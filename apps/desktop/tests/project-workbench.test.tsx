@@ -20,8 +20,8 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-function fixtureGateway(overrides: Partial<ProjectDto> = {}): ProjectGateway {
-  const project: ProjectDto = {
+function fixtureProject(overrides: Partial<ProjectDto> = {}): ProjectDto {
+  return {
     id: "keeper-ide",
     name: "Keeper IDE",
     rootPath: "<workspace>/VaultSystem\\keeper-ide",
@@ -30,15 +30,74 @@ function fixtureGateway(overrides: Partial<ProjectDto> = {}): ProjectGateway {
     updatedAt: "2026-07-29T00:00:00.000Z",
     ...overrides,
   };
-
-  return {
-    listProjects: async () => [project],
-    createProject: async () => project,
-    selectProject: async () => project,
-  };
 }
 
-describe("project workbench", () => {
+function fixtureGateway(
+  projects: ProjectDto[] = [fixtureProject()],
+  overrides: Partial<ProjectGateway> = {},
+): ProjectGateway {
+  const store = [...projects];
+  const gateway: ProjectGateway = {
+    listProjects: async () => [...store],
+    createProject: async (input) => {
+      const project = fixtureProject({
+        id: crypto.randomUUID(),
+        name: input.name,
+        rootPath: input.rootPath,
+        trust: "untrusted",
+      });
+      store.push(project);
+      return project;
+    },
+    selectProject: async (projectId) => {
+      const project = store.find((item) => item.id === projectId);
+      if (!project) {
+        throw new ProjectGatewayError("project_not_found", "Project not found.");
+      }
+      return project;
+    },
+    pickDirectory: async () => null,
+    openOrRegisterProject: async (rootPath) => {
+      const existing = store.find((item) => item.rootPath === rootPath);
+      if (existing) return existing;
+      const leaf = rootPath.split(/[\\/]/u).pop() ?? rootPath;
+      const project = fixtureProject({
+        id: crypto.randomUUID(),
+        name: leaf,
+        rootPath,
+        trust: "untrusted",
+      });
+      store.push(project);
+      return project;
+    },
+    createProjectWithFolder: async ({ name, parentPath }) => {
+      const rootPath = `${parentPath}\\${name}`;
+      const project = fixtureProject({
+        id: crypto.randomUUID(),
+        name,
+        rootPath,
+        trust: "untrusted",
+      });
+      store.push(project);
+      return project;
+    },
+    ...overrides,
+  };
+  return gateway;
+}
+
+describe("project workbench shell", () => {
+  it("launches into the full shell without a full-screen launcher", async () => {
+    render(<App gateway={fixtureGateway([])} />);
+
+    expect(await screen.findByTestId("empty-workbench")).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "项目" })).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "项目对话" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "对话工作台" })).toBeVisible();
+    expect(screen.queryByRole("main", { name: "项目启动器" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("项目目录")).not.toBeInTheDocument();
+  });
+
   it("marks readiness only after the initial project list succeeds", async () => {
     const onProjectLauncherReady = vi.fn().mockResolvedValue(undefined);
 
@@ -49,7 +108,7 @@ describe("project workbench", () => {
       />,
     );
 
-    await screen.findByRole("button", { name: "Keeper IDE" });
+    await screen.findByTestId("empty-workbench-title");
     await waitFor(() => expect(onProjectLauncherReady).toHaveBeenCalledOnce());
   });
 
@@ -73,6 +132,83 @@ describe("project workbench", () => {
     expect(onProjectLauncherReady).not.toHaveBeenCalled();
   });
 
+  it("opens a folder via picker and registers/selects without path typing", async () => {
+    const user = userEvent.setup();
+    const opened = fixtureProject({
+      id: "opened",
+      name: "demo-folder",
+      rootPath: "F:\\work\\demo-folder",
+      trust: "untrusted",
+    });
+    const gateway = fixtureGateway([]);
+    gateway.pickDirectory = vi.fn().mockResolvedValue(opened.rootPath);
+    gateway.openOrRegisterProject = vi.fn().mockResolvedValue(opened);
+    gateway.selectProject = vi.fn().mockResolvedValue(opened);
+
+    render(<App gateway={gateway} />);
+
+    const openButtons = await screen.findAllByRole("button", { name: "打开项目" });
+    await user.click(openButtons[0]);
+
+    await waitFor(() => {
+      expect(gateway.pickDirectory).toHaveBeenCalledOnce();
+      expect(gateway.openOrRegisterProject).toHaveBeenCalledWith(opened.rootPath);
+      expect(gateway.selectProject).toHaveBeenCalledWith(opened.id);
+    });
+    expect(await screen.findByTestId("active-project-name")).toHaveTextContent("demo-folder");
+    expect(screen.queryByLabelText("项目目录")).not.toBeInTheDocument();
+  });
+
+  it("selects an existing registered project when the path already exists", async () => {
+    const user = userEvent.setup();
+    const existing = fixtureProject();
+    const gateway = fixtureGateway([existing]);
+    gateway.pickDirectory = vi.fn().mockResolvedValue(existing.rootPath);
+    gateway.openOrRegisterProject = vi.fn().mockResolvedValue(existing);
+    gateway.selectProject = vi.fn().mockResolvedValue(existing);
+    gateway.createProject = vi.fn();
+
+    render(<App gateway={gateway} />);
+    await user.click((await screen.findAllByRole("button", { name: "打开项目" }))[0]);
+
+    await waitFor(() => {
+      expect(gateway.openOrRegisterProject).toHaveBeenCalledWith(existing.rootPath);
+      expect(gateway.selectProject).toHaveBeenCalledWith(existing.id);
+    });
+    expect(gateway.createProject).not.toHaveBeenCalled();
+  });
+
+  it("creates a new project with name only and a parent folder picker", async () => {
+    const user = userEvent.setup();
+    const created = fixtureProject({
+      id: "new-project",
+      name: "New project",
+      rootPath: "<workspace>/New project",
+      trust: "untrusted",
+    });
+    const gateway = fixtureGateway([]);
+    gateway.pickDirectory = vi.fn().mockResolvedValue("<workspace>");
+    gateway.createProjectWithFolder = vi.fn().mockResolvedValue(created);
+    gateway.selectProject = vi.fn().mockResolvedValue(created);
+
+    render(<App gateway={gateway} />);
+
+    await user.click((await screen.findAllByRole("button", { name: "新建项目" }))[0]);
+    await user.type(await screen.findByLabelText("项目名称"), created.name);
+    await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
+
+    await waitFor(() => {
+      expect(gateway.pickDirectory).toHaveBeenCalledOnce();
+      expect(gateway.createProjectWithFolder).toHaveBeenCalledWith({
+        name: created.name,
+        parentPath: "<workspace>",
+      });
+      expect(gateway.selectProject).toHaveBeenCalledWith(created.id);
+    });
+    expect(await screen.findByTestId("active-project-name")).toHaveTextContent(created.name);
+    expect(screen.queryByLabelText("项目目录")).not.toBeInTheDocument();
+  });
+
   it("keeps the selected project visible above its conversations", async () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
@@ -81,69 +217,39 @@ describe("project workbench", () => {
 
     expect(screen.getByTestId("active-project-name")).toHaveTextContent("Keeper IDE");
     expect(screen.getByRole("navigation", { name: "项目对话" })).toBeVisible();
+    expect(screen.getByText("Keeper IDE", {
+      selector: ".conversation-sidebar__project",
+    })).toBeVisible();
   });
 
-  it("does not render provider internals in the empty workbench", async () => {
+  it("does not render provider internals or Grok branding", async () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Keeper IDE" }));
+    await user.click(await screen.findByLabelText("Keeper IDE"));
     await screen.findByRole("region", { name: "对话工作台" });
 
-    expect(screen.queryByText(/routeCode|lease|slotId/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/routeCode|lease|slotId|Grok|SuperGrok/i)).not.toBeInTheDocument();
   });
 
   it("keeps project details open and exposes a safe command error", async () => {
     const user = userEvent.setup();
-    const gateway = fixtureGateway();
-    gateway.listProjects = async () => [];
-    gateway.createProject = vi.fn().mockRejectedValue(new ProjectGatewayError(
+    const gateway = fixtureGateway([]);
+    gateway.pickDirectory = vi.fn().mockResolvedValue("F:\\parents");
+    gateway.createProjectWithFolder = vi.fn().mockRejectedValue(new ProjectGatewayError(
       "project_store_unavailable",
       "Project storage is temporarily unavailable.",
     ));
     render(<App gateway={gateway} />);
 
+    await user.click((await screen.findAllByRole("button", { name: "新建项目" }))[0]);
     await user.type(await screen.findByLabelText("项目名称"), "Broken project");
-    await user.type(screen.getByLabelText("项目目录"), "Z:\\missing");
-    await user.click(screen.getByRole("button", { name: "创建" }));
+    await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Project storage is temporarily unavailable.");
     expect(alert).toHaveTextContent("project_store_unavailable");
     expect(screen.getByLabelText("项目名称")).toHaveValue("Broken project");
-    expect(screen.getByLabelText("项目目录")).toHaveValue("Z:\\missing");
-  });
-
-  it("selects a newly created project through the host before activating it", async () => {
-    const user = userEvent.setup();
-    const created: ProjectDto = {
-      id: "new-project",
-      name: "New project",
-      rootPath: "<workspace>/new-project",
-      trust: "untrusted",
-      createdAt: "2026-07-29T01:00:00.000Z",
-      updatedAt: "2026-07-29T01:00:00.000Z",
-    };
-    const gateway = fixtureGateway();
-    gateway.listProjects = async () => [];
-    gateway.createProject = vi.fn().mockResolvedValue(created);
-    gateway.selectProject = vi.fn().mockResolvedValue(created);
-    render(<App gateway={gateway} />);
-
-    await user.type(await screen.findByLabelText("项目名称"), created.name);
-    await user.type(screen.getByLabelText("项目目录"), created.rootPath);
-    await user.click(screen.getByRole("button", { name: "创建" }));
-
-    await waitFor(() => {
-      expect(gateway.createProject).toHaveBeenCalledWith({
-        name: created.name,
-        rootPath: created.rootPath,
-      });
-      expect(gateway.selectProject).toHaveBeenCalledWith(created.id);
-    });
-    expect(vi.mocked(gateway.createProject).mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(gateway.selectProject).mock.invocationCallOrder[0]);
-    expect(await screen.findByTestId("active-project-name")).toHaveTextContent(created.name);
   });
 
   it("keeps a long project name constrained at the 1024px minimum width", async () => {
@@ -151,7 +257,7 @@ describe("project workbench", () => {
     const longName = "Keeper IDE project with a deliberately very long name ".repeat(8);
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
     window.dispatchEvent(new Event("resize"));
-    render(<App gateway={fixtureGateway({ name: longName })} />);
+    render(<App gateway={fixtureGateway([fixtureProject({ name: longName })])} />);
 
     await user.click(await screen.findByRole("button", {
       name: /Keeper IDE project with a deliberately very long name/,
