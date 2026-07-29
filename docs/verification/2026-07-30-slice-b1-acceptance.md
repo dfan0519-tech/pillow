@@ -116,9 +116,10 @@ Acceptance Fix 5 — Replay Idempotency + Renderer Truth + Pump Fail-Closed:
 | SHA | Message |
 | --- | --- |
 | `eb99b9b` | `fix(session): same-kind replay skips status; emit from recorded; pump fail-closed` |
-| *(docs commit — filled after commit)* | `docs(verification): record Task 4 Acceptance Fix 5 evidence` |
+| `0c7cf1e` | `docs(verification): record Task 4 Acceptance Fix 5 evidence` |
 
 Primary Fix 5 tip for controller citation: **`eb99b9b`** (implementation).
+Docs evidence tip: **`0c7cf1e`** (pin commit may follow for self-SHA).
 
 Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4 + Fix 5:
 
@@ -131,7 +132,7 @@ Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4 + Fix 5:
 | Acceptance Fix 4 (code) | `33b4edc` |
 | Acceptance Fix 4 (docs) | `f137f91` |
 | Acceptance Fix 5 (code) | `eb99b9b` |
-| Acceptance Fix 5 (docs) | *(pin after commit)* |
+| Acceptance Fix 5 (docs) | `0c7cf1e` |
 
 Task 4 surfaces:
 
