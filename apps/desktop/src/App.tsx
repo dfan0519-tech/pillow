@@ -312,8 +312,11 @@ export function App({
           conversation,
           select: stillCurrent,
         });
+        // Stale scope: conversation is registered under the owning project but
+        // must not select, send, surface an error on the new project, or restore
+        // the old draft via Composer rejection.
         if (!stillCurrent) {
-          throw new Error("项目已切换，发送已取消。");
+          return;
         }
         conversationId = conversation.id;
       } else if (
@@ -327,7 +330,7 @@ export function App({
       }
 
       if (!isScopeCurrent(projectIdAtStart, generationAtStart)) {
-        throw new Error("项目已切换，发送已取消。");
+        return;
       }
 
       // Accepted send: run id means the turn is durable on the gateway.
@@ -346,6 +349,11 @@ export function App({
         }
       }
     } catch (cause) {
+      // Project switched while this send was in flight: never write send-error
+      // into the new project or reject so Composer restores the old draft there.
+      if (!isScopeCurrent(projectIdAtStart, generationAtStart)) {
+        return;
+      }
       const message =
         cause instanceof Error ? cause.message : "发送失败，请重试。";
       setSendError(message);

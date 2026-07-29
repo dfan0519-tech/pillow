@@ -1,6 +1,7 @@
 /**
- * Wave B1 UI Fix Pass 2 regressions:
- * project-scope create race, accepted-send vs refresh, windowing follow.
+ * Wave B1 UI Fix Pass 2/3 regressions:
+ * project-scope create race, stale-send isolation, accepted-send vs refresh,
+ * windowing follow.
  */
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -146,6 +147,69 @@ describe("first-send createConversation project scope race", () => {
     });
     // Must not auto-select the raced conversation as the active timeline.
     expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
+  });
+
+  it("isolates deferred create completion: no B draft restore, send error, timeline, or cancel", async () => {
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const projectB = fixtureProject({
+      id: "project-b",
+      name: "Project B",
+      rootPath: "F:\\work\\project-b",
+    });
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const sendTurnSpy = vi.spyOn(conversationGateway, "sendTurn");
+    const releaseCreate = conversationGateway.holdNextCreate();
+
+    const user = userEvent.setup();
+    render(
+      <App
+        conversationGateway={conversationGateway}
+        gateway={fixtureProjectGateway([projectA, projectB])}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Project A" }));
+    const textarea = await screen.findByRole("textbox", { name: "工作请求" });
+    await user.type(textarea, "stale draft prompt");
+    await user.click(screen.getByTestId("composer-send"));
+    // Composer clears draft optimistically before create resolves.
+    expect(textarea).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "Project B" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("active-project-name")).toHaveTextContent(
+        "Project B",
+      );
+    });
+
+    // Project B starts empty; resolve Project A's deferred create while on B.
+    const bTextarea = screen.getByRole("textbox", { name: "工作请求" });
+    expect(bTextarea).toHaveValue("");
+
+    await act(async () => {
+      releaseCreate();
+    });
+
+    // Allow any residual promise settlement to surface into state/composer.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("active-project-name")).toHaveTextContent(
+        "Project B",
+      );
+    });
+
+    // Isolation: B must stay empty of A's turn UI, error, and restored draft.
+    expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-cancel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-send-error")).not.toBeInTheDocument();
+    expect(bTextarea).toHaveValue("");
+    // Must not silently execute the stale turn in either project.
+    expect(sendTurnSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("conversation-row")).not.toBeInTheDocument();
   });
 });
 
