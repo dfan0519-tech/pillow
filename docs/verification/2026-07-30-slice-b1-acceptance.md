@@ -67,8 +67,9 @@ Acceptance Fix 1 (closes controller Important findings without redesign):
 | `f19a2aa` | `fix(desktop): active-run cleanup and graceful conversation shutdown` |
 | `8e6a6b6` | `fix(desktop): wait for graceful exit and clean process snapshots in E2E` |
 | `db93aa5` | `docs(verification): record Task 4 Acceptance Fix 1 gate evidence` |
+| `e5129bf` … `HEAD` | docs pins for fix SHAs on `integration/slice-b1` |
 
-Tip of Acceptance Fix 1: `c1b327b`.
+Primary fix tip for controller citation: latest `docs(verification): pin…` on this branch after `cfcb5c4`.
 
 Task 4 surfaces:
 
