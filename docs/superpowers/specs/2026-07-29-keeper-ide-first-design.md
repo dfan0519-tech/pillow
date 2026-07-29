@@ -6,6 +6,22 @@ Status: Approved direction; implementation planning gate
 
 Owner: Keeper controller
 
+## 0. Current Execution Status
+
+Updated: 2026-07-30
+
+- Slice A is functionally complete and independently verified.
+- The accepted shell no longer uses a blocking project launcher. It opens
+  directly into an always-visible, Grok App-derived workbench with native
+  folder picking.
+- `rusqlite` is the selected Stage 1 SQLite implementation.
+- Focused Grok App UI code is adapted directly under MIT with pinned
+  provenance in `THIRD_PARTY_NOTICES.md`.
+- The next implementation milestone is Slice B1: a runtime-neutral,
+  persistent conversation vertical slice using a deterministic fake adapter.
+- A real Grok ACP connection is Slice B2 and cannot be declared complete from
+  fake-stream evidence.
+
 ## 1. Product Decision
 
 Keeper will be rebuilt as an industrial, local-first AI IDE.
@@ -273,7 +289,7 @@ normalized event vocabulary.
 
 ### 7.2 Initial Budgets
 
-- cold launch to usable project launcher: at most 2.5 seconds on the target
+- cold launch to usable project shell: at most 2.5 seconds on the target
   Windows workstation;
 - resumed project shell visible: at most 1.5 seconds;
 - conversation switch with cached data: at most 100 milliseconds;
@@ -319,7 +335,7 @@ new database and writes an import report. It never mutates the source.
 
 - clean monorepo and build;
 - Tauri window and Grok App-based shell;
-- project launcher;
+- always-visible project shell with native open/create flows;
 - SQLite project records;
 - logging, diagnostics and release metadata.
 
@@ -372,16 +388,23 @@ Stage 1 is complete only when a clean Windows installation can:
 9. import the retained legacy project/conversation subset from a backup;
 10. pass unit, integration, desktop, security and performance gates.
 
-## 12. Decisions Deferred To Implementation Planning
+## 12. Implementation Decisions
 
-The first implementation plan must resolve:
+Resolved:
 
-- SQLx versus rusqlite;
-- Monaco versus CodeMirror for the first editor;
-- whether Grok App UI code is adapted directly or recreated component by
-  component;
-- exact Tauri capability allow-list;
-- protocol code generation boundary;
+- `rusqlite` is the operational SQLite library.
+- Focused Grok App UI implementations are adapted directly, not copied as a
+  whole application.
+- Renderer filesystem access remains prohibited; native folder selection and
+  scoped directory creation are typed Tauri commands.
+- Rust domain types are authoritative. TypeScript mirrors remain handwritten
+  during Slice B1 and must pass fixture parity tests. Code generation is
+  reconsidered before the second runtime adapter.
+
+Deferred:
+
+- Monaco versus CodeMirror for Slice C;
+- the complete Tauri capability allow-list as new IDE resources arrive;
 - Windows signing and updater channel for public alpha.
 
 These decisions do not change the product boundary in this specification.
