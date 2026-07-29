@@ -126,45 +126,123 @@ impl AgentRuntimeAdapter for DelayedRegistrationAdapter {
 
 #[test]
 fn cancel_immediately_after_spawn_never_yields_turn_completed_with_delayed_registration() {
-    let adapter = Arc::new(DelayedRegistrationAdapter::new(50));
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: false,
-            event_queue_capacity: 16,
-            after_worker_registered: None,
-        },
-    ));
-    let session = host
-        .start_session(StartSession {
-            conversation_key: "delayed".into(),
-            working_directory: None,
-        })
-        .unwrap();
-    let spawned = host
-        .spawn_turn(SendTurn {
-            session_id: session.session_id,
-            run_id: RunId::new(),
-            content: "go".into(),
-        })
-        .unwrap();
+    for _ in 0..16 {
+        let adapter = Arc::new(DelayedRegistrationAdapter::new(50));
+        let host = Arc::new(RuntimeHost::new(
+            adapter,
+            HostConfig {
+                max_concurrent_turns: 2,
+                honor_fixture_delays: false,
+                event_queue_capacity: 16,
+                after_worker_registered: None,
+            },
+        ));
+        let session = host
+            .start_session(StartSession {
+                conversation_key: "delayed".into(),
+                working_directory: None,
+            })
+            .unwrap();
+        let spawned = host
+            .spawn_turn(SendTurn {
+                session_id: session.session_id,
+                run_id: RunId::new(),
+                content: "go".into(),
+            })
+            .unwrap();
 
-    // Cancel immediately — adapter has not registered yet (RunNotFound path).
-    spawned
-        .cancel()
-        .expect("host-owned cancel must succeed even when adapter returns RunNotFound");
+        // Cancel immediately — adapter has not registered yet (RunNotFound path).
+        spawned
+            .cancel()
+            .expect("host-owned cancel must succeed even when adapter returns RunNotFound");
 
-    let events = spawned.join().unwrap();
-    assert_eq!(
-        terminal_kinds(&events),
-        vec![RuntimeEventKind::RunCancelled],
-        "immediate cancel must yield exactly run_cancelled, never turn_completed; got {events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .all(|e| e.kind != RuntimeEventKind::TurnCompleted),
-        "turn_completed must not appear after immediate cancel: {events:?}"
-    );
+        let events = spawned.join().unwrap();
+        assert_eq!(
+            terminal_kinds(&events),
+            vec![RuntimeEventKind::RunCancelled],
+            "immediate cancel must yield exactly run_cancelled, never turn_completed; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind != RuntimeEventKind::TurnCompleted),
+            "turn_completed must not appear after immediate cancel: {events:?}"
+        );
+    }
+}
+
+/// Capacity-1 queue with terminal blocked on enqueue: cancel that returns
+/// success before terminal commit must produce only `run_cancelled`.
+#[test]
+fn cancel_wins_over_turn_completed_blocked_on_full_queue() {
+    for _ in 0..32 {
+        // run_started fills capacity=1; turn_completed blocks on enqueue.
+        let fixture = r#"
+{"kind":"run_started","delay_ms":0,"payload":{}}
+{"kind":"turn_completed","delay_ms":0,"payload":{}}
+"#;
+        let adapter = Arc::new(
+            keeper_runtime_host::FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap(),
+        );
+        let host = Arc::new(RuntimeHost::new(
+            adapter,
+            HostConfig {
+                max_concurrent_turns: 2,
+                honor_fixture_delays: false,
+                event_queue_capacity: 1,
+                after_worker_registered: None,
+            },
+        ));
+        let session = host
+            .start_session(StartSession {
+                conversation_key: "term-block".into(),
+                working_directory: None,
+            })
+            .unwrap();
+        let spawned = host
+            .spawn_turn(SendTurn {
+                session_id: session.session_id,
+                run_id: RunId::new(),
+                content: "block".into(),
+            })
+            .unwrap();
+
+        // Wait until turn_completed is blocked on the full queue.
+        let mut blocked = false;
+        for _ in 0..500 {
+            if spawned.delivery().producer_blocked() {
+                blocked = true;
+                break;
+            }
+            if spawned.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            blocked,
+            "expected turn_completed producer blocked on capacity=1"
+        );
+        assert!(
+            !spawned.is_finished(),
+            "terminal must still be blocked before cancel"
+        );
+
+        spawned
+            .cancel()
+            .expect("cancel must succeed before terminal commit");
+
+        let events = spawned.join().expect("cancel+join must progress");
+        assert_eq!(
+            terminal_kinds(&events),
+            vec![RuntimeEventKind::RunCancelled],
+            "cancel before terminal commit must yield only run_cancelled; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind != RuntimeEventKind::TurnCompleted),
+            "blocked turn_completed must not commit after cancel: {events:?}"
+        );
+    }
 }

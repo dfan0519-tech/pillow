@@ -1,7 +1,15 @@
-//! Host-owned turn worker execution and join helpers.
+//! Host-owned turn worker: explicit lifecycle state machine and join helpers.
+//!
+//! Lifecycle is linearizable under [`WorkerRecord`]'s mutex + condvar:
+//!
+//! `Starting -> Running -> Joining -> Joined`
+//!
+//! Exactly one waiter claims the OS join handle (`Joining`); other waiters
+//! block until the phase is truly `Joined`. Cancel intent is published through
+//! the same record (and into delivery so terminal commit is atomic with cancel).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -10,22 +18,137 @@ use keeper_agent_protocol::{AgentRuntimeAdapter, RunId, RuntimeError, RuntimeEve
 use crate::delivery::BoundedDelivery;
 use crate::sink::{BoundedDeliverySink, ProtocolGuardSink};
 
-/// Join-handle lifecycle for a host-owned worker.
-///
-/// `Starting` covers the window after registry insert and before the OS thread
-/// handle is installed. Shutdown must wait through this state so it never
-/// drops a live worker.
-pub(crate) enum JoinSlot {
+/// Linearizable host worker lifecycle.
+#[derive(Debug)]
+pub(crate) enum WorkerPhase {
+    /// Registered in the host map; may still be arming or spawning the OS thread.
     Starting,
+    /// OS thread is live; this record owns the join handle.
     Running(JoinHandle<Result<(), RuntimeError>>),
+    /// Exactly one waiter holds the handle and is performing the OS join.
+    Joining,
+    /// OS join finished; no residual host work for this run.
     Joined,
 }
 
+struct WorkerInner {
+    phase: WorkerPhase,
+    /// Worker thread body returned (handle may still be in `Joining`).
+    body_finished: bool,
+}
+
+/// Per-run worker record: sole authority for phase, cancel publish, and join.
 pub(crate) struct WorkerRecord {
     pub cancel: Arc<AtomicBool>,
-    pub finished: Arc<AtomicBool>,
     pub delivery: Arc<BoundedDelivery>,
-    pub join: std::sync::Mutex<JoinSlot>,
+    inner: Mutex<WorkerInner>,
+    cv: Condvar,
+}
+
+impl WorkerRecord {
+    pub fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            delivery: BoundedDelivery::new(capacity),
+            inner: Mutex::new(WorkerInner {
+                phase: WorkerPhase::Starting,
+                body_finished: false,
+            }),
+            cv: Condvar::new(),
+        })
+    }
+
+    /// Publish cancel so ingress and terminal commit observe it.
+    pub fn request_cancel(&self) {
+        // Delivery cancel is authoritative for enqueue/commit arbitration.
+        self.delivery.request_cancel();
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_body_finished(&self) -> bool {
+        self.inner.lock().expect("worker").body_finished
+    }
+
+    pub fn is_joined(&self) -> bool {
+        matches!(
+            self.inner.lock().expect("worker").phase,
+            WorkerPhase::Joined
+        )
+    }
+
+    pub fn mark_body_finished(&self) {
+        let mut g = self.inner.lock().expect("worker");
+        g.body_finished = true;
+        self.cv.notify_all();
+    }
+
+    /// Transition `Starting -> Running` after the OS thread is spawned.
+    pub fn install_running(&self, handle: JoinHandle<Result<(), RuntimeError>>) {
+        let mut g = self.inner.lock().expect("worker");
+        match g.phase {
+            WorkerPhase::Starting => {
+                g.phase = WorkerPhase::Running(handle);
+                self.cv.notify_all();
+            }
+            // Failure / shutdown races: do not leak the handle.
+            _ => {
+                drop(g);
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Fail a spawn that never obtained a live handle (`Starting -> Joined`).
+    pub fn abandon_starting(&self) {
+        let mut g = self.inner.lock().expect("worker");
+        if matches!(g.phase, WorkerPhase::Starting) {
+            g.phase = WorkerPhase::Joined;
+            g.body_finished = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Wait until the worker is truly `Joined`.
+    ///
+    /// Exactly one caller transitions `Running -> Joining` and performs the OS
+    /// join; concurrent waiters block on `Joining` until `Joined`.
+    pub fn await_joined(&self, events: &mut Vec<RuntimeEvent>) -> Result<(), RuntimeError> {
+        let handle = {
+            let mut g = self.inner.lock().expect("worker");
+            loop {
+                match g.phase {
+                    WorkerPhase::Running(_) => {
+                        let prev = std::mem::replace(&mut g.phase, WorkerPhase::Joining);
+                        let WorkerPhase::Running(h) = prev else {
+                            unreachable!("phase was Running");
+                        };
+                        break Some(h);
+                    }
+                    WorkerPhase::Joined => break None,
+                    WorkerPhase::Starting | WorkerPhase::Joining => {
+                        g = self.cv.wait(g).expect("worker cv");
+                    }
+                }
+            }
+        };
+
+        match handle {
+            Some(h) => {
+                let result = join_handle_draining(&self.delivery, h, events);
+                {
+                    let mut g = self.inner.lock().expect("worker");
+                    g.phase = WorkerPhase::Joined;
+                    g.body_finished = true;
+                }
+                self.cv.notify_all();
+                result
+            }
+            None => {
+                events.extend(self.delivery.drain());
+                Ok(())
+            }
+        }
+    }
 }
 
 pub(crate) fn run_turn_worker(
@@ -39,7 +162,7 @@ pub(crate) fn run_turn_worker(
     let mut guarded = ProtocolGuardSink::with_cancel(run_id, &mut sink, cancel);
 
     // Cancel may have been requested before send_turn started.
-    if cancel.load(Ordering::SeqCst) {
+    if cancel.load(Ordering::SeqCst) || delivery.is_cancelled() {
         guarded.force_run_cancelled()?;
         return guarded.finish();
     }
@@ -48,7 +171,9 @@ pub(crate) fn run_turn_worker(
         Ok(()) => {}
         Err(RuntimeError::Cancelled) => {}
         Err(e) => {
-            if cancel.load(Ordering::SeqCst) && !guarded.terminal_seen() {
+            if (cancel.load(Ordering::SeqCst) || delivery.is_cancelled())
+                && !guarded.terminal_seen()
+            {
                 let _ = guarded.force_run_cancelled();
                 return guarded.finish();
             }
@@ -56,7 +181,7 @@ pub(crate) fn run_turn_worker(
         }
     }
 
-    if cancel.load(Ordering::SeqCst) && !guarded.terminal_seen() {
+    if (cancel.load(Ordering::SeqCst) || delivery.is_cancelled()) && !guarded.terminal_seen() {
         guarded.force_run_cancelled()?;
     }
     guarded.finish()
@@ -81,33 +206,4 @@ pub(crate) fn join_handle_draining(
     })?;
     out.extend(delivery.drain());
     join_result
-}
-
-/// Wait for a worker's join slot to resolve, draining the queue throughout.
-pub(crate) fn await_worker_slot(
-    record: &WorkerRecord,
-    events: &mut Vec<RuntimeEvent>,
-) -> Result<(), RuntimeError> {
-    loop {
-        let handle = {
-            let mut slot = record.join.lock().expect("join");
-            match std::mem::replace(&mut *slot, JoinSlot::Joined) {
-                JoinSlot::Running(h) => Some(h),
-                JoinSlot::Starting => {
-                    *slot = JoinSlot::Starting;
-                    None
-                }
-                JoinSlot::Joined => None,
-            }
-        };
-        if let Some(handle) = handle {
-            return join_handle_draining(&record.delivery, handle, events);
-        }
-        if record.finished.load(Ordering::SeqCst) {
-            events.extend(record.delivery.drain());
-            return Ok(());
-        }
-        events.extend(record.delivery.drain());
-        thread::sleep(Duration::from_millis(1));
-    }
 }

@@ -1,23 +1,24 @@
 //! Bounded runtime host: concurrency limits, protocol guard, worker lifecycle.
+//!
+//! Spawn registration, cancel, and join are linearized through the host worker
+//! map and each [`WorkerRecord`]'s phase machine (`Starting -> Running ->
+//! Joining -> Joined`). There is no unregistered in-flight arm window.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeProbe,
     RuntimeSession, SendTurn, StartSession,
 };
 
-use crate::delivery::{BoundedDelivery, DEFAULT_EVENT_QUEUE_CAPACITY};
+use crate::delivery::DEFAULT_EVENT_QUEUE_CAPACITY;
 use crate::fake::FakeRuntimeAdapter;
 use crate::sink::ProtocolGuardSink;
-use crate::worker::{
-    JoinSlot, WorkerRecord, await_worker_slot, join_handle_draining, run_turn_worker,
-};
+use crate::worker::{WorkerRecord, run_turn_worker};
 
 /// Default concurrent turn limit for the host (process-pool style bound).
 pub const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 4;
@@ -35,8 +36,8 @@ pub struct HostConfig {
     pub honor_fixture_delays: bool,
     /// Per-turn bounded event queue capacity (backpressure when full).
     pub event_queue_capacity: usize,
-    /// Test seam: invoked after the worker is registered and before the join
-    /// handle is installed. Default `None`.
+    /// Test seam: invoked after the worker is registered (`Starting`) and
+    /// before `arm_turn` / thread install. Default `None`.
     #[doc(hidden)]
     pub after_worker_registered: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -130,38 +131,21 @@ impl RuntimeHost {
 
     /// Run a turn on a background thread; cancellable as soon as this returns.
     ///
-    /// Host cancel is enforced at the event ingress regardless of whether the
-    /// adapter has finished registering the run. A spawn that races shutdown is
-    /// either rejected with [`RuntimeError::ShutDown`] or fully owned and joined
-    /// by shutdown.
+    /// The worker is registered in `Starting` **before** any blocking
+    /// `arm_turn` work. Shutdown either waits for that record or the spawn is
+    /// rejected before registration — there is no unregistered in-flight slot.
     pub fn spawn_turn(self: &Arc<Self>, request: SendTurn) -> Result<SpawnedTurn, RuntimeError> {
         self.ensure_alive()?;
         self.acquire_turn_slot()?;
 
         let run_id = request.run_id;
-        if let Err(e) = self.adapter.arm_turn(run_id) {
-            self.release_turn_slot();
-            return Err(e);
-        }
+        let record = WorkerRecord::new(self.config.event_queue_capacity);
 
-        let delivery = BoundedDelivery::new(self.config.event_queue_capacity);
-        let finished = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let record = Arc::new(WorkerRecord {
-            cancel: Arc::clone(&cancel),
-            finished: Arc::clone(&finished),
-            delivery: Arc::clone(&delivery),
-            join: Mutex::new(JoinSlot::Starting),
-        });
-
-        // Linearize with shutdown: reject if already shutting down; otherwise
-        // publish the registry entry before the join handle exists.
+        // Linearize with shutdown: register Starting before arm_turn/spawn.
         {
             let mut workers = self.workers.lock().expect("workers");
             if self.shut_down.load(Ordering::SeqCst) {
                 drop(workers);
-                let _ = self.adapter.disarm_turn(run_id);
-                delivery.close();
                 self.release_turn_slot();
                 return Err(RuntimeError::ShutDown);
             }
@@ -172,10 +156,23 @@ impl RuntimeHost {
             hook();
         }
 
+        // arm_turn may block; shutdown observes Starting and waits.
+        if let Err(e) = self.adapter.arm_turn(run_id) {
+            self.fail_spawn_cleanup(run_id, &record);
+            return Err(e);
+        }
+
+        // Shutdown may have begun during arm; reject without residual work.
+        if self.shut_down.load(Ordering::SeqCst) {
+            let _ = self.adapter.disarm_turn(run_id);
+            self.fail_spawn_cleanup(run_id, &record);
+            return Err(RuntimeError::ShutDown);
+        }
+
         let host = Arc::clone(self);
-        let delivery_for_thread = Arc::clone(&delivery);
-        let finished_flag = Arc::clone(&finished);
-        let cancel_flag = Arc::clone(&cancel);
+        let delivery_for_thread = Arc::clone(&record.delivery);
+        let cancel_flag = Arc::clone(&record.cancel);
+        let record_for_thread = Arc::clone(&record);
 
         let join = thread::Builder::new()
             .name(format!("keeper-turn-{run_id}"))
@@ -189,7 +186,7 @@ impl RuntimeHost {
                 );
                 delivery_for_thread.close();
                 host.release_turn_slot();
-                finished_flag.store(true, Ordering::SeqCst);
+                record_for_thread.mark_body_finished();
                 result
             });
 
@@ -197,19 +194,21 @@ impl RuntimeHost {
             Ok(handle) => handle,
             Err(e) => {
                 let _ = self.adapter.disarm_turn(run_id);
-                {
-                    let mut workers = self.workers.lock().expect("workers");
-                    workers.remove(&run_id);
-                }
-                delivery.close();
-                self.release_turn_slot();
+                self.fail_spawn_cleanup(run_id, &record);
                 return Err(RuntimeError::Internal {
                     message: format!("spawn turn worker: {e}"),
                 });
             }
         };
 
-        *record.join.lock().expect("join") = JoinSlot::Running(join);
+        record.install_running(join);
+
+        // Late shutdown: worker is Running and will be joined by shutdown.
+        if self.shut_down.load(Ordering::SeqCst) {
+            // Still return the handle so the caller can observe cancel; the
+            // worker is fully owned. Callers that race shutdown may also see
+            // ShutDown only on the pre-register / pre-thread paths above.
+        }
 
         Ok(SpawnedTurn {
             run_id,
@@ -223,10 +222,8 @@ impl RuntimeHost {
         let known = {
             let workers = self.workers.lock().expect("workers");
             if let Some(w) = workers.get(&run_id) {
-                // Host cancel is the source of truth: ingress forces
-                // `run_cancelled` so the worker cannot complete with
-                // `turn_completed` after this store.
-                w.cancel.store(true, Ordering::SeqCst);
+                // Atomic with terminal commit: delivery cancel + host flag.
+                w.request_cancel();
                 true
             } else {
                 false
@@ -244,14 +241,16 @@ impl RuntimeHost {
 
     /// Shut down the adapter and join all host-owned workers before returning.
     ///
-    /// Host workers are joined even when `adapter.shutdown()` returns an error.
+    /// Host workers in `Starting`, `Running`, or `Joining` are waited on even
+    /// when `adapter.shutdown()` returns an error. The adapter error is
+    /// returned only after host cleanup is complete.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
         let already = self.shut_down.swap(true, Ordering::SeqCst);
 
         {
             let workers = self.workers.lock().expect("workers");
             for (run_id, worker) in workers.iter() {
-                worker.cancel.store(true, Ordering::SeqCst);
+                worker.request_cancel();
                 let _ = self.adapter.cancel_turn(*run_id);
                 worker.delivery.close();
             }
@@ -283,44 +282,42 @@ impl RuntimeHost {
         self.config.event_queue_capacity
     }
 
-    /// Join every host-owned worker, including those still in `Starting`.
+    /// Wait until every registered worker is truly `Joined`.
     fn join_all_workers(&self) {
         loop {
-            let mut handles = Vec::new();
-            let mut starting = 0usize;
-            {
+            let batch: Vec<(RunId, Arc<WorkerRecord>)> = {
                 let workers = self.workers.lock().expect("workers");
                 if workers.is_empty() {
                     return;
                 }
-                for worker in workers.values() {
-                    let mut slot = worker.join.lock().expect("join");
-                    match std::mem::replace(&mut *slot, JoinSlot::Joined) {
-                        JoinSlot::Running(handle) => handles.push(handle),
-                        JoinSlot::Starting => {
-                            *slot = JoinSlot::Starting;
-                            starting += 1;
-                        }
-                        JoinSlot::Joined => {}
-                    }
-                }
+                workers.iter().map(|(id, w)| (*id, Arc::clone(w))).collect()
+            };
+
+            for (_id, worker) in &batch {
+                let mut discarded = Vec::new();
+                let _ = worker.await_joined(&mut discarded);
             }
 
-            if handles.is_empty() && starting == 0 {
-                self.workers.lock().expect("workers").clear();
+            let mut workers = self.workers.lock().expect("workers");
+            for (id, _) in batch {
+                workers.remove(&id);
+            }
+            if workers.is_empty() {
                 return;
             }
-
-            for handle in handles {
-                // Deliveries were closed in shutdown; producers unblock.
-                let _ = handle.join();
-            }
-
-            if starting > 0 {
-                thread::yield_now();
-                thread::sleep(Duration::from_millis(1));
-            }
+            // A spawn may have inserted during join; loop until the map drains.
         }
+    }
+
+    fn fail_spawn_cleanup(&self, run_id: RunId, record: &WorkerRecord) {
+        record.request_cancel();
+        record.delivery.close();
+        record.abandon_starting();
+        {
+            let mut workers = self.workers.lock().expect("workers");
+            workers.remove(&run_id);
+        }
+        self.release_turn_slot();
     }
 
     fn ensure_alive(&self) -> Result<(), RuntimeError> {
@@ -366,7 +363,7 @@ impl SpawnedTurn {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.record.finished.load(Ordering::SeqCst)
+        self.record.is_body_finished()
     }
 
     /// Snapshot of events currently buffered (not yet consumed).
@@ -375,13 +372,13 @@ impl SpawnedTurn {
     }
 
     /// Delivery queue for streaming consumption / backpressure tests.
-    pub fn delivery(&self) -> &Arc<BoundedDelivery> {
+    pub fn delivery(&self) -> &Arc<crate::delivery::BoundedDelivery> {
         &self.record.delivery
     }
 
     pub fn join(self) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         let mut events = Vec::new();
-        let join_result = await_worker_slot(&self.record, &mut events);
+        let join_result = self.record.await_joined(&mut events);
         {
             let mut workers = self.host.workers.lock().expect("workers");
             workers.remove(&self.run_id);
@@ -393,20 +390,10 @@ impl SpawnedTurn {
 
 impl Drop for SpawnedTurn {
     fn drop(&mut self) {
-        let handle = {
-            let mut slot = self.record.join.lock().expect("join");
-            match std::mem::replace(&mut *slot, JoinSlot::Joined) {
-                JoinSlot::Running(h) => Some(h),
-                other => {
-                    *slot = other;
-                    None
-                }
-            }
-        };
-        if let Some(handle) = handle {
-            let _ = self.host.cancel_turn(self.run_id);
+        if !self.record.is_joined() {
+            self.record.request_cancel();
             let mut discarded = Vec::new();
-            let _ = join_handle_draining(&self.record.delivery, handle, &mut discarded);
+            let _ = self.record.await_joined(&mut discarded);
         }
         let mut workers = self.host.workers.lock().expect("workers");
         workers.remove(&self.run_id);

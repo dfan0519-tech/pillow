@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use keeper_agent_protocol::{RuntimeError, RuntimeEvent};
+use keeper_agent_protocol::{RuntimeError, RuntimeEvent, RuntimeEventKind};
 
 /// Default per-turn event queue capacity (host-owned delivery).
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 64;
@@ -17,6 +17,8 @@ struct Inner {
     queue: VecDeque<RuntimeEvent>,
     capacity: usize,
     closed: bool,
+    /// Host cancel requested: non-cancel terminals must not commit.
+    cancelled: bool,
     /// True while a producer is blocked waiting for capacity (test/observability).
     producer_blocked: bool,
 }
@@ -37,6 +39,7 @@ impl BoundedDelivery {
                 queue: VecDeque::with_capacity(capacity),
                 capacity,
                 closed: false,
+                cancelled: false,
                 producer_blocked: false,
             }),
             not_full: Condvar::new(),
@@ -48,15 +51,54 @@ impl BoundedDelivery {
         self.inner.lock().expect("delivery").capacity
     }
 
-    /// Push an event, blocking when full until space is available or closed.
-    pub fn push_blocking(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+    /// Publish host cancel under the same lock that guards terminal commit.
+    pub fn request_cancel(&self) {
         let mut guard = self.inner.lock().expect("delivery");
-        while guard.queue.len() >= guard.capacity && !guard.closed {
+        guard.cancelled = true;
+        // Wake a producer blocked on a full queue so it can re-arbitrate.
+        self.not_full.notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.lock().expect("delivery").cancelled
+    }
+
+    /// Push an event, blocking when full until space is available, closed, or
+    /// cancel wins the commit arbitration.
+    ///
+    /// After cancel, only `run_cancelled` may commit (host-forced terminal).
+    /// A previously validated but blocked `turn_completed` cannot win.
+    pub fn push_blocking(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+        let is_cancel_terminal = event.kind == RuntimeEventKind::RunCancelled;
+        let mut guard = self.inner.lock().expect("delivery");
+        loop {
+            // Cancel beats a non-cancel terminal that was blocked on enqueue.
+            if guard.cancelled && !is_cancel_terminal {
+                guard.producer_blocked = false;
+                return Err(RuntimeError::Cancelled);
+            }
+            if guard.closed && !is_cancel_terminal {
+                guard.producer_blocked = false;
+                return Err(RuntimeError::ShutDown);
+            }
+            // Host cancel terminal may still wait for capacity after cancel.
+            if guard.queue.len() < guard.capacity {
+                break;
+            }
+            if guard.closed && is_cancel_terminal {
+                // Closed and full: cannot record residual cancel terminal.
+                guard.producer_blocked = false;
+                return Err(RuntimeError::ShutDown);
+            }
             guard.producer_blocked = true;
             guard = self.not_full.wait(guard).expect("delivery wait");
         }
         guard.producer_blocked = false;
-        if guard.closed {
+        // Re-check after wait: cancel may have landed while blocked.
+        if guard.cancelled && !is_cancel_terminal {
+            return Err(RuntimeError::Cancelled);
+        }
+        if guard.closed && !is_cancel_terminal {
             return Err(RuntimeError::ShutDown);
         }
         guard.queue.push_back(event);
@@ -67,6 +109,9 @@ impl BoundedDelivery {
     /// Non-blocking push used when fail-fast backpressure is preferred.
     pub fn try_push(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
         let mut guard = self.inner.lock().expect("delivery");
+        if guard.cancelled && event.kind != RuntimeEventKind::RunCancelled {
+            return Err(RuntimeError::Cancelled);
+        }
         if guard.closed {
             return Err(RuntimeError::ShutDown);
         }

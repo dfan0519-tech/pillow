@@ -189,7 +189,18 @@ impl EventSink for ProtocolGuardSink<'_> {
             }
             return Err(RuntimeError::Cancelled);
         }
-        self.emit_validated(event)
+        match self.emit_validated(event) {
+            Ok(()) => Ok(()),
+            // Delivery rejected a blocked non-cancel terminal after host cancel
+            // won commit arbitration — force run_cancelled if still needed.
+            Err(RuntimeError::Cancelled) => {
+                if !self.terminal_seen {
+                    self.force_run_cancelled()?;
+                }
+                Err(RuntimeError::Cancelled)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
