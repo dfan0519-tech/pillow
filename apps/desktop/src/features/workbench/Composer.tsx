@@ -1,4 +1,6 @@
+import { useState, type FormEvent, type KeyboardEvent } from "react";
 import {
+  IconClose,
   IconFolder,
   IconFolderPlus,
   IconSend,
@@ -8,8 +10,12 @@ type ComposerProps = {
   disabled?: boolean;
   projectName?: string | null;
   busy?: boolean;
+  sending?: boolean;
+  canCancel?: boolean;
   onOpenProject?: () => void;
   onNewProject?: () => void;
+  onSend?: (content: string) => void;
+  onCancelRun?: () => void;
 };
 
 /**
@@ -22,29 +28,61 @@ export function Composer({
   disabled = false,
   projectName = null,
   busy = false,
+  sending = false,
+  canCancel = false,
   onOpenProject,
   onNewProject,
+  onSend,
+  onCancelRun,
 }: ComposerProps) {
+  const [draft, setDraft] = useState("");
+  const canSend =
+    !disabled && !busy && !sending && !canCancel && draft.trim().length > 0;
+
+  function submit() {
+    const content = draft.trim();
+    if (!content || !canSend || !onSend) return;
+    onSend(content);
+    setDraft("");
+  }
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    submit();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  }
+
   return (
     <div className="composer-wrap composer-wrap--float">
       <form
-        aria-label="工作请求"
+        aria-label="对话输入"
         className="composer"
         data-testid="composer"
-        onSubmit={(event) => event.preventDefault()}
+        onSubmit={handleSubmit}
       >
         <label className="sr-only" htmlFor="work-request">
           工作请求
         </label>
         <textarea
-          disabled={disabled}
+          disabled={disabled || canCancel}
           id="work-request"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder={
             disabled
               ? "打开或新建项目后开始描述工作"
-              : "描述要完成的工作"
+              : canCancel
+                ? "运行中…可取消当前回合"
+                : "描述要完成的工作"
           }
           rows={2}
+          value={draft}
         />
         <div className="composer__footer">
           <div className="composer__context">
@@ -76,16 +114,30 @@ export function Composer({
               </>
             )}
           </div>
-          <button
-            aria-label="发送"
-            className="icon-btn icon-btn--primary"
-            data-testid="composer-send"
-            disabled
-            title="发送（代理运行时尚未接入）"
-            type="submit"
-          >
-            <IconSend size={16} />
-          </button>
+          <div className="composer__actions">
+            {canCancel ? (
+              <button
+                aria-label="取消运行"
+                className="icon-btn"
+                data-testid="composer-cancel"
+                onClick={onCancelRun}
+                title="取消当前运行"
+                type="button"
+              >
+                <IconClose size={16} />
+              </button>
+            ) : null}
+            <button
+              aria-label="发送"
+              className="icon-btn icon-btn--primary"
+              data-testid="composer-send"
+              disabled={!canSend}
+              title={canSend ? "发送" : "发送"}
+              type="submit"
+            >
+              <IconSend size={16} />
+            </button>
+          </div>
         </div>
       </form>
     </div>

@@ -1,4 +1,10 @@
 import { useState } from "react";
+import type {
+  ConversationTimelineView,
+  RunView,
+} from "../conversations/conversationReducer";
+import { isRunActive } from "../conversations/conversationReducer";
+import { ConversationTimeline } from "../conversations/ConversationTimeline";
 import type { ProjectDto } from "../../lib/projectGateway";
 import { IconKeeperMark, IconPanelRight } from "../../components/icons";
 import { Composer } from "./Composer";
@@ -8,7 +14,14 @@ type WorkbenchProps = {
   project: ProjectDto | null;
   onOpenProject: () => void;
   onNewProject: () => void;
+  onSendTurn: (content: string) => void;
+  onCancelRun: () => void;
   busy?: boolean;
+  sending?: boolean;
+  timeline: ConversationTimelineView | null;
+  run: RunView | null;
+  showMockBadge?: boolean;
+  mockBadgeLabel?: string;
 };
 
 /**
@@ -21,9 +34,18 @@ export function Workbench({
   project,
   onOpenProject,
   onNewProject,
+  onSendTurn,
+  onCancelRun,
   busy = false,
+  sending = false,
+  timeline,
+  run,
+  showMockBadge = false,
+  mockBadgeLabel = "模拟运行时",
 }: WorkbenchProps) {
   const [resourcesOpen, setResourcesOpen] = useState(false);
+  const hasTimeline = Boolean(timeline && timeline.messages.length > 0);
+  const canCancel = isRunActive(run);
 
   return (
     <main
@@ -60,7 +82,14 @@ export function Workbench({
         </header>
 
         <div className="stage-body">
-          {project ? (
+          {hasTimeline && timeline ? (
+            <ConversationTimeline
+              mockBadgeLabel={mockBadgeLabel}
+              run={run}
+              showMockBadge={showMockBadge}
+              timeline={timeline}
+            />
+          ) : project ? (
             <div className="stage-empty" data-testid="selected-workbench">
               <IconKeeperMark size={40} title="Keeper" />
               <h2>Keeper</h2>
@@ -77,10 +106,14 @@ export function Workbench({
 
         <Composer
           busy={busy}
+          canCancel={canCancel}
           disabled={!project}
+          onCancelRun={onCancelRun}
           onNewProject={onNewProject}
           onOpenProject={onOpenProject}
+          onSend={onSendTurn}
           projectName={project?.name ?? null}
+          sending={sending}
         />
       </section>
       <ResourcePane

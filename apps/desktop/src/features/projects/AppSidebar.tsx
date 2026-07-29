@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ConversationDto } from "../../lib/conversationGateway";
 import type { ProjectDto } from "../../lib/projectGateway";
 import {
   IconChevronDown,
@@ -14,10 +15,14 @@ import {
 type AppSidebarProps = {
   activeProjectId: string | null;
   projects: ProjectDto[];
+  conversations: ConversationDto[];
+  selectedConversationId: string | null;
   busy: boolean;
   onOpenProject: () => void;
   onNewProject: () => void;
   onSelect: (projectId: string) => void;
+  onNewConversation: () => void;
+  onSelectConversation: (conversationId: string) => void;
 };
 
 /**
@@ -30,10 +35,14 @@ type AppSidebarProps = {
 export function AppSidebar({
   activeProjectId,
   projects,
+  conversations,
+  selectedConversationId,
   busy,
   onOpenProject,
   onNewProject,
   onSelect,
+  onNewConversation,
+  onSelectConversation,
 }: AppSidebarProps) {
   const [projectsOpen, setProjectsOpen] = useState(true);
   const active = projects.find((project) => project.id === activeProjectId) ?? null;
@@ -64,6 +73,7 @@ export function AppSidebar({
         <button
           className="nav-new"
           disabled={busy || !active}
+          onClick={onNewConversation}
           title={active ? "新建对话" : "打开项目后可新建对话"}
           type="button"
         >
@@ -146,9 +156,33 @@ export function AppSidebar({
                         data-testid="project-conversations"
                         role="group"
                       >
-                        <p className="session-empty">
-                          尚无对话。在下方描述工作后，它会保存在此项目中。
-                        </p>
+                        {conversations.length === 0 ? (
+                          <p className="session-empty">
+                            尚无对话。在下方描述工作后，它会保存在此项目中。
+                          </p>
+                        ) : (
+                          conversations.map((conversation) => {
+                            const selected = conversation.id === selectedConversationId;
+                            return (
+                              <button
+                                className={
+                                  selected
+                                    ? "session-row session-row--active"
+                                    : "session-row"
+                                }
+                                data-testid="conversation-row"
+                                key={conversation.id}
+                                onClick={() => onSelectConversation(conversation.id)}
+                                title={conversation.title}
+                                type="button"
+                              >
+                                <span className="session-row__title">
+                                  {conversation.title}
+                                </span>
+                              </button>
+                            );
+                          })
+                        )}
                       </div>
                     ) : null}
                   </div>

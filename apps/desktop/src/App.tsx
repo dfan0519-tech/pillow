@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
+import {
+  conversationReducer,
+  createInitialConversationState,
+  isRunActive,
+  selectActiveRun,
+  selectActiveTimeline,
+  selectConversationsForProject,
+} from "./features/conversations/conversationReducer";
 import { AppSidebar } from "./features/projects/AppSidebar";
 import { NewProjectDialog } from "./features/projects/NewProjectDialog";
 import { Workbench } from "./features/workbench/Workbench";
+import type { ConversationGateway } from "./lib/conversationGateway";
+import { MockConversationGateway, MOCK_RUNTIME_BADGE } from "./lib/mockConversationGateway";
 import {
   normalizeProjectGatewayError,
   type CommandError,
@@ -12,6 +22,8 @@ import {
 
 type AppProps = {
   gateway: ProjectGateway;
+  /** Defaults to the deterministic mock gateway (Task 3). Task 4 swaps Tauri. */
+  conversationGateway?: ConversationGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
@@ -25,16 +37,29 @@ type AppProps = {
  */
 export function App({
   gateway,
+  conversationGateway: conversationGatewayProp,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
+  const conversationGateway = useMemo(
+    () => conversationGatewayProp ?? new MockConversationGateway({ stepDelayMs: 35 }),
+    [conversationGatewayProp],
+  );
+  const isMockRuntime = conversationGateway instanceof MockConversationGateway;
+
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [shellReady, setShellReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
+  const [conversationState, dispatchConversation] = useReducer(
+    conversationReducer,
+    undefined,
+    createInitialConversationState,
+  );
   const readinessSent = useRef(false);
   const defaultSelectSent = useRef(false);
 
@@ -78,6 +103,38 @@ export function App({
     void selectProject(defaultSelectedProjectId);
   }, [shellReady, defaultSelectedProjectId]);
 
+  // Global event subscription — streams continue regardless of selection.
+  useEffect(() => {
+    return conversationGateway.subscribe((event) => {
+      dispatchConversation({ type: "runtime_event", event });
+    });
+  }, [conversationGateway]);
+
+  useEffect(() => {
+    if (!activeProject) {
+      dispatchConversation({ type: "project_cleared" });
+      return;
+    }
+    let active = true;
+    void conversationGateway.listConversations(activeProject.id).then(
+      (conversations) => {
+        if (!active) return;
+        dispatchConversation({
+          type: "conversations_loaded",
+          projectId: activeProject.id,
+          conversations,
+        });
+      },
+      (cause: unknown) => {
+        if (!active) return;
+        console.error("Failed to list conversations.", cause);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [activeProject, conversationGateway]);
+
   function upsertProject(project: ProjectDto) {
     setProjects((current) => {
       const existing = current.some((item) => item.id === project.id);
@@ -101,6 +158,7 @@ export function App({
       upsertProject(project);
       setActiveProject(project);
       setError(null);
+      dispatchConversation({ type: "conversation_selected", conversationId: null });
     } catch (cause) {
       setError(normalizeProjectGatewayError(cause));
     } finally {
@@ -142,6 +200,90 @@ export function App({
     }
   }
 
+  async function createConversation() {
+    if (!activeProject) return;
+    setBusy(true);
+    try {
+      const conversation = await conversationGateway.createConversation(
+        activeProject.id,
+      );
+      dispatchConversation({ type: "conversation_created", conversation });
+      dispatchConversation({
+        type: "timeline_loaded",
+        timeline: { conversationId: conversation.id, messages: [], events: [] },
+      });
+    } catch (cause) {
+      console.error("Failed to create conversation.", cause);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function selectConversation(conversationId: string) {
+    dispatchConversation({ type: "conversation_selected", conversationId });
+    try {
+      // Authority snapshot; in-flight events continue via subscribe and merge
+      // by (runId, sequence) so background streams are not lost.
+      const timeline = await conversationGateway.loadTimeline(conversationId);
+      dispatchConversation({ type: "timeline_loaded", timeline });
+    } catch (cause) {
+      console.error("Failed to load timeline.", cause);
+    }
+  }
+
+  async function sendTurn(content: string) {
+    if (!activeProject) return;
+    setSending(true);
+    try {
+      let conversationId = conversationState.selectedConversationId;
+      if (!conversationId) {
+        const conversation = await conversationGateway.createConversation(
+          activeProject.id,
+          content.slice(0, 32),
+        );
+        dispatchConversation({ type: "conversation_created", conversation });
+        conversationId = conversation.id;
+      }
+
+      dispatchConversation({
+        type: "user_message_appended",
+        conversationId,
+        message: {
+          id: `local-${crypto.randomUUID()}`,
+          role: "user",
+          content: content.trim(),
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      await conversationGateway.sendTurn(conversationId, content);
+    } catch (cause) {
+      console.error("Failed to send turn.", cause);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function cancelActiveRun() {
+    const run = selectActiveRun(conversationState);
+    if (!run || !isRunActive(run)) return;
+    try {
+      await conversationGateway.cancelRun(run.runId);
+    } catch (cause) {
+      console.error("Failed to cancel run.", cause);
+    }
+  }
+
+  const projectConversations = selectConversationsForProject(
+    conversationState,
+    activeProject?.id ?? null,
+  );
+  const activeTimeline = selectActiveTimeline(conversationState);
+  const activeRun = selectActiveRun(conversationState);
+  const showMockBadge = Boolean(
+    isMockRuntime && conversationState.selectedConversationId,
+  );
+
   if (loading) {
     return <main className="app-loading">正在加载工作台…</main>;
   }
@@ -164,16 +306,27 @@ export function App({
         <AppSidebar
           activeProjectId={activeProject?.id ?? null}
           busy={busy}
+          conversations={projectConversations}
+          onNewConversation={() => void createConversation()}
           onNewProject={() => setNewProjectOpen(true)}
           onOpenProject={() => void openProject()}
           onSelect={(id) => void selectProject(id)}
+          onSelectConversation={(id) => void selectConversation(id)}
           projects={projects}
+          selectedConversationId={conversationState.selectedConversationId}
         />
         <Workbench
           busy={busy}
+          mockBadgeLabel={MOCK_RUNTIME_BADGE}
+          onCancelRun={() => void cancelActiveRun()}
           onNewProject={() => setNewProjectOpen(true)}
           onOpenProject={() => void openProject()}
+          onSendTurn={(content) => void sendTurn(content)}
           project={activeProject}
+          run={activeRun}
+          sending={sending}
+          showMockBadge={showMockBadge}
+          timeline={activeTimeline}
         />
       </div>
       <NewProjectDialog

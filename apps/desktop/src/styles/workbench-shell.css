@@ -353,6 +353,39 @@
   line-height: 1.45;
 }
 
+/* Nested conversation rows — Grok session-row rhythm */
+.session-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.session-row--active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.session-row__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-footer {
   flex-shrink: 0;
   padding: 8px 10px 10px;
@@ -430,7 +463,16 @@
   align-items: center;
   justify-content: center;
   min-height: 0;
+  min-width: 0;
   padding: 24px 32px;
+  overflow: auto;
+}
+
+/* When a timeline is present, pin scroll to the body — composer stays put. */
+.stage-body:has(.conversation-timeline) {
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 12px 24px 8px;
 }
 
 .stage-empty {
@@ -441,6 +483,146 @@
   max-width: 420px;
   gap: 8px;
   color: var(--text-secondary);
+}
+
+.conversation-timeline {
+  width: 100%;
+  max-width: 42rem;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.conversation-timeline__messages {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mock-runtime-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.timeline-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.timeline-msg header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+.timeline-msg p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.timeline-msg--user p {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg-hover);
+}
+
+.run-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.run-activity__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.run-activity__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.run-activity__dot--live {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.run-activity__block h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+.run-activity__block p,
+.run-activity__block ol,
+.run-activity__block ul {
+  margin: 0;
+  padding: 0;
+}
+
+.run-activity__block ol {
+  padding-left: 1.2em;
+}
+
+.run-activity__list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-activity__list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+}
+
+.run-activity__item-title {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.run-activity__item-meta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.run-activity__item-detail {
+  grid-column: 1 / -1;
+  color: var(--text-tertiary);
 }
 
 .stage-empty h2 {
