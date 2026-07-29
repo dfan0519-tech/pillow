@@ -4,10 +4,13 @@
   "private": true,
   "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "check": "node scripts/check-workspace.mjs",
+    "check": "node scripts/check-workspace.mjs && pnpm typecheck && pnpm test && node scripts/run-cargo.mjs test --workspace && node scripts/run-cargo.mjs clippy --workspace -- -D warnings",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "desktop:dev": "pnpm --filter @keeper-ide/desktop tauri dev"
+    "desktop:dev": "pnpm --filter @keeper-ide/desktop tauri dev",
+    "desktop:test:e2e": "pnpm --filter @keeper-ide/desktop test:e2e",
+    "desktop:smoke": "node scripts/smoke-desktop.mjs --mode release",
+    "desktop:smoke:dev": "node scripts/smoke-desktop.mjs --mode dev"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.1"

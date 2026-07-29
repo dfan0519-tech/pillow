@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
 import { ProjectLauncher } from "./features/projects/ProjectLauncher";
 import { ProjectSidebar } from "./features/projects/ProjectSidebar";
@@ -11,18 +11,22 @@ import {
   type ProjectGateway,
 } from "./lib/projectGateway";
 
-type AppProps = { gateway: ProjectGateway };
+type AppProps = {
+  gateway: ProjectGateway;
+  onProjectLauncherReady?: () => Promise<void>;
+};
 
 /**
  * Shell regions and adjustable navigation adapt Grok App's App.tsx layout under MIT.
  * Source: src/App.tsx at 1c3f9c8aa3a42e869f11afb3d075f1b52843aaa9.
  */
-export function App({ gateway }: AppProps) {
+export function App({ gateway, onProjectLauncherReady }: AppProps) {
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
   const [launcherOpen, setLauncherOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<CommandError | null>(null);
+  const readinessSent = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -42,6 +46,14 @@ export function App({ gateway }: AppProps) {
       active = false;
     };
   }, [gateway]);
+
+  useEffect(() => {
+    if (loading || readinessSent.current || !onProjectLauncherReady) return;
+    readinessSent.current = true;
+    void onProjectLauncherReady().catch((cause: unknown) => {
+      console.error("Keeper IDE readiness command failed.", cause);
+    });
+  }, [loading, onProjectLauncherReady]);
 
   async function selectProject(projectId: string) {
     try {

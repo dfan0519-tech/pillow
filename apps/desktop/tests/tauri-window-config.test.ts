@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import desktopPackage from "../package.json";
 import capability from "../src-tauri/capabilities/default.json";
 import config from "../src-tauri/tauri.conf.json";
 
@@ -17,5 +18,10 @@ describe("Tauri custom titlebar configuration", () => {
       "core:event:allow-listen",
       "core:event:allow-unlisten",
     ]));
+  });
+
+  it("pins the dev server and Tauri probe to the same IPv4 loopback host", () => {
+    expect(config.build.devUrl).toBe("http://127.0.0.1:1420");
+    expect(desktopPackage.scripts.dev).toContain("--host 127.0.0.1");
   });
 });

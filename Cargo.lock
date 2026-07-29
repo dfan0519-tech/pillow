@@ -1639,6 +1639,7 @@ dependencies = [
  "keeper-project",
  "keeper-storage-sqlite",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "uuid",
