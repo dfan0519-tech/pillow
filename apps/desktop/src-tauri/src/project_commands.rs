@@ -36,9 +36,7 @@ pub fn select_project(
 #[tauri::command]
 pub async fn pick_directory() -> Result<Option<String>, String> {
     let folder = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("选择文件夹")
-            .pick_folder()
+        rfd::FileDialog::new().set_title("选择文件夹").pick_folder()
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -61,10 +59,7 @@ pub fn open_or_register_project(
 /// Create a child directory under `parent_path` named `name` (no registration).
 /// Parent must already be on the path allowlist (native picker grants it).
 #[tauri::command]
-pub fn create_project_directory(
-    parent_path: String,
-    name: String,
-) -> Result<String, CommandError> {
+pub fn create_project_directory(parent_path: String, name: String) -> Result<String, CommandError> {
     let parent = std::path::Path::new(parent_path.trim());
     path_scope::require_allowed(parent).map_err(|error| CommandError {
         code: error.code(),

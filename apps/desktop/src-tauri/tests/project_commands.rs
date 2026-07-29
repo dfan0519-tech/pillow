@@ -82,10 +82,7 @@ fn open_or_register_registers_new_folder_using_leaf_name() {
         .expect("register");
 
     assert_eq!(opened.name, "brand-new");
-    assert_eq!(
-        project_name_from_path(&project_root).unwrap(),
-        "brand-new"
-    );
+    assert_eq!(project_name_from_path(&project_root).unwrap(), "brand-new");
     assert_eq!(state.list_projects().unwrap().len(), 1);
 }
 
@@ -104,9 +101,7 @@ fn create_project_with_folder_makes_directory_and_registers_when_parent_granted(
     assert!(expected.is_dir());
     assert_eq!(project.name, "New App");
     assert_eq!(
-        PathBuf::from(&project.root_path)
-            .canonicalize()
-            .unwrap(),
+        PathBuf::from(&project.root_path).canonicalize().unwrap(),
         expected.canonicalize().unwrap()
     );
 }

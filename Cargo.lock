@@ -1925,13 +1925,18 @@ dependencies = [
 name = "keeper-ide-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "keeper-agent-protocol",
  "keeper-project",
+ "keeper-runtime-host",
+ "keeper-session",
  "keeper-storage-sqlite",
  "rfd",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "uuid",
 ]
 

@@ -16,10 +16,17 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+chrono.workspace = true
+keeper-agent-protocol = { path = "../../../crates/agent-protocol" }
 keeper-project = { path = "../../../crates/kernel-project" }
+keeper-runtime-host = { path = "../../../crates/runtime-host" }
+keeper-session = { path = "../../../crates/kernel-session" }
 keeper-storage-sqlite = { path = "../../../crates/storage-sqlite" }
 rfd = "0.15"
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

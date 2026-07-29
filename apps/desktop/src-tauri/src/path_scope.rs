@@ -44,9 +44,7 @@ pub fn is_allowed(path: &Path) -> bool {
     let Ok(locked) = grants().lock() else {
         return false;
     };
-    locked
-        .iter()
-        .any(|root| path_under_root(&candidate, root))
+    locked.iter().any(|root| path_under_root(&candidate, root))
 }
 
 /// Reject when `path` is outside the allowlist (used by write-capable create paths).
