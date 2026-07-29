@@ -13,6 +13,7 @@ describe("Tauri custom titlebar configuration", () => {
       "core:window:allow-toggle-maximize",
       "core:window:allow-close",
       "core:window:allow-is-maximized",
+      "core:window:allow-start-dragging",
       "core:event:allow-listen",
       "core:event:allow-unlisten",
     ]));
