@@ -44,8 +44,11 @@ impl SqliteConversationRepository {
     }
 
     /// Append event + optional status in one IMMEDIATE transaction.
-    /// Same-kind sequence replay is idempotent (first payload wins);
-    /// different-kind replay errors without mutating rows or status.
+    ///
+    /// - First insert applies `target_status` (when `Some`) in the same txn.
+    /// - Same-kind sequence replay returns the persisted event and does **not**
+    ///   apply, revert, or revalidate a status transition (first payload wins).
+    /// - Different-kind replay errors without mutating rows or status.
     pub fn append_event_with_status(
         &self,
         event: NewRunEvent,
@@ -56,9 +59,11 @@ impl SqliteConversationRepository {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
-        let (recorded, _inserted) = append_event_in_tx(&tx, event, sequence_i64)?;
-        // Only non-conflicting events reach here (insert or same-kind replay).
-        if let Some(target) = target_status {
+        let (recorded, inserted) = append_event_in_tx(&tx, event, sequence_i64)?;
+        // Apply event-derived status only on first insert. Same-kind replay must
+        // remain idempotent after the run has advanced past the early target
+        // (e.g. replaying run_started once status is Cancelling/Completed).
+        if inserted && let Some(target) = target_status {
             apply_status_in_tx(&tx, recorded.run_id, target)?;
         }
         tx.commit().map_err(map_sqlite)?;

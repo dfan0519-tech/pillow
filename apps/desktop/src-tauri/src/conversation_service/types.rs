@@ -7,6 +7,23 @@ use std::time::{Duration, Instant};
 
 use keeper_session::{ConversationId, RunId};
 
+/// Optional test seams for pump registration ordering and fail-closed paths.
+///
+/// Production defaults are no-ops (`None` / false).
+#[derive(Default)]
+pub struct PumpRegistrationHooks {
+    /// Fires on the `send_turn` thread after the pump is spawned and before its
+    /// `JoinHandle` is stored (and before the registration gate is released).
+    pub after_spawn_before_register: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Fires on the pump thread after `pump_turn` returns and before
+    /// `wait_until_registered` / active-entry removal.
+    pub after_pump_before_registration_wait: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Pump-boundary seam: `Err` forces authoritative process failure.
+    pub force_process_error: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// When true after authoritative failure, terminalization returns residual.
+    pub force_terminalization_failure: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationCommandError {
     pub code: &'static str,

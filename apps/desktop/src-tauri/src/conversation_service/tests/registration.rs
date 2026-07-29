@@ -60,6 +60,7 @@ fn pump_finish_before_handle_register_clears_active_entry() {
                 // wait_until_registered / remove_active_run.
                 pump_post_turn_hook.wait();
             })),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -164,7 +165,7 @@ fn send_turn_admission_linearized_with_shutdown() {
                 enter_hook.wait();
                 release_hook.wait();
             })),
-            after_pump_before_registration_wait: None,
+            ..Default::default()
         },
     )
     .unwrap();

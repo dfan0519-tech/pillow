@@ -20,25 +20,11 @@ use crate::conversation_events::{
 };
 
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
-use super::pipeline::{PumpOutcome, pump_turn};
+use super::pipeline::{PumpFailSeams, PumpOutcome, pump_turn};
 use super::types::{
-    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, ServiceAdmission,
-    remove_active_run,
+    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, PumpRegistrationHooks,
+    ServiceAdmission, remove_active_run,
 };
-
-/// Optional test seams for pump registration ordering.
-///
-/// Both hooks are production-no-ops (`None`). Tests use them to force the
-/// post-`pump_turn`, pre-remove gate without relying on timing alone.
-#[derive(Default)]
-pub struct PumpRegistrationHooks {
-    /// Fires on the `send_turn` thread after the pump is spawned and before its
-    /// `JoinHandle` is stored (and before the registration gate is released).
-    pub after_spawn_before_register: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Fires on the pump thread after `pump_turn` returns and before
-    /// `wait_until_registered` / active-entry removal.
-    pub after_pump_before_registration_wait: Option<Arc<dyn Fn() + Send + Sync>>,
-}
 
 pub struct ConversationService {
     repository: Arc<SqliteConversationRepository>,
@@ -50,6 +36,8 @@ pub struct ConversationService {
     shut_down: AtomicBool,
     after_spawn_before_register_pump: Option<Arc<dyn Fn() + Send + Sync>>,
     after_pump_before_registration_wait: Option<Arc<dyn Fn() + Send + Sync>>,
+    force_process_error: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    force_terminalization_failure: bool,
 }
 
 impl ConversationService {
@@ -90,10 +78,12 @@ impl ConversationService {
             shut_down: AtomicBool::new(false),
             after_spawn_before_register_pump: None,
             after_pump_before_registration_wait: None,
+            force_process_error: None,
+            force_terminalization_failure: false,
         })
     }
 
-    /// Like [`open_with_config`], plus test seams for pump registration ordering.
+    /// Like [`open_with_config`], plus test seams for pump registration / fail-closed.
     pub fn open_with_config_and_pump_hook(
         path: impl AsRef<Path>,
         emitter: Arc<dyn RuntimeEventEmitter>,
@@ -103,6 +93,8 @@ impl ConversationService {
         let mut service = Self::open_with_config(path, emitter, config)?;
         service.after_spawn_before_register_pump = hooks.after_spawn_before_register;
         service.after_pump_before_registration_wait = hooks.after_pump_before_registration_wait;
+        service.force_process_error = hooks.force_process_error;
+        service.force_terminalization_failure = hooks.force_terminalization_failure;
         Ok(service)
     }
 
@@ -399,20 +391,20 @@ impl ConversationService {
         }
     }
 
-    /// Idempotent graceful shutdown:
-    /// 1. close the local admission gate (no new durable runs);
-    /// 2. wait for in-flight `send_turn` admissions to finish ownership handoff;
-    /// 3. reject new host work, cancel inflight workers, join them;
-    /// 4. join/drain all active pumps;
-    /// 5. leave zero active entries, workers and slots;
-    /// 6. surface a bounded actionable error rather than hanging forever.
+    /// Idempotent graceful shutdown (production bound: 15s).
     pub fn shutdown(&self) -> Result<(), ConversationCommandError> {
+        self.shutdown_with_timeout(Duration::from_secs(15))
+    }
+
+    /// Shared shutdown implementation. Production uses 15s; tests may pass a
+    /// short bound so residual fail-closed paths return quickly.
+    pub fn shutdown_with_timeout(&self, bound: Duration) -> Result<(), ConversationCommandError> {
         let already = self.shut_down.swap(true, Ordering::SeqCst);
         // Own the admission gate before any drain so racing send_turn cannot
         // create a Pending run after we begin shutdown.
         self.admission.close();
         // Bounded wait: fail closed rather than hang forever.
-        self.admission.wait_until_idle(Duration::from_secs(15))?;
+        self.admission.wait_until_idle(bound)?;
 
         // Host rejects new turns, cancels inflight workers, joins them.
         self.host.shutdown().map_err(|error| {
@@ -420,7 +412,7 @@ impl ConversationService {
         })?;
 
         // Drain pumps that may still be finishing persist/emit.
-        self.drain(Duration::from_secs(15))?;
+        self.drain(bound)?;
 
         if self.active_run_count() != 0
             || self.host.worker_registry_len() != 0
@@ -469,11 +461,16 @@ impl ConversationService {
         let emitter = Arc::clone(&self.emitter);
         let active = Arc::clone(&self.active);
         let after_pump = self.after_pump_before_registration_wait.clone();
+        let seams = PumpFailSeams {
+            force_process_error: self.force_process_error.clone(),
+            force_terminalization_failure: self.force_terminalization_failure,
+        };
 
         thread::Builder::new()
             .name(format!("keeper-conv-pump-{}", run_id.0))
             .spawn(move || {
-                let outcome = pump_turn(repository, emitter, conversation_id, run_id, spawned);
+                let outcome =
+                    pump_turn(repository, emitter, conversation_id, run_id, spawned, seams);
                 // Test seam: post-pump_turn, pre-registration-wait.
                 if let Some(hook) = after_pump.as_ref() {
                     hook();

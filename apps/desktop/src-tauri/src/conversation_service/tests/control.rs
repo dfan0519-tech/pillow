@@ -125,21 +125,136 @@ fn failing_emitter_still_reaches_completed_with_zero_residuals() {
     assert!(service.host_is_idle());
 }
 
-/// Processing failure → Interrupted without inventing a terminal event; missing
-/// run terminalization is fail-closed residual.
+/// Real service pump: force authoritative process failure at the production
+/// boundary → durable Interrupted, no invented terminal event, zero residuals.
 #[test]
-fn pump_processing_failure_interrupts_or_fail_closed() {
-    use keeper_session::{
-        ConversationRepository, NewConversation, NewRun, NewRunEvent, RunId, RunStatus,
-        RuntimeEventKind,
-    };
-    use keeper_storage_sqlite::SqliteConversationRepository;
-    use uuid::Uuid;
-
-    use crate::conversation_service::pipeline::{PumpOutcome, ensure_interrupted};
+fn real_pump_authoritative_process_failure_interrupts_cleanly() {
+    use crate::conversation_service::PumpRegistrationHooks;
 
     let (_temp, path) = temp_db();
-    let project = seed_project(&path, "pump-interrupt");
+    let project = seed_project(&path, "pump-auth-fail");
+    let service = ConversationService::open_with_config_and_pump_hook(
+        &path,
+        Arc::new(RecordingEmitter::new()),
+        HostConfig {
+            max_concurrent_turns: 4,
+            honor_fixture_delays: false,
+            event_queue_capacity: 64,
+            after_worker_registered: None,
+        },
+        PumpRegistrationHooks {
+            force_process_error: Some(Arc::new(|| {
+                Err("forced authoritative process failure".into())
+            })),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let conversation = service
+        .create_conversation(project.0.to_string(), None)
+        .unwrap();
+    let result = service
+        .send_turn(conversation.id.clone(), "force process fail".into())
+        .unwrap();
+    service.drain(Duration::from_secs(5)).unwrap();
+
+    let timeline = service.load_timeline(conversation.id).unwrap();
+    let run = timeline
+        .runs
+        .iter()
+        .find(|r| r.run_id == result.run_id)
+        .expect("run");
+    assert_eq!(run.status, "interrupted");
+    let terminals: Vec<_> = timeline
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                "turn_completed" | "turn_failed" | "run_cancelled"
+            )
+        })
+        .collect();
+    assert!(
+        terminals.is_empty(),
+        "must not invent a terminal runtime event: {terminals:?}"
+    );
+    assert_eq!(service.active_run_count(), 0);
+    assert_eq!(service.worker_registry_len(), 0);
+    assert_eq!(service.in_flight_turns(), 0);
+    assert!(service.host_is_idle());
+}
+
+/// Real pump: process failure then forced terminalization failure → residual
+/// active entry; short drain and short shutdown both return actionable errors.
+#[test]
+fn real_pump_terminalization_failure_fail_closed_on_drain_and_shutdown() {
+    use crate::conversation_service::PumpRegistrationHooks;
+
+    let (_temp, path) = temp_db();
+    let project = seed_project(&path, "pump-term-fail");
+    let service = ConversationService::open_with_config_and_pump_hook(
+        &path,
+        Arc::new(RecordingEmitter::new()),
+        HostConfig {
+            max_concurrent_turns: 4,
+            honor_fixture_delays: false,
+            event_queue_capacity: 64,
+            after_worker_registered: None,
+        },
+        PumpRegistrationHooks {
+            force_process_error: Some(Arc::new(|| {
+                Err("forced authoritative process failure".into())
+            })),
+            force_terminalization_failure: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let conversation = service
+        .create_conversation(project.0.to_string(), None)
+        .unwrap();
+    let _ = service
+        .send_turn(conversation.id.clone(), "force term fail".into())
+        .unwrap();
+
+    // Pump finishes with residual active entry (handle still joinable via drain).
+    let drain_err = service
+        .drain(Duration::from_millis(200))
+        .expect_err("residual active must fail drain");
+    assert_eq!(drain_err.code, "drain_timeout");
+    assert!(
+        service.active_run_count() >= 1,
+        "active residual must be retained"
+    );
+
+    let shutdown_err = service
+        .shutdown_with_timeout(Duration::from_millis(200))
+        .expect_err("residual active must fail shutdown");
+    assert!(
+        matches!(shutdown_err.code, "drain_timeout" | "shutdown_incomplete"),
+        "actionable fail-closed code, got {}",
+        shutdown_err.code
+    );
+    assert!(service.active_run_count() >= 1);
+}
+
+/// Emitted DTO comes from durable recorded event; same-kind replay with a
+/// replacement payload re-emits the first persisted payload.
+#[test]
+fn process_runtime_event_emits_persisted_payload_on_same_kind_replay() {
+    use chrono::Utc;
+    use keeper_agent_protocol::{
+        RunId as ProtocolRunId, RuntimeEvent, RuntimeEventKind as ProtocolEventKind,
+    };
+    use keeper_session::{ConversationRepository, NewConversation, NewRun, RuntimeEventKind};
+    use keeper_storage_sqlite::SqliteConversationRepository;
+    use serde_json::json;
+
+    use crate::conversation_service::pipeline::process_runtime_event;
+
+    let (_temp, path) = temp_db();
+    let project = seed_project(&path, "emit-recorded");
     let repo = SqliteConversationRepository::open(&path).unwrap();
     let conversation = repo
         .create_conversation(NewConversation {
@@ -150,35 +265,43 @@ fn pump_processing_failure_interrupts_or_fail_closed() {
     let run = repo
         .create_run(NewRun {
             conversation_id: conversation.id,
-            user_message: "interrupt me".into(),
+            user_message: "payload truth".into(),
         })
         .unwrap();
-    repo.append_event_with_status(
-        NewRunEvent {
-            run_id: run.id,
-            sequence: 0,
-            kind: RuntimeEventKind::RunStarted,
-            payload_json: r#"{"prompt_preview":"x"}"#.into(),
-        },
-        Some(RunStatus::Running),
-    )
-    .unwrap();
-    assert_eq!(
-        ensure_interrupted(&repo, run.id),
-        PumpOutcome::DurableTerminal
-    );
+    let emitter = RecordingEmitter::new();
+    let protocol_run = ProtocolRunId(run.id.0);
+    let first = RuntimeEvent {
+        run_id: protocol_run,
+        sequence: 1,
+        kind: ProtocolEventKind::RunStarted,
+        payload: json!({"prompt_preview": "original"}),
+        created_at: Utc::now(),
+    };
+    let replacement = RuntimeEvent {
+        run_id: protocol_run,
+        sequence: 1,
+        kind: ProtocolEventKind::RunStarted,
+        payload: json!({"prompt_preview": "replacement"}),
+        created_at: Utc::now(),
+    };
+    process_runtime_event(&repo, &emitter, conversation.id, &first).unwrap();
+    process_runtime_event(&repo, &emitter, conversation.id, &replacement).unwrap();
+
+    let emitted = emitter.snapshot();
+    assert_eq!(emitted.len(), 2);
+    for dto in &emitted {
+        assert_eq!(dto.kind, "run_started");
+        assert_eq!(dto.sequence, 1);
+        assert_eq!(dto.payload["prompt_preview"], "original");
+    }
     let timeline = repo.load_timeline(conversation.id).unwrap();
-    assert_eq!(timeline.runs[0].status, RunStatus::Interrupted);
     assert_eq!(timeline.events.len(), 1);
     assert_eq!(timeline.events[0].kind, RuntimeEventKind::RunStarted);
     assert_eq!(
-        ensure_interrupted(&repo, run.id),
-        PumpOutcome::DurableTerminal
+        timeline.events[0].payload_json,
+        r#"{"prompt_preview":"original"}"#
     );
-    assert_eq!(
-        ensure_interrupted(&repo, RunId(Uuid::new_v4())),
-        PumpOutcome::ResidualNonTerminal
-    );
+    assert_eq!(timeline.runs[0].status, keeper_session::RunStatus::Running);
 }
 
 /// Emit-path failures still clear the active entry once the durable run is terminal.

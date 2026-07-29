@@ -13,7 +13,7 @@ use keeper_session::{
 };
 use keeper_storage_sqlite::SqliteConversationRepository;
 
-use crate::conversation_events::{RuntimeEventEmitter, live_runtime_event_dto, status_for_kind};
+use crate::conversation_events::{RuntimeEventEmitter, runtime_event_dto, status_for_kind};
 
 /// Result of draining one host turn into SQLite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,18 @@ pub(crate) enum PumpOutcome {
     /// Could not prove a durable terminal status; keep the residual active entry
     /// so shutdown/drain fail closed instead of reporting success.
     ResidualNonTerminal,
+}
+
+/// Narrow test seams at production pump boundaries. Production defaults are all
+/// no-ops (`None` / false).
+#[derive(Default, Clone)]
+pub(crate) struct PumpFailSeams {
+    /// Called before `process_runtime_event`. `Err` is treated as an
+    /// authoritative processing failure (same path as real process errors).
+    pub force_process_error: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// When true after an authoritative failure, skip store terminalization and
+    /// return `ResidualNonTerminal` (simulates terminalization store failure).
+    pub force_terminalization_failure: bool,
 }
 
 /// Drain the host delivery queue, persist each event, then join the worker.
@@ -37,6 +49,7 @@ pub(super) fn pump_turn(
     conversation_id: ConversationId,
     run_id: RunId,
     spawned: SpawnedTurn,
+    seams: PumpFailSeams,
 ) -> PumpOutcome {
     let delivery = Arc::clone(spawned.delivery());
     let mut authoritative_failure = false;
@@ -45,6 +58,13 @@ pub(super) fn pump_turn(
         match delivery.pop_timeout(Duration::from_millis(50)) {
             Ok(Some(event)) => {
                 let terminal = event.is_terminal();
+                if let Some(force) = seams.force_process_error.as_ref()
+                    && let Err(error) = force()
+                {
+                    eprintln!("Keeper IDE conversation pump error: {error}");
+                    authoritative_failure = true;
+                    break;
+                }
                 match process_runtime_event(&repository, emitter.as_ref(), conversation_id, &event)
                 {
                     Ok(()) => {
@@ -63,6 +83,13 @@ pub(super) fn pump_turn(
                 if delivery.is_closed() && delivery.is_empty() {
                     for event in delivery.drain() {
                         let terminal = event.is_terminal();
+                        if let Some(force) = seams.force_process_error.as_ref()
+                            && let Err(error) = force()
+                        {
+                            eprintln!("Keeper IDE conversation pump error: {error}");
+                            authoritative_failure = true;
+                            break;
+                        }
                         if let Err(error) = process_runtime_event(
                             &repository,
                             emitter.as_ref(),
@@ -96,6 +123,9 @@ pub(super) fn pump_turn(
     let _ = spawned.join();
 
     if authoritative_failure {
+        if seams.force_terminalization_failure {
+            return PumpOutcome::ResidualNonTerminal;
+        }
         return ensure_interrupted(&repository, run_id);
     }
 
@@ -110,7 +140,8 @@ pub(super) fn pump_turn(
 /// 4. emit to the renderer (non-authoritative; failures do not roll back)
 ///
 /// Never emit an event that has not been durably committed.
-pub(super) fn process_runtime_event(
+/// The emitted DTO is built entirely from the persisted event row.
+pub(crate) fn process_runtime_event(
     repository: &SqliteConversationRepository,
     emitter: &dyn RuntimeEventEmitter,
     conversation_id: ConversationId,
@@ -143,18 +174,11 @@ pub(super) fn process_runtime_event(
         )
         .map_err(|error| format!("append_event_with_status: {error}"))?;
 
-    // 4. Emit only after durable commit. Emit failure is non-authoritative:
-    // durable truth already landed; log and continue so the pump can ingest
-    // the real terminal event.
-    let dto = live_runtime_event_dto(
-        recorded.event_id.0.to_string(),
-        domain_run_id,
-        conversation_id,
-        validated.sequence,
-        kind,
-        validated.payload.clone(),
-        recorded.created_at,
-    );
+    // 4. Emit only after durable commit, from persisted truth (kind, sequence,
+    // payload_json, timestamps) — never from the incoming replacement payload.
+    // Emit failure is non-authoritative: log and continue.
+    let dto = runtime_event_dto(&recorded, conversation_id)
+        .map_err(|error| format!("recorded payload parse: {error}"))?;
     if let Err(error) = emitter.emit_runtime_event(&dto) {
         eprintln!("Keeper IDE conversation emit error (non-authoritative): {error}");
     }
