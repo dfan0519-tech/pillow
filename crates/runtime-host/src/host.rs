@@ -5,6 +5,12 @@
 //! Joining -> Joined`). Async turn slots are RAII [`TurnSlotPermit`]s owned by
 //! the worker record — no unregistered in-flight window and no manual
 //! double/missed release on the async path.
+//!
+//! Synchronous `send_turn` shares the same concurrency counter but is not an
+//! OS worker record. Admission is linearized with shutdown via
+//! [`SyncTurnLifecycle`]: the gate is closed before workers are cancelled, and
+//! shutdown waits on a condition variable until every admitted sync turn
+//! releases its permit.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +26,7 @@ use keeper_agent_protocol::{
 use crate::delivery::DEFAULT_EVENT_QUEUE_CAPACITY;
 use crate::fake::FakeRuntimeAdapter;
 use crate::sink::ProtocolGuardSink;
-use crate::worker::{TurnSlotPermit, WorkerRecord, run_turn_worker};
+use crate::worker::{SyncTurnLifecycle, TurnSlotPermit, WorkerRecord, run_turn_worker};
 
 /// Default concurrent turn limit for the host (process-pool style bound).
 pub const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 4;
@@ -81,6 +87,8 @@ pub struct RuntimeHost {
     slots: Arc<AtomicU32>,
     shut_down: AtomicBool,
     workers: Mutex<HashMap<RunId, Arc<WorkerRecord>>>,
+    /// Sync `send_turn` admission linearized with shutdown (mutex + condvar).
+    sync_turns: SyncTurnLifecycle,
 }
 
 impl RuntimeHost {
@@ -96,6 +104,7 @@ impl RuntimeHost {
             slots: Arc::new(AtomicU32::new(0)),
             shut_down: AtomicBool::new(false),
             workers: Mutex::new(HashMap::new()),
+            sync_turns: SyncTurnLifecycle::new(),
         }
     }
 
@@ -120,8 +129,11 @@ impl RuntimeHost {
         sink: &mut dyn EventSink,
     ) -> Result<(), RuntimeError> {
         self.ensure_alive()?;
-        // Scoped RAII guard: increments once, decrements exactly once on drop
-        // (including early returns / panics in the closure body).
+        // Lifecycle admission first: linearizes with shutdown close/wait so an
+        // admitted sync turn is never invisible to join. Drop order is reverse
+        // of declaration — permit releases before admission, so wait_until_idle
+        // implies this turn's concurrency slot is already free.
+        let _admission = self.sync_turns.try_admit()?;
         let _permit = TurnSlotPermit::try_acquire(&self.slots, self.config.max_concurrent_turns)?;
         let run_id = request.run_id;
         let mut guarded = ProtocolGuardSink::new(run_id, sink);
@@ -141,12 +153,16 @@ impl RuntimeHost {
 
         let run_id = request.run_id;
 
-        // Linearize with shutdown: re-check shut_down, acquire the permit, and
-        // publish Starting with permit ownership under the same workers lock.
+        // Linearize with shutdown: re-check shut_down, reject duplicate run_id
+        // (never replace a live record), acquire the permit, and publish
+        // Starting with permit ownership under the same workers lock.
         let record = {
             let mut workers = self.workers.lock().expect("workers");
             if self.shut_down.load(Ordering::SeqCst) {
                 return Err(RuntimeError::ShutDown);
+            }
+            if workers.contains_key(&run_id) {
+                return Err(RuntimeError::RunAlreadyActive { run_id });
             }
             let permit =
                 TurnSlotPermit::try_acquire(&self.slots, self.config.max_concurrent_turns)?;
@@ -246,14 +262,22 @@ impl RuntimeHost {
 
     /// Shut down the adapter and join all host-owned workers before returning.
     ///
-    /// Host workers in `Starting`, `Running`, or `Joining` are waited on even
-    /// when `adapter.shutdown()` returns an error. The adapter error is
-    /// returned only after host cleanup is complete.
+    /// Host workers in `Starting`, `Running`, or `Joining`, and every admitted
+    /// synchronous `send_turn`, are waited on even when `adapter.shutdown()`
+    /// returns an error. The adapter error is returned only after host cleanup
+    /// is complete.
     ///
-    /// `shut_down` is published under the workers lock so a concurrent
-    /// `spawn_turn` either rejects before acquiring a permit or has already
-    /// inserted a `Starting` record that this path will join.
+    /// Order:
+    /// 1. Close the sync-turn gate (no new admissions; existing holds remain).
+    /// 2. Publish `shut_down` under the workers lock and cancel async workers.
+    /// 3. `adapter.shutdown()` (error retained).
+    /// 4. Join every async worker record.
+    /// 5. Wait (condvar) until every admitted sync turn releases.
+    /// 6. Empty registry must imply zero turn slots.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        // Close first so try_admit cannot race past AtomicBool shut_down alone.
+        self.sync_turns.close();
+
         let already = {
             let workers = self.workers.lock().expect("workers");
             let already = self.shut_down.swap(true, Ordering::SeqCst);
@@ -268,12 +292,13 @@ impl RuntimeHost {
         let adapter_result = self.adapter.shutdown();
         // Join host workers even when the adapter reports failure.
         self.join_all_workers();
+        // Wait for every admitted synchronous send_turn to release its slot.
+        self.sync_turns.wait_until_idle();
         adapter_result?;
         if already {
             return Ok(());
         }
-        // Empty registry must imply no outstanding turn slots (async permits
-        // live on worker records; sync send_turn cannot start after shut_down).
+        // Empty registry + idle sync gate ⇒ no outstanding turn slots.
         self.ensure_registry_empty_implies_no_slots()?;
         Ok(())
     }
@@ -282,13 +307,21 @@ impl RuntimeHost {
         self.slots.load(Ordering::SeqCst)
     }
 
-    /// True when the worker registry is empty and no turn-slot permits remain.
+    /// True when the worker registry is empty, no sync admissions remain, and
+    /// no turn-slot permits remain.
     ///
     /// After a successful shutdown this must hold. It also documents the
     /// invariant that an empty async worker map cannot leave a leaked permit.
     pub fn is_fully_idle(&self) -> bool {
         let workers = self.workers.lock().expect("workers");
-        workers.is_empty() && self.slots.load(Ordering::SeqCst) == 0
+        workers.is_empty()
+            && self.sync_turns.in_flight() == 0
+            && self.slots.load(Ordering::SeqCst) == 0
+    }
+
+    /// Admitted synchronous turns still holding the lifecycle gate (tests).
+    pub fn sync_turns_in_flight(&self) -> u32 {
+        self.sync_turns.in_flight()
     }
 
     /// Number of worker records still registered (test / invariant helper).
@@ -334,13 +367,22 @@ impl RuntimeHost {
     }
 
     /// Abandon a Starting record: permit is released inside `abandon_starting`
-    /// before `Joined` is published, then the map entry is removed.
-    fn fail_spawn_cleanup(&self, run_id: RunId, record: &WorkerRecord) {
+    /// before `Joined` is published, then the map entry is removed **only if it
+    /// still points at this exact record** (never detach another owner).
+    fn fail_spawn_cleanup(&self, run_id: RunId, record: &Arc<WorkerRecord>) {
         record.request_cancel();
         record.delivery.close();
         record.abandon_starting();
         let mut workers = self.workers.lock().expect("workers");
-        workers.remove(&run_id);
+        match workers.get(&run_id) {
+            Some(current) if Arc::ptr_eq(current, record) => {
+                workers.remove(&run_id);
+            }
+            _ => {
+                // Already removed, or a different record owns this run_id —
+                // do not remove foreign ownership.
+            }
+        }
     }
 
     fn ensure_alive(&self) -> Result<(), RuntimeError> {
@@ -351,11 +393,37 @@ impl RuntimeHost {
         }
     }
 
-    /// Post-shutdown invariant: empty worker registry ⇒ no turn-slot permits.
+    /// Cancel a host-owned worker without requiring the host to still be alive.
+    ///
+    /// Used by [`SpawnedTurn`] Drop so a blocked adapter is unblocked even when
+    /// `shut_down` is already set. Tolerates `RunNotFound` only because the
+    /// caller holds the host worker record.
+    fn cancel_owned_worker_best_effort(&self, run_id: RunId, record: &WorkerRecord) {
+        record.request_cancel();
+        match self.adapter.cancel_turn(run_id) {
+            Ok(()) => {}
+            Err(RuntimeError::RunNotFound { .. }) => {}
+            Err(_) => {}
+        }
+    }
+
+    /// Remove `run_id` from the registry only when it still points at `record`.
+    fn remove_worker_if_owner(&self, run_id: RunId, record: &Arc<WorkerRecord>) {
+        let mut workers = self.workers.lock().expect("workers");
+        match workers.get(&run_id) {
+            Some(current) if Arc::ptr_eq(current, record) => {
+                workers.remove(&run_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Post-shutdown invariant: empty worker registry + idle sync gate ⇒ no
+    /// turn-slot permits.
     ///
     /// Async permits live on worker records and are dropped before `Joined` is
-    /// published. Sync `send_turn` cannot start after `shut_down` is set, so a
-    /// drained registry with a non-zero counter is always a bookkeeping leak.
+    /// published. Sync admissions are closed and drained before this check, so
+    /// a non-zero counter is always a bookkeeping leak.
     fn ensure_registry_empty_implies_no_slots(&self) -> Result<(), RuntimeError> {
         let workers = self.workers.lock().expect("workers");
         if !workers.is_empty() {
@@ -363,6 +431,14 @@ impl RuntimeHost {
                 message: format!(
                     "shutdown completed with {} worker record(s) still registered",
                     workers.len()
+                ),
+            });
+        }
+        let sync = self.sync_turns.in_flight();
+        if sync != 0 {
+            return Err(RuntimeError::Internal {
+                message: format!(
+                    "shutdown completed with {sync} admitted synchronous turn(s) still in flight"
                 ),
             });
         }
@@ -407,10 +483,7 @@ impl SpawnedTurn {
     pub fn join(self) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         let mut events = Vec::new();
         let join_result = self.record.await_joined(&mut events);
-        {
-            let mut workers = self.host.workers.lock().expect("workers");
-            workers.remove(&self.run_id);
-        }
+        self.host.remove_worker_if_owner(self.run_id, &self.record);
         join_result?;
         Ok(events)
     }
@@ -419,12 +492,16 @@ impl SpawnedTurn {
 impl Drop for SpawnedTurn {
     fn drop(&mut self) {
         if !self.record.is_joined() {
-            self.record.request_cancel();
+            // Request real adapter cancellation before waiting so a blocked
+            // adapter (away from sink.emit) can unblock. Host cancel flag alone
+            // is not sufficient for every provider. Exactly-one-terminal is
+            // preserved by ProtocolGuardSink + delivery cancel arbitration.
+            self.host
+                .cancel_owned_worker_best_effort(self.run_id, &self.record);
             let mut discarded = Vec::new();
             let _ = self.record.await_joined(&mut discarded);
         }
-        let mut workers = self.host.workers.lock().expect("workers");
-        workers.remove(&self.run_id);
+        self.host.remove_worker_if_owner(self.run_id, &self.record);
     }
 }
 
