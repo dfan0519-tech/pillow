@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use keeper_project::{CreateProject, Project, ProjectId, ProjectRepository, ProjectTrust};
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -65,15 +65,6 @@ impl ProjectRepository for SqliteProjectRepository {
     fn create(&self, input: CreateProject) -> Result<Project, Self::Error> {
         let canonical_root_path = canonical_root_path(&input.root_path)?;
         let connection = self.connection()?;
-        let duplicate: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE canonical_root_path = ?1)",
-            [&canonical_root_path],
-            |row| row.get(0),
-        )?;
-        if duplicate != 0 {
-            return Err(ProjectStoreError::DuplicateRoot);
-        }
-
         let project = Project {
             id: ProjectId(Uuid::new_v4()),
             name: input.name,
@@ -82,20 +73,22 @@ impl ProjectRepository for SqliteProjectRepository {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        connection.execute(
-            "INSERT INTO projects (
+        connection
+            .execute(
+                "INSERT INTO projects (
                 id, name, root_path, canonical_root_path, trust_state, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                project.id.0.to_string(),
-                project.name,
-                project.root_path,
-                canonical_root_path,
-                trust_state(project.trust),
-                project.created_at.to_rfc3339(),
-                project.updated_at.to_rfc3339(),
-            ],
-        )?;
+                params![
+                    project.id.0.to_string(),
+                    project.name,
+                    project.root_path,
+                    canonical_root_path,
+                    trust_state(project.trust),
+                    project.created_at.to_rfc3339(),
+                    project.updated_at.to_rfc3339(),
+                ],
+            )
+            .map_err(map_unique_constraint)?;
 
         Ok(project)
     }
@@ -139,6 +132,17 @@ fn canonical_root_path(root_path: &str) -> Result<String, ProjectStoreError> {
         })?;
 
     Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn map_unique_constraint(error: rusqlite::Error) -> ProjectStoreError {
+    match &error {
+        rusqlite::Error::SqliteFailure(error, _)
+            if error.code == ErrorCode::ConstraintViolation =>
+        {
+            ProjectStoreError::DuplicateRoot
+        }
+        _ => ProjectStoreError::Sqlite(error),
+    }
 }
 
 fn trust_state(trust: ProjectTrust) -> &'static str {
@@ -193,3 +197,19 @@ fn parse_timestamp(value: &str, index: usize) -> rusqlite::Result<DateTime<Utc>>
 #[derive(Debug, Error)]
 #[error("invalid project trust state: {0}")]
 struct InvalidTrustState(String);
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectStoreError, map_unique_constraint};
+    use rusqlite::{Error, ffi};
+
+    #[test]
+    fn maps_unique_sqlite_constraints_to_duplicate_roots() {
+        let error = Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_CONSTRAINT_UNIQUE), None);
+
+        assert!(matches!(
+            map_unique_constraint(error),
+            ProjectStoreError::DuplicateRoot
+        ));
+    }
+}

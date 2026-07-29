@@ -11,6 +11,12 @@ impl ProjectId {
     }
 }
 
+impl Default for ProjectId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectTrust {

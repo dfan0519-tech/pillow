@@ -4,11 +4,13 @@ use keeper_storage_sqlite::{ProjectStoreError, SqliteProjectRepository};
 #[test]
 fn creates_and_lists_a_project() {
     let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("keeper-ide");
+    std::fs::create_dir(&project_root).unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     let created = repo
         .create(CreateProject {
             name: "Keeper IDE".into(),
-            root_path: r"<workspace>/VaultSystem\keeper-ide".into(),
+            root_path: project_root.to_string_lossy().into_owned(),
         })
         .unwrap();
 
@@ -19,12 +21,21 @@ fn creates_and_lists_a_project() {
 #[test]
 fn rejects_the_same_canonical_root_twice() {
     let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("keeper-ide");
+    std::fs::create_dir(&project_root).unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
-    let input = CreateProject {
+    repo.create(CreateProject {
         name: "Keeper IDE".into(),
-        root_path: r"<workspace>/VaultSystem\keeper-ide".into(),
-    };
-    repo.create(input.clone()).unwrap();
-    let error = repo.create(input).unwrap_err();
+        root_path: project_root.to_string_lossy().into_owned(),
+    })
+    .unwrap();
+
+    let error = repo
+        .create(CreateProject {
+            name: "Keeper IDE alias".into(),
+            root_path: project_root.join(".").to_string_lossy().into_owned(),
+        })
+        .unwrap_err();
+
     assert!(matches!(error, ProjectStoreError::DuplicateRoot));
 }
