@@ -39,6 +39,40 @@ function fixtureGateway(overrides: Partial<ProjectDto> = {}): ProjectGateway {
 }
 
 describe("project workbench", () => {
+  it("marks readiness only after the initial project list succeeds", async () => {
+    const onProjectLauncherReady = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <App
+        gateway={fixtureGateway()}
+        onProjectLauncherReady={onProjectLauncherReady}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Keeper IDE" });
+    await waitFor(() => expect(onProjectLauncherReady).toHaveBeenCalledOnce());
+  });
+
+  it("does not mark readiness when the initial project list fails", async () => {
+    const gateway = fixtureGateway();
+    gateway.listProjects = vi.fn().mockRejectedValue(new ProjectGatewayError(
+      "project_store_unavailable",
+      "Project storage is temporarily unavailable.",
+    ));
+    const onProjectLauncherReady = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <App
+        gateway={gateway}
+        onProjectLauncherReady={onProjectLauncherReady}
+      />,
+    );
+
+    await screen.findByRole("alert");
+    await waitFor(() => expect(gateway.listProjects).toHaveBeenCalledOnce());
+    expect(onProjectLauncherReady).not.toHaveBeenCalled();
+  });
+
   it("keeps the selected project visible above its conversations", async () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);

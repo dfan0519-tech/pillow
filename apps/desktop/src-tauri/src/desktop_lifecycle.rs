@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 const APP_DATA_OVERRIDE: &str = "KEEPER_IDE_APP_DATA_DIR";
+const LAUNCH_NONCE: &str = "KEEPER_IDE_LAUNCH_NONCE";
+const STARTED_AT: &str = "KEEPER_IDE_STARTED_AT";
+const WEBVIEW_PROFILE_DIR: &str = "WEBVIEW2_USER_DATA_FOLDER";
 const ACCEPTANCE_PHASE: &str = "KEEPER_IDE_ACCEPTANCE_PHASE";
 const ACCEPTANCE_RESULT: &str = "KEEPER_IDE_ACCEPTANCE_RESULT";
 const ACCEPTANCE_PROJECT_NAME: &str = "KEEPER_IDE_ACCEPTANCE_PROJECT_NAME";
@@ -41,9 +44,12 @@ pub struct NativeAcceptanceResult {
 struct ReadinessEvidence<'a> {
     schema_version: u8,
     status: &'static str,
+    nonce: &'a str,
     pid: u32,
+    started_at: u128,
     app_data_dir: &'a Path,
     database_path: &'a Path,
+    webview_profile_dir: Option<&'a Path>,
     ready_at_unix_ms: u128,
 }
 
@@ -57,9 +63,12 @@ struct NativeAcceptanceEvidence<'a> {
     restored_project_count: usize,
     error_message: &'a Option<String>,
     ipc_boundary: &'static str,
+    nonce: &'a str,
     pid: u32,
+    started_at: u128,
     app_data_dir: &'a Path,
     database_path: &'a Path,
+    webview_profile_dir: Option<&'a Path>,
     completed_at_unix_ms: u128,
 }
 
@@ -74,6 +83,9 @@ pub struct DesktopLifecycleState {
     app_data_dir: PathBuf,
     database_path: PathBuf,
     readiness_path: PathBuf,
+    launch_nonce: String,
+    started_at: u128,
+    webview_profile_dir: Option<PathBuf>,
     acceptance: Option<NativeAcceptanceConfig>,
     write_lock: Mutex<()>,
 }
@@ -87,6 +99,17 @@ impl DesktopLifecycleState {
             app_data_dir,
             database_path,
             readiness_path,
+            launch_nonce: std::env::var(LAUNCH_NONCE)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            started_at: std::env::var(STARTED_AT)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(unix_time_ms),
+            webview_profile_dir: std::env::var_os(WEBVIEW_PROFILE_DIR)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             acceptance,
             write_lock: Mutex::new(()),
         }
@@ -94,11 +117,14 @@ impl DesktopLifecycleState {
 
     fn mark_ready(&self) -> Result<(), LifecycleCommandError> {
         let evidence = ReadinessEvidence {
-            schema_version: 1,
+            schema_version: 2,
             status: "ready",
+            nonce: &self.launch_nonce,
             pid: std::process::id(),
+            started_at: self.started_at,
             app_data_dir: &self.app_data_dir,
             database_path: &self.database_path,
+            webview_profile_dir: self.webview_profile_dir.as_deref(),
             ready_at_unix_ms: unix_time_ms(),
         };
         self.write_evidence(&self.readiness_path, &evidence)
@@ -121,16 +147,19 @@ impl DesktopLifecycleState {
             return Err(lifecycle_error());
         }
         let evidence = NativeAcceptanceEvidence {
-            schema_version: 1,
+            schema_version: 2,
             phase: &result.phase,
             status: &result.status,
             project_id: &result.project_id,
             restored_project_count: result.restored_project_count,
             error_message: &result.error_message,
             ipc_boundary: "real-tauri-webview",
+            nonce: &self.launch_nonce,
             pid: std::process::id(),
+            started_at: self.started_at,
             app_data_dir: &self.app_data_dir,
             database_path: &self.database_path,
+            webview_profile_dir: self.webview_profile_dir.as_deref(),
             completed_at_unix_ms: unix_time_ms(),
         };
         self.write_evidence(&config.result_path, &evidence)

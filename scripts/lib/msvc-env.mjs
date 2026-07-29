@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 
 const execFileAsync = promisify(execFile);
+const VC_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
 
 async function firstExisting(paths) {
   for (const candidate of paths) {
@@ -20,6 +21,39 @@ async function firstExisting(paths) {
 async function findVsDevCmd() {
   const programFilesX86 =
     process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  const vswhere = path.join(
+    programFilesX86,
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  try {
+    await access(vswhere);
+    const { stdout } = await execFileAsync(vswhere, [
+      "-latest",
+      "-products",
+      "*",
+      "-requires",
+      VC_COMPONENT,
+      "-property",
+      "installationPath",
+    ]);
+    const installationPath = stdout.trim();
+    if (installationPath) {
+      return {
+        discovery: "vswhere-with-vc-component",
+        vsDevCmd: path.join(
+          installationPath,
+          "Common7",
+          "Tools",
+          "VsDevCmd.bat",
+        ),
+      };
+    }
+  } catch {
+    // A direct fallback is allowed only if its initialized tools are verified below.
+  }
+
   const visualStudioRoot = path.join(
     programFilesX86,
     "Microsoft Visual Studio",
@@ -30,29 +64,12 @@ async function findVsDevCmd() {
       path.join(visualStudioRoot, edition, "Common7", "Tools", "VsDevCmd.bat"),
     ),
   );
-  if (direct) return direct;
-
-  const vswhere = path.join(
-    programFilesX86,
-    "Microsoft Visual Studio",
-    "Installer",
-    "vswhere.exe",
-  );
-  await access(vswhere);
-  const { stdout } = await execFileAsync(vswhere, [
-    "-latest",
-    "-products",
-    "*",
-    "-requires",
-    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-    "-property",
-    "installationPath",
-  ]);
-  const installationPath = stdout.trim();
-  if (!installationPath) {
-    throw new Error("Visual Studio C++ Build Tools were not found.");
+  if (!direct) {
+    throw new Error(
+      `Visual Studio installation with ${VC_COMPONENT} was not found.`,
+    );
   }
-  return path.join(installationPath, "Common7", "Tools", "VsDevCmd.bat");
+  return { discovery: "direct-verified-fallback", vsDevCmd: direct };
 }
 
 function parseEnvironment(stdout) {
@@ -65,10 +82,45 @@ function parseEnvironment(stdout) {
   return environment;
 }
 
-export async function getMsvcEnvironment() {
-  if (process.platform !== "win32") return { ...process.env };
+async function verifyTool(environment, tool) {
+  let output;
+  try {
+    const { stdout, stderr } = await execFileAsync(tool, ["/?"], {
+      encoding: "utf8",
+      env: environment,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+    });
+    output = `${stdout}${stderr}`;
+  } catch (error) {
+    output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+  }
+  const expected = tool === "cl.exe" ? /Optimizing Compiler/iu : /Incremental Linker/iu;
+  if (!expected.test(output)) {
+    throw new Error(`${tool} did not produce its expected help response.`);
+  }
+  const { stdout: resolved } = await execFileAsync("where.exe", [tool], {
+    encoding: "utf8",
+    env: environment,
+    windowsHide: true,
+  });
+  const toolPath = resolved.split(/\r?\n/u).find(Boolean);
+  if (!toolPath) throw new Error(`${tool} was not found in the MSVC environment.`);
+  return toolPath;
+}
 
-  const vsDevCmd = await findVsDevCmd();
+export async function getMsvcEnvironmentDetails() {
+  if (process.platform !== "win32") {
+    return {
+      clPath: null,
+      discovery: "not-windows",
+      environment: { ...process.env },
+      linkPath: null,
+      vsDevCmd: null,
+    };
+  }
+
+  const { discovery, vsDevCmd } = await findVsDevCmd();
   const { stdout } = await execFileAsync(
     "cmd.exe",
     [
@@ -87,5 +139,11 @@ export async function getMsvcEnvironment() {
   const cargoBin = path.join(process.env.USERPROFILE ?? "", ".cargo", "bin");
   environment.Path = `${cargoBin};${environment.Path ?? environment.PATH ?? ""}`;
   environment.PATH = environment.Path;
-  return environment;
+  const clPath = await verifyTool(environment, "cl.exe");
+  const linkPath = await verifyTool(environment, "link.exe");
+  return { clPath, discovery, environment, linkPath, vsDevCmd };
+}
+
+export async function getMsvcEnvironment() {
+  return (await getMsvcEnvironmentDetails()).environment;
 }

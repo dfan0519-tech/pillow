@@ -25,6 +25,7 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
   const [launcherOpen, setLauncherOpen] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [launcherLoaded, setLauncherLoaded] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
   const readinessSent = useRef(false);
 
@@ -34,6 +35,7 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
       (result) => {
         if (!active) return;
         setProjects(result);
+        setLauncherLoaded(true);
         setLoading(false);
       },
       (cause: unknown) => {
@@ -48,12 +50,12 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
   }, [gateway]);
 
   useEffect(() => {
-    if (loading || readinessSent.current || !onProjectLauncherReady) return;
+    if (!launcherLoaded || readinessSent.current || !onProjectLauncherReady) return;
     readinessSent.current = true;
     void onProjectLauncherReady().catch((cause: unknown) => {
       console.error("Keeper IDE readiness command failed.", cause);
     });
-  }, [loading, onProjectLauncherReady]);
+  }, [launcherLoaded, onProjectLauncherReady]);
 
   async function selectProject(projectId: string) {
     try {

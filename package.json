@@ -10,7 +10,9 @@
     "desktop:dev": "pnpm --filter @keeper-ide/desktop tauri dev",
     "desktop:test:e2e": "pnpm --filter @keeper-ide/desktop test:e2e",
     "desktop:smoke": "node scripts/smoke-desktop.mjs --mode release",
-    "desktop:smoke:dev": "node scripts/smoke-desktop.mjs --mode dev"
+    "desktop:smoke:dev": "node scripts/smoke-desktop.mjs --mode dev",
+    "desktop:smoke:self-test": "node scripts/smoke-desktop.mjs --self-test",
+    "desktop:cargo:self-test": "node scripts/run-cargo.mjs --self-test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.1"
