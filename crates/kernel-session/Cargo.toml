@@ -1,0 +1,13 @@
+[package]
+name = "keeper-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+keeper-project = { path = "../kernel-project" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
