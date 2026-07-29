@@ -1,9 +1,7 @@
 //! Runtime-neutral adapter contract.
 
 use crate::error::RuntimeError;
-use crate::types::{
-    RunId, RuntimeEvent, RuntimeProbe, RuntimeSession, SendTurn, StartSession,
-};
+use crate::types::{RunId, RuntimeEvent, RuntimeProbe, RuntimeSession, SendTurn, StartSession};
 
 /// Sink that receives ordered runtime events for one turn.
 pub trait EventSink: Send {
@@ -16,6 +14,23 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     fn probe(&self) -> Result<RuntimeProbe, RuntimeError>;
 
     fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError>;
+
+    /// Mark `run_id` as cancellable before `send_turn` begins.
+    ///
+    /// Hosts that return a cancel handle from a concurrent spawn must call this
+    /// so `cancel_turn` succeeds as soon as the handle is returned. Default is
+    /// a no-op for adapters that only register inside `send_turn`.
+    fn arm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let _ = run_id;
+        Ok(())
+    }
+
+    /// Drop a previously armed run that will never call `send_turn` (e.g. spawn
+    /// failure). Default is a no-op.
+    fn disarm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let _ = run_id;
+        Ok(())
+    }
 
     /// Stream events for a turn into `sink`. Implementations may block until
     /// a terminal event is emitted or return after accepting the turn.

@@ -20,6 +20,8 @@ pub enum RuntimeError {
     InvalidFixture { message: String },
     #[error("invalid event: {message}")]
     InvalidEvent { message: String },
+    #[error("event queue full (capacity {capacity})")]
+    EventQueueFull { capacity: usize },
     #[error("cancelled")]
     Cancelled,
     #[error("internal error: {message}")]

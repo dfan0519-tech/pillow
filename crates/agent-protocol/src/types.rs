@@ -139,6 +139,7 @@ pub enum SubagentStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanStep {
     pub id: String,
     pub title: String,
@@ -146,27 +147,32 @@ pub struct PlanStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunStartedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssistantDeltaPayload {
     pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReasoningSummaryDeltaPayload {
     pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanUpdatedPayload {
     pub steps: Vec<PlanStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCallStartedPayload {
     pub tool_call_id: String,
     pub name: String,
@@ -175,36 +181,42 @@ pub struct ToolCallStartedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCallOutputPayload {
     pub tool_call_id: String,
     pub chunk: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCallCompletedPayload {
     pub tool_call_id: String,
     pub status: ToolCallStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentStartedPayload {
     pub subagent_id: String,
     pub role: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentProgressPayload {
     pub subagent_id: String,
     pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentCompletedPayload {
     pub subagent_id: String,
     pub status: SubagentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactProducedPayload {
     pub artifact_id: String,
     pub path: String,
@@ -212,24 +224,28 @@ pub struct ArtifactProducedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TurnCompletedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnFailedPayload {
     pub code: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunCancelledPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeartbeatPayload {
     pub tick: u64,
 }
@@ -247,6 +263,7 @@ pub struct RuntimeEvent {
 }
 
 impl RuntimeEvent {
+    /// Build an event after kind-specific payload validation.
     pub fn new(
         run_id: RunId,
         sequence: u64,
@@ -254,15 +271,28 @@ impl RuntimeEvent {
         payload: impl Serialize,
         created_at: DateTime<Utc>,
     ) -> Result<Self, RuntimeError> {
-        let payload = serde_json::to_value(payload).map_err(|e| RuntimeError::Internal {
+        let raw = serde_json::to_value(payload).map_err(|e| RuntimeError::Internal {
             message: format!("payload serialize failed: {e}"),
         })?;
+        let payload = crate::validate::validate_payload(kind, &raw)?;
         Ok(Self {
             run_id,
             sequence,
             kind,
             payload,
             created_at,
+        })
+    }
+
+    /// Validate payload shape for this event's kind (ingress boundary).
+    pub fn validate(&self) -> Result<Self, RuntimeError> {
+        let payload = crate::validate::validate_payload(self.kind, &self.payload)?;
+        Ok(Self {
+            run_id: self.run_id,
+            sequence: self.sequence,
+            kind: self.kind,
+            payload,
+            created_at: self.created_at,
         })
     }
 

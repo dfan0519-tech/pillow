@@ -11,11 +11,10 @@ use chrono::Utc;
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunCancelledPayload, RunId, RuntimeError, RuntimeEvent,
     RuntimeEventKind, RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn, StartSession,
+    validate_payload,
 };
 
-use crate::fixture::{
-    load_fixture_file, parse_fixture_jsonl, FixtureEventLine, FAKE_TURN_FIXTURE,
-};
+use crate::fixture::{FAKE_TURN_FIXTURE, FixtureEventLine, load_fixture_file, parse_fixture_jsonl};
 
 struct ActiveTurn {
     cancel: Arc<AtomicBool>,
@@ -136,11 +135,12 @@ impl FakeRuntimeAdapter {
             }
 
             sequence += 1;
+            let payload = validate_payload(line.kind, &line.payload)?;
             let event = RuntimeEvent {
                 run_id,
                 sequence,
                 kind: line.kind,
-                payload: line.payload.clone(),
+                payload,
                 created_at: Utc::now(),
             };
             let is_terminal = event.is_terminal();
@@ -159,7 +159,7 @@ impl FakeRuntimeAdapter {
         Ok(())
     }
 
-    /// Number of in-flight turn workers (for shutdown assertions).
+    /// Number of in-flight / armed turn workers (for shutdown assertions).
     pub fn active_turn_count(&self) -> usize {
         self.active.lock().expect("active lock").len()
     }
@@ -189,6 +189,28 @@ impl AgentRuntimeAdapter for FakeRuntimeAdapter {
         })
     }
 
+    fn arm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.ensure_alive()?;
+        let mut active = self.active.lock().expect("active lock");
+        if active.contains_key(&run_id) {
+            return Err(RuntimeError::RunAlreadyActive { run_id });
+        }
+        active.insert(
+            run_id,
+            ActiveTurn {
+                cancel: Arc::new(AtomicBool::new(false)),
+                join: None,
+            },
+        );
+        Ok(())
+    }
+
+    fn disarm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let mut active = self.active.lock().expect("active lock");
+        active.remove(&run_id);
+        Ok(())
+    }
+
     fn send_turn(&self, request: SendTurn, sink: &mut dyn EventSink) -> Result<(), RuntimeError> {
         self.ensure_alive()?;
         {
@@ -200,32 +222,34 @@ impl AgentRuntimeAdapter for FakeRuntimeAdapter {
             }
         }
 
-        let cancel = Arc::new(AtomicBool::new(false));
-        {
+        let cancel = {
             let mut active = self.active.lock().expect("active lock");
-            if active.contains_key(&request.run_id) {
-                return Err(RuntimeError::RunAlreadyActive {
-                    run_id: request.run_id,
-                });
+            if let Some(turn) = active.get(&request.run_id) {
+                Arc::clone(&turn.cancel)
+            } else {
+                let cancel = Arc::new(AtomicBool::new(false));
+                active.insert(
+                    request.run_id,
+                    ActiveTurn {
+                        cancel: Arc::clone(&cancel),
+                        join: None,
+                    },
+                );
+                cancel
             }
-            active.insert(
-                request.run_id,
-                ActiveTurn {
-                    cancel: Arc::clone(&cancel),
-                    join: None,
-                },
-            );
-        }
+        };
 
-        // Synchronous emission on the caller thread keeps shutdown simple:
-        // no orphan join handles when the turn finishes before shutdown.
-        let result = Self::emit_fixture_turn(
-            &self.fixture,
-            self.honor_delays,
-            request.run_id,
-            &cancel,
-            sink,
-        );
+        let result = if cancel.load(Ordering::SeqCst) {
+            Self::emit_cancelled(request.run_id, 1, sink)
+        } else {
+            Self::emit_fixture_turn(
+                &self.fixture,
+                self.honor_delays,
+                request.run_id,
+                &cancel,
+                sink,
+            )
+        };
 
         {
             let mut active = self.active.lock().expect("active lock");
@@ -255,10 +279,8 @@ impl AgentRuntimeAdapter for FakeRuntimeAdapter {
         for turn in active.values() {
             turn.cancel.store(true, Ordering::SeqCst);
         }
-        let handles: Vec<JoinHandle<Result<(), RuntimeError>>> = active
-            .values_mut()
-            .filter_map(|t| t.join.take())
-            .collect();
+        let handles: Vec<JoinHandle<Result<(), RuntimeError>>> =
+            active.values_mut().filter_map(|t| t.join.take()).collect();
         active.clear();
         drop(active);
 

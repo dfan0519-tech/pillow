@@ -47,9 +47,10 @@ pub fn parse_fixture_jsonl(text: &str) -> Result<Vec<FixtureEventLine>, RuntimeE
 }
 
 pub fn load_fixture_file(path: impl AsRef<Path>) -> Result<Vec<FixtureEventLine>, RuntimeError> {
-    let text = std::fs::read_to_string(path.as_ref()).map_err(|e| RuntimeError::InvalidFixture {
-        message: format!("read {}: {e}", path.as_ref().display()),
-    })?;
+    let text =
+        std::fs::read_to_string(path.as_ref()).map_err(|e| RuntimeError::InvalidFixture {
+            message: format!("read {}: {e}", path.as_ref().display()),
+        })?;
     parse_fixture_jsonl(&text)
 }
 
@@ -63,8 +64,20 @@ mod tests {
         assert!(lines.len() >= 10);
         assert_eq!(lines.first().unwrap().kind, RuntimeEventKind::RunStarted);
         assert_eq!(lines.last().unwrap().kind, RuntimeEventKind::TurnCompleted);
-        assert!(lines.iter().any(|l| l.kind == RuntimeEventKind::AssistantDelta));
-        assert!(lines.iter().any(|l| l.kind == RuntimeEventKind::ToolCallStarted));
-        assert!(lines.iter().any(|l| l.kind == RuntimeEventKind::SubagentStarted));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.kind == RuntimeEventKind::AssistantDelta)
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.kind == RuntimeEventKind::ToolCallStarted)
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.kind == RuntimeEventKind::SubagentStarted)
+        );
     }
 }

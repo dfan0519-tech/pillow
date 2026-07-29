@@ -9,8 +9,8 @@ use keeper_agent_protocol::{
     StartSession,
 };
 use keeper_runtime_host::{
-    parse_fixture_jsonl, workspace_fixture_path, CollectingSink, FakeRuntimeAdapter, HostConfig,
-    RuntimeHost, FAKE_TURN_FIXTURE,
+    CollectingSink, FAKE_TURN_FIXTURE, FakeRuntimeAdapter, HostConfig, RuntimeHost,
+    parse_fixture_jsonl, workspace_fixture_path,
 };
 
 fn start_host(honor_delays: bool) -> Arc<RuntimeHost> {
@@ -18,16 +18,14 @@ fn start_host(honor_delays: bool) -> Arc<RuntimeHost> {
         RuntimeHost::with_fake(HostConfig {
             max_concurrent_turns: 4,
             honor_fixture_delays: honor_delays,
+            event_queue_capacity: 64,
         })
         .expect("host"),
     )
 }
 
 fn kinds_and_payloads(events: &[RuntimeEvent]) -> Vec<(RuntimeEventKind, serde_json::Value)> {
-    events
-        .iter()
-        .map(|e| (e.kind, e.payload.clone()))
-        .collect()
+    events.iter().map(|e| (e.kind, e.payload.clone())).collect()
 }
 
 fn terminal_kinds(events: &[RuntimeEvent]) -> Vec<RuntimeEventKind> {
@@ -78,26 +76,31 @@ fn ordered_streaming_emits_monotonic_sequences() {
         terminal_kinds(&sink.events),
         vec![RuntimeEventKind::TurnCompleted]
     );
-    assert!(sink
-        .events
-        .iter()
-        .any(|e| e.kind == RuntimeEventKind::AssistantDelta));
-    assert!(sink
-        .events
-        .iter()
-        .any(|e| e.kind == RuntimeEventKind::PlanUpdated));
-    assert!(sink
-        .events
-        .iter()
-        .any(|e| e.kind == RuntimeEventKind::ToolCallCompleted));
-    assert!(sink
-        .events
-        .iter()
-        .any(|e| e.kind == RuntimeEventKind::SubagentCompleted));
-    assert!(sink
-        .events
-        .iter()
-        .any(|e| e.kind == RuntimeEventKind::ArtifactProduced));
+    assert!(
+        sink.events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::AssistantDelta)
+    );
+    assert!(
+        sink.events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::PlanUpdated)
+    );
+    assert!(
+        sink.events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::ToolCallCompleted)
+    );
+    assert!(
+        sink.events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::SubagentCompleted)
+    );
+    assert!(
+        sink.events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::ArtifactProduced)
+    );
 }
 
 #[test]
@@ -140,11 +143,7 @@ fn deterministic_replay_is_identical_across_two_runs() {
     // Sequences restart per run but remain 1..n
     assert_eq!(
         first.events.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-        second
-            .events
-            .iter()
-            .map(|e| e.sequence)
-            .collect::<Vec<_>>()
+        second.events.iter().map(|e| e.sequence).collect::<Vec<_>>()
     );
 }
 
@@ -166,6 +165,7 @@ fn cancellation_stops_emission_with_exactly_one_terminal() {
         HostConfig {
             max_concurrent_turns: 2,
             honor_fixture_delays: true,
+            event_queue_capacity: 64,
         },
     ));
     let session = host
@@ -209,7 +209,9 @@ fn cancellation_stops_emission_with_exactly_one_terminal() {
         "completion must not co-exist with cancel"
     );
     assert!(
-        !events.iter().any(|e| e.kind == RuntimeEventKind::TurnFailed),
+        !events
+            .iter()
+            .any(|e| e.kind == RuntimeEventKind::TurnFailed),
         "failure must not co-exist with cancel"
     );
 }
@@ -217,13 +219,7 @@ fn cancellation_stops_emission_with_exactly_one_terminal() {
 #[test]
 fn completion_failure_and_cancellation_are_mutually_exclusive() {
     let completed = parse_fixture_jsonl(FAKE_TURN_FIXTURE).unwrap();
-    assert_eq!(
-        completed
-            .iter()
-            .filter(|l| l.kind.is_terminal())
-            .count(),
-        1
-    );
+    assert_eq!(completed.iter().filter(|l| l.kind.is_terminal()).count(), 1);
     assert_eq!(
         completed.last().unwrap().kind,
         RuntimeEventKind::TurnCompleted
@@ -282,6 +278,7 @@ fn shutdown_rejects_new_work_and_leaves_no_active_turns() {
             HostConfig {
                 max_concurrent_turns: 2,
                 honor_fixture_delays: true,
+                event_queue_capacity: 64,
             },
         ))
     };
@@ -308,8 +305,13 @@ fn shutdown_rejects_new_work_and_leaves_no_active_turns() {
     }
 
     slow_host.shutdown().unwrap();
-    let events = spawned.join().unwrap();
+    // Worker must already be finished without requiring join() first.
+    assert!(
+        spawned.is_finished(),
+        "shutdown must join host workers before returning"
+    );
     assert_eq!(slow_host.in_flight_turns(), 0);
+    let events = spawned.join().unwrap();
     assert!(
         terminal_kinds(&events).len() <= 1,
         "at most one terminal after shutdown cancel"
@@ -351,6 +353,7 @@ fn concurrency_limit_is_enforced() {
         HostConfig {
             max_concurrent_turns: 1,
             honor_fixture_delays: true,
+            event_queue_capacity: 64,
         },
     ));
     let session = host

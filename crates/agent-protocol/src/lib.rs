@@ -7,6 +7,7 @@
 mod adapter;
 mod error;
 mod types;
+mod validate;
 
 pub use adapter::{AgentRuntimeAdapter, EventSink};
 pub use error::RuntimeError;
@@ -18,6 +19,7 @@ pub use types::{
     SubagentStatus, ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload,
     ToolCallStatus, TurnCompletedPayload, TurnFailedPayload,
 };
+pub use validate::validate_payload;
 
 #[cfg(test)]
 mod tests {
@@ -185,14 +187,8 @@ mod tests {
                 prompt_preview: Some("hi".into()),
             })
             .unwrap(),
-            serde_json::to_value(AssistantDeltaPayload {
-                text: "a".into(),
-            })
-            .unwrap(),
-            serde_json::to_value(ReasoningSummaryDeltaPayload {
-                text: "r".into(),
-            })
-            .unwrap(),
+            serde_json::to_value(AssistantDeltaPayload { text: "a".into() }).unwrap(),
+            serde_json::to_value(ReasoningSummaryDeltaPayload { text: "r".into() }).unwrap(),
             serde_json::to_value(PlanUpdatedPayload {
                 steps: vec![PlanStep {
                     id: "1".into(),
