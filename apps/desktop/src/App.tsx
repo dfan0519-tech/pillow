@@ -3,7 +3,13 @@ import { WindowControls } from "./components/WindowControls";
 import { ProjectLauncher } from "./features/projects/ProjectLauncher";
 import { ProjectSidebar } from "./features/projects/ProjectSidebar";
 import { Workbench } from "./features/workbench/Workbench";
-import type { CreateProjectInput, ProjectDto, ProjectGateway } from "./lib/projectGateway";
+import {
+  normalizeProjectGatewayError,
+  type CommandError,
+  type CreateProjectInput,
+  type ProjectDto,
+  type ProjectGateway,
+} from "./lib/projectGateway";
 
 type AppProps = { gateway: ProjectGateway };
 
@@ -16,7 +22,7 @@ export function App({ gateway }: AppProps) {
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
   const [launcherOpen, setLauncherOpen] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CommandError | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -26,13 +32,15 @@ export function App({ gateway }: AppProps) {
         setProjects(result);
         setLoading(false);
       },
-      () => {
+      (cause: unknown) => {
         if (!active) return;
-        setError("无法加载项目。请检查本地桌面服务是否正在运行。");
+        setError(normalizeProjectGatewayError(cause));
         setLoading(false);
       },
     );
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [gateway]);
 
   async function selectProject(projectId: string) {
@@ -40,21 +48,30 @@ export function App({ gateway }: AppProps) {
       const project = await gateway.selectProject(projectId);
       setActiveProject(project);
       setLauncherOpen(false);
-    } catch {
-      setError("无法打开该项目。");
+      setError(null);
+    } catch (cause) {
+      setError(normalizeProjectGatewayError(cause));
     }
   }
 
   async function createProject(input: CreateProjectInput) {
     try {
-      const project = await gateway.createProject(input);
-      setProjects((current) => [...current, project]);
-      setActiveProject(project);
+      const createdProject = await gateway.createProject(input);
+      const selectedProject = await gateway.selectProject(createdProject.id);
+      setProjects((current) => {
+        const existing = current.some((project) => project.id === selectedProject.id);
+        return existing
+          ? current.map((project) => (
+              project.id === selectedProject.id ? selectedProject : project
+            ))
+          : [...current, selectedProject];
+      });
+      setActiveProject(selectedProject);
       setLauncherOpen(false);
       setError(null);
       return true;
-    } catch {
-      setError("无法创建项目。请确认目录可用后重试。");
+    } catch (cause) {
+      setError(normalizeProjectGatewayError(cause));
       return false;
     }
   }
@@ -64,15 +81,36 @@ export function App({ gateway }: AppProps) {
   return (
     <div className="app-shell">
       <header className="titlebar" data-tauri-drag-region>
-        <button aria-label="打开项目启动器" className="brand" onClick={() => setLauncherOpen(true)} type="button">Keeper IDE</button>
+        <button
+          aria-label="打开项目启动器"
+          className="brand"
+          onClick={() => setLauncherOpen(true)}
+          type="button"
+        >
+          Keeper IDE
+        </button>
         <WindowControls />
       </header>
-      {error ? <p className="app-error" role="alert">{error}</p> : null}
+      {error ? (
+        <p className="app-error" role="alert">
+          <span>{error.message}</span>
+          <code>{error.code}</code>
+        </p>
+      ) : null}
       {launcherOpen || !activeProject ? (
-        <ProjectLauncher onCreate={createProject} onSelect={selectProject} projects={projects} />
+        <ProjectLauncher
+          onCreate={createProject}
+          onSelect={selectProject}
+          projects={projects}
+        />
       ) : (
         <div className="project-shell">
-          <ProjectSidebar activeProjectId={activeProject.id} onCreate={() => setLauncherOpen(true)} onSelect={(id) => void selectProject(id)} projects={projects} />
+          <ProjectSidebar
+            activeProjectId={activeProject.id}
+            onCreate={() => setLauncherOpen(true)}
+            onSelect={(id) => void selectProject(id)}
+            projects={projects}
+          />
           <Workbench project={activeProject} />
         </div>
       )}

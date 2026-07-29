@@ -14,7 +14,10 @@ export function Workbench({ project }: WorkbenchProps) {
       <ConversationSidebar project={project} />
       <section className="conversation-surface" aria-label="对话工作台">
         <header className="workbench-header">
-          <div><p className="eyebrow">当前项目</p><h1 data-testid="active-project-name">{project.name}</h1></div>
+          <div className="workbench-header__project">
+            <p className="eyebrow">当前项目</p>
+            <h1 data-testid="active-project-name" title={project.name}>{project.name}</h1>
+          </div>
           <div className="workbench-actions"><span>{project.trust === "trusted" ? "已信任" : "需确认信任"}</span><button onClick={() => setResourcesOpen(true)} type="button">资源</button></div>
         </header>
         <div className="conversation-empty">

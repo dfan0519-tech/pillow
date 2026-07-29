@@ -7,7 +7,9 @@
 .window-controls button:hover { background: var(--panel-muted); }
 .window-controls .window-controls__close:hover { background: var(--danger); color: #fff; }
 .app-loading { display: grid; min-height: calc(100vh - var(--titlebar-height)); place-items: center; color: var(--muted); }
-.app-error { margin: 0; padding: 8px 14px; background: #fce9e7; border-bottom: 1px solid #edc4c0; color: var(--danger); font-size: 13px; }
+.app-error { display: flex; justify-content: space-between; gap: 12px; margin: 0; padding: 8px 14px; background: #fce9e7; border-bottom: 1px solid #edc4c0; color: var(--danger); font-size: 13px; }
+.app-error span { min-width: 0; overflow-wrap: anywhere; }
+.app-error code { flex: 0 0 auto; color: inherit; }
 .launcher { max-width: 760px; margin: 0 auto; padding: 72px 28px; }
 .launcher__intro { max-width: 560px; }
 .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0; text-transform: uppercase; }
@@ -41,11 +43,12 @@
 .workbench { display: grid; grid-template-columns: 188px minmax(0, 1fr); min-width: 0; background: var(--canvas); }
 .workbench.has-resources { grid-template-columns: 188px minmax(0, 1fr) 300px; }
 .conversation-sidebar { background: #fafbfc; }
-.conversation-sidebar__project { margin: 14px 0 8px; font-size: 13px; font-weight: 600; }
+.conversation-sidebar__project { min-width: 0; margin: 14px 0 8px; overflow-wrap: anywhere; font-size: 13px; font-weight: 600; }
 .conversation-surface { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; min-height: calc(100vh - var(--titlebar-height)); }
 .workbench-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 22px; border-bottom: 1px solid var(--line); background: var(--panel); }
-.workbench-header h1 { margin: 0; font-size: 18px; font-weight: 650; }
-.workbench-actions { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.workbench-header__project { min-width: 0; }
+.workbench-header h1 { max-width: 100%; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 650; }
+.workbench-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .workbench-actions button { border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel); color: var(--text); padding: 6px 9px; }
 .conversation-empty { align-self: center; max-width: 520px; margin: 0 auto; padding: 32px; }
 .conversation-empty h2 { font-size: 22px; }
