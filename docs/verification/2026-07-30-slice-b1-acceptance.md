@@ -433,10 +433,10 @@ only the stylesheet split restores the ≤500-line source-size invariant.
 | Wave | SHA | Message |
 | --- | --- | --- |
 | CSS closeout implementation | `1d2b719` | `refactor(desktop): split conversation styles under 500-line source limit` |
-| CSS closeout docs | `3eee77a` | `docs(verification): record Slice B1 CSS closeout evidence` |
+| CSS closeout docs | `a8744c0` | `docs(verification): record Slice B1 CSS closeout evidence` |
 
 Exact implementation tip for controller citation: **`1d2b71967e913bbd35fddd2d5e2f8faa5ff3a1f3`**.
-Docs tip: **`3eee77adaa397e0c8c0041f101a45fa84bbae2b8`**.
+Docs tip: **`a8744c0fb0f3d2c770b07eeb43535c35da4af907`**.
 
 ## Remaining risks
 
