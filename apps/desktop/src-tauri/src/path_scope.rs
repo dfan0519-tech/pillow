@@ -99,7 +99,24 @@ pub fn clear_grants_for_tests() {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Serialize only these unit tests: they share and clear one process-global
+    /// grant list. Production grant/is_allowed paths are unchanged.
+    fn test_grants_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_isolated_grants(body: impl FnOnce()) {
+        let _guard = test_grants_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_grants_for_tests();
+        body();
+        clear_grants_for_tests();
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -116,34 +133,37 @@ mod tests {
 
     #[test]
     fn grants_allow_the_folder_and_its_children() {
-        clear_grants_for_tests();
-        let root = temp_dir("grant");
-        let child = root.join("nested");
-        fs::create_dir_all(&child).unwrap();
-        grant_path(&root);
-        assert!(is_allowed(&root));
-        assert!(is_allowed(&child));
-        let _ = fs::remove_dir_all(&root);
+        with_isolated_grants(|| {
+            let root = temp_dir("grant");
+            let child = root.join("nested");
+            fs::create_dir_all(&child).unwrap();
+            grant_path(&root);
+            assert!(is_allowed(&root));
+            assert!(is_allowed(&child));
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 
     #[test]
     fn ungranted_paths_are_not_allowed() {
-        clear_grants_for_tests();
-        let root = temp_dir("deny");
-        assert!(!is_allowed(&root));
-        assert_eq!(
-            require_allowed(&root).unwrap_err(),
-            PathScopeError::NotAllowed
-        );
-        let _ = fs::remove_dir_all(&root);
+        with_isolated_grants(|| {
+            let root = temp_dir("deny");
+            assert!(!is_allowed(&root));
+            assert_eq!(
+                require_allowed(&root).unwrap_err(),
+                PathScopeError::NotAllowed
+            );
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 
     #[test]
     fn require_allowed_accepts_granted_parent() {
-        clear_grants_for_tests();
-        let root = temp_dir("require-ok");
-        grant_path(&root);
-        assert!(require_allowed(&root).is_ok());
-        let _ = fs::remove_dir_all(&root);
+        with_isolated_grants(|| {
+            let root = temp_dir("require-ok");
+            grant_path(&root);
+            assert!(require_allowed(&root).is_ok());
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 }
