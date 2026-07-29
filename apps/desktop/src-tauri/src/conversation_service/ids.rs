@@ -46,6 +46,10 @@ pub(super) fn map_session_error(error: SessionError) -> ConversationCommandError
             "invalid_event_sequence",
             "Invalid runtime event sequence.",
         ),
+        SessionError::ConflictingEventKind { .. } => ConversationCommandError::new(
+            "conflicting_event_kind",
+            "Runtime event kind conflicts with the durable sequence.",
+        ),
         SessionError::SequenceOutOfRange(_) => ConversationCommandError::new(
             "invalid_event_sequence",
             "Runtime event sequence out of range.",

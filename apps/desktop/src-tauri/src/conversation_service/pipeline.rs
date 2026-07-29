@@ -7,52 +7,86 @@ use keeper_agent_protocol::{
     RuntimeEvent, RuntimeEventKind as ProtocolEventKind, validate_payload,
 };
 use keeper_runtime_host::SpawnedTurn;
-use keeper_session::{ConversationId, NewRunEvent, RunId, RuntimeEventKind};
+use keeper_session::{
+    ConversationId, ConversationRepository, NewRunEvent, RunId, RunStatus, RuntimeEventKind,
+    SessionError,
+};
 use keeper_storage_sqlite::SqliteConversationRepository;
 
 use crate::conversation_events::{RuntimeEventEmitter, live_runtime_event_dto, status_for_kind};
 
+/// Result of draining one host turn into SQLite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PumpOutcome {
+    /// Run is durably terminal (`Completed` / `Failed` / `Cancelled` / `Interrupted`).
+    DurableTerminal,
+    /// Could not prove a durable terminal status; keep the residual active entry
+    /// so shutdown/drain fail closed instead of reporting success.
+    ResidualNonTerminal,
+}
+
 /// Drain the host delivery queue, persist each event, then join the worker.
+///
+/// Renderer emit failures are non-authoritative: they are logged and ingestion
+/// continues so SQLite can still reach the real terminal event. Validation,
+/// persistence, delivery, or worker-end-without-terminal failures attempt
+/// `Interrupted` without inventing a duplicate terminal event.
 pub(super) fn pump_turn(
     repository: Arc<SqliteConversationRepository>,
     emitter: Arc<dyn RuntimeEventEmitter>,
     conversation_id: ConversationId,
-    _run_id: RunId,
+    run_id: RunId,
     spawned: SpawnedTurn,
-) {
+) -> PumpOutcome {
     let delivery = Arc::clone(spawned.delivery());
+    let mut authoritative_failure = false;
+
     loop {
         match delivery.pop_timeout(Duration::from_millis(50)) {
             Ok(Some(event)) => {
-                if let Err(error) =
-                    process_runtime_event(&repository, emitter.as_ref(), conversation_id, &event)
+                let terminal = event.is_terminal();
+                match process_runtime_event(&repository, emitter.as_ref(), conversation_id, &event)
                 {
-                    eprintln!("Keeper IDE conversation pump error: {error}");
-                    break;
-                }
-                if event.is_terminal() {
-                    break;
+                    Ok(()) => {
+                        if terminal {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Keeper IDE conversation pump error: {error}");
+                        authoritative_failure = true;
+                        break;
+                    }
                 }
             }
             Ok(None) => {
                 if delivery.is_closed() && delivery.is_empty() {
-                    // Drain any late events.
                     for event in delivery.drain() {
-                        let _ = process_runtime_event(
+                        let terminal = event.is_terminal();
+                        if let Err(error) = process_runtime_event(
                             &repository,
                             emitter.as_ref(),
                             conversation_id,
                             &event,
-                        );
+                        ) {
+                            eprintln!("Keeper IDE conversation pump error: {error}");
+                            authoritative_failure = true;
+                            break;
+                        }
+                        if terminal {
+                            break;
+                        }
                     }
                     break;
                 }
                 if spawned.is_finished() && delivery.is_empty() {
+                    // Worker ended without a further queued event.
                     break;
                 }
             }
             Err(error) => {
                 eprintln!("Keeper IDE conversation delivery error: {error}");
+                authoritative_failure = true;
                 break;
             }
         }
@@ -60,13 +94,20 @@ pub(super) fn pump_turn(
 
     // Join host worker; Drop of SpawnedTurn also joins if needed.
     let _ = spawned.join();
+
+    if authoritative_failure {
+        return ensure_interrupted(&repository, run_id);
+    }
+
+    // Happy path or quiet worker end: only terminalize if still inflight.
+    ensure_durable_terminal(&repository, run_id)
 }
 
 /// Authoritative order for every runtime event:
 /// 1. validate
 /// 2. persist event + resulting run status in SQLite
 /// 3. commit
-/// 4. emit to the renderer
+/// 4. emit to the renderer (non-authoritative; failures do not roll back)
 ///
 /// Never emit an event that has not been durably committed.
 pub(super) fn process_runtime_event(
@@ -102,7 +143,9 @@ pub(super) fn process_runtime_event(
         )
         .map_err(|error| format!("append_event_with_status: {error}"))?;
 
-    // 4. Emit only after durable commit of both event and resulting status.
+    // 4. Emit only after durable commit. Emit failure is non-authoritative:
+    // durable truth already landed; log and continue so the pump can ingest
+    // the real terminal event.
     let dto = live_runtime_event_dto(
         recorded.event_id.0.to_string(),
         domain_run_id,
@@ -112,10 +155,42 @@ pub(super) fn process_runtime_event(
         validated.payload.clone(),
         recorded.created_at,
     );
-    emitter
-        .emit_runtime_event(&dto)
-        .map_err(|error| format!("emit: {error}"))?;
+    if let Err(error) = emitter.emit_runtime_event(&dto) {
+        eprintln!("Keeper IDE conversation emit error (non-authoritative): {error}");
+    }
     Ok(())
+}
+
+/// After a pump ends, ensure the run is durably terminal without inventing events.
+pub(crate) fn ensure_durable_terminal(
+    repository: &SqliteConversationRepository,
+    run_id: RunId,
+) -> PumpOutcome {
+    match repository.transition_run(run_id, RunStatus::Interrupted) {
+        Ok(_) => {
+            // Worker ended without a terminal runtime event; marked Interrupted.
+            PumpOutcome::DurableTerminal
+        }
+        Err(SessionError::IllegalTransition { from, .. }) if from.is_terminal() => {
+            // Already Completed / Failed / Cancelled / Interrupted.
+            PumpOutcome::DurableTerminal
+        }
+        Err(error) => {
+            eprintln!(
+                "Keeper IDE conversation terminalization failed for run {}: {error}",
+                run_id.0
+            );
+            PumpOutcome::ResidualNonTerminal
+        }
+    }
+}
+
+/// Authoritative failure path: attempt Interrupted; never invent a terminal event.
+pub(crate) fn ensure_interrupted(
+    repository: &SqliteConversationRepository,
+    run_id: RunId,
+) -> PumpOutcome {
+    ensure_durable_terminal(repository, run_id)
 }
 
 pub(super) fn protocol_to_domain_sequence(protocol_sequence: u64) -> Result<u64, String> {

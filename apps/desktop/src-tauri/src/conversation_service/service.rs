@@ -20,7 +20,7 @@ use crate::conversation_events::{
 };
 
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
-use super::pipeline::pump_turn;
+use super::pipeline::{PumpOutcome, pump_turn};
 use super::types::{
     ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, ServiceAdmission,
     remove_active_run,
@@ -473,19 +473,22 @@ impl ConversationService {
         thread::Builder::new()
             .name(format!("keeper-conv-pump-{}", run_id.0))
             .spawn(move || {
-                pump_turn(repository, emitter, conversation_id, run_id, spawned);
-                // Explicit post-pump_turn / pre-remove gate. Tests can wait on this
-                // signal to prove the pump reached the registration wait without
-                // inferring solely from host worker idleness.
+                let outcome = pump_turn(repository, emitter, conversation_id, run_id, spawned);
+                // Test seam: post-pump_turn, pre-registration-wait.
                 if let Some(hook) = after_pump.as_ref() {
                     hook();
                 }
-                // Do not remove the active entry until send_turn has stored this
-                // thread's JoinHandle. Otherwise a completed handle can be
-                // re-inserted with nobody left to clean it up.
+                // Wait until JoinHandle is stored, then remove only if durable terminal.
                 registration.wait_until_registered();
-                // Production cleanup: remove this exact run only (never a foreign key).
-                remove_active_run(&active, run_id);
+                if matches!(outcome, PumpOutcome::DurableTerminal) {
+                    remove_active_run(&active, run_id);
+                } else {
+                    eprintln!(
+                        "Keeper IDE conversation pump left residual active run {} \
+                         (non-terminal after pump failure)",
+                        run_id.0
+                    );
+                }
             })
             .expect("conversation pump thread")
     }

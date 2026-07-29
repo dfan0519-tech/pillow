@@ -317,13 +317,25 @@ pub enum SessionError {
     RunNotFound(RunId),
     #[error("illegal run transition from {from:?} to {to:?}")]
     IllegalTransition { from: RunStatus, to: RunStatus },
-    /// New events must be strictly contiguous from 0; exact `(run_id, sequence)`
-    /// replay is handled separately as idempotent success.
+    /// New events must be strictly contiguous from 0; same-kind `(run_id, sequence)`
+    /// replay is handled separately as idempotent success (first durable payload wins).
     #[error("invalid event sequence for run {run_id:?}: expected {expected}, got {got}")]
     InvalidSequence {
         run_id: RunId,
         expected: u64,
         got: u64,
+    },
+    /// Replay of an existing sequence with a different event kind is not
+    /// idempotent: the persisted row and run status must stay unchanged.
+    #[error(
+        "conflicting event kind for run {run_id:?} sequence {sequence}: \
+         persisted {persisted:?}, got {got:?}"
+    )]
+    ConflictingEventKind {
+        run_id: RunId,
+        sequence: u64,
+        persisted: RuntimeEventKind,
+        got: RuntimeEventKind,
     },
     /// SQLite INTEGER is signed; sequences above `i64::MAX` cannot be stored.
     #[error("event sequence {0} exceeds SQLite INTEGER range (i64::MAX)")]

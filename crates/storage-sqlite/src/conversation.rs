@@ -43,39 +43,25 @@ impl SqliteConversationRepository {
             .map_err(|_| SessionError::Store("conversation store lock was poisoned".into()))
     }
 
-    /// Append a runtime event and, when `target_status` is set, apply the legal
-    /// resulting run transition in a **single** IMMEDIATE SQLite transaction.
-    ///
-    /// Preserves strict sequence, idempotent exact-sequence replay, i64 bounds,
-    /// and `validate_run_transition` rules. Cancelled from Running walks through
-    /// Cancelling inside the same commit so a crash cannot leave a durable
-    /// terminal event with a non-terminal run status.
+    /// Append event + optional status in one IMMEDIATE transaction.
+    /// Same-kind sequence replay is idempotent (first payload wins);
+    /// different-kind replay errors without mutating rows or status.
     pub fn append_event_with_status(
         &self,
         event: NewRunEvent,
         target_status: Option<RunStatus>,
     ) -> Result<RunEvent, SessionError> {
         let sequence_i64 = sequence_to_sqlite(event.sequence)?;
-
         let mut connection = self.connection()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
-
-        let (recorded, inserted) = append_event_in_tx(&tx, event, sequence_i64)?;
-
+        let (recorded, _inserted) = append_event_in_tx(&tx, event, sequence_i64)?;
+        // Only non-conflicting events reach here (insert or same-kind replay).
         if let Some(target) = target_status {
             apply_status_in_tx(&tx, recorded.run_id, target)?;
         }
-
-        if inserted {
-            tx.commit().map_err(map_sqlite)?;
-        } else {
-            // Idempotent replay: still commit when a status transition was applied;
-            // if neither insert nor status change occurred, drop the empty txn.
-            tx.commit().map_err(map_sqlite)?;
-        }
-
+        tx.commit().map_err(map_sqlite)?;
         Ok(recorded)
     }
 }
@@ -193,6 +179,7 @@ impl ConversationRepository for SqliteConversationRepository {
         let sequence_i64 = sequence_to_sqlite(event.sequence)?;
         let run_id = event.run_id;
         let sequence = event.sequence;
+        let incoming_kind = event.kind;
 
         let mut connection = self.connection()?;
         // IMMEDIATE takes the write lock before the existence/max reads so a
@@ -207,18 +194,28 @@ impl ConversationRepository for SqliteConversationRepository {
                 Ok(recorded)
             }
             Ok((recorded, false)) => {
-                // Exact duplicate replay: no write needed.
+                // Same-kind replay: first durable payload wins; no write needed.
                 drop(tx);
                 Ok(recorded)
             }
             Err(SessionError::Store(message)) if message.starts_with("unique constraint") => {
                 // Defense-in-depth: transaction is failed — roll back, re-read winner.
                 drop(tx);
-                load_event_by_sequence(&connection, run_id, sequence)?.ok_or_else(|| {
-                    SessionError::Store(format!(
-                        "unique constraint on run event but row missing for sequence {sequence}"
-                    ))
-                })
+                let existing =
+                    load_event_by_sequence(&connection, run_id, sequence)?.ok_or_else(|| {
+                        SessionError::Store(format!(
+                            "unique constraint on run event but row missing for sequence {sequence}"
+                        ))
+                    })?;
+                if existing.kind != incoming_kind {
+                    return Err(SessionError::ConflictingEventKind {
+                        run_id,
+                        sequence,
+                        persisted: existing.kind,
+                        got: incoming_kind,
+                    });
+                }
+                Ok(existing)
             }
             Err(error) => Err(error),
         }
@@ -309,7 +306,8 @@ impl ConversationRepository for SqliteConversationRepository {
 }
 
 /// Insert (or idempotently load) a run event inside an open transaction.
-/// Returns `(event, inserted)` where `inserted` is false on exact-sequence replay.
+/// Returns `(event, inserted)` where `inserted` is false on same-kind sequence replay.
+/// Different-kind replay of an existing sequence is an explicit error.
 fn append_event_in_tx(
     tx: &rusqlite::Transaction<'_>,
     event: NewRunEvent,
@@ -318,6 +316,15 @@ fn append_event_in_tx(
     ensure_run_exists(tx, event.run_id)?;
 
     if let Some(existing) = load_event_by_sequence(tx, event.run_id, event.sequence)? {
+        if existing.kind != event.kind {
+            return Err(SessionError::ConflictingEventKind {
+                run_id: event.run_id,
+                sequence: event.sequence,
+                persisted: existing.kind,
+                got: event.kind,
+            });
+        }
+        // Same-kind replay: first durable payload wins; return the persisted row.
         return Ok((existing, false));
     }
 

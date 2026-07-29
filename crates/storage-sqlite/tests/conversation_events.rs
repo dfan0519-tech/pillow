@@ -56,6 +56,7 @@ fn append_event_orders_by_sequence_and_duplicate_replay_is_idempotent() {
         })
         .unwrap();
 
+    // Same-kind different payload: first durable payload wins.
     let replay = sessions
         .append_event(NewRunEvent {
             run_id: run.id,
@@ -64,22 +65,36 @@ fn append_event_orders_by_sequence_and_duplicate_replay_is_idempotent() {
             payload_json: r#"{"text":"should not replace"}"#.into(),
         })
         .unwrap();
-
     assert_eq!(replay, second);
-    assert_eq!(replay.kind, RuntimeEventKind::AssistantDelta);
     assert_eq!(replay.payload_json, r#"{"text":"hello"}"#);
-
-    // Non-latest exact replay remains idempotent and does not replace payload.
+    // Non-latest same-kind replay is idempotent.
     let replay_first = sessions
+        .append_event(NewRunEvent {
+            run_id: run.id,
+            sequence: 0,
+            kind: RuntimeEventKind::RunStarted,
+            payload_json: r#"{"ignored":true}"#.into(),
+        })
+        .unwrap();
+    assert_eq!(replay_first, first);
+    // Different-kind replay is rejected.
+    let conflict = sessions
         .append_event(NewRunEvent {
             run_id: run.id,
             sequence: 0,
             kind: RuntimeEventKind::Heartbeat,
             payload_json: r#"{"ignored":true}"#.into(),
         })
-        .unwrap();
-    assert_eq!(replay_first, first);
-
+        .unwrap_err();
+    assert_eq!(
+        conflict,
+        SessionError::ConflictingEventKind {
+            run_id: run.id,
+            sequence: 0,
+            persisted: RuntimeEventKind::RunStarted,
+            got: RuntimeEventKind::Heartbeat,
+        }
+    );
     let timeline = sessions.load_timeline(conversation.id).unwrap();
     assert_eq!(
         timeline
@@ -89,10 +104,7 @@ fn append_event_orders_by_sequence_and_duplicate_replay_is_idempotent() {
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    assert_eq!(timeline.events[0], first);
-    assert_eq!(timeline.events[1], second);
-    assert_eq!(timeline.events[2], third);
-    assert_eq!(timeline.events.len(), 3);
+    assert_eq!(timeline.events, vec![first, second, third]);
 }
 
 #[test]
@@ -167,19 +179,38 @@ fn append_event_rejects_gaps_backwards_and_out_of_order() {
         })
         .unwrap();
 
-    // Existing earlier sequence: exact duplicate replay (not a backwards write).
+    // Existing earlier sequence: same-kind duplicate replay (not a backwards write).
     let replay = sessions
         .append_event(NewRunEvent {
             run_id: run.id,
             sequence: 0,
-            kind: RuntimeEventKind::Heartbeat,
+            kind: RuntimeEventKind::RunStarted,
             payload_json: "{}".into(),
         })
         .unwrap();
     assert_eq!(replay.sequence, 0);
     assert_eq!(replay.kind, RuntimeEventKind::RunStarted);
 
-    // Out-of-order new insert beyond next expected.
+    // Different-kind earlier-sequence replay is rejected (not a silent no-op).
+    let conflict = sessions
+        .append_event(NewRunEvent {
+            run_id: run.id,
+            sequence: 0,
+            kind: RuntimeEventKind::Heartbeat,
+            payload_json: "{}".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        SessionError::ConflictingEventKind {
+            sequence: 0,
+            persisted: RuntimeEventKind::RunStarted,
+            got: RuntimeEventKind::Heartbeat,
+            ..
+        }
+    ));
+
+    // Out-of-order insert beyond next expected.
     let out_of_order = sessions
         .append_event(NewRunEvent {
             run_id: run.id,

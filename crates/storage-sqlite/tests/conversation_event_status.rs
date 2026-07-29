@@ -321,6 +321,112 @@ fn idempotent_terminal_replay_against_matching_status_succeeds() {
     );
 }
 
+/// Seq-0 run_started then seq-0 turn_completed is rejected; both connections
+/// still see the original event/status (no wrong terminal advancement).
+#[test]
+fn conflicting_kind_replay_rejected_leaves_status_on_second_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let projects = keeper_storage_sqlite::SqliteProjectRepository::open(&db).unwrap();
+    let project = seed_project(&projects, &temp, "conflict-kind");
+    let sessions = SqliteConversationRepository::open(&db).unwrap();
+    let conversation = sessions
+        .create_conversation(NewConversation {
+            project_id: project.id,
+            title: None,
+        })
+        .unwrap();
+    let run = sessions
+        .create_run(NewRun {
+            conversation_id: conversation.id,
+            user_message: "conflict".into(),
+        })
+        .unwrap();
+    let original = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::RunStarted,
+                payload_json: r#"{"prompt_preview":"first"}"#.into(),
+            },
+            Some(RunStatus::Running),
+        )
+        .unwrap();
+    let conflict = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::TurnCompleted,
+                payload_json: r#"{"summary":"should not win"}"#.into(),
+            },
+            Some(RunStatus::Completed),
+        )
+        .unwrap_err();
+    assert_eq!(
+        conflict,
+        SessionError::ConflictingEventKind {
+            run_id: run.id,
+            sequence: 0,
+            persisted: RuntimeEventKind::RunStarted,
+            got: RuntimeEventKind::TurnCompleted,
+        }
+    );
+    for repo in [&sessions, &SqliteConversationRepository::open(&db).unwrap()] {
+        let timeline = repo.load_timeline(conversation.id).unwrap();
+        assert_eq!(timeline.runs[0].status, RunStatus::Running);
+        assert_eq!(timeline.events, vec![original.clone()]);
+    }
+}
+
+/// Same-kind replay with a different payload: first durable payload wins.
+#[test]
+fn same_kind_replay_first_payload_wins() {
+    let temp = tempfile::tempdir().unwrap();
+    let (projects, sessions) = open_pair(&temp);
+    let project = seed_project(&projects, &temp, "first-write-wins");
+    let conversation = sessions
+        .create_conversation(NewConversation {
+            project_id: project.id,
+            title: None,
+        })
+        .unwrap();
+    let run = sessions
+        .create_run(NewRun {
+            conversation_id: conversation.id,
+            user_message: "payload".into(),
+        })
+        .unwrap();
+    let first = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::RunStarted,
+                payload_json: r#"{"prompt_preview":"original"}"#.into(),
+            },
+            Some(RunStatus::Running),
+        )
+        .unwrap();
+    let replay = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::RunStarted,
+                payload_json: r#"{"prompt_preview":"replacement"}"#.into(),
+            },
+            Some(RunStatus::Running),
+        )
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(replay.payload_json, r#"{"prompt_preview":"original"}"#);
+    let timeline = sessions.load_timeline(conversation.id).unwrap();
+    assert_eq!(timeline.runs[0].status, RunStatus::Running);
+    assert_eq!(timeline.events.len(), 1);
+}
+
 #[test]
 fn append_event_with_status_preserves_sequence_and_i64_bounds() {
     let temp = tempfile::tempdir().unwrap();
