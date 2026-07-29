@@ -1,9 +1,16 @@
 /**
  * Slice B1 conversation recovery acceptance.
  * Phase create_stream: real Tauri WebView IPC creates a conversation, sends a
- * deterministic fake turn, waits for completion, writes evidence.
- * Process tree is fully cleaned. Phase restore: same temporary SQLite app-data
- * is reopened; messages, events and run status are restored.
+ * deterministic fake turn, waits for completion, writes evidence, then
+ * requests graceful app exit (ConversationService::shutdown via ExitRequested).
+ * Phase restore: same temporary SQLite app-data is reopened after a clean
+ * process snapshot; messages, events and run status are restored.
+ *
+ * Each phase returns only after:
+ * - evidence is published;
+ * - the acceptance process exits through the graceful app path;
+ * - a fresh process snapshot has no keeper-ide.exe;
+ * - no inherited port listener remains.
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -15,9 +22,11 @@ import {
   ProcessSupervisor,
   assertDesktopBaselineClean,
   captureDesktopBaseline,
-  observeProcessSurvival,
+  isProcessAlive,
   runChecked,
   startCaptured,
+  waitForChildExit,
+  waitForDesktopProcessSnapshotClean,
   waitForJsonFile,
 } from "./lib/desktop-process.mjs";
 import {
@@ -113,17 +122,53 @@ async function runPhase({
     });
     assert.equal(readiness.pid, processRun.child.pid);
     supervisor.trackPid(readiness.pid);
-    await observeProcessSurvival(readiness.pid, 500);
+    // Acceptance may finish and request graceful exit quickly after readiness;
+    // do not require a fixed survival window. Only require the PID was live at
+    // readiness publication (already validated via readiness.pid).
+    assert.ok(
+      Number.isInteger(readiness.pid) && readiness.pid > 0,
+      "readiness must report a real acceptance PID",
+    );
 
+    // Evidence may land just before graceful exit; tolerate exit once the file
+    // exists by not treating mid-poll exit as failure after the first read try.
     const evidence = await waitForJsonFile(resultPath, {
       label: `conversation acceptance ${phase} result`,
       onPoll: () => supervisor.capture(),
-      processHandle: processRun.child,
+      // Do not fail the moment the process exits: graceful close is expected
+      // right after publishing evidence. Fail only on timeout without file.
+      processHandle: null,
       timeoutMs: 60_000,
       validate: (value) =>
         validateConversationEvidence(value, { phase }),
     });
     assert.equal(evidence.pid, readiness.pid);
+
+    // Evidence is published before graceful exit; wait for the app's own exit path.
+    const exit = await waitForChildExit(
+      processRun.child,
+      60_000,
+      `conversation acceptance ${phase}`,
+    );
+    // Prefer clean exit code; Windows close may still yield 0.
+    assert.equal(
+      exit.signal,
+      null,
+      `${phase} terminated by signal ${exit.signal} instead of graceful exit`,
+    );
+    assert.equal(
+      isProcessAlive(readiness.pid),
+      false,
+      `${phase} acceptance PID ${readiness.pid} still alive after exit event`,
+    );
+
+    // Deterministic post-exit cleanliness (not a fixed sleep as sole proof).
+    await waitForDesktopProcessSnapshotClean({
+      port: baseline.port,
+      timeoutMs: 30_000,
+      label: `conversation acceptance ${phase} post-exit snapshot`,
+    });
+
     return evidence;
   } catch (error) {
     const output = processRun.output();
@@ -132,7 +177,13 @@ async function runPhase({
       + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
     );
   } finally {
+    // Safety net if graceful exit failed; still waits for snapshot cleanliness.
     await supervisor.cleanup();
+    await waitForDesktopProcessSnapshotClean({
+      port: baseline.port,
+      timeoutMs: 15_000,
+      label: `conversation acceptance ${phase} final snapshot`,
+    }).catch(() => undefined);
   }
 }
 
@@ -177,6 +228,13 @@ try {
   assert.equal(createEvidence.runStatus, "completed");
   assert.ok(createEvidence.eventCount >= 5);
 
+  // Between phases: prove recovery cannot poison the next process baseline.
+  await waitForDesktopProcessSnapshotClean({
+    timeoutMs: 15_000,
+    label: "between conversation recovery phases",
+  });
+  assertDesktopBaselineClean(captureDesktopBaseline());
+
   const profileEntriesAfterCreate = await snapshotPath(webviewProfileDir);
   assert.ok(
     profileEntriesAfterCreate.length > 0,
@@ -202,6 +260,13 @@ try {
   const dbStat = await stat(databasePath);
   assert.ok(dbStat.size > 0, "SQLite database must exist after recovery");
 
+  // Final cleanliness so project-launcher process-baseline tests cannot see leftovers.
+  await waitForDesktopProcessSnapshotClean({
+    timeoutMs: 15_000,
+    label: "conversation recovery suite end",
+  });
+  assertDesktopBaselineClean(captureDesktopBaseline());
+
   summary = {
     status: "passed",
     createEventCount: createEvidence.eventCount,
@@ -212,6 +277,7 @@ try {
     webviewProfileEntries: profileEntriesAfterCreate.length,
     durationMs: Math.round(performance.now() - startedAt),
     ipcBoundary: "real-tauri-webview",
+    gracefulExit: true,
   };
 } catch (error) {
   summary = {

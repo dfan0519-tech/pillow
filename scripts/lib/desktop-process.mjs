@@ -146,6 +146,40 @@ function terminateWindowsPids(pids) {
   }
 }
 
+/** True when no keeper-ide.exe and no supervised port listeners remain. */
+export function isDesktopProcessSnapshotClean(port = 1420) {
+  if (process.platform !== "win32") return true;
+  const keepers = keeperProcessPids(snapshotWindowsProcesses());
+  const listeners = listenerPidsForPort(port);
+  return keepers.length === 0 && listeners.length === 0;
+}
+
+/**
+ * Poll a fresh Windows process snapshot until keeper-ide.exe and the desktop
+ * port listener are gone. Not a fixed sleep: returns as soon as the snapshot is clean.
+ */
+export async function waitForDesktopProcessSnapshotClean({
+  port = 1420,
+  timeoutMs = 30_000,
+  label = "desktop process snapshot",
+} = {}) {
+  const deadline = performance.now() + timeoutMs;
+  let lastKeepers = [];
+  let lastListeners = [];
+  while (performance.now() < deadline) {
+    if (process.platform !== "win32") return;
+    const processes = snapshotWindowsProcesses();
+    lastKeepers = keeperProcessPids(processes);
+    lastListeners = listenerPidsForPort(port);
+    if (lastKeepers.length === 0 && lastListeners.length === 0) return;
+    await delay(POLL_INTERVAL_MS);
+  }
+  throw new Error(
+    `${label} still dirty after ${timeoutMs} ms: `
+    + `keeper-ide.exe=[${lastKeepers.join(",")}] listeners=[${lastListeners.join(",")}]`,
+  );
+}
+
 export class ProcessSupervisor {
   constructor({ rootPid, baseline, enforceDesktopClean = true }) {
     this.baseline = baseline;
@@ -178,34 +212,95 @@ export class ProcessSupervisor {
     this.lastCaptureAt = performance.now();
   }
 
+  /**
+   * Terminate known PIDs and do not return until:
+   * - every known PID fails isProcessAlive, AND
+   * - a fresh process snapshot has no keeper-ide.exe and no port listener
+   *   (when enforceDesktopClean is set).
+   *
+   * isProcessAlive alone is insufficient: Windows can drop the kill check
+   * before Get-CimInstance stops listing the process name.
+   */
   async cleanup() {
     let lastError = null;
+    // Allow enough polls for graceful exit + residual reaping (not a single sleep).
+    const maxAttempts = Math.max(CLEANUP_ATTEMPTS, 120);
 
-    for (let attempt = 0; attempt < CLEANUP_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       await this.capture(true);
       const alive = [...this.knownPids].filter(isProcessAlive);
-      if (alive.length === 0) return;
-      try {
-        if (process.platform === "win32") {
-          terminateWindowsPids(alive.reverse());
-        } else {
-          for (const pid of alive.reverse()) {
-            process.kill(pid, "SIGKILL");
+      if (alive.length > 0) {
+        try {
+          if (process.platform === "win32") {
+            terminateWindowsPids(alive.reverse());
+          } else {
+            for (const pid of alive.reverse()) {
+              process.kill(pid, "SIGKILL");
+            }
           }
+        } catch (error) {
+          lastError = error;
         }
-      } catch (error) {
-        lastError = error;
+        await delay(POLL_INTERVAL_MS);
+        continue;
+      }
+
+      if (!this.enforceDesktopClean || process.platform !== "win32") {
+        return;
+      }
+
+      const processes = snapshotWindowsProcesses();
+      const keepers = keeperProcessPids(processes);
+      const listeners = listenerPidsForPort(this.port);
+      if (keepers.length === 0 && listeners.length === 0) {
+        return;
+      }
+
+      // Snapshot still lists processes even though kill(0) failed — re-track and kill.
+      for (const pid of keepers) this.knownPids.add(pid);
+      for (const pid of listeners) this.knownPids.add(pid);
+      const residual = [...new Set([...keepers, ...listeners])].filter(isProcessAlive);
+      if (residual.length > 0) {
+        try {
+          terminateWindowsPids(residual.reverse());
+        } catch (error) {
+          lastError = error;
+        }
       }
       await delay(POLL_INTERVAL_MS);
     }
 
     const survivingKnown = [...this.knownPids].filter(isProcessAlive);
+    const processes = process.platform === "win32" ? snapshotWindowsProcesses() : [];
+    const keepers = keeperProcessPids(processes);
+    const listeners =
+      process.platform === "win32" ? listenerPidsForPort(this.port) : [];
     const detail = lastError instanceof Error ? ` ${lastError.message}` : "";
     throw new Error(
-      `Desktop cleanup left known=[${survivingKnown}] after `
-      + `${CLEANUP_ATTEMPTS} attempts.${detail}`,
+      `Desktop cleanup left known=[${survivingKnown}] keepers=[${keepers}] `
+      + `listeners=[${listeners}] after ${maxAttempts} attempts.${detail}`,
     );
   }
+}
+
+/** Wait until a child process has exited (graceful path preferred). */
+export async function waitForChildExit(child, timeoutMs = 60_000, label = "process") {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { status: child.exitCode, signal: child.signalCode };
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} did not exit within ${timeoutMs} ms.`));
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal });
+    });
+  });
 }
 
 export async function waitForJsonFile(
