@@ -6,9 +6,11 @@
  * Single continuous left sidebar + quiet main stage. Grok branding removed.
  *
  * Split for the 500-line source limit. Cascade order is preserved:
- * shell/sidebar/stage, then composer/dialog/resource, then shell media query.
+ * shell/sidebar/stage grid, then conversation/timeline/run-activity,
+ * then composer/dialog/resource, then shell media query.
  */
 @import "./workbench-shell.css";
+@import "./workbench-conversation.css";
 @import "./workbench-chrome.css";
 
 @media (max-width: 1024px) {
