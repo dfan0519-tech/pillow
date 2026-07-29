@@ -1,0 +1,15 @@
+{
+  "name": "keeper-ide",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.14.0",
+  "scripts": {
+    "check": "node scripts/check-workspace.mjs",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "desktop:dev": "pnpm --filter @keeper-ide/desktop tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.1"
+  }
+}

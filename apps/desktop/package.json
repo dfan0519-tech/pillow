@@ -1,0 +1,21 @@
+{
+  "name": "@keeper-ide/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 1420 --strictPort",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.2",
+    "vitest": "^3.2.3"
+  }
+}
