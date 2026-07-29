@@ -12,72 +12,28 @@
 //! shutdown waits on a condition variable until every admitted sync turn
 //! releases its permit.
 
+mod config;
+mod spawned;
+
+pub use config::{
+    DEFAULT_MAX_CONCURRENT_TURNS, HostConfig, normalize_max_concurrent_turns,
+    workspace_fixture_path,
+};
+pub use spawned::SpawnedTurn;
+
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use keeper_agent_protocol::{
-    AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeProbe,
-    RuntimeSession, SendTurn, StartSession,
+    AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeProbe, RuntimeSession, SendTurn,
+    StartSession,
 };
 
-use crate::delivery::DEFAULT_EVENT_QUEUE_CAPACITY;
 use crate::fake::FakeRuntimeAdapter;
 use crate::sink::ProtocolGuardSink;
 use crate::worker::{SyncTurnLifecycle, TurnSlotPermit, WorkerRecord, run_turn_worker};
-
-/// Default concurrent turn limit for the host (process-pool style bound).
-pub const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 4;
-const MAX_CONCURRENT_TURNS_CAP: u32 = 32;
-
-/// Host configuration.
-///
-/// `after_worker_registered` is a test seam used to force the
-/// register-before-handle race with barriers. Production callers leave it
-/// `None`.
-#[derive(Clone)]
-pub struct HostConfig {
-    pub max_concurrent_turns: u32,
-    /// When true, fixture `delay_ms` is honored; when false, delays are zeroed.
-    pub honor_fixture_delays: bool,
-    /// Per-turn bounded event queue capacity (backpressure when full).
-    pub event_queue_capacity: usize,
-    /// Test seam: invoked after the worker is registered (`Starting`) and
-    /// before `arm_turn` / thread install. Default `None`.
-    #[doc(hidden)]
-    pub after_worker_registered: Option<Arc<dyn Fn() + Send + Sync>>,
-}
-
-impl Default for HostConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent_turns: DEFAULT_MAX_CONCURRENT_TURNS,
-            honor_fixture_delays: true,
-            event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
-            after_worker_registered: None,
-        }
-    }
-}
-
-impl std::fmt::Debug for HostConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostConfig")
-            .field("max_concurrent_turns", &self.max_concurrent_turns)
-            .field("honor_fixture_delays", &self.honor_fixture_delays)
-            .field("event_queue_capacity", &self.event_queue_capacity)
-            .field(
-                "after_worker_registered",
-                &self.after_worker_registered.is_some(),
-            )
-            .finish()
-    }
-}
-
-pub fn normalize_max_concurrent_turns(raw: u32) -> u32 {
-    raw.clamp(1, MAX_CONCURRENT_TURNS_CAP)
-}
 
 /// Host that bounds concurrency and enforces the provider-neutral protocol.
 pub struct RuntimeHost {
@@ -398,7 +354,7 @@ impl RuntimeHost {
     /// Used by [`SpawnedTurn`] Drop so a blocked adapter is unblocked even when
     /// `shut_down` is already set. Tolerates `RunNotFound` only because the
     /// caller holds the host worker record.
-    fn cancel_owned_worker_best_effort(&self, run_id: RunId, record: &WorkerRecord) {
+    pub(super) fn cancel_owned_worker_best_effort(&self, run_id: RunId, record: &WorkerRecord) {
         record.request_cancel();
         match self.adapter.cancel_turn(run_id) {
             Ok(()) => {}
@@ -408,7 +364,7 @@ impl RuntimeHost {
     }
 
     /// Remove `run_id` from the registry only when it still points at `record`.
-    fn remove_worker_if_owner(&self, run_id: RunId, record: &Arc<WorkerRecord>) {
+    pub(super) fn remove_worker_if_owner(&self, run_id: RunId, record: &Arc<WorkerRecord>) {
         let mut workers = self.workers.lock().expect("workers");
         match workers.get(&run_id) {
             Some(current) if Arc::ptr_eq(current, record) => {
@@ -451,73 +407,5 @@ impl RuntimeHost {
             });
         }
         Ok(())
-    }
-}
-
-/// Handle for a turn running on a host worker thread.
-pub struct SpawnedTurn {
-    pub run_id: RunId,
-    host: Arc<RuntimeHost>,
-    record: Arc<WorkerRecord>,
-}
-
-impl SpawnedTurn {
-    pub fn cancel(&self) -> Result<(), RuntimeError> {
-        self.host.cancel_turn(self.run_id)
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.record.is_body_finished()
-    }
-
-    /// Snapshot of events currently buffered (not yet consumed).
-    pub fn events_snapshot(&self) -> Vec<RuntimeEvent> {
-        self.record.delivery.snapshot()
-    }
-
-    /// Delivery queue for streaming consumption / backpressure tests.
-    pub fn delivery(&self) -> &Arc<crate::delivery::BoundedDelivery> {
-        &self.record.delivery
-    }
-
-    pub fn join(self) -> Result<Vec<RuntimeEvent>, RuntimeError> {
-        let mut events = Vec::new();
-        let join_result = self.record.await_joined(&mut events);
-        self.host.remove_worker_if_owner(self.run_id, &self.record);
-        join_result?;
-        Ok(events)
-    }
-}
-
-impl Drop for SpawnedTurn {
-    fn drop(&mut self) {
-        if !self.record.is_joined() {
-            // Request real adapter cancellation before waiting so a blocked
-            // adapter (away from sink.emit) can unblock. Host cancel flag alone
-            // is not sufficient for every provider. Exactly-one-terminal is
-            // preserved by ProtocolGuardSink + delivery cancel arbitration.
-            self.host
-                .cancel_owned_worker_best_effort(self.run_id, &self.record);
-            let mut discarded = Vec::new();
-            let _ = self.record.await_joined(&mut discarded);
-        }
-        self.host.remove_worker_if_owner(self.run_id, &self.record);
-    }
-}
-
-/// Resolve the workspace fixture path for tests that prefer filesystem load.
-pub fn workspace_fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/protocol/fake-turn.jsonl")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_concurrent_turns_clamps() {
-        assert_eq!(normalize_max_concurrent_turns(0), 1);
-        assert_eq!(normalize_max_concurrent_turns(4), 4);
-        assert_eq!(normalize_max_concurrent_turns(99), MAX_CONCURRENT_TURNS_CAP);
     }
 }
