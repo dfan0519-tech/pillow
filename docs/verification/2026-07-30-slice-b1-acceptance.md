@@ -106,10 +106,10 @@ Acceptance Fix 4 — Replay + Pump Truth (closes two independent P1 truth gaps):
 | SHA | Message |
 | --- | --- |
 | `33b4edc` | `fix(session): reject conflicting-kind replay and non-authoritative emit` |
-| `80962f7` | `docs(verification): record Task 4 Acceptance Fix 4 replay and pump truth` |
+| `f137f91` | `docs(verification): record Task 4 Acceptance Fix 4 replay and pump truth` |
 
 Primary Fix 4 tip for controller citation: **`33b4edc`** (implementation).
-Docs evidence tip: **`80962f7`**.
+Docs evidence tip: **`f137f91`** (pin commit may follow for self-SHA).
 
 Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4:
 
@@ -120,7 +120,7 @@ Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4:
 | Closeout A docs | `40e6776` |
 | Acceptance Fix 3 | `28180e4` |
 | Acceptance Fix 4 (code) | `33b4edc` |
-| Acceptance Fix 4 (docs) | `80962f7` |
+| Acceptance Fix 4 (docs) | `f137f91` |
 
 Task 4 surfaces:
 
