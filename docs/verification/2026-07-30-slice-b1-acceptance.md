@@ -6,7 +6,7 @@ Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\integration-slice-b1`
 
 Branch: `integration/slice-b1`
 
-Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 3 (Lifecycle Truth)**
+Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 4 (Replay + Pump Truth)**
 
 ## Explicit non-claim
 
@@ -101,7 +101,17 @@ Acceptance Fix 3 — Lifecycle Truth (closes remaining Important findings):
 
 Primary Fix 3 tip for controller citation: **`28180e4`**.
 
-Exact SHAs to pin for Fix 2 + Closeout + Fix 3:
+Acceptance Fix 4 — Replay + Pump Truth (closes two independent P1 truth gaps):
+
+| SHA | Message |
+| --- | --- |
+| `33b4edc` | `fix(session): reject conflicting-kind replay and non-authoritative emit` |
+| `80962f7` | `docs(verification): record Task 4 Acceptance Fix 4 replay and pump truth` |
+
+Primary Fix 4 tip for controller citation: **`33b4edc`** (implementation).
+Docs evidence tip: **`80962f7`**.
+
+Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4:
 
 | Wave | SHA |
 | --- | --- |
@@ -109,6 +119,8 @@ Exact SHAs to pin for Fix 2 + Closeout + Fix 3:
 | Engineering Closeout A | `5945eab` |
 | Closeout A docs | `40e6776` |
 | Acceptance Fix 3 | `28180e4` |
+| Acceptance Fix 4 (code) | `33b4edc` |
+| Acceptance Fix 4 (docs) | `80962f7` |
 
 Task 4 surfaces:
 
@@ -156,9 +168,16 @@ close after publishing evidence so the E2E path exercises app exit, not only
 - **Fix 3:** `illegal_status_transition_rolls_back_event_on_second_connection`
   proves `Pending -> Completed` leaves neither the event nor a status change on
   a second connection. `idempotent_terminal_replay_against_matching_status_succeeds`
-  keeps exact replay of an already-matching terminal successful.
+  keeps same-kind replay of an already-matching terminal successful.
   `append_event_with_status_cancelled_from_running_walks_cancelling` keeps
   `Running -> Cancelling -> Cancelled` atomic in one commit.
+- **Fix 4:** sequence replay is idempotent **only when kinds match**. Different-kind
+  replay returns `SessionError::ConflictingEventKind` and leaves event rows and
+  run status unchanged on a second connection
+  (`conflicting_kind_replay_rejected_leaves_status_on_second_connection`).
+  Same-kind different-payload replay returns the first durable event
+  (`same_kind_replay_first_payload_wins`). Status advancement is never based on
+  a conflicting event.
 - Service test `persistence_commits_before_renderer_emit`:
   `RecordingEmitter` opens a **second** SQLite connection at emit time and
   asserts both the event row and the resulting status (`Running` /
@@ -167,13 +186,22 @@ close after publishing evidence so the E2E path exercises app exit, not only
 ### Active-run cleanup
 
 - Completed / failed / cancelled / pump-error pumps remove their exact `RunId`
-  from the service `active` registry (no foreign-key delete).
+  from the service `active` registry (no foreign-key delete) **only after** the
+  run is durably terminal.
+- **Fix 4:** renderer emit failure is non-authoritative — the pump logs it and
+  continues so SQLite still reaches the real terminal event
+  (`failing_emitter_still_reaches_completed_with_zero_residuals`). Authoritative
+  validation/persistence/delivery failures attempt `Interrupted` without
+  inventing a terminal runtime event
+  (`pump_processing_failure_interrupts_or_fail_closed`). If terminalization
+  itself fails, the residual active entry is kept so drain/shutdown fail closed.
 - Observable helpers: `ConversationService::active_run_count()`,
   `worker_registry_len()`, `in_flight_turns()`.
 - Tests:
   - `sequential_turns_return_active_run_count_to_zero` (many turns → 0);
   - `cancellation_yields_one_terminal_and_no_residual_slots` → 0;
-  - `pump_error_removes_active_run_entry` → 0;
+  - `failing_emitter_still_reaches_completed_with_zero_residuals` → Completed + 0;
+  - `pump_error_removes_active_run_entry` → 0 after durable terminal;
   - `spawn_failure_removes_active_run_entry` → failed spawn leaves no residual;
   - `drain` remains correct when pumps self-remove concurrently.
 
@@ -282,7 +310,39 @@ rather than inferring readiness from host worker idleness alone.
 
 ## Gate commands and results
 
-### Acceptance Fix 3 gates (Lifecycle Truth — this pass)
+### Acceptance Fix 4 gates (Replay + Pump Truth — this pass)
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
+| Unit tests (JS) | `pnpm test` | PASS — **80** tests |
+| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
+| Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1340` within 2500 ms budget |
+| Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
+| Line budget | changed sources in `main...HEAD` ≤ 500 lines | PASS |
+| Worktree | `git status --short` | clean after Fix 4 code + docs commits |
+
+Desktop Rust lib tests after Fix 4: **27** (includes Fix 4 pump/emit regressions).
+Integration: **7**.
+
+Focused Fix 4 regressions:
+
+- `conflicting_kind_replay_rejected_leaves_status_on_second_connection` — PASS
+- `same_kind_replay_first_payload_wins` — PASS
+- `failing_emitter_still_reaches_completed_with_zero_residuals` — PASS
+- `pump_processing_failure_interrupts_or_fail_closed` — PASS
+
+Release smoke summary (this machine, Fix 4):
+
+```text
+KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1374,"startupBudgetMs":2500,"startupMs":1340,"webviewProfile":"temporary-and-populated","readiness":"list-projects-and-lifecycle-command"}
+```
+
+### Acceptance Fix 3 gates (Lifecycle Truth — historical)
 
 | Gate | Command | Result |
 | --- | --- | --- |
