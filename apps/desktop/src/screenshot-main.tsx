@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { MockConversationGateway } from "./lib/mockConversationGateway";
 import { MockProjectGateway } from "./lib/mockProjectGateway";
 import type { ProjectDto } from "./lib/projectGateway";
 import "./styles/tokens.css";
@@ -17,6 +18,9 @@ const sample: ProjectDto = {
 
 const params = new URLSearchParams(window.location.search);
 const state = params.get("state") === "selected" ? "selected" : "empty";
+
+// Slow mock steps so the capture script can photograph mid-stream / cancel.
+const conversationGateway = new MockConversationGateway({ stepDelayMs: 45 });
 const gateway = new MockProjectGateway(state === "selected" ? [sample] : []);
 
 const root = document.getElementById("root");
@@ -25,6 +29,7 @@ if (!root) throw new Error("Missing renderer root");
 createRoot(root).render(
   <StrictMode>
     <App
+      conversationGateway={conversationGateway}
       defaultSelectedProjectId={state === "selected" ? sample.id : undefined}
       gateway={gateway}
     />

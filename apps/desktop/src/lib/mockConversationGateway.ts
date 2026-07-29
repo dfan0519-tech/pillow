@@ -1,16 +1,20 @@
 /**
  * Deterministic mock conversation gateway for Slice B1 renderer evidence.
- * No network, credentials, or real agent runtime — test and prototype only.
+ * Emits the Task 2 canonical snake_case fixture. No network or real runtime.
  */
 
+import { CANONICAL_TURN_FIXTURE } from "./canonicalTurnFixture";
 import type {
   ConversationDto,
   ConversationGateway,
+  RunDto,
+  RunStatus,
   RuntimeEventDto,
   RuntimeEventKind,
   TimelineDto,
   TimelineMessageDto,
 } from "./conversationGateway";
+import { isTerminalKind } from "./conversationGateway";
 
 export const MOCK_RUNTIME_BADGE = "模拟运行时";
 
@@ -28,71 +32,13 @@ type InflightRun = {
   resolveDrain: Array<() => void>;
 };
 
+type StoredRun = RunDto;
+
 type StoredConversation = ConversationDto & {
   messages: TimelineMessageDto[];
   events: RuntimeEventDto[];
+  runs: Map<string, StoredRun>;
 };
-
-const ASSISTANT_CHUNKS = [
-  "已收到任务。",
-  "正在整理项目结构与入口文件。",
-  "建议从 `apps/desktop` 与核心 crate 边界开始阅读。",
-];
-
-/**
- * Fixed, ordered fixture stream. Kinds are the normalized vocabulary only.
- */
-function buildFixtureSteps(): Array<{
-  kind: RuntimeEventKind;
-  payload: Record<string, unknown>;
-}> {
-  return [
-    { kind: "run_started", payload: {} },
-    {
-      kind: "reasoning_summary_delta",
-      payload: { text: "梳理请求目标与可验证交付物。" },
-    },
-    {
-      kind: "plan_updated",
-      payload: {
-        title: "执行计划",
-        steps: ["定位入口", "检查对话边界", "汇总结果"],
-      },
-    },
-    {
-      kind: "tool_call_started",
-      payload: { toolCallId: "tool-1", name: "list_workspace", title: "列出工作区" },
-    },
-    {
-      kind: "tool_call_output",
-      payload: {
-        toolCallId: "tool-1",
-        output: "apps/desktop, crates/kernel-session",
-      },
-    },
-    {
-      kind: "tool_call_completed",
-      payload: { toolCallId: "tool-1", name: "list_workspace", status: "completed" },
-    },
-    {
-      kind: "subagent_started",
-      payload: { subagentId: "sub-1", title: "结构扫描" },
-    },
-    {
-      kind: "subagent_progress",
-      payload: { subagentId: "sub-1", message: "扫描源码树…" },
-    },
-    {
-      kind: "subagent_completed",
-      payload: { subagentId: "sub-1", title: "结构扫描", status: "completed" },
-    },
-    ...ASSISTANT_CHUNKS.map((text) => ({
-      kind: "assistant_delta" as const,
-      payload: { text },
-    })),
-    { kind: "turn_completed", payload: {} },
-  ];
-}
 
 export class MockConversationGateway implements ConversationGateway {
   private readonly stepDelayMs: number;
@@ -126,6 +72,7 @@ export class MockConversationGateway implements ConversationGateway {
       updatedAt: now,
       messages: [],
       events: [],
+      runs: new Map(),
     };
     this.conversations.set(conversation.id, conversation);
     return toConversationDto(conversation);
@@ -137,6 +84,7 @@ export class MockConversationGateway implements ConversationGateway {
       conversationId,
       messages: conversation.messages.map((message) => ({ ...message })),
       events: conversation.events.map((event) => ({ ...event })),
+      runs: [...conversation.runs.values()].map((run) => ({ ...run })),
     };
   }
 
@@ -148,6 +96,11 @@ export class MockConversationGateway implements ConversationGateway {
     const trimmed = content.trim();
     if (!trimmed) {
       throw new Error("Turn content must not be empty.");
+    }
+    if (this.nextSendError) {
+      const message = this.nextSendError;
+      this.nextSendError = null;
+      throw new Error(message);
     }
 
     const now = this.nextTimestamp();
@@ -163,6 +116,12 @@ export class MockConversationGateway implements ConversationGateway {
     conversation.updatedAt = now;
 
     const runId = `run-${crypto.randomUUID()}`;
+    conversation.runs.set(runId, {
+      runId,
+      conversationId,
+      status: "pending",
+    });
+
     const inflight: InflightRun = {
       runId,
       conversationId,
@@ -184,7 +143,8 @@ export class MockConversationGateway implements ConversationGateway {
       clearTimeout(timer);
     }
     inflight.timers = [];
-    this.emitEvent(inflight, "run_cancelled", {});
+    this.setRunStatus(inflight.conversationId, runId, "cancelling");
+    this.emitEvent(inflight, "run_cancelled", { reason: "user_cancel" });
     this.markTerminal(inflight);
   }
 
@@ -194,6 +154,45 @@ export class MockConversationGateway implements ConversationGateway {
       this.listeners.delete(listener);
     };
   }
+
+  /**
+   * Test helper: seed a conversation timeline with authoritative runs
+   * (pending / cancelling / interrupted restoration cases).
+   */
+  seedTimeline(
+    conversationId: string,
+    input: {
+      messages?: TimelineMessageDto[];
+      events?: RuntimeEventDto[];
+      runs?: RunDto[];
+    },
+  ): void {
+    const conversation = this.requireConversation(conversationId);
+    if (input.messages) {
+      conversation.messages = input.messages.map((message) => ({ ...message }));
+    }
+    if (input.events) {
+      conversation.events = input.events.map((event) => ({ ...event }));
+      for (const event of conversation.events) {
+        const prev = this.seqCounters.get(event.runId) ?? 0;
+        if (event.sequence > prev) {
+          this.seqCounters.set(event.runId, event.sequence);
+        }
+      }
+    }
+    if (input.runs) {
+      for (const run of input.runs) {
+        conversation.runs.set(run.runId, { ...run });
+      }
+    }
+  }
+
+  /** Test helper: force a sendTurn failure for the next call. */
+  failNextSend(message = "mock send failed"): void {
+    this.nextSendError = message;
+  }
+
+  private nextSendError: string | null = null;
 
   /** Test helper: wait until every inflight run has finished or been cancelled. */
   async drain(): Promise<void> {
@@ -230,11 +229,10 @@ export class MockConversationGateway implements ConversationGateway {
   }
 
   private scheduleFixture(inflight: InflightRun) {
-    const steps = buildFixtureSteps();
     let delay = 0;
-    for (const step of steps) {
+    for (const step of CANONICAL_TURN_FIXTURE) {
       const handle = setTimeout(() => {
-        this.step(inflight, step.kind, step.payload);
+        this.step(inflight, step.kind, step.payload as RuntimeEventDto["payload"]);
       }, delay);
       inflight.timers.push(handle);
       delay += Math.max(0, this.stepDelayMs);
@@ -244,12 +242,13 @@ export class MockConversationGateway implements ConversationGateway {
   private step(
     inflight: InflightRun,
     kind: RuntimeEventKind,
-    payload: Record<string, unknown>,
+    payload: RuntimeEventDto["payload"],
   ) {
     if (inflight.terminal || inflight.cancelled) return;
 
     if (kind === "assistant_delta") {
-      const text = String(payload.text ?? "");
+      const text =
+        "text" in payload && typeof payload.text === "string" ? payload.text : "";
       const conversation = this.conversations.get(inflight.conversationId);
       if (conversation) {
         const last = conversation.messages.at(-1);
@@ -269,7 +268,7 @@ export class MockConversationGateway implements ConversationGateway {
 
     this.emitEvent(inflight, kind, payload);
 
-    if (kind === "turn_completed" || kind === "turn_failed" || kind === "run_cancelled") {
+    if (isTerminalKind(kind)) {
       this.markTerminal(inflight);
     }
   }
@@ -277,13 +276,24 @@ export class MockConversationGateway implements ConversationGateway {
   private emitEvent(
     inflight: InflightRun,
     kind: RuntimeEventKind,
-    payload: Record<string, unknown>,
+    payload: RuntimeEventDto["payload"],
   ) {
     if (inflight.terminal) return;
     const conversation = this.requireConversation(inflight.conversationId);
     const sequence = (this.seqCounters.get(inflight.runId) ?? 0) + 1;
     this.seqCounters.set(inflight.runId, sequence);
-    const event: RuntimeEventDto = {
+
+    if (kind === "run_started") {
+      this.setRunStatus(inflight.conversationId, inflight.runId, "running");
+    } else if (kind === "turn_completed") {
+      this.setRunStatus(inflight.conversationId, inflight.runId, "completed");
+    } else if (kind === "turn_failed") {
+      this.setRunStatus(inflight.conversationId, inflight.runId, "failed");
+    } else if (kind === "run_cancelled") {
+      this.setRunStatus(inflight.conversationId, inflight.runId, "cancelled");
+    }
+
+    const event = {
       eventId: `evt-${inflight.runId}-${sequence}`,
       runId: inflight.runId,
       conversationId: inflight.conversationId,
@@ -291,12 +301,29 @@ export class MockConversationGateway implements ConversationGateway {
       kind,
       payload: { ...payload },
       createdAt: this.nextTimestamp(),
-    };
+    } as RuntimeEventDto;
+
     conversation.events.push(event);
     conversation.updatedAt = event.createdAt;
     for (const listener of this.listeners) {
       listener(event);
     }
+  }
+
+  private setRunStatus(
+    conversationId: string,
+    runId: string,
+    status: RunStatus,
+  ) {
+    const conversation = this.conversations.get(conversationId);
+    if (!conversation) return;
+    const existing = conversation.runs.get(runId);
+    conversation.runs.set(runId, {
+      runId,
+      conversationId,
+      status,
+      ...(existing ? {} : {}),
+    });
   }
 
   private markTerminal(inflight: InflightRun) {

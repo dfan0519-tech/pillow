@@ -544,6 +544,41 @@
   background: var(--bg-hover);
 }
 
+.stage-empty .mock-runtime-badge {
+  margin-bottom: 8px;
+}
+
+.conversation-timeline__messages--windowed {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.run-activity__item-detail {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.run-activity ol {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-activity li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .run-activity {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
 import {
+  conversationBelongsToProject,
   conversationReducer,
   createInitialConversationState,
   isRunActive,
@@ -53,6 +54,7 @@ export function App({
   const [shellReady, setShellReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
   const [conversationState, dispatchConversation] = useReducer(
@@ -62,6 +64,8 @@ export function App({
   );
   const readinessSent = useRef(false);
   const defaultSelectSent = useRef(false);
+  const conversationStateRef = useRef(conversationState);
+  conversationStateRef.current = conversationState;
 
   useEffect(() => {
     let active = true;
@@ -144,7 +148,17 @@ export function App({
     });
   }
 
+  /**
+   * Every activation path clears conversation selection before the new project
+   * becomes active so sendTurn cannot target a foreign conversation.
+   */
+  function clearConversationScope() {
+    dispatchConversation({ type: "conversation_selected", conversationId: null });
+    setSendError(null);
+  }
+
   async function activateProject(project: ProjectDto) {
+    clearConversationScope();
     const selected = await gateway.selectProject(project.id);
     upsertProject(selected);
     setActiveProject(selected);
@@ -154,11 +168,11 @@ export function App({
   async function selectProject(projectId: string) {
     setBusy(true);
     try {
+      clearConversationScope();
       const project = await gateway.selectProject(projectId);
       upsertProject(project);
       setActiveProject(project);
       setError(null);
-      dispatchConversation({ type: "conversation_selected", conversationId: null });
     } catch (cause) {
       setError(normalizeProjectGatewayError(cause));
     } finally {
@@ -210,7 +224,12 @@ export function App({
       dispatchConversation({ type: "conversation_created", conversation });
       dispatchConversation({
         type: "timeline_loaded",
-        timeline: { conversationId: conversation.id, messages: [], events: [] },
+        timeline: {
+          conversationId: conversation.id,
+          messages: [],
+          events: [],
+          runs: [],
+        },
       });
     } catch (cause) {
       console.error("Failed to create conversation.", cause);
@@ -231,11 +250,33 @@ export function App({
     }
   }
 
-  async function sendTurn(content: string) {
-    if (!activeProject) return;
+  async function sendTurn(content: string): Promise<void> {
+    if (!activeProject) {
+      throw new Error("No active project.");
+    }
     setSending(true);
+    setSendError(null);
+
+    const state = conversationStateRef.current;
+    let conversationId = state.selectedConversationId;
+    let conversationProjectId: string | null = null;
+
+    if (conversationId) {
+      for (const [projectId, list] of Object.entries(state.conversationsByProject)) {
+        if (list.some((item) => item.id === conversationId)) {
+          conversationProjectId = projectId;
+          break;
+        }
+      }
+    }
+
+    // Never send against a conversation owned by another project.
+    if (conversationId && conversationProjectId !== activeProject.id) {
+      conversationId = null;
+      dispatchConversation({ type: "conversation_selected", conversationId: null });
+    }
+
     try {
-      let conversationId = conversationState.selectedConversationId;
       if (!conversationId) {
         const conversation = await conversationGateway.createConversation(
           activeProject.id,
@@ -243,22 +284,28 @@ export function App({
         );
         dispatchConversation({ type: "conversation_created", conversation });
         conversationId = conversation.id;
+      } else if (
+        !conversationBelongsToProject(
+          conversationStateRef.current,
+          conversationId,
+          activeProject.id,
+        )
+      ) {
+        throw new Error("Conversation is not in the active project.");
       }
 
-      dispatchConversation({
-        type: "user_message_appended",
-        conversationId,
-        message: {
-          id: `local-${crypto.randomUUID()}`,
-          role: "user",
-          content: content.trim(),
-          createdAt: new Date().toISOString(),
-        },
-      });
-
       await conversationGateway.sendTurn(conversationId, content);
+
+      // Snapshot user message + runs from the gateway (no unqualified local success).
+      // Merge keeps any stream deltas that arrived while this load was in flight.
+      const timeline = await conversationGateway.loadTimeline(conversationId);
+      dispatchConversation({ type: "timeline_loaded", timeline });
     } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "发送失败，请重试。";
+      setSendError(message);
       console.error("Failed to send turn.", cause);
+      throw cause instanceof Error ? cause : new Error(message);
     } finally {
       setSending(false);
     }
@@ -280,9 +327,9 @@ export function App({
   );
   const activeTimeline = selectActiveTimeline(conversationState);
   const activeRun = selectActiveRun(conversationState);
-  const showMockBadge = Boolean(
-    isMockRuntime && conversationState.selectedConversationId,
-  );
+  // Mock badge is visible whenever the mock gateway is active and a project is selected,
+  // including before the first send — it must not imply real Grok connectivity.
+  const showMockBadge = Boolean(isMockRuntime && activeProject);
 
   if (loading) {
     return <main className="app-loading">正在加载工作台…</main>;
@@ -321,9 +368,10 @@ export function App({
           onCancelRun={() => void cancelActiveRun()}
           onNewProject={() => setNewProjectOpen(true)}
           onOpenProject={() => void openProject()}
-          onSendTurn={(content) => void sendTurn(content)}
+          onSendTurn={sendTurn}
           project={activeProject}
           run={activeRun}
+          sendError={sendError}
           sending={sending}
           showMockBadge={showMockBadge}
           timeline={activeTimeline}

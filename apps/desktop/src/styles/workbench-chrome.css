@@ -46,8 +46,22 @@
   color: var(--text-tertiary);
 }
 
+/* Kill mouse-focus ring; restore a clear keyboard focus state. */
 .composer textarea:focus {
   outline: none;
+}
+
+.composer textarea:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.composer__error {
+  margin: 0 14px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--danger, #c44);
 }
 
 .composer__footer {

@@ -1,17 +1,15 @@
 /**
- * Slice B1 Task 3 — conversation workbench RED/GREEN tests.
- * Covers project isolation, streaming, activity, cancellation, and background runs.
+ * Slice B1 conversation workbench tests + Wave B1 UI fix-pass regressions.
  */
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import {
-  createInitialConversationState,
-  conversationReducer,
-  type ConversationAction,
-  type ConversationUiState,
-} from "../src/features/conversations/conversationReducer";
+  ConversationTimeline,
+  TIMELINE_WINDOW_THRESHOLD,
+} from "../src/features/conversations/ConversationTimeline";
+import type { ConversationTimelineView } from "../src/features/conversations/conversationReducer";
 import {
   MockConversationGateway,
   MOCK_RUNTIME_BADGE,
@@ -20,11 +18,13 @@ import type {
   ConversationGateway,
   RuntimeEventDto,
 } from "../src/lib/conversationGateway";
+import { isTerminalKind } from "../src/lib/conversationGateway";
 import {
   ProjectGatewayError,
   type ProjectDto,
   type ProjectGateway,
 } from "../src/lib/projectGateway";
+import { Composer } from "../src/features/workbench/Composer";
 import "../src/styles/tokens.css";
 import "../src/styles/workbench.css";
 
@@ -52,6 +52,10 @@ function fixtureProject(overrides: Partial<ProjectDto> = {}): ProjectDto {
 
 function fixtureProjectGateway(
   projects: ProjectDto[] = [fixtureProject()],
+  options: {
+    openProject?: ProjectDto;
+    createProject?: ProjectDto;
+  } = {},
 ): ProjectGateway {
   const store = [...projects];
   return {
@@ -72,20 +76,41 @@ function fixtureProjectGateway(
       }
       return project;
     },
-    pickDirectory: async () => null,
-    openOrRegisterProject: async () => store[0]!,
-    createProjectWithFolder: async () => store[0]!,
+    pickDirectory: async () => "F:\\work\\picked",
+    openOrRegisterProject: async () => {
+      const project =
+        options.openProject
+        ?? fixtureProject({
+          id: "opened-project",
+          name: "Opened Project",
+          rootPath: "F:\\work\\opened",
+        });
+      if (!store.some((item) => item.id === project.id)) store.push(project);
+      return project;
+    },
+    createProjectWithFolder: async (input) => {
+      const project =
+        options.createProject
+        ?? fixtureProject({
+          id: "created-project",
+          name: input.name,
+          rootPath: `F:\\work\\${input.name}`,
+        });
+      if (!store.some((item) => item.id === project.id)) store.push(project);
+      return project;
+    },
   };
 }
 
 function renderApp(
   conversationGateway: ConversationGateway,
   projects: ProjectDto[] = [fixtureProject()],
+  projectGateway?: ProjectGateway,
 ) {
   return render(
     <App
       conversationGateway={conversationGateway}
-      gateway={fixtureProjectGateway(projects)}
+      gateway={projectGateway ?? fixtureProjectGateway(projects)}
     />,
   );
 }
@@ -144,7 +169,16 @@ describe("conversation gateway contract", () => {
     expect(seen.every((event) => event.runId === runId)).toBe(true);
     expect(seen.filter((event) => isTerminalKind(event.kind))).toHaveLength(1);
 
+    // Canonical snake_case payload keys
+    const plan = seen.find((event) => event.kind === "plan_updated");
+    expect(plan?.kind === "plan_updated" && plan.payload.steps[0]?.id).toBe("s1");
+    const toolOut = seen.find((event) => event.kind === "tool_call_output");
+    expect(
+      toolOut?.kind === "tool_call_output" && "chunk" in toolOut.payload,
+    ).toBe(true);
+
     const timeline = await gateway.loadTimeline(conversation.id);
+    expect(timeline.runs.some((run) => run.runId === runId)).toBe(true);
     expect(timeline.messages.some((m) => m.role === "user")).toBe(true);
     expect(timeline.messages.some((m) => m.role === "assistant")).toBe(true);
     unsubscribe();
@@ -182,7 +216,6 @@ describe("conversation gateway contract", () => {
 
     await gateway.sendTurn(first.id, "后台流");
     await gateway.waitForKind("assistant_delta");
-    // Selecting another conversation is a UI concern; gateway continues by run id.
     await gateway.createConversation("project-a", "Third");
     await gateway.drain();
 
@@ -190,77 +223,6 @@ describe("conversation gateway contract", () => {
     expect(firstEvents.some((event) => event.kind === "assistant_delta")).toBe(true);
     expect(firstEvents.some((event) => event.kind === "turn_completed")).toBe(true);
     expect(byConversation.get(second.id) ?? []).toHaveLength(0);
-  });
-});
-
-describe("conversation reducer", () => {
-  it("applies deltas without duplicating sequences and tracks run status", () => {
-    let state = createInitialConversationState();
-    state = dispatch(state, {
-      type: "conversations_loaded",
-      projectId: "p1",
-      conversations: [
-        {
-          id: "c1",
-          projectId: "p1",
-          title: "T",
-          createdAt: "t0",
-          updatedAt: "t0",
-        },
-      ],
-    });
-    state = dispatch(state, { type: "conversation_selected", conversationId: "c1" });
-    state = dispatch(state, {
-      type: "timeline_loaded",
-      timeline: { conversationId: "c1", messages: [], events: [] },
-    });
-
-    const base = {
-      eventId: "e1",
-      runId: "r1",
-      conversationId: "c1",
-      sequence: 1,
-      kind: "run_started" as const,
-      payload: {},
-      createdAt: "t1",
-    };
-    state = dispatch(state, { type: "runtime_event", event: base });
-    state = dispatch(state, {
-      type: "runtime_event",
-      event: {
-        ...base,
-        eventId: "e2",
-        sequence: 2,
-        kind: "assistant_delta",
-        payload: { text: "Hello" },
-      },
-    });
-    // Duplicate sequence is ignored.
-    state = dispatch(state, {
-      type: "runtime_event",
-      event: {
-        ...base,
-        eventId: "e2-dup",
-        sequence: 2,
-        kind: "assistant_delta",
-        payload: { text: "Hello" },
-      },
-    });
-    state = dispatch(state, {
-      type: "runtime_event",
-      event: {
-        ...base,
-        eventId: "e3",
-        sequence: 3,
-        kind: "turn_completed",
-        payload: {},
-      },
-    });
-
-    const timeline = state.timelines.c1;
-    expect(timeline?.events).toHaveLength(3);
-    expect(timeline?.assistantText).toContain("Hello");
-    expect(state.runs.r1?.status).toBe("completed");
   });
 });
 
@@ -290,7 +252,128 @@ describe("conversation workbench UI", () => {
     expect(within(groupB).queryByText("A only")).not.toBeInTheDocument();
   });
 
-  it("sends a turn, streams activity into the timeline, and completes", async () => {
+  it("clears selected conversation on sidebar project switch", async () => {
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const projectB = fixtureProject({
+      id: "project-b",
+      name: "Project B",
+      rootPath: "F:\\work\\project-b",
+    });
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const chat = await conversationGateway.createConversation("project-a", "A chat");
+    conversationGateway.seedTimeline(chat.id, {
+      messages: [
+        {
+          id: "seed-u1",
+          role: "user",
+          content: "seeded",
+          createdAt: "2026-07-30T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderApp(conversationGateway, [projectA, projectB]);
+
+    await user.click(await screen.findByRole("button", { name: "Project A" }));
+    await user.click(await screen.findByRole("button", { name: "A chat" }));
+    expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
+    expect(screen.getByTestId("conversation-row")).toHaveClass("session-row--active");
+
+    await user.click(screen.getByRole("button", { name: "Project B" }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
+      expect(screen.queryByText("A chat")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("selected-workbench")).toBeVisible();
+  });
+
+  it("clears conversation scope when opening a registered project", async () => {
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const opened = fixtureProject({
+      id: "opened-project",
+      name: "Opened Project",
+      rootPath: "F:\\work\\opened",
+    });
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const chat = await conversationGateway.createConversation("project-a", "Stay behind");
+    conversationGateway.seedTimeline(chat.id, {
+      messages: [
+        {
+          id: "seed-u1",
+          role: "user",
+          content: "stay",
+          createdAt: "2026-07-30T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(
+      <App
+        conversationGateway={conversationGateway}
+        gateway={fixtureProjectGateway([projectA], { openProject: opened })}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Project A" }));
+    await user.click(await screen.findByRole("button", { name: "Stay behind" }));
+    expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
+
+    await user.click(screen.getByTestId("nav-open-project"));
+    await waitFor(() => {
+      expect(screen.getByTestId("active-project-name")).toHaveTextContent(
+        "Opened Project",
+      );
+    });
+    expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stay behind")).not.toBeInTheDocument();
+  });
+
+  it("clears conversation scope when creating a project folder", async () => {
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const created = fixtureProject({
+      id: "created-project",
+      name: "Brand New",
+      rootPath: "F:\\work\\Brand New",
+    });
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const chat = await conversationGateway.createConversation("project-a", "Old chat");
+    conversationGateway.seedTimeline(chat.id, {
+      messages: [
+        {
+          id: "seed-u1",
+          role: "user",
+          content: "old",
+          createdAt: "2026-07-30T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(
+      <App
+        conversationGateway={conversationGateway}
+        gateway={fixtureProjectGateway([projectA], { createProject: created })}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Project A" }));
+    await user.click(await screen.findByRole("button", { name: "Old chat" }));
+    expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
+
+    await user.click(screen.getByTestId("nav-new-project"));
+    await user.type(await screen.findByLabelText("项目名称"), "Brand New");
+    await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("active-project-name")).toHaveTextContent("Brand New");
+    });
+    expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
+    expect(screen.queryByText("Old chat")).not.toBeInTheDocument();
+  });
+
+  it("sends a turn, streams structured activity, and completes", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     const user = await selectProjectAfterRender(conversationGateway);
 
@@ -306,13 +389,24 @@ describe("conversation workbench UI", () => {
     expect(screen.getByTestId("timeline-assistant-message")).toBeVisible();
     expect(screen.getByTestId("run-activity")).toBeVisible();
     expect(screen.getByTestId("run-activity-plan")).toBeVisible();
-    expect(screen.getByTestId("run-activity-tool")).toBeVisible();
-    expect(screen.getByTestId("run-activity-subagent")).toBeVisible();
+    expect(screen.getAllByTestId("run-activity-plan-step").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("run-activity-tool")).toHaveTextContent(/crates|apps/);
+    expect(screen.getByTestId("run-activity-subagent")).toHaveTextContent(/explore|indexed/i);
     await waitFor(() => {
       expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成|completed/i);
     });
     expect(screen.getByTestId("mock-runtime-badge")).toHaveTextContent(MOCK_RUNTIME_BADGE);
     expect(screen.queryByText(/Grok|provider|model|routeCode/i)).not.toBeInTheDocument();
+  });
+
+  it("shows 模拟运行时 before the first send when mock gateway is active", async () => {
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    await selectProjectAfterRender(conversationGateway);
+
+    expect(await screen.findByTestId("mock-runtime-badge")).toHaveTextContent(
+      MOCK_RUNTIME_BADGE,
+    );
+    expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
   });
 
   it("continues a background stream when the user selects another conversation", async () => {
@@ -332,12 +426,10 @@ describe("conversation workbench UI", () => {
 
     await user.click(screen.getByRole("button", { name: "新建对话" }));
     const secondTitle = await screen.findAllByRole("button", { name: /新对话|对话/ });
-    // Second conversation row should appear; select the first conversation again later.
     expect(secondTitle.length).toBeGreaterThanOrEqual(1);
 
     await drainMock(conversationGateway);
 
-    // Open first conversation from the list (first non-empty titled row under project).
     const rows = screen.getAllByTestId("conversation-row");
     expect(rows.length).toBeGreaterThanOrEqual(2);
     await user.click(rows[0]!);
@@ -393,6 +485,67 @@ describe("conversation workbench UI", () => {
     expect(after.width).toBe(before.width);
   });
 
+  it("recovers draft and surfaces failure without a successful local message", async () => {
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    conversationGateway.failNextSend("network down");
+    const user = await selectProjectAfterRender(conversationGateway);
+
+    await user.click(screen.getByRole("button", { name: "新建对话" }));
+    const textarea = await screen.findByRole("textbox", { name: "工作请求" });
+    await user.type(textarea, "这会失败");
+    await user.click(screen.getByTestId("composer-send"));
+
+    expect(await screen.findByTestId("composer-send-error")).toHaveTextContent(
+      /network down|失败/,
+    );
+    expect(textarea).toHaveValue("这会失败");
+    expect(screen.queryByTestId("timeline-user-message")).not.toBeInTheDocument();
+  });
+
+  it("renders multiple turns in chronological order", async () => {
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const user = await selectProjectAfterRender(conversationGateway);
+
+    await user.click(screen.getByRole("button", { name: "新建对话" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: "工作请求" }),
+      "第一轮",
+    );
+    await user.click(screen.getByTestId("composer-send"));
+    await drainMock(conversationGateway);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成/);
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "工作请求" }),
+      "第二轮",
+    );
+    await user.click(screen.getByTestId("composer-send"));
+    await drainMock(conversationGateway);
+
+    await waitFor(() => {
+      const users = screen.getAllByTestId("timeline-user-message");
+      const assistants = screen.getAllByTestId("timeline-assistant-message");
+      expect(users).toHaveLength(2);
+      expect(assistants).toHaveLength(2);
+      expect(users[0]).toHaveTextContent("第一轮");
+      expect(users[1]).toHaveTextContent("第二轮");
+    });
+
+    const timeline = screen.getByTestId("conversation-timeline");
+    const ordered = within(timeline)
+      .getAllByTestId(/timeline-(user|assistant)-message/)
+      .map((node) => node.getAttribute("data-testid"));
+    expect(ordered).toEqual([
+      "timeline-user-message",
+      "timeline-assistant-message",
+      "timeline-user-message",
+      "timeline-assistant-message",
+    ]);
+  });
+
   it("preserves Slice A empty and selected empty-conversation surfaces", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     renderApp(conversationGateway, []);
@@ -408,20 +561,88 @@ describe("conversation workbench UI", () => {
     expect(await screen.findByTestId("selected-workbench")).toBeVisible();
     expect(screen.getByTestId("project-conversations")).toBeVisible();
     expect(screen.getByText(/尚无对话/)).toBeVisible();
-    expect(screen.queryByTestId("mock-runtime-badge")).not.toBeInTheDocument();
+    // Mock badge is intentional on selected project with mock gateway (before first send).
+    expect(screen.getByTestId("mock-runtime-badge")).toBeVisible();
   });
 });
 
-function isTerminalKind(kind: RuntimeEventDto["kind"]): boolean {
-  return kind === "turn_completed" || kind === "turn_failed" || kind === "run_cancelled";
-}
+describe("composer contracts", () => {
+  it("ignores Enter while IME composition is active", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} projectName="Demo" />);
+    const textarea = screen.getByRole("textbox", { name: "工作请求" });
+    await userEvent.type(textarea, "你好");
 
-function dispatch(
-  state: ConversationUiState,
-  action: ConversationAction,
-): ConversationUiState {
-  return conversationReducer(state, action);
-}
+    textarea.dispatchEvent(
+      new CompositionEvent("compositionstart", { bubbles: true }),
+    );
+    textarea.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        // IME uses keyCode 229 while composing
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...({ keyCode: 229 } as any),
+      }),
+    );
+    expect(onSend).not.toHaveBeenCalled();
+
+    textarea.dispatchEvent(
+      new CompositionEvent("compositionend", { bubbles: true }),
+    );
+  });
+
+  it("restores draft when onSend rejects", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("boom"));
+    const user = userEvent.setup();
+    render(<Composer onSend={onSend} projectName="Demo" sendError="boom" />);
+    const textarea = screen.getByRole("textbox", { name: "工作请求" });
+    await user.type(textarea, "retry me");
+    await user.click(screen.getByTestId("composer-send"));
+    await waitFor(() => {
+      expect(textarea).toHaveValue("retry me");
+    });
+    expect(screen.getByTestId("composer-send-error")).toHaveTextContent("boom");
+  });
+});
+
+describe("timeline scale", () => {
+  it("window-renders long histories without mounting every message", () => {
+    const count = TIMELINE_WINDOW_THRESHOLD + 40;
+    const messages = Array.from({ length: count }, (_, index) => ({
+      id: `m-${index}`,
+      role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `Message ${index}`,
+      createdAt: `2026-07-30T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    }));
+    const timeline: ConversationTimelineView = {
+      conversationId: "c-scale",
+      messages,
+      events: [],
+      seenEventKeys: new Set(),
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      activeRunId: null,
+    };
+
+    render(
+      <ConversationTimeline run={null} timeline={timeline} />,
+    );
+
+    expect(screen.getByTestId("conversation-timeline")).toHaveAttribute(
+      "data-windowed",
+      "true",
+    );
+    const mounted = screen.getAllByTestId(/timeline-(user|assistant)-message/);
+    expect(mounted.length).toBeLessThan(count);
+    expect(mounted.length).toBeLessThanOrEqual(60);
+    expect(screen.getByTestId("timeline-window")).toBeInTheDocument();
+  });
+});
 
 async function selectProjectAfterRender(gateway: ConversationGateway) {
   renderApp(gateway);

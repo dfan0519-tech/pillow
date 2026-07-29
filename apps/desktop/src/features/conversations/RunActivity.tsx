@@ -25,6 +25,13 @@ const STATUS_LABEL: Record<string, string> = {
   interrupted: "已中断",
 };
 
+const STEP_STATUS_LABEL: Record<string, string> = {
+  pending: "待办",
+  active: "进行中",
+  completed: "完成",
+  failed: "失败",
+};
+
 export function RunActivity({ timeline, run }: RunActivityProps) {
   const hasActivity =
     timeline.plan
@@ -42,7 +49,12 @@ export function RunActivity({ timeline, run }: RunActivityProps) {
       data-testid="run-activity"
     >
       {run ? (
-        <div className="run-activity__status" data-testid="run-status">
+        <div
+          aria-live="polite"
+          aria-atomic="true"
+          className="run-activity__status"
+          data-testid="run-status"
+        >
           <span
             className={
               isRunActive(run)
@@ -63,10 +75,19 @@ export function RunActivity({ timeline, run }: RunActivityProps) {
 
       {timeline.plan ? (
         <div className="run-activity__block" data-testid="run-activity-plan">
-          <h3>{timeline.plan.title}</h3>
+          <h3>计划</h3>
           <ol>
             {timeline.plan.steps.map((step) => (
-              <li key={step}>{step}</li>
+              <li
+                data-status={step.status}
+                data-testid="run-activity-plan-step"
+                key={step.id}
+              >
+                <span className="run-activity__item-title">{step.title}</span>
+                <span className="run-activity__item-meta">
+                  {STEP_STATUS_LABEL[step.status] ?? step.status}
+                </span>
+              </li>
             ))}
           </ol>
         </div>
@@ -81,7 +102,7 @@ export function RunActivity({ timeline, run }: RunActivityProps) {
                 <span className="run-activity__item-title">{tool.title}</span>
                 <span className="run-activity__item-meta">{tool.status}</span>
                 {tool.output ? (
-                  <p className="run-activity__item-detail">{tool.output}</p>
+                  <pre className="run-activity__item-detail">{tool.output}</pre>
                 ) : null}
               </li>
             ))}

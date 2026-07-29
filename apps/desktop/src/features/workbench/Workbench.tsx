@@ -14,10 +14,11 @@ type WorkbenchProps = {
   project: ProjectDto | null;
   onOpenProject: () => void;
   onNewProject: () => void;
-  onSendTurn: (content: string) => void;
+  onSendTurn: (content: string) => void | Promise<void>;
   onCancelRun: () => void;
   busy?: boolean;
   sending?: boolean;
+  sendError?: string | null;
   timeline: ConversationTimelineView | null;
   run: RunView | null;
   showMockBadge?: boolean;
@@ -38,6 +39,7 @@ export function Workbench({
   onCancelRun,
   busy = false,
   sending = false,
+  sendError = null,
   timeline,
   run,
   showMockBadge = false,
@@ -91,6 +93,11 @@ export function Workbench({
             />
           ) : project ? (
             <div className="stage-empty" data-testid="selected-workbench">
+              {showMockBadge ? (
+                <div className="mock-runtime-badge" data-testid="mock-runtime-badge">
+                  {mockBadgeLabel}
+                </div>
+              ) : null}
               <IconKeeperMark size={40} title="Keeper" />
               <h2>Keeper</h2>
               <p>从一个清晰的任务开始。计划与变更会在这里展开。</p>
@@ -113,6 +120,7 @@ export function Workbench({
           onOpenProject={onOpenProject}
           onSend={onSendTurn}
           projectName={project?.name ?? null}
+          sendError={sendError}
           sending={sending}
         />
       </section>

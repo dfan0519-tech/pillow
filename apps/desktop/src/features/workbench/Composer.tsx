@@ -12,9 +12,11 @@ type ComposerProps = {
   busy?: boolean;
   sending?: boolean;
   canCancel?: boolean;
+  sendError?: string | null;
   onOpenProject?: () => void;
   onNewProject?: () => void;
-  onSend?: (content: string) => void;
+  /** Resolves on success; rejects so the composer can restore the draft. */
+  onSend?: (content: string) => void | Promise<void>;
   onCancelRun?: () => void;
 };
 
@@ -30,31 +32,42 @@ export function Composer({
   busy = false,
   sending = false,
   canCancel = false,
+  sendError = null,
   onOpenProject,
   onNewProject,
   onSend,
   onCancelRun,
 }: ComposerProps) {
   const [draft, setDraft] = useState("");
+  const [composing, setComposing] = useState(false);
   const canSend =
     !disabled && !busy && !sending && !canCancel && draft.trim().length > 0;
 
-  function submit() {
+  async function submit() {
     const content = draft.trim();
     if (!content || !canSend || !onSend) return;
-    onSend(content);
     setDraft("");
+    try {
+      await onSend(content);
+    } catch {
+      // Preserve / recover draft after a failed send.
+      setDraft(content);
+    }
   }
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    submit();
+    void submit();
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Ignore Enter while IME composition is active (e.g. Chinese/Japanese).
+    if (event.nativeEvent.isComposing || event.keyCode === 229 || composing) {
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      submit();
+      void submit();
     }
   }
 
@@ -73,6 +86,8 @@ export function Composer({
           disabled={disabled || canCancel}
           id="work-request"
           onChange={(event) => setDraft(event.target.value)}
+          onCompositionEnd={() => setComposing(false)}
+          onCompositionStart={() => setComposing(true)}
           onKeyDown={handleKeyDown}
           placeholder={
             disabled
@@ -84,6 +99,11 @@ export function Composer({
           rows={2}
           value={draft}
         />
+        {sendError ? (
+          <p className="composer__error" data-testid="composer-send-error" role="alert">
+            {sendError}
+          </p>
+        ) : null}
         <div className="composer__footer">
           <div className="composer__context">
             {projectName ? (

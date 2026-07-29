@@ -1,5 +1,6 @@
 /**
- * Capture empty / selected shell screenshots at 1440x960 and 1024x720.
+ * Capture shell screenshots at supported Windows sizes.
+ * States: empty, selected (Slice A), streaming, cancelled (B1 conversation).
  * Uses system Edge/Chrome + Vite preview of the screenshot harness.
  */
 import { createRequire } from "node:module";
@@ -54,6 +55,34 @@ function resolveModule(name) {
   }
 }
 
+async function driveStreaming(page, mode) {
+  await page.waitForSelector("[data-testid='active-project-name']");
+  await page.click('button:has-text("新建对话")');
+  await page.waitForSelector("#work-request:not([disabled])");
+  await page.fill("#work-request", mode === "cancelled" ? "cancel capture" : "stream capture");
+  await page.click("[data-testid='composer-send']");
+  await page.waitForSelector("[data-testid='timeline-user-message']", {
+    timeout: 10_000,
+  });
+  if (mode === "cancelled") {
+    await page.waitForSelector("[data-testid='composer-cancel']", { timeout: 10_000 });
+    await page.click("[data-testid='composer-cancel']");
+    await page.waitForFunction(
+      () => {
+        const status = document.querySelector("[data-testid='run-status']");
+        return status && /已取消|cancelled/i.test(status.textContent ?? "");
+      },
+      { timeout: 10_000 },
+    );
+  } else {
+    await page.waitForSelector("[data-testid='timeline-assistant-message']", {
+      timeout: 10_000,
+    });
+    await page.waitForSelector("[data-testid='run-activity']", { timeout: 10_000 });
+  }
+  await page.waitForTimeout(200);
+}
+
 async function main() {
   await mkdir(outDir, { recursive: true });
   const browserPath = await resolveBrowser();
@@ -86,6 +115,20 @@ async function main() {
     { state: "empty", width: 1024, height: 720, file: "empty-1024x720.png" },
     { state: "selected", width: 1440, height: 960, file: "selected-1440x960.png" },
     { state: "selected", width: 1024, height: 720, file: "selected-1024x720.png" },
+    {
+      state: "selected",
+      width: 1440,
+      height: 960,
+      file: "streaming-1440x960.png",
+      drive: "streaming",
+    },
+    {
+      state: "selected",
+      width: 1440,
+      height: 960,
+      file: "cancelled-1440x960.png",
+      drive: "cancelled",
+    },
   ];
 
   const browser = await chromium.launch({
@@ -103,7 +146,9 @@ async function main() {
         waitUntil: "networkidle",
       });
       await waitForReady(page);
-      if (shot.state === "selected") {
+      if (shot.drive) {
+        await driveStreaming(page, shot.drive);
+      } else if (shot.state === "selected") {
         await page.waitForSelector("[data-testid='active-project-name']");
       } else {
         await page.waitForSelector("[data-testid='empty-workbench']");
