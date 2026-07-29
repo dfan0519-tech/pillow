@@ -63,9 +63,12 @@ Acceptance Fix 1 (closes controller Important findings without redesign):
 
 | SHA | Message |
 | --- | --- |
-| *(tip of this fix series on `integration/slice-b1`)* | atomic event+status, active-run cleanup, graceful shutdown, E2E process truth |
+| `b6efde6` | `feat(storage): atomic append_event_with_status for event and run status` |
+| `f19a2aa` | `fix(desktop): active-run cleanup and graceful conversation shutdown` |
+| `8e6a6b6` | `fix(desktop): wait for graceful exit and clean process snapshots in E2E` |
+| `db93aa5` | `docs(verification): record Task 4 Acceptance Fix 1 gate evidence` |
 
-See `git log cfcb5c4..HEAD --oneline` for the fix commit SHAs after this report lands.
+Tip of Acceptance Fix 1: `c1b327b`.
 
 Task 4 surfaces:
 
