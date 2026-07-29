@@ -6,7 +6,7 @@ Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\integration-slice-b1`
 
 Branch: `integration/slice-b1`
 
-Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 4 (Replay + Pump Truth)**
+Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 5 (Replay Idempotency + Renderer Truth + Pump Fail-Closed)**
 
 ## Explicit non-claim
 
@@ -111,7 +111,16 @@ Acceptance Fix 4 — Replay + Pump Truth (closes two independent P1 truth gaps):
 Primary Fix 4 tip for controller citation: **`33b4edc`** (implementation).
 Docs evidence tip: **`f137f91`** (pin commit may follow for self-SHA).
 
-Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4:
+Acceptance Fix 5 — Replay Idempotency + Renderer Truth + Pump Fail-Closed:
+
+| SHA | Message |
+| --- | --- |
+| `eb99b9b` | `fix(session): same-kind replay skips status; emit from recorded; pump fail-closed` |
+| *(docs commit — filled after commit)* | `docs(verification): record Task 4 Acceptance Fix 5 evidence` |
+
+Primary Fix 5 tip for controller citation: **`eb99b9b`** (implementation).
+
+Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4 + Fix 5:
 
 | Wave | SHA |
 | --- | --- |
@@ -121,6 +130,8 @@ Exact SHAs to pin for Fix 2 + Closeout + Fix 3 + Fix 4:
 | Acceptance Fix 3 | `28180e4` |
 | Acceptance Fix 4 (code) | `33b4edc` |
 | Acceptance Fix 4 (docs) | `f137f91` |
+| Acceptance Fix 5 (code) | `eb99b9b` |
+| Acceptance Fix 5 (docs) | *(pin after commit)* |
 
 Task 4 surfaces:
 
@@ -178,23 +189,45 @@ close after publishing evidence so the E2E path exercises app exit, not only
   Same-kind different-payload replay returns the first durable event
   (`same_kind_replay_first_payload_wins`). Status advancement is never based on
   a conflicting event.
+- **Fix 5:** `append_event_with_status` applies `target_status` **only on first
+  insert**. Same-kind replay returns the persisted event without applying,
+  reverting, or revalidating a status transition. Proven for early
+  `run_started` replay after the run has advanced to `Cancelling` and
+  `Completed` (`same_kind_run_started_replay_ignores_status_after_later_states`).
+  Different-kind rejection and first-payload-wins remain.
 - Service test `persistence_commits_before_renderer_emit`:
   `RecordingEmitter` opens a **second** SQLite connection at emit time and
   asserts both the event row and the resulting status (`Running` /
   `Completed` / …) are already durable.
+- **Fix 5 renderer truth:** `process_runtime_event` builds the emitted DTO via
+  `runtime_event_dto` from the **persisted** `RunEvent` (`payload_json`, `kind`,
+  sequence, timestamps) — not from the incoming validated payload. Same-kind
+  replay with a replacement payload re-emits the first durable payload
+  (`process_runtime_event_emits_persisted_payload_on_same_kind_replay`).
 
 ### Active-run cleanup
 
 - Completed / failed / cancelled / pump-error pumps remove their exact `RunId`
   from the service `active` registry (no foreign-key delete) **only after** the
   run is durably terminal.
-- **Fix 4:** renderer emit failure is non-authoritative — the pump logs it and
-  continues so SQLite still reaches the real terminal event
+- **Fix 4 / Fix 5:** renderer emit failure is non-authoritative — the pump logs
+  it and continues so SQLite still reaches the real terminal event
   (`failing_emitter_still_reaches_completed_with_zero_residuals`). Authoritative
-  validation/persistence/delivery failures attempt `Interrupted` without
-  inventing a terminal runtime event
-  (`pump_processing_failure_interrupts_or_fail_closed`). If terminalization
-  itself fails, the residual active entry is kept so drain/shutdown fail closed.
+  processing failures attempt `Interrupted` without inventing a terminal
+  runtime event.
+- **Fix 5 real pump fail-closed (deterministic seams, production defaults
+  unchanged):**
+  1. `real_pump_authoritative_process_failure_interrupts_cleanly` forces an
+     authoritative process error inside a real service pump
+     (`PumpRegistrationHooks.force_process_error`) → durable `Interrupted`, no
+     invented terminal event, active/workers/slots zero, drain succeeds.
+  2. `real_pump_terminalization_failure_fail_closed_on_drain_and_shutdown`
+     forces process failure **and** terminalization residual
+     (`force_terminalization_failure`) → active entry retained; short bounded
+     `drain` and `shutdown_with_timeout` both return actionable failure
+     (`drain_timeout` / `shutdown_incomplete`). Public `shutdown` remains 15s.
+  These prove the pump thread + registry + drain/shutdown path at the seams;
+  they do not claim broader fault coverage than those deterministic boundaries.
 - Observable helpers: `ConversationService::active_run_count()`,
   `worker_registry_len()`, `in_flight_turns()`.
 - Tests:
@@ -310,7 +343,42 @@ rather than inferring readiness from host worker idleness alone.
 
 ## Gate commands and results
 
-### Acceptance Fix 4 gates (Replay + Pump Truth — this pass)
+### Acceptance Fix 5 gates (Replay Idempotency + Renderer Truth + Pump Fail-Closed — this pass)
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
+| Unit tests (JS) | `pnpm test` | PASS — **80** tests |
+| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
+| Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1265` within 2500 ms budget |
+| Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
+| Line budget | changed sources in `main...HEAD` ≤ 500 lines | PASS |
+| Worktree | `git status --short` | clean after Fix 5 code + docs commits |
+
+Desktop Rust lib tests after Fix 5: **29** (includes Fix 5 real-pump + emit regressions).
+Integration: **7**. Storage: new `conversation_event_replay_status` binary.
+
+Focused Fix 5 regressions:
+
+- `same_kind_run_started_replay_ignores_status_after_later_states` — PASS
+- `same_kind_replay_first_payload_wins` — PASS (retained)
+- `conflicting_kind_replay_rejected_leaves_status_on_second_connection` — PASS (retained)
+- `process_runtime_event_emits_persisted_payload_on_same_kind_replay` — PASS
+- `real_pump_authoritative_process_failure_interrupts_cleanly` — PASS
+- `real_pump_terminalization_failure_fail_closed_on_drain_and_shutdown` — PASS
+- `failing_emitter_still_reaches_completed_with_zero_residuals` — PASS (retained)
+
+Release smoke summary (this machine, Fix 5):
+
+```text
+KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1278,"startupBudgetMs":2500,"startupMs":1265,"webviewProfile":"temporary-and-populated","readiness":"list-projects-and-lifecycle-command"}
+```
+
+### Acceptance Fix 4 gates (Replay + Pump Truth — historical)
 
 | Gate | Command | Result |
 | --- | --- | --- |
@@ -334,7 +402,7 @@ Focused Fix 4 regressions:
 - `conflicting_kind_replay_rejected_leaves_status_on_second_connection` — PASS
 - `same_kind_replay_first_payload_wins` — PASS
 - `failing_emitter_still_reaches_completed_with_zero_residuals` — PASS
-- `pump_processing_failure_interrupts_or_fail_closed` — PASS
+- `pump_processing_failure_interrupts_or_fail_closed` — PASS (helper-only; superseded as sole proof by Fix 5 real-pump tests)
 
 Release smoke summary (this machine, Fix 4):
 
@@ -526,6 +594,11 @@ while leaving status unchanged; send_turn/shutdown admission race leaving
 Pending runs; RuntimeHost adapter teardown before admitted sync turns finished
 (`SessionNotFound` accepted as normal race); ExitRequested continuing exit after
 failed drain; E2E gracefulExit without shutdown-success marker + exit 0.)
+
+(Removed after Acceptance Fix 5: same-kind replay reapplying event-derived
+status after later states; renderer DTO built from incoming validated payload
+instead of persisted event; helper-only `ensure_interrupted` as sole fail-closed
+proof without traversing real pump/registry/drain/shutdown.)
 
 ## Slice B2 boundary (not done here)
 
