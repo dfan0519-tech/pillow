@@ -9,7 +9,7 @@ commit.
 | Project | Commit inspected | License | Adopted lessons |
 | --- | --- | --- | --- |
 | `anomalyco/opencode` | `7565e03536d19e850f9996c407f9bf5e932b5f7a` | MIT | provider-neutral core, package boundaries, desktop/server separation, plugin and protocol surfaces |
-| `RongleCat/grok-app` | `1c3f9c8aa3a42e869f11afb3d075f1b52843aaa9` | MIT | Tauri host, React workbench, host-owned ACP session FSM, project/session UX, permissions, resource previews |
+| `RongleCat/grok-app` | `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` | MIT | Tauri host, React workbench, host-owned ACP session FSM, project/session UX, permissions, resource previews, native folder picker |
 | `openai/codex` | `fe01054a28fa4bd04716d9ceadb410f2443a50ce` | Apache-2.0 | app-server protocol, thread persistence, tools, approvals, sandboxing, process hardening |
 | `xai-org/grok-build` | `5da6962e4adb9c857f3def762542b52b4ec3e522` | Apache-2.0 | ACP, agent lifecycle, workspace/checkpoints, tool runtime, prompt queue, MCP and plugin boundaries |
 
