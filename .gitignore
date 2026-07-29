@@ -1,0 +1,42 @@
+# Rust
+/target/
+
+# JavaScript
+/node_modules/
+**/node_modules/
+**/dist/
+**/.vite/
+
+# Tauri and packaging
+**/src-tauri/target/
+**/bundle/
+
+# Tests and diagnostics
+/coverage/
+/artifacts/
+*.log
+*.dmp
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+credentials.json
+
+# Runtime state
+/.keeper/
+/.runtime/
+*.db
+*.db-shm
+*.db-wal
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
