@@ -9,7 +9,7 @@
     "build:ui": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:e2e": "node --test tests/e2e/project-launcher.spec.ts",
+    "test:e2e": "node --test tests/e2e/project-launcher.spec.ts tests/e2e/conversation-recovery.spec.ts",
     "tauri": "tauri"
   },
   "dependencies": {
