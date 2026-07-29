@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 keeper-project = { path = "../kernel-project" }
+keeper-session = { path = "../kernel-session" }
 rusqlite.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

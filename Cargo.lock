@@ -1934,11 +1934,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-session"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-project",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "keeper-storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "keeper-project",
+ "keeper-session",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.19",

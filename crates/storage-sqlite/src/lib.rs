@@ -1,4 +1,8 @@
+mod conversation;
+mod conversation_rows;
 mod migrations;
+
+pub use conversation::SqliteConversationRepository;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
