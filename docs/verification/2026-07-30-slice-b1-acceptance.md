@@ -6,7 +6,7 @@ Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\integration-slice-b1`
 
 Branch: `integration/slice-b1`
 
-Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 2**
+Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 2 and Engineering Closeout A**
 
 ## Explicit non-claim
 
@@ -77,9 +77,18 @@ Acceptance Fix 2 (closes remaining active-pump registration race):
 
 Primary fix tip for controller citation: **`ef60c2d`** (Acceptance Fix 2).
 
+Engineering Closeout A (module split + deterministic workspace gate):
+
+| SHA | Message |
+| --- | --- |
+| `5945eab` | `refactor(desktop): split conversation service and isolate path_scope tests` |
+
+Primary Closeout A tip for controller citation: **`5945eab`**.
+
 Task 4 surfaces:
 
-- `apps/desktop/src-tauri/src/conversation_service.rs` — single owner of repository + host
+- `apps/desktop/src-tauri/src/conversation_service/` — single public owner of repository + host
+  (`service.rs`, `pipeline.rs`, `types.rs`, `ids.rs`, focused `tests/`)
 - `apps/desktop/src-tauri/src/conversation_events.rs` — typed renderer envelope
 - `apps/desktop/src-tauri/src/conversation_commands.rs` — Tauri commands + acceptance hooks
 - `apps/desktop/src/lib/tauriConversationGateway.ts` — typed invoke/listen gateway
@@ -153,16 +162,38 @@ still exists before host worker registration (pre-insert before `spawn_turn`).
 
 **Deterministic regression:**
 `pump_finish_before_handle_register_clears_active_entry` uses
-`open_with_config_and_pump_hook` to block between spawn and handle store,
-waits until `worker_registry_len() == 0` and `in_flight_turns() == 0` (pump
-finished work, parked on the gate), asserts `active_run_count() == 1` at that
-point, then releases, drains, and requires active/workers/in-flight all zero.
+`open_with_config_and_pump_hook` / `PumpRegistrationHooks` to:
+
+1. block `send_turn` between spawn and handle store
+   (`after_spawn_before_register`);
+2. fire an explicit test-only signal on the pump thread after `pump_turn`
+   returns and before `wait_until_registered` / remove
+   (`after_pump_before_registration_wait`);
+3. rendezvous on that signal, then assert `active_run_count() == 1`,
+   `worker_registry_len() == 0`, and `in_flight_turns() == 0`;
+4. release, drain, and require active/workers/in-flight all zero.
+
+This proves the pump reached the exact post-`pump_turn`, pre-remove gate
+rather than inferring readiness from host worker idleness alone.
 
 **No-delay sequential stress:**
 `no_delay_sequential_stress_clears_all_residuals` runs 32 turns with
 `honor_fixture_delays: false`, draining after each and asserting
 `active_run_count() == 0`, `worker_registry_len() == 0`,
 `in_flight_turns() == 0`, and `host_is_idle()`.
+
+### Engineering Closeout A (file size + parallel test gate)
+
+- Split oversized `conversation_service.rs` into focused modules, each
+  ≤ 500 lines. `ConversationService` remains the single public owner of
+  repository, host, emitter, active registry, and shutdown lifecycle.
+- Pure validate/persist/emit mapping lives in `conversation_service/pipeline.rs`
+  (`pub(crate)` within the module tree).
+- Tests split into `tests/core.rs`, `tests/control.rs`,
+  `tests/registration.rs` (+ shared `support.rs`).
+- `path_scope` unit tests serialize only themselves via a test mutex around
+  clear/grant/assert sequences. Production grants are unchanged; the whole
+  workspace is not serialized.
 
 ### Graceful application shutdown
 
@@ -189,13 +220,33 @@ point, then releases, drains, and requires active/workers/in-flight all zero.
 
 ## Gate commands and results
 
-### Acceptance Fix 2 gates (re-run after `ef60c2d`)
+### Engineering Closeout A gates (module split + path_scope isolation)
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
+| Desktop Rust tests | `cargo test -p keeper-ide-desktop` | PASS — 22 lib + 7 integration + 0 doctests |
+| Workspace Rust tests | `cargo test --workspace` ×2 | PASS both runs (default parallel; path_scope unit tests serialized only among themselves) |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
+| Unit tests (JS) | `pnpm test` | PASS — 80 tests |
+| Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
+| Worktree | `git status --short` | clean after Closeout A code + docs commits |
+
+Conversation-service focused evidence under Closeout A:
+
+- every created/modified Rust source file in scope ≤ 500 lines
+- `pump_finish_before_handle_register_clears_active_entry` uses explicit
+  post-`pump_turn` signal — PASS (lib)
+- `path_scope` unit tests pass under default parallel `cargo test --workspace`
+
+### Acceptance Fix 2 gates (historical; re-run after `ef60c2d`)
 
 | Gate | Command | Result |
 | --- | --- | --- |
 | Rust fmt | `node scripts/run-cargo.mjs fmt --all -- --check` | PASS |
 | Desktop Rust tests | `node scripts/run-cargo.mjs test -p keeper-ide-desktop` | PASS — 20 lib + 7 integration |
-| Workspace Rust tests | `node scripts/run-cargo.mjs test --workspace` | PASS (also re-confirmed with `RUST_TEST_THREADS=1` after a pre-existing parallel flake in `path_scope::tests::grants_allow_the_folder_and_its_children` under full suite load; path_scope uses a process-global grant map with `clear_grants_for_tests` — not introduced by Fix 2) |
+| Workspace Rust tests | `node scripts/run-cargo.mjs test --workspace` | PASS (serial reconfirm noted a pre-existing parallel flake in `path_scope` unit tests under full suite load; fixed in Engineering Closeout A via test-only mutex) |
 | Clippy | `node scripts/run-cargo.mjs clippy --workspace --all-targets -- -D warnings` | PASS |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — 80 tests |
@@ -253,6 +304,10 @@ missing app-exit conversation drain handler.)
 
 (Removed after Acceptance Fix 2: pump remove-before-JoinHandle-register race
 that re-inserted a completed handle and left `active_run_count() == 1`.)
+
+(Removed after Engineering Closeout A: conversation_service single-file size
+> 500 lines; path_scope unit-test flake under default parallel workspace
+test runs.)
 
 ## Slice B2 boundary (not done here)
 
