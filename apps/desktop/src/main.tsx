@@ -94,6 +94,16 @@ async function completeConversationAcceptance(
   await invoke("complete_conversation_acceptance", { result });
 }
 
+/** Request the app's own window-close path so ExitRequested runs service.shutdown. */
+async function requestGracefulAppExit(): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().close();
+  } catch (error) {
+    console.error("Keeper IDE graceful exit request failed.", error);
+  }
+}
+
 async function waitForTerminalRun(
   gateway: ConversationGateway,
   conversationId: string,
@@ -170,6 +180,7 @@ export async function runConversationAcceptanceIfRequested(
         runStatus: terminal.runStatus,
         eventCount: terminal.eventCount,
       });
+      await requestGracefulAppExit();
       return;
     }
 
@@ -219,6 +230,7 @@ export async function runConversationAcceptanceIfRequested(
       runStatus: run.status,
       eventCount: timeline.events.length,
     });
+    await requestGracefulAppExit();
   } catch (error) {
     await completeConversationAcceptance({
       phase: scenario.phase,
@@ -230,6 +242,7 @@ export async function runConversationAcceptanceIfRequested(
       eventCount: 0,
       errorMessage: error instanceof Error ? error.message : "Unknown acceptance failure.",
     });
+    await requestGracefulAppExit();
     throw error;
   }
 }

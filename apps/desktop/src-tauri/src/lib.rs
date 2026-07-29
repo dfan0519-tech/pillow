@@ -50,7 +50,7 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    configure_desktop_commands(tauri::Builder::default())
+    let app = configure_desktop_commands(tauri::Builder::default())
         .setup(|app| {
             let app_data_dir = app_data_override()
                 .map(Ok)
@@ -71,6 +71,21 @@ pub fn run() {
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Keeper IDE");
+        .build(tauri::generate_context!())
+        .expect("error while building Keeper IDE");
+
+    app.run(|app_handle, event| {
+        // Graceful ConversationService drain on app exit (window close / acceptance exit).
+        // Idempotent: ExitRequested and Exit may both fire.
+        match event {
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>()
+                    && let Err(error) = service.shutdown()
+                {
+                    eprintln!("Keeper IDE conversation shutdown: {error}");
+                }
+            }
+            _ => {}
+        }
+    });
 }

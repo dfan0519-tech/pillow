@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -61,11 +62,14 @@ struct ActiveRun {
     pump: Option<thread::JoinHandle<()>>,
 }
 
+type ActiveMap = Arc<Mutex<HashMap<RunId, ActiveRun>>>;
+
 pub struct ConversationService {
     repository: Arc<SqliteConversationRepository>,
     host: Arc<RuntimeHost>,
     emitter: Arc<dyn RuntimeEventEmitter>,
-    active: Mutex<HashMap<RunId, ActiveRun>>,
+    active: ActiveMap,
+    shut_down: AtomicBool,
 }
 
 impl ConversationService {
@@ -101,7 +105,8 @@ impl ConversationService {
             repository: Arc::new(repository),
             host: Arc::new(host),
             emitter,
-            active: Mutex::new(HashMap::new()),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            shut_down: AtomicBool::new(false),
         })
     }
 
@@ -110,6 +115,11 @@ impl ConversationService {
         self.repository
             .mark_inflight_interrupted()
             .map_err(map_session_error)
+    }
+
+    /// Observable size of the production active-run registry (tests / diagnostics).
+    pub fn active_run_count(&self) -> usize {
+        self.active.lock().map(|guard| guard.len()).unwrap_or(0)
     }
 
     pub fn list_conversations(
@@ -159,6 +169,13 @@ impl ConversationService {
         conversation_id: String,
         content: String,
     ) -> Result<SendTurnResult, ConversationCommandError> {
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(ConversationCommandError::new(
+                "conversation_shut_down",
+                "Conversation service is shut down.",
+            ));
+        }
+
         let conversation_id = parse_conversation_id(&conversation_id)?;
         let trimmed = content.trim().to_owned();
         if trimmed.is_empty() {
@@ -213,9 +230,8 @@ impl ConversationService {
         }) {
             Ok(spawned) => spawned,
             Err(error) => {
-                if let Ok(mut active) = self.active.lock() {
-                    active.remove(&run.id);
-                }
+                // Spawn failure: remove only this exact run entry.
+                remove_active_run(&self.active, run.id);
                 let _ = self.repository.transition_run(run.id, RunStatus::Failed);
                 return Err(ConversationCommandError::new(
                     "runtime_spawn_failed",
@@ -234,6 +250,17 @@ impl ConversationService {
             })?;
             if let Some(entry) = active.get_mut(&run.id) {
                 entry.pump = Some(pump);
+            } else {
+                // Entry was removed (shutdown/cancel race) — still join later via handle.
+                // Dropping the JoinHandle detaches; park it in a transient entry only if
+                // the map still rejects the id (should not happen for unique RunIds).
+                active.insert(
+                    run.id,
+                    ActiveRun {
+                        conversation_id,
+                        pump: Some(pump),
+                    },
+                );
             }
         }
 
@@ -281,6 +308,9 @@ impl ConversationService {
     }
 
     /// Wait until every pump has finished (test helper).
+    ///
+    /// Safe when pumps self-remove their active entries concurrently: handles
+    /// are taken under the lock, then joined outside it.
     pub fn drain(&self, timeout: Duration) -> Result<(), ConversationCommandError> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -300,7 +330,7 @@ impl ConversationService {
                 // Also wait for host workers that finished pumps already removed.
                 if self.host.is_fully_idle() || self.host.in_flight_turns() == 0 {
                     // Brief settle for map cleanup after Drop.
-                    if self.host.worker_registry_len() == 0 {
+                    if self.host.worker_registry_len() == 0 && self.active_run_count() == 0 {
                         return Ok(());
                     }
                 }
@@ -322,7 +352,7 @@ impl ConversationService {
                         "Conversation state is temporarily unavailable.",
                     )
                 })?;
-                if active.values().all(|entry| entry.pump.is_none())
+                if active.is_empty()
                     && self.host.worker_registry_len() == 0
                     && self.host.in_flight_turns() == 0
                 {
@@ -337,6 +367,46 @@ impl ConversationService {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Idempotent graceful shutdown:
+    /// 1. reject new work through the host (and local gate);
+    /// 2. join/drain all active pumps;
+    /// 3. leave zero active entries, workers and slots;
+    /// 4. surface a bounded actionable error rather than hanging forever.
+    pub fn shutdown(&self) -> Result<(), ConversationCommandError> {
+        let already = self.shut_down.swap(true, Ordering::SeqCst);
+
+        // Host rejects new turns, cancels inflight workers, joins them.
+        self.host.shutdown().map_err(|error| {
+            ConversationCommandError::new("runtime_shutdown_failed", error.to_string())
+        })?;
+
+        // Drain pumps that may still be finishing persist/emit.
+        self.drain(Duration::from_secs(15))?;
+
+        if self.active_run_count() != 0
+            || self.host.worker_registry_len() != 0
+            || self.host.in_flight_turns() != 0
+            || !self.host.is_fully_idle()
+        {
+            return Err(ConversationCommandError::new(
+                "shutdown_incomplete",
+                format!(
+                    "Conversation shutdown left residual state: active={}, workers={}, in_flight={}, idle={}",
+                    self.active_run_count(),
+                    self.host.worker_registry_len(),
+                    self.host.in_flight_turns(),
+                    self.host.is_fully_idle(),
+                ),
+            ));
+        }
+
+        // Second call must remain successful once idle.
+        if already {
+            return Ok(());
+        }
+        Ok(())
     }
 
     pub fn host_is_idle(&self) -> bool {
@@ -359,15 +429,22 @@ impl ConversationService {
     ) -> thread::JoinHandle<()> {
         let repository = Arc::clone(&self.repository);
         let emitter = Arc::clone(&self.emitter);
-        let active = Arc::new(());
-        let _keep = active;
+        let active = Arc::clone(&self.active);
 
         thread::Builder::new()
             .name(format!("keeper-conv-pump-{}", run_id.0))
             .spawn(move || {
                 pump_turn(repository, emitter, conversation_id, run_id, spawned);
+                // Production cleanup: remove this exact run only (never a foreign key).
+                remove_active_run(&active, run_id);
             })
             .expect("conversation pump thread")
+    }
+}
+
+fn remove_active_run(active: &ActiveMap, run_id: RunId) {
+    if let Ok(mut guard) = active.lock() {
+        guard.remove(&run_id);
     }
 }
 
@@ -438,22 +515,22 @@ fn process_runtime_event(
     let payload_json = serde_json::to_string(&validated.payload)
         .map_err(|error| format!("payload serialize: {error}"))?;
     let domain_run_id = RunId(validated.run_id.0);
+    let target_status = status_for_kind(kind);
 
-    // 2–3. Persist event then resulting run status (each API commits its own txn).
+    // 2–3. Persist event + resulting run status in one SQLite transaction, then commit.
     let recorded = repository
-        .append_event(NewRunEvent {
-            run_id: domain_run_id,
-            sequence: domain_sequence,
-            kind,
-            payload_json,
-        })
-        .map_err(|error| format!("append_event: {error}"))?;
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: domain_run_id,
+                sequence: domain_sequence,
+                kind,
+                payload_json,
+            },
+            target_status,
+        )
+        .map_err(|error| format!("append_event_with_status: {error}"))?;
 
-    if let Some(target) = status_for_kind(kind) {
-        apply_status_transition(repository, conversation_id, domain_run_id, target)?;
-    }
-
-    // 4. Emit only after durable commit.
+    // 4. Emit only after durable commit of both event and resulting status.
     let dto = live_runtime_event_dto(
         recorded.event_id.0.to_string(),
         domain_run_id,
@@ -467,55 +544,6 @@ fn process_runtime_event(
         .emit_runtime_event(&dto)
         .map_err(|error| format!("emit: {error}"))?;
     Ok(())
-}
-
-fn apply_status_transition(
-    repository: &SqliteConversationRepository,
-    conversation_id: ConversationId,
-    run_id: RunId,
-    target: RunStatus,
-) -> Result<(), String> {
-    let timeline = repository
-        .load_timeline(conversation_id)
-        .map_err(|error| format!("load_timeline: {error}"))?;
-    let current = timeline
-        .runs
-        .iter()
-        .find(|run| run.id == run_id)
-        .map(|run| run.status)
-        .ok_or_else(|| format!("run missing after append: {}", run_id.0))?;
-
-    if current == target || current.is_terminal() {
-        return Ok(());
-    }
-
-    // Cancel terminal may arrive while still Running if cancel raced past
-    // the explicit Cancelling transition.
-    if target == RunStatus::Cancelled && current == RunStatus::Running {
-        repository
-            .transition_run(run_id, RunStatus::Cancelling)
-            .map_err(|error| format!("transition cancelling: {error}"))?;
-    }
-
-    let timeline = repository
-        .load_timeline(conversation_id)
-        .map_err(|error| format!("load_timeline: {error}"))?;
-    let current = timeline
-        .runs
-        .iter()
-        .find(|run| run.id == run_id)
-        .map(|run| run.status)
-        .ok_or_else(|| format!("run missing: {}", run_id.0))?;
-
-    if current == target || current.is_terminal() {
-        return Ok(());
-    }
-
-    match repository.transition_run(run_id, target) {
-        Ok(_) => Ok(()),
-        Err(SessionError::IllegalTransition { .. }) => Ok(()),
-        Err(error) => Err(format!("transition_run: {error}")),
-    }
 }
 
 fn protocol_to_domain_sequence(protocol_sequence: u64) -> Result<u64, String> {
@@ -660,8 +688,10 @@ mod tests {
         let path_hook = path.clone();
 
         let emitter = RecordingEmitter::with_hook(move |dto| {
+            // Second SQLite connection must see both event and resulting status.
             let repo = SqliteConversationRepository::open(&path_hook).unwrap();
             let conversation_id = ConversationId(Uuid::parse_str(&dto.conversation_id).unwrap());
+            let run_id = RunId(Uuid::parse_str(&dto.run_id).unwrap());
             let timeline = repo.load_timeline(conversation_id).unwrap();
             assert!(
                 timeline.events.iter().any(|event| {
@@ -672,8 +702,35 @@ mod tests {
                 "event must be durable in SQLite before emit: {:?}",
                 dto.kind
             );
+            let run = timeline
+                .runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .expect("run must exist at emit time");
+            match dto.kind.as_str() {
+                "run_started" => assert_eq!(
+                    run.status,
+                    RunStatus::Running,
+                    "run_started must commit Running with the event"
+                ),
+                "turn_completed" => assert_eq!(
+                    run.status,
+                    RunStatus::Completed,
+                    "turn_completed must commit Completed with the event"
+                ),
+                "turn_failed" => assert_eq!(
+                    run.status,
+                    RunStatus::Failed,
+                    "turn_failed must commit Failed with the event"
+                ),
+                "run_cancelled" => assert_eq!(
+                    run.status,
+                    RunStatus::Cancelled,
+                    "run_cancelled must commit Cancelled with the event"
+                ),
+                _ => {}
+            }
             seen_hook.fetch_add(1, Ordering::SeqCst);
-            // Silence unused warning for first-open repo (ensures migrations applied).
             let _ = &repo_for_hook;
         });
 
@@ -687,6 +744,7 @@ mod tests {
         service.drain(Duration::from_secs(10)).unwrap();
 
         assert!(seen.load(Ordering::SeqCst) > 0);
+        assert_eq!(service.active_run_count(), 0);
         let timeline = service.load_timeline(conversation.id).unwrap();
         assert!(!timeline.events.is_empty());
         assert_eq!(timeline.runs[0].run_id, result.run_id);
@@ -792,6 +850,141 @@ mod tests {
         assert_eq!(timeline.runs[0].status, "cancelled");
         assert_eq!(service.in_flight_turns(), 0);
         assert!(service.host_is_idle());
+        assert_eq!(service.active_run_count(), 0);
+    }
+
+    #[test]
+    fn sequential_turns_return_active_run_count_to_zero() {
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "seq");
+        let service =
+            ConversationService::open(&path, Arc::new(RecordingEmitter::new()), false).unwrap();
+        let conversation = service
+            .create_conversation(project.0.to_string(), Some("seq".into()))
+            .unwrap();
+
+        for i in 0..8 {
+            let _ = service
+                .send_turn(conversation.id.clone(), format!("turn {i}"))
+                .unwrap();
+            service.drain(Duration::from_secs(10)).unwrap();
+            assert_eq!(
+                service.active_run_count(),
+                0,
+                "active registry must empty after turn {i}"
+            );
+            assert_eq!(service.in_flight_turns(), 0);
+            assert!(service.host_is_idle());
+        }
+    }
+
+    struct FailingEmitter;
+
+    impl RuntimeEventEmitter for FailingEmitter {
+        fn emit_runtime_event(
+            &self,
+            _event: &crate::conversation_events::RuntimeEventDto,
+        ) -> Result<(), String> {
+            Err("forced pump emit failure".into())
+        }
+    }
+
+    #[test]
+    fn pump_error_removes_active_run_entry() {
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "pump-err");
+        let service = ConversationService::open(&path, Arc::new(FailingEmitter), false).unwrap();
+        let conversation = service
+            .create_conversation(project.0.to_string(), None)
+            .unwrap();
+        let _ = service
+            .send_turn(conversation.id, "will fail at emit".into())
+            .unwrap();
+        service.drain(Duration::from_secs(10)).unwrap();
+        assert_eq!(service.active_run_count(), 0);
+        assert_eq!(service.in_flight_turns(), 0);
+        assert!(service.host_is_idle());
+    }
+
+    #[test]
+    fn spawn_failure_removes_active_run_entry() {
+        use std::sync::Barrier;
+
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "spawn-fail");
+        let enter = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let enter_hook = Arc::clone(&enter);
+        let release_hook = Arc::clone(&release);
+        // Hold the only concurrency slot so a second spawn is rejected.
+        let service = ConversationService::open_with_config(
+            &path,
+            Arc::new(RecordingEmitter::new()),
+            HostConfig {
+                max_concurrent_turns: 1,
+                honor_fixture_delays: true,
+                event_queue_capacity: 64,
+                after_worker_registered: Some(Arc::new(move || {
+                    enter_hook.wait();
+                    release_hook.wait();
+                })),
+            },
+        )
+        .unwrap();
+        let conversation = service
+            .create_conversation(project.0.to_string(), None)
+            .unwrap();
+        let service = Arc::new(service);
+        let service_hold = Arc::clone(&service);
+        let hold_id = conversation.id.clone();
+        let holder = thread::spawn(move || {
+            service_hold
+                .send_turn(hold_id, "hold the slot".into())
+                .unwrap()
+        });
+
+        enter.wait();
+        // Second turn must fail admission while the first holds the only slot.
+        let err = service
+            .send_turn(conversation.id.clone(), "overflow".into())
+            .unwrap_err();
+        assert_eq!(err.code, "runtime_spawn_failed");
+        // Failed spawn must not leave a residual active entry (holder still active).
+        assert_eq!(service.active_run_count(), 1);
+
+        release.wait();
+        let _ = holder.join().expect("holder");
+        service.drain(Duration::from_secs(10)).unwrap();
+        assert_eq!(service.active_run_count(), 0);
+        assert_eq!(service.in_flight_turns(), 0);
+        assert!(service.host_is_idle());
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_and_leaves_zero_residuals() {
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "shutdown");
+        let service =
+            ConversationService::open(&path, Arc::new(RecordingEmitter::new()), false).unwrap();
+        let conversation = service
+            .create_conversation(project.0.to_string(), None)
+            .unwrap();
+        let _ = service
+            .send_turn(conversation.id.clone(), "finish me".into())
+            .unwrap();
+
+        service.shutdown().unwrap();
+        assert_eq!(service.active_run_count(), 0);
+        assert_eq!(service.in_flight_turns(), 0);
+        assert!(service.host_is_idle());
+
+        // Idempotent second call.
+        service.shutdown().unwrap();
+
+        let err = service
+            .send_turn(conversation.id, "after shutdown".into())
+            .unwrap_err();
+        assert_eq!(err.code, "conversation_shut_down");
     }
 
     #[test]
@@ -816,6 +1009,7 @@ mod tests {
         assert!(other.events.is_empty());
 
         service.drain(Duration::from_secs(10)).unwrap();
+        assert_eq!(service.active_run_count(), 0);
         let timeline = service.load_timeline(first.id).unwrap();
         assert_eq!(timeline.runs[0].run_id, run.run_id);
         assert_eq!(timeline.runs[0].status, "completed");
