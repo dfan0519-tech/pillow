@@ -52,6 +52,13 @@ impl SqliteProjectRepository {
         ProjectRepository::get(self, id)
     }
 
+    pub fn find_by_canonical_root(
+        &self,
+        root_path: &str,
+    ) -> Result<Option<Project>, ProjectStoreError> {
+        ProjectRepository::find_by_canonical_root(self, root_path)
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, ProjectStoreError> {
         self.connection
             .lock()
@@ -114,6 +121,24 @@ impl ProjectRepository for SqliteProjectRepository {
                 "SELECT id, name, root_path, trust_state, created_at, updated_at
                  FROM projects WHERE id = ?1",
                 [id.0.to_string()],
+                project_from_row,
+            )
+            .optional()?;
+
+        Ok(project)
+    }
+
+    fn find_by_canonical_root(
+        &self,
+        root_path: &str,
+    ) -> Result<Option<Project>, Self::Error> {
+        let canonical = canonical_root_path(root_path)?;
+        let connection = self.connection()?;
+        let project = connection
+            .query_row(
+                "SELECT id, name, root_path, trust_state, created_at, updated_at
+                 FROM projects WHERE canonical_root_path = ?1",
+                [canonical],
                 project_from_row,
             )
             .optional()?;

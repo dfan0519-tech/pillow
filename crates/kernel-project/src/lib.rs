@@ -46,4 +46,8 @@ pub trait ProjectRepository {
     fn create(&self, input: CreateProject) -> Result<Project, Self::Error>;
     fn list(&self) -> Result<Vec<Project>, Self::Error>;
     fn get(&self, id: ProjectId) -> Result<Option<Project>, Self::Error>;
+    fn find_by_canonical_root(
+        &self,
+        root_path: &str,
+    ) -> Result<Option<Project>, Self::Error>;
 }

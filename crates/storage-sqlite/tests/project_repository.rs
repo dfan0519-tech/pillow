@@ -39,3 +39,23 @@ fn rejects_the_same_canonical_root_twice() {
 
     assert!(matches!(error, ProjectStoreError::DuplicateRoot));
 }
+
+#[test]
+fn finds_an_existing_project_by_canonical_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("keeper-ide");
+    std::fs::create_dir(&project_root).unwrap();
+    let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
+    let created = repo
+        .create(CreateProject {
+            name: "Keeper IDE".into(),
+            root_path: project_root.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+    let found = repo
+        .find_by_canonical_root(&project_root.join(".").to_string_lossy())
+        .unwrap();
+
+    assert_eq!(found, Some(created));
+}
