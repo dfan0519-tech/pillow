@@ -6,7 +6,7 @@ Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\integration-slice-b1`
 
 Branch: `integration/slice-b1`
 
-Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 2 and Engineering Closeout A**
+Verdict: **PASS for Slice B1 Task 4 (Tauri conversation integration) after Acceptance Fix 3 (Lifecycle Truth)**
 
 ## Explicit non-claim
 
@@ -85,6 +85,31 @@ Engineering Closeout A (module split + deterministic workspace gate):
 
 Primary Closeout A tip for controller citation: **`5945eab`**.
 
+Closeout companion SHAs (test/module splits on the same branch):
+
+| SHA | Message |
+| --- | --- |
+| `668348c` | `test(b1): split oversized storage and workbench test files` |
+| `663dab7` | `refactor(runtime-host): split host and shutdown-race tests by responsibility` |
+| `40e6776` | `docs(verification): record Engineering Closeout A gate evidence` |
+
+Acceptance Fix 3 — Lifecycle Truth (closes remaining Important findings):
+
+| SHA | Message |
+| --- | --- |
+| `28180e4` | `fix(lifecycle): close B1 Fix 3 truth gaps for status, admission, and exit` |
+
+Primary Fix 3 tip for controller citation: **`28180e4`**.
+
+Exact SHAs to pin for Fix 2 + Closeout + Fix 3:
+
+| Wave | SHA |
+| --- | --- |
+| Acceptance Fix 2 | `ef60c2d` |
+| Engineering Closeout A | `5945eab` |
+| Closeout A docs | `40e6776` |
+| Acceptance Fix 3 | `28180e4` |
+
 Task 4 surfaces:
 
 - `apps/desktop/src-tauri/src/conversation_service/` — single public owner of repository + host
@@ -117,15 +142,23 @@ close after publishing evidence so the E2E path exercises app exit, not only
 
 ## Evidence
 
-### Atomic event + resulting run status
+### Atomic event + resulting run status (verified behavior, not broad claim)
 
 - Repository API `SqliteConversationRepository::append_event_with_status`
-  commits event append and legal status transition in one SQLite transaction.
+  commits event append and **legal** status transition in one IMMEDIATE SQLite
+  transaction. Illegal transitions fail the whole transaction (event insert
+  rolls back with the status change).
 - Crash-window regression
   `append_event_with_status_is_atomic_against_crash_window` shows the old
   two-transaction path can leave durable `turn_completed` while status is still
   `Running`, and proves the atomic API makes event + `Completed` visible
   together on a second connection.
+- **Fix 3:** `illegal_status_transition_rolls_back_event_on_second_connection`
+  proves `Pending -> Completed` leaves neither the event nor a status change on
+  a second connection. `idempotent_terminal_replay_against_matching_status_succeeds`
+  keeps exact replay of an already-matching terminal successful.
+  `append_event_with_status_cancelled_from_running_walks_cancelling` keeps
+  `Running -> Cancelling -> Cancelled` atomic in one commit.
 - Service test `persistence_commits_before_renderer_emit`:
   `RecordingEmitter` opens a **second** SQLite connection at emit time and
   asserts both the event row and the resulting status (`Running` /
@@ -195,30 +228,102 @@ rather than inferring readiness from host worker idleness alone.
   clear/grant/assert sequences. Production grants are unchanged; the whole
   workspace is not serialized.
 
-### Graceful application shutdown
+### Graceful application shutdown (Fix 3 fail-closed)
 
-- `ConversationService::shutdown` is idempotent: rejects new work, joins host
-  workers, drains pumps, requires zero active / workers / slots, or returns a
+- `ConversationService::shutdown` is idempotent: closes the local admission
+  gate, waits (bounded) for in-flight `send_turn` admissions, shuts down the
+  host, drains pumps, requires zero active / workers / slots, or returns a
   bounded `shutdown_incomplete` / `drain_timeout` error.
-- Wired on Tauri `RunEvent::ExitRequested` and `RunEvent::Exit`.
-- Acceptance renderer calls `getCurrentWindow().close()` after publishing
+- **Service admission:** `send_turn` and `shutdown` share `ServiceAdmission`.
+  Once shutdown owns the gate, no new durable run/session/pump is admitted.
+  Barrier test `send_turn_admission_linearized_with_shutdown` proves an
+  admitted send is fully owned and drained, and post-shutdown sends are
+  rejected without leaving `Pending` runs.
+- **RuntimeHost order (Fix 3):** close sync admission → cancel async workers →
+  wait for admitted sync turns → `adapter.shutdown()` → join async workers.
+  Sync/shutdown race accepts only `Ok(())` or `RuntimeError::ShutDown` —
+  `SessionNotFound` is not a normal race result.
+- **Tauri ExitRequested:** pure helper `conversation_exit_decision` —
+  success allows exit; failure logs and calls `api.prevent_exit()`. A later
+  `Exit` event is best-effort cleanup only and is **not** claimed as recovery
+  for a failed drain. Unit tests cover both decisions.
+- Acceptance renderer still calls `getCurrentWindow().close()` after publishing
   evidence so the process exits through that path.
 
-### Native E2E cleanup and report truth
+### Native E2E cleanup and report truth (Fix 3 graceful proof)
 
 - `scripts/conversation-recovery-desktop.mjs` waits for:
   1. evidence JSON;
-  2. child process exit (graceful app path);
-  3. fresh process snapshot with no `keeper-ide.exe`;
-  4. no inherited port listener;
+  2. Rust shutdown-success marker written **only** after
+     `ConversationService::shutdown` returns `Ok` (env
+     `KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER`);
+  3. child `exit.status === 0` and `signal === null`;
+  4. fresh process snapshot with no `keeper-ide.exe`;
+  5. no inherited port listener;
   then returns from each phase.
+- `gracefulExit: true` is reported only when marker + exit code + snapshot all
+  pass for **both** create and restore phases (`createGracefulExit` /
+  `restoreGracefulExit`). Forced cleanup remains a safety net and cannot
+  satisfy graceful proof.
 - `ProcessSupervisor.cleanup()` does not return until known PIDs are dead **and**
   (when enforcing desktop clean) a fresh CIM snapshot has no `keeper-ide.exe`
   and no port listener — not `isProcessAlive` alone.
 - E2E file order is recovery then project-launcher with
   `--test-concurrency=1` so recovery cannot poison process-baseline tests.
 
+### Original parallel `path_scope` failure and deterministic fix
+
+- Under default parallel `cargo test --workspace`, Fix 2-era runs occasionally
+  failed in `path_scope` unit tests when concurrent cases cleared/granted the
+  shared allowlist.
+- Engineering Closeout A (`5945eab`) serialized **only** the `path_scope` unit
+  tests via a test mutex around clear/grant/assert sequences. Production path
+  grants are unchanged; the workspace is not globally serialized.
+
 ## Gate commands and results
+
+### Acceptance Fix 3 gates (Lifecycle Truth — this pass)
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
+| Unit tests (JS) | `pnpm test` | PASS — **80** tests |
+| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
+| Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1357` within 2500 ms budget |
+| Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
+| Worktree | `git status --short` | clean after Fix 3 code + docs commits |
+
+Desktop Rust lib tests after Fix 3: **25** (includes exit-decision helpers +
+admission barrier + pump registration seam). Integration: **7**.
+
+Conversation recovery consecutive outputs (after Fix 3):
+
+```text
+KEEPER_CONVERSATION_RECOVERY {"status":"passed","createEventCount":17,"restoredEventCount":17,"runStatus":"completed","databaseBytes":73728,"webviewProfile":"temporary-and-populated","webviewProfileEntries":207,"durationMs":34599,"ipcBoundary":"real-tauri-webview","gracefulExit":true,"createGracefulExit":true,"restoreGracefulExit":true}
+```
+
+```text
+KEEPER_CONVERSATION_RECOVERY {"status":"passed","createEventCount":17,"restoredEventCount":17,"runStatus":"completed","databaseBytes":73728,"webviewProfile":"temporary-and-populated","webviewProfileEntries":207,"durationMs":24931,"ipcBoundary":"real-tauri-webview","gracefulExit":true,"createGracefulExit":true,"restoreGracefulExit":true}
+```
+
+Release smoke summary (this machine, Fix 3):
+
+```text
+KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1412,"startupBudgetMs":2500,"startupMs":1357,"webviewProfile":"temporary-and-populated","readiness":"list-projects-and-lifecycle-command"}
+```
+
+Focused Fix 3 regressions:
+
+- `illegal_status_transition_rolls_back_event_on_second_connection` — PASS
+- `idempotent_terminal_replay_against_matching_status_succeeds` — PASS
+- `send_turn_admission_linearized_with_shutdown` — PASS
+- `synchronous_send_turn_racing_shutdown_is_admitted_or_rejected` (Ok|ShutDown only) — PASS under parallel workspace load
+- `pump_finish_before_handle_register_clears_active_entry` (explicit post-`pump_turn` signal) — PASS
+- `conversation_exit_decision` allow/prevent unit tests — PASS
 
 ### Engineering Closeout A gates (module split + path_scope isolation)
 
@@ -309,7 +414,16 @@ that re-inserted a completed handle and left `active_run_count() == 1`.)
 > 500 lines; path_scope unit-test flake under default parallel workspace
 test runs.)
 
+(Removed after Acceptance Fix 3: illegal status transition committing events
+while leaving status unchanged; send_turn/shutdown admission race leaving
+Pending runs; RuntimeHost adapter teardown before admitted sync turns finished
+(`SessionNotFound` accepted as normal race); ExitRequested continuing exit after
+failed drain; E2E gracefulExit without shutdown-success marker + exit 0.)
+
 ## Slice B2 boundary (not done here)
 
 Slice B2 must introduce real provider execution behind the same protocol adapter
 boundary. Slice B1 must not be cited as Grok connectivity evidence.
+
+**B2 non-claim (unchanged):** this acceptance does not prove live provider
+connectivity, account auth, credentials, model picker, quota, or Obsidian.
