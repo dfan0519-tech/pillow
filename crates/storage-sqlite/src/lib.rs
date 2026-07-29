@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use keeper_project::{CreateProject, Project, ProjectId, ProjectRepository, ProjectTrust};
 use rusqlite::types::Type;
-use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, ffi, params};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -137,7 +137,7 @@ fn canonical_root_path(root_path: &str) -> Result<String, ProjectStoreError> {
 fn map_unique_constraint(error: rusqlite::Error) -> ProjectStoreError {
     match &error {
         rusqlite::Error::SqliteFailure(error, _)
-            if error.code == ErrorCode::ConstraintViolation =>
+            if error.extended_code == ffi::SQLITE_CONSTRAINT_UNIQUE =>
         {
             ProjectStoreError::DuplicateRoot
         }
@@ -210,6 +210,17 @@ mod tests {
         assert!(matches!(
             map_unique_constraint(error),
             ProjectStoreError::DuplicateRoot
+        ));
+    }
+
+    #[test]
+    fn preserves_non_unique_sqlite_constraints() {
+        let error = Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_CONSTRAINT_CHECK), None);
+
+        assert!(matches!(
+            map_unique_constraint(error),
+            ProjectStoreError::Sqlite(Error::SqliteFailure(sqlite_error, _))
+                if sqlite_error.extended_code == ffi::SQLITE_CONSTRAINT_CHECK
         ));
     }
 }
