@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use keeper_agent_protocol::{
@@ -14,19 +14,31 @@ use keeper_agent_protocol::{
 
 use crate::delivery::{BoundedDelivery, DEFAULT_EVENT_QUEUE_CAPACITY};
 use crate::fake::FakeRuntimeAdapter;
-use crate::sink::{BoundedDeliverySink, ProtocolGuardSink};
+use crate::sink::ProtocolGuardSink;
+use crate::worker::{
+    JoinSlot, WorkerRecord, await_worker_slot, join_handle_draining, run_turn_worker,
+};
 
 /// Default concurrent turn limit for the host (process-pool style bound).
 pub const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 4;
 const MAX_CONCURRENT_TURNS_CAP: u32 = 32;
 
-#[derive(Debug, Clone)]
+/// Host configuration.
+///
+/// `after_worker_registered` is a test seam used to force the
+/// register-before-handle race with barriers. Production callers leave it
+/// `None`.
+#[derive(Clone)]
 pub struct HostConfig {
     pub max_concurrent_turns: u32,
     /// When true, fixture `delay_ms` is honored; when false, delays are zeroed.
     pub honor_fixture_delays: bool,
     /// Per-turn bounded event queue capacity (backpressure when full).
     pub event_queue_capacity: usize,
+    /// Test seam: invoked after the worker is registered and before the join
+    /// handle is installed. Default `None`.
+    #[doc(hidden)]
+    pub after_worker_registered: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for HostConfig {
@@ -35,19 +47,27 @@ impl Default for HostConfig {
             max_concurrent_turns: DEFAULT_MAX_CONCURRENT_TURNS,
             honor_fixture_delays: true,
             event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
+            after_worker_registered: None,
         }
+    }
+}
+
+impl std::fmt::Debug for HostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostConfig")
+            .field("max_concurrent_turns", &self.max_concurrent_turns)
+            .field("honor_fixture_delays", &self.honor_fixture_delays)
+            .field("event_queue_capacity", &self.event_queue_capacity)
+            .field(
+                "after_worker_registered",
+                &self.after_worker_registered.is_some(),
+            )
+            .finish()
     }
 }
 
 pub fn normalize_max_concurrent_turns(raw: u32) -> u32 {
     raw.clamp(1, MAX_CONCURRENT_TURNS_CAP)
-}
-
-struct WorkerRecord {
-    cancel: Arc<AtomicBool>,
-    finished: Arc<AtomicBool>,
-    delivery: Arc<BoundedDelivery>,
-    join: Mutex<Option<JoinHandle<Result<(), RuntimeError>>>>,
 }
 
 /// Host that bounds concurrency and enforces the provider-neutral protocol.
@@ -67,6 +87,7 @@ impl RuntimeHost {
                 max_concurrent_turns: normalize_max_concurrent_turns(config.max_concurrent_turns),
                 honor_fixture_delays: config.honor_fixture_delays,
                 event_queue_capacity: config.event_queue_capacity.max(1),
+                after_worker_registered: config.after_worker_registered,
             },
             in_flight: AtomicU32::new(0),
             shut_down: AtomicBool::new(false),
@@ -108,6 +129,11 @@ impl RuntimeHost {
     }
 
     /// Run a turn on a background thread; cancellable as soon as this returns.
+    ///
+    /// Host cancel is enforced at the event ingress regardless of whether the
+    /// adapter has finished registering the run. A spawn that races shutdown is
+    /// either rejected with [`RuntimeError::ShutDown`] or fully owned and joined
+    /// by shutdown.
     pub fn spawn_turn(self: &Arc<Self>, request: SendTurn) -> Result<SpawnedTurn, RuntimeError> {
         self.ensure_alive()?;
         self.acquire_turn_slot()?;
@@ -125,28 +151,42 @@ impl RuntimeHost {
             cancel: Arc::clone(&cancel),
             finished: Arc::clone(&finished),
             delivery: Arc::clone(&delivery),
-            join: Mutex::new(None),
+            join: Mutex::new(JoinSlot::Starting),
         });
 
+        // Linearize with shutdown: reject if already shutting down; otherwise
+        // publish the registry entry before the join handle exists.
         {
             let mut workers = self.workers.lock().expect("workers");
+            if self.shut_down.load(Ordering::SeqCst) {
+                drop(workers);
+                let _ = self.adapter.disarm_turn(run_id);
+                delivery.close();
+                self.release_turn_slot();
+                return Err(RuntimeError::ShutDown);
+            }
             workers.insert(run_id, Arc::clone(&record));
+        }
+
+        if let Some(hook) = self.config.after_worker_registered.as_ref() {
+            hook();
         }
 
         let host = Arc::clone(self);
         let delivery_for_thread = Arc::clone(&delivery);
         let finished_flag = Arc::clone(&finished);
+        let cancel_flag = Arc::clone(&cancel);
 
         let join = thread::Builder::new()
             .name(format!("keeper-turn-{run_id}"))
             .spawn(move || {
-                let result = (|| {
-                    let mut sink = BoundedDeliverySink::new(Arc::clone(&delivery_for_thread));
-                    let mut guarded = ProtocolGuardSink::new(run_id, &mut sink);
-                    host.adapter.send_turn(request, &mut guarded)?;
-                    guarded.finish()?;
-                    Ok(())
-                })();
+                let result = run_turn_worker(
+                    &host.adapter,
+                    request,
+                    run_id,
+                    &cancel_flag,
+                    &delivery_for_thread,
+                );
                 delivery_for_thread.close();
                 host.release_turn_slot();
                 finished_flag.store(true, Ordering::SeqCst);
@@ -169,7 +209,7 @@ impl RuntimeHost {
             }
         };
 
-        *record.join.lock().expect("join") = Some(join);
+        *record.join.lock().expect("join") = JoinSlot::Running(join);
 
         Ok(SpawnedTurn {
             run_id,
@@ -183,6 +223,9 @@ impl RuntimeHost {
         let known = {
             let workers = self.workers.lock().expect("workers");
             if let Some(w) = workers.get(&run_id) {
+                // Host cancel is the source of truth: ingress forces
+                // `run_cancelled` so the worker cannot complete with
+                // `turn_completed` after this store.
                 w.cancel.store(true, Ordering::SeqCst);
                 true
             } else {
@@ -191,34 +234,36 @@ impl RuntimeHost {
         };
         match self.adapter.cancel_turn(run_id) {
             Ok(()) => Ok(()),
+            // Map RunNotFound → Ok only for host-owned workers, where the host
+            // cancel flag already makes cancel real. Never invent success for
+            // an unknown run.
             Err(RuntimeError::RunNotFound { .. }) if known => Ok(()),
             Err(e) => Err(e),
         }
     }
 
     /// Shut down the adapter and join all host-owned workers before returning.
+    ///
+    /// Host workers are joined even when `adapter.shutdown()` returns an error.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
-        if self.shut_down.swap(true, Ordering::SeqCst) {
-            // Already shut down: still ensure no residual host workers.
-            self.join_all_workers();
-            return self.adapter.shutdown();
-        }
+        let already = self.shut_down.swap(true, Ordering::SeqCst);
 
-        // Cancel every tracked worker, close deliveries so blocked producers
-        // unblock, then shut down the adapter and join threads.
         {
             let workers = self.workers.lock().expect("workers");
             for (run_id, worker) in workers.iter() {
                 worker.cancel.store(true, Ordering::SeqCst);
                 let _ = self.adapter.cancel_turn(*run_id);
-                // Unblock push_blocking waiters (backpressured producers).
                 worker.delivery.close();
             }
         }
 
-        self.adapter.shutdown()?;
+        let adapter_result = self.adapter.shutdown();
+        // Join host workers even when the adapter reports failure.
         self.join_all_workers();
-
+        adapter_result?;
+        if already {
+            return Ok(());
+        }
         if self.in_flight.load(Ordering::SeqCst) != 0 {
             return Err(RuntimeError::Internal {
                 message: format!(
@@ -238,19 +283,44 @@ impl RuntimeHost {
         self.config.event_queue_capacity
     }
 
+    /// Join every host-owned worker, including those still in `Starting`.
     fn join_all_workers(&self) {
-        let handles: Vec<JoinHandle<Result<(), RuntimeError>>> = {
-            let workers = self.workers.lock().expect("workers");
-            workers
-                .values()
-                .filter_map(|w| w.join.lock().expect("join").take())
-                .collect()
-        };
-        for handle in handles {
-            let _ = handle.join();
+        loop {
+            let mut handles = Vec::new();
+            let mut starting = 0usize;
+            {
+                let workers = self.workers.lock().expect("workers");
+                if workers.is_empty() {
+                    return;
+                }
+                for worker in workers.values() {
+                    let mut slot = worker.join.lock().expect("join");
+                    match std::mem::replace(&mut *slot, JoinSlot::Joined) {
+                        JoinSlot::Running(handle) => handles.push(handle),
+                        JoinSlot::Starting => {
+                            *slot = JoinSlot::Starting;
+                            starting += 1;
+                        }
+                        JoinSlot::Joined => {}
+                    }
+                }
+            }
+
+            if handles.is_empty() && starting == 0 {
+                self.workers.lock().expect("workers").clear();
+                return;
+            }
+
+            for handle in handles {
+                // Deliveries were closed in shutdown; producers unblock.
+                let _ = handle.join();
+            }
+
+            if starting > 0 {
+                thread::yield_now();
+                thread::sleep(Duration::from_millis(1));
+            }
         }
-        // Workers remove themselves on exit; clear any stragglers after join.
-        self.workers.lock().expect("workers").clear();
     }
 
     fn ensure_alive(&self) -> Result<(), RuntimeError> {
@@ -310,34 +380,33 @@ impl SpawnedTurn {
     }
 
     pub fn join(self) -> Result<Vec<RuntimeEvent>, RuntimeError> {
-        // Prefer taking the join handle so Drop does not double-join.
-        let handle = self.record.join.lock().expect("join").take();
-        let join_result = if let Some(handle) = handle {
-            handle.join().map_err(|_| RuntimeError::Internal {
-                message: "turn worker panicked".into(),
-            })?
-        } else {
-            // Host shutdown may have joined already; wait for finished flag.
-            while !self.record.finished.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(1));
-            }
-            Ok(())
-        };
+        let mut events = Vec::new();
+        let join_result = await_worker_slot(&self.record, &mut events);
         {
             let mut workers = self.host.workers.lock().expect("workers");
             workers.remove(&self.run_id);
         }
         join_result?;
-        Ok(self.record.delivery.drain())
+        Ok(events)
     }
 }
 
 impl Drop for SpawnedTurn {
     fn drop(&mut self) {
-        if let Some(handle) = self.record.join.lock().expect("join").take() {
-            // Best-effort cancel + join so Drop leaves no thread residual.
+        let handle = {
+            let mut slot = self.record.join.lock().expect("join");
+            match std::mem::replace(&mut *slot, JoinSlot::Joined) {
+                JoinSlot::Running(h) => Some(h),
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        };
+        if let Some(handle) = handle {
             let _ = self.host.cancel_turn(self.run_id);
-            let _ = handle.join();
+            let mut discarded = Vec::new();
+            let _ = join_handle_draining(&self.record.delivery, handle, &mut discarded);
         }
         let mut workers = self.host.workers.lock().expect("workers");
         workers.remove(&self.run_id);

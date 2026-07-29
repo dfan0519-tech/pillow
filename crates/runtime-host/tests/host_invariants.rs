@@ -35,6 +35,7 @@ fn spawn_turn_is_cancellable_immediately_after_return() {
             max_concurrent_turns: 2,
             honor_fixture_delays: true,
             event_queue_capacity: 64,
+            after_worker_registered: None,
         },
     ));
     let session = host
@@ -77,6 +78,7 @@ fn shutdown_joins_workers_without_later_join_masking() {
             max_concurrent_turns: 2,
             honor_fixture_delays: true,
             event_queue_capacity: 64,
+            after_worker_registered: None,
         },
     ));
     let session = host
@@ -128,6 +130,7 @@ fn slow_consumer_experiences_bounded_backpressure() {
             max_concurrent_turns: 2,
             honor_fixture_delays: false,
             event_queue_capacity: 1,
+            after_worker_registered: None,
         },
     ));
     let session = host
@@ -221,6 +224,10 @@ impl AgentRuntimeAdapter for ArmFailsAdapter {
         })
     }
 
+    fn disarm_turn(&self, _run_id: RunId) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     fn send_turn(&self, _request: SendTurn, _sink: &mut dyn EventSink) -> Result<(), RuntimeError> {
         unreachable!("send_turn must not run when arm fails")
     }
@@ -242,6 +249,7 @@ fn slot_is_released_when_arm_turn_fails() {
             max_concurrent_turns: 1,
             honor_fixture_delays: false,
             event_queue_capacity: 8,
+            after_worker_registered: None,
         },
     ));
     let session = host

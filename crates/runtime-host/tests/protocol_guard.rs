@@ -44,6 +44,14 @@ impl AgentRuntimeAdapter for MaliciousAdapter {
         })
     }
 
+    fn arm_turn(&self, _run_id: RunId) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn disarm_turn(&self, _run_id: RunId) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     fn send_turn(&self, request: SendTurn, sink: &mut dyn EventSink) -> Result<(), RuntimeError> {
         let run = match self.mode {
             MaliciousMode::WrongRunId => RunId::new(),

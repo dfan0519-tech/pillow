@@ -19,6 +19,7 @@ fn start_host(honor_delays: bool) -> Arc<RuntimeHost> {
             max_concurrent_turns: 4,
             honor_fixture_delays: honor_delays,
             event_queue_capacity: 64,
+            after_worker_registered: None,
         })
         .expect("host"),
     )
@@ -166,6 +167,7 @@ fn cancellation_stops_emission_with_exactly_one_terminal() {
             max_concurrent_turns: 2,
             honor_fixture_delays: true,
             event_queue_capacity: 64,
+            after_worker_registered: None,
         },
     ));
     let session = host
@@ -279,6 +281,7 @@ fn shutdown_rejects_new_work_and_leaves_no_active_turns() {
                 max_concurrent_turns: 2,
                 honor_fixture_delays: true,
                 event_queue_capacity: 64,
+                after_worker_registered: None,
             },
         ))
     };
@@ -354,6 +357,7 @@ fn concurrency_limit_is_enforced() {
             max_concurrent_turns: 1,
             honor_fixture_delays: true,
             event_queue_capacity: 64,
+            after_worker_registered: None,
         },
     ));
     let session = host

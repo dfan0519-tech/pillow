@@ -9,6 +9,7 @@ mod fake;
 mod fixture;
 mod host;
 mod sink;
+mod worker;
 
 pub use delivery::{BoundedDelivery, DEFAULT_EVENT_QUEUE_CAPACITY};
 pub use fake::FakeRuntimeAdapter;

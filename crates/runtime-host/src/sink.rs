@@ -1,6 +1,12 @@
 //! Event sinks used by the host and tests.
 
-use keeper_agent_protocol::{EventSink, RunId, RuntimeError, RuntimeEvent, validate_payload};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use chrono::Utc;
+use keeper_agent_protocol::{
+    EventSink, RunCancelledPayload, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind,
+    validate_payload,
+};
 
 use crate::delivery::BoundedDelivery;
 
@@ -56,12 +62,16 @@ impl EventSink for TerminalGuardSink<'_> {
 }
 
 /// Host ingress guard: request run id, strict monotonic sequence, payload
-/// validation, single terminal, and exactly-one-terminal on finish.
+/// validation, single terminal, optional host cancel, and exactly-one-terminal
+/// on finish.
 pub struct ProtocolGuardSink<'a> {
     inner: &'a mut dyn EventSink,
     expected_run_id: RunId,
     next_sequence: u64,
     terminal_seen: bool,
+    /// When set, host cancel wins: adapter events are replaced with
+    /// `run_cancelled` and further emits return [`RuntimeError::Cancelled`].
+    cancel: Option<&'a AtomicBool>,
 }
 
 impl<'a> ProtocolGuardSink<'a> {
@@ -71,6 +81,22 @@ impl<'a> ProtocolGuardSink<'a> {
             expected_run_id,
             next_sequence: 1,
             terminal_seen: false,
+            cancel: None,
+        }
+    }
+
+    /// Like [`new`](Self::new) but host cancel is checked on every emit.
+    pub fn with_cancel(
+        expected_run_id: RunId,
+        inner: &'a mut dyn EventSink,
+        cancel: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            inner,
+            expected_run_id,
+            next_sequence: 1,
+            terminal_seen: false,
+            cancel: Some(cancel),
         }
     }
 
@@ -88,10 +114,31 @@ impl<'a> ProtocolGuardSink<'a> {
             })
         }
     }
-}
 
-impl EventSink for ProtocolGuardSink<'_> {
-    fn emit(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+    /// Emit a host-forced `run_cancelled` if no terminal has been delivered yet.
+    pub fn force_run_cancelled(&mut self) -> Result<(), RuntimeError> {
+        if self.terminal_seen {
+            return Ok(());
+        }
+        let event = RuntimeEvent::new(
+            self.expected_run_id,
+            self.next_sequence,
+            RuntimeEventKind::RunCancelled,
+            RunCancelledPayload {
+                reason: Some("host".into()),
+            },
+            Utc::now(),
+        )?;
+        self.emit_validated(event)
+    }
+
+    fn host_cancelled(&self) -> bool {
+        self.cancel
+            .map(|c| c.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    fn emit_validated(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
         if self.terminal_seen {
             return Err(RuntimeError::InvalidEvent {
                 message: format!(
@@ -116,7 +163,6 @@ impl EventSink for ProtocolGuardSink<'_> {
                 ),
             });
         }
-        // Kind-specific payload validation; strip unknown/forbidden fields path.
         let payload = validate_payload(event.kind, &event.payload)?;
         let event = RuntimeEvent {
             run_id: event.run_id,
@@ -132,6 +178,18 @@ impl EventSink for ProtocolGuardSink<'_> {
             self.terminal_seen = true;
         }
         Ok(())
+    }
+}
+
+impl EventSink for ProtocolGuardSink<'_> {
+    fn emit(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+        if self.host_cancelled() {
+            if !self.terminal_seen {
+                self.force_run_cancelled()?;
+            }
+            return Err(RuntimeError::Cancelled);
+        }
+        self.emit_validated(event)
     }
 }
 
@@ -155,7 +213,6 @@ impl EventSink for BoundedDeliverySink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use keeper_agent_protocol::RuntimeEventKind;
 
     fn event(
@@ -282,5 +339,40 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RuntimeError::InvalidEvent { .. }));
         assert!(collect.events.is_empty());
+    }
+
+    #[test]
+    fn protocol_guard_cancel_replaces_completion_with_run_cancelled() {
+        let mut collect = CollectingSink::default();
+        let run = RunId::new();
+        let cancel = AtomicBool::new(false);
+        {
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::RunStarted,
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            cancel.store(true, Ordering::SeqCst);
+            let err = guard
+                .emit(event(
+                    run,
+                    2,
+                    RuntimeEventKind::TurnCompleted,
+                    serde_json::json!({}),
+                ))
+                .unwrap_err();
+            assert!(matches!(err, RuntimeError::Cancelled));
+            guard.finish().unwrap();
+        }
+        assert_eq!(collect.events.len(), 2);
+        assert_eq!(
+            collect.events[1].kind,
+            RuntimeEventKind::RunCancelled,
+            "host cancel must win over turn_completed"
+        );
     }
 }

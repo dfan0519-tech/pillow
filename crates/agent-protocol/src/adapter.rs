@@ -17,20 +17,20 @@ pub trait AgentRuntimeAdapter: Send + Sync {
 
     /// Mark `run_id` as cancellable before `send_turn` begins.
     ///
-    /// Hosts that return a cancel handle from a concurrent spawn must call this
-    /// so `cancel_turn` succeeds as soon as the handle is returned. Default is
-    /// a no-op for adapters that only register inside `send_turn`.
-    fn arm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let _ = run_id;
-        Ok(())
-    }
+    /// **Required** for any adapter used with concurrent host spawn
+    /// (`RuntimeHost::spawn_turn` or equivalent). Implementations must register
+    /// a cancel token so `cancel_turn` can succeed as soon as the host returns
+    /// a handle. There is intentionally **no default no-op**: spawn-capable
+    /// adapters must opt in explicitly.
+    ///
+    /// Synchronous `send_turn`-only adapters may implement this as an explicit
+    /// empty `Ok(())` if they never expose a pre-`send_turn` cancel handle.
+    fn arm_turn(&self, run_id: RunId) -> Result<(), RuntimeError>;
 
     /// Drop a previously armed run that will never call `send_turn` (e.g. spawn
-    /// failure). Default is a no-op.
-    fn disarm_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let _ = run_id;
-        Ok(())
-    }
+    /// failure). Spawn-capable adapters must free any token created by
+    /// `arm_turn`. Synchronous-only adapters may return `Ok(())`.
+    fn disarm_turn(&self, run_id: RunId) -> Result<(), RuntimeError>;
 
     /// Stream events for a turn into `sink`. Implementations may block until
     /// a terminal event is emitted or return after accepting the turn.
