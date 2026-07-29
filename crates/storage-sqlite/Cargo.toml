@@ -1,0 +1,15 @@
+[package]
+name = "keeper-storage-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+keeper-project = { path = "../kernel-project" }
+rusqlite.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
