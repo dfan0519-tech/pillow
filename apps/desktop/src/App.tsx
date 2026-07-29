@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
+import { AppSidebar } from "./features/projects/AppSidebar";
 import { NewProjectDialog } from "./features/projects/NewProjectDialog";
-import { ProjectSidebar } from "./features/projects/ProjectSidebar";
 import { Workbench } from "./features/workbench/Workbench";
 import {
   normalizeProjectGatewayError,
@@ -161,7 +161,7 @@ export function App({
         </p>
       ) : null}
       <div className="project-shell">
-        <ProjectSidebar
+        <AppSidebar
           activeProjectId={activeProject?.id ?? null}
           busy={busy}
           onNewProject={() => setNewProjectOpen(true)}

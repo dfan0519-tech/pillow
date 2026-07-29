@@ -1,29 +1,71 @@
 /**
- * Neutral light tokens adapted from Grok App under MIT.
- * Upstream: src/styles/tokens.css light theme at
+ * Light product tokens ported from Grok App (MIT).
+ * Upstream: src/styles/tokens.css `[data-theme="light"]` at
  * cbbbdf17bb8db1588b6707f3f42f6b00397e27f9.
- * Keeper keeps a single quiet light product surface for this prototype.
+ * Keeper ships a single quiet light surface for this prototype (no dark theme).
  */
 :root {
   color-scheme: light;
   font-family: "Segoe UI", Inter, system-ui, Arial, sans-serif;
-  color: #202124;
-  background: #f4f4f6;
-  --canvas: #f4f4f6;
-  --panel: #ffffff;
-  --panel-muted: #ececef;
-  --line: #e3e5e8;
-  --line-strong: #c7cdd4;
-  --text: #202124;
-  --muted: #65717d;
-  --accent: #1769aa;
-  --accent-soft: #e5f1fb;
-  --danger: #b3261e;
-  --success: #2b6f46;
+  color: var(--text-primary);
+  background: var(--bg-app);
+
+  --bg-app: #f4f4f6;
+  --bg-sidebar: #ececef;
+  --bg-sidebar-solid: #ececef;
+  --bg-main: #ffffff;
+  --bg-aside: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 0, 0, 0.06);
+  --bg-input: #ffffff;
+  --bg-code: #f0f0f2;
+
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-strong: rgba(0, 0, 0, 0.1);
+  --border-focus: rgba(70, 100, 220, 0.55);
+
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.55);
+  --text-tertiary: rgba(0, 0, 0, 0.36);
+  --text-inverse: #ffffff;
+
+  /* Upstream indigo accent family (Grok light theme) */
+  --accent: #3d5fd9;
+  --accent-muted: rgba(61, 95, 217, 0.1);
+  --accent-hover: #2f4fc4;
+  --accent-fg: #ffffff;
+
+  --success: #1a9f63;
+  --danger: #d13b45;
+  --warning: #e07020;
+
   --titlebar-height: 40px;
-  --sidebar-width: 220px;
+  --sidebar-width: 260px;
+  --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-composer: 18px;
+
+  --text-sm: 13px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+
+  --shadow-composer:
+    0 1px 0 rgba(0, 0, 0, 0.04),
+    0 10px 32px rgba(0, 0, 0, 0.08),
+    0 2px 6px rgba(0, 0, 0, 0.04);
+
+  /* Compatibility aliases used by residual classes / window chrome */
+  --canvas: var(--bg-app);
+  --panel: var(--bg-main);
+  --panel-muted: var(--bg-sidebar-solid);
+  --line: var(--border-subtle);
+  --line-strong: var(--border-strong);
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --accent-soft: var(--accent-muted);
 }
 
 * {
