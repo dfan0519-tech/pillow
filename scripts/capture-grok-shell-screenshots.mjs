@@ -65,22 +65,51 @@ async function driveStreaming(page, mode) {
     timeout: 10_000,
   });
   if (mode === "cancelled") {
-    await page.waitForSelector("[data-testid='composer-cancel']", { timeout: 10_000 });
+    await page.waitForSelector("[data-testid='composer-cancel']:not([disabled])", {
+      timeout: 10_000,
+    });
     await page.click("[data-testid='composer-cancel']");
     await page.waitForFunction(
       () => {
         const status = document.querySelector("[data-testid='run-status']");
         return status && /已取消|cancelled/i.test(status.textContent ?? "");
       },
-      { timeout: 10_000 },
+      { timeout: 15_000 },
+    );
+    // Ensure child activity is not left as "running".
+    await page.waitForFunction(
+      () => {
+        const activity = document.querySelector("[data-testid='run-activity']");
+        if (!activity) return true;
+        return !/\brunning\b|进行中/i.test(activity.textContent ?? "");
+      },
+      { timeout: 5_000 },
     );
   } else {
+    // Capture while the run is still active — not after turn_completed.
+    await page.waitForFunction(
+      () => {
+        const status = document.querySelector("[data-testid='run-status']");
+        return status && /运行中|running/i.test(status.textContent ?? "");
+      },
+      { timeout: 15_000 },
+    );
     await page.waitForSelector("[data-testid='timeline-assistant-message']", {
       timeout: 10_000,
     });
     await page.waitForSelector("[data-testid='run-activity']", { timeout: 10_000 });
+    // Confirm still active at capture time (slow fixture keeps stream open).
+    const stillActive = await page.evaluate(() => {
+      const status = document.querySelector("[data-testid='run-status']");
+      return status && /运行中|running|取消中|cancelling/i.test(status.textContent ?? "");
+    });
+    if (!stillActive) {
+      throw new Error(
+        "Streaming screenshot would capture a completed run; increase stepDelayMs.",
+      );
+    }
   }
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(120);
 }
 
 async function main() {
@@ -124,9 +153,23 @@ async function main() {
     },
     {
       state: "selected",
+      width: 1024,
+      height: 720,
+      file: "streaming-1024x720.png",
+      drive: "streaming",
+    },
+    {
+      state: "selected",
       width: 1440,
       height: 960,
       file: "cancelled-1440x960.png",
+      drive: "cancelled",
+    },
+    {
+      state: "selected",
+      width: 1024,
+      height: 720,
+      file: "cancelled-1024x720.png",
       drive: "cancelled",
     },
   ];

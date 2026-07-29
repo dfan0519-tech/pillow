@@ -51,6 +51,7 @@ export function conversationReducer(
       };
     case "conversation_created": {
       const { conversation } = action;
+      const select = action.select !== false;
       const existing = state.conversationsByProject[conversation.projectId] ?? [];
       const without = existing.filter((item) => item.id !== conversation.id);
       return {
@@ -59,7 +60,9 @@ export function conversationReducer(
           ...state.conversationsByProject,
           [conversation.projectId]: [...without, conversation],
         },
-        selectedConversationId: conversation.id,
+        selectedConversationId: select
+          ? conversation.id
+          : state.selectedConversationId,
       };
     }
     case "conversation_selected":

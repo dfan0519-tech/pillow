@@ -30,6 +30,7 @@ const STEP_STATUS_LABEL: Record<string, string> = {
   active: "进行中",
   completed: "完成",
   failed: "失败",
+  cancelled: "已取消",
 };
 
 export function RunActivity({ timeline, run }: RunActivityProps) {

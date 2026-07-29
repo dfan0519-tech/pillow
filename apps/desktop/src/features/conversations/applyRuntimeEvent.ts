@@ -19,6 +19,12 @@ import type {
   SubagentActivity,
   ToolActivity,
 } from "./conversationTypes";
+import {
+  closeOpenActivities,
+  normalizeTimelineActivitiesForRuns,
+} from "./normalizeTerminalActivity";
+
+export { closeOpenActivities } from "./normalizeTerminalActivity";
 
 export function emptyTimeline(conversationId: string): ConversationTimelineView {
   return {
@@ -168,6 +174,30 @@ export function applyRuntimeEvent(
     );
   }
 
+  // Terminal runs must never leave plan steps / tools / sub-agents as "running".
+  if (event.kind === "turn_completed") {
+    ({ plan, tools, subagents } = closeOpenActivities(
+      plan,
+      tools,
+      subagents,
+      "completed",
+    ));
+  } else if (event.kind === "turn_failed") {
+    ({ plan, tools, subagents } = closeOpenActivities(
+      plan,
+      tools,
+      subagents,
+      "failed",
+    ));
+  } else if (event.kind === "run_cancelled") {
+    ({ plan, tools, subagents } = closeOpenActivities(
+      plan,
+      tools,
+      subagents,
+      "cancelled",
+    ));
+  }
+
   const previousRun = state.runs[event.runId];
   const runStatus = statusFromEvent(event.kind, previousRun?.status);
   const terminalKind = isTerminalKind(event.kind)
@@ -299,6 +329,9 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
   if (active) {
     view = { ...view, activeRunId: active.runId };
   }
+
+  // Restored interrupted / terminal runs must close orphan running children.
+  view = normalizeTimelineActivitiesForRuns(view, runs);
 
   return { view, runs };
 }

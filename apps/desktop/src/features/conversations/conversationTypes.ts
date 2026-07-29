@@ -69,7 +69,12 @@ export type ConversationAction =
       projectId: string;
       conversations: ConversationDto[];
     }
-  | { type: "conversation_created"; conversation: ConversationDto }
+  | {
+      type: "conversation_created";
+      conversation: ConversationDto;
+      /** When false, register under project but do not select (stale scope). */
+      select?: boolean;
+    }
   | { type: "conversation_selected"; conversationId: string | null }
   | {
       type: "timeline_loaded";

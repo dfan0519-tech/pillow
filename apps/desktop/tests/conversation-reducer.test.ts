@@ -231,6 +231,160 @@ describe("timeline load merge and run restoration", () => {
   });
 });
 
+describe("terminal activity normalization", () => {
+  function seedRunningChildren(state: ConversationUiState): ConversationUiState {
+    let next = state;
+    next = dispatch(next, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 1,
+        kind: "run_started",
+        payload: { prompt_preview: "x" },
+      }),
+    });
+    next = dispatch(next, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 2,
+        kind: "plan_updated",
+        payload: {
+          steps: [
+            { id: "s1", title: "A", status: "completed" },
+            { id: "s2", title: "B", status: "active" },
+            { id: "s3", title: "C", status: "pending" },
+          ],
+        },
+        createdAt: "t2",
+      }),
+    });
+    next = dispatch(next, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 3,
+        kind: "tool_call_started",
+        payload: { tool_call_id: "tc1", name: "list", summary: "list" },
+        createdAt: "t3",
+      }),
+    });
+    next = dispatch(next, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 4,
+        kind: "subagent_started",
+        payload: { subagent_id: "sa1", role: "explore" },
+        createdAt: "t4",
+      }),
+    });
+    return next;
+  }
+
+  it("closes open children on run_cancelled", () => {
+    let state = createInitialConversationState();
+    state = dispatch(state, {
+      type: "timeline_loaded",
+      timeline: { conversationId: "c1", messages: [], events: [], runs: [] },
+    });
+    state = seedRunningChildren(state);
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 5,
+        kind: "run_cancelled",
+        payload: { reason: "user_cancel" },
+        createdAt: "t5",
+      }),
+    });
+
+    const timeline = state.timelines.c1;
+    expect(state.runs["run-term"]?.status).toBe("cancelled");
+    expect(timeline?.plan?.steps.map((s) => s.status)).toEqual([
+      "completed",
+      "cancelled",
+      "cancelled",
+    ]);
+    expect(timeline?.tools[0]?.status).toBe("cancelled");
+    expect(timeline?.subagents[0]?.status).toBe("cancelled");
+    expect(timeline?.tools.some((t) => t.status === "running")).toBe(false);
+    expect(timeline?.subagents.some((s) => s.status === "running")).toBe(false);
+  });
+
+  it("closes open children on turn_failed", () => {
+    let state = createInitialConversationState();
+    state = dispatch(state, {
+      type: "timeline_loaded",
+      timeline: { conversationId: "c1", messages: [], events: [], runs: [] },
+    });
+    state = seedRunningChildren(state);
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-term",
+        sequence: 5,
+        kind: "turn_failed",
+        payload: { code: "mock_error", message: "boom" },
+        createdAt: "t5",
+      }),
+    });
+
+    const timeline = state.timelines.c1;
+    expect(state.runs["run-term"]?.status).toBe("failed");
+    expect(timeline?.plan?.steps[1]?.status).toBe("failed");
+    expect(timeline?.tools[0]?.status).toBe("failed");
+    expect(timeline?.subagents[0]?.status).toBe("failed");
+  });
+
+  it("normalizes restored interrupted runs without leaving running children", () => {
+    const timeline: TimelineDto = {
+      conversationId: "c1",
+      messages: [],
+      events: [
+        baseEvent({
+          runId: "r-int",
+          sequence: 1,
+          kind: "run_started",
+          payload: {},
+        }),
+        baseEvent({
+          runId: "r-int",
+          sequence: 2,
+          kind: "tool_call_started",
+          payload: { tool_call_id: "tc", name: "read", summary: "read" },
+          createdAt: "t2",
+        }),
+        baseEvent({
+          runId: "r-int",
+          sequence: 3,
+          kind: "plan_updated",
+          payload: {
+            steps: [{ id: "s1", title: "Work", status: "active" }],
+          },
+          createdAt: "t3",
+        }),
+      ],
+      runs: [
+        { runId: "r-int", conversationId: "c1", status: "interrupted" },
+      ],
+    };
+
+    const state = dispatch(createInitialConversationState(), {
+      type: "timeline_loaded",
+      timeline,
+    });
+
+    expect(state.runs["r-int"]?.status).toBe("interrupted");
+    expect(state.timelines.c1?.tools[0]?.status).toBe("cancelled");
+    expect(state.timelines.c1?.plan?.steps[0]?.status).toBe("cancelled");
+    expect(state.timelines.c1?.tools.some((t) => t.status === "running")).toBe(
+      false,
+    );
+  });
+});
+
 describe("multi-turn chronological messages", () => {
   it("does not carry previous assistant text into a new run", () => {
     let state = createInitialConversationState();

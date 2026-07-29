@@ -63,6 +63,11 @@ export class MockConversationGateway implements ConversationGateway {
     projectId: string,
     title?: string,
   ): Promise<ConversationDto> {
+    if (this.createHold) {
+      const hold = this.createHold;
+      this.createHold = null;
+      await hold;
+    }
     const now = this.nextTimestamp();
     const conversation: StoredConversation = {
       id: `conv-${crypto.randomUUID()}`,
@@ -79,6 +84,11 @@ export class MockConversationGateway implements ConversationGateway {
   }
 
   async loadTimeline(conversationId: string): Promise<TimelineDto> {
+    if (this.nextLoadError) {
+      const message = this.nextLoadError;
+      this.nextLoadError = null;
+      throw new Error(message);
+    }
     const conversation = this.requireConversation(conversationId);
     return {
       conversationId,
@@ -192,7 +202,26 @@ export class MockConversationGateway implements ConversationGateway {
     this.nextSendError = message;
   }
 
+  /** Test helper: force loadTimeline failure for the next call. */
+  failNextLoadTimeline(message = "mock timeline load failed"): void {
+    this.nextLoadError = message;
+  }
+
+  /**
+   * Test helper: hold the next createConversation until the returned release
+   * function is called (deferred-promise race tests).
+   */
+  holdNextCreate(): () => void {
+    let release!: () => void;
+    this.createHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  }
+
   private nextSendError: string | null = null;
+  private nextLoadError: string | null = null;
+  private createHold: Promise<void> | null = null;
 
   /** Test helper: wait until every inflight run has finished or been cancelled. */
   async drain(): Promise<void> {

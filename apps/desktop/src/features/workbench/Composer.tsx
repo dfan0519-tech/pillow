@@ -13,6 +13,8 @@ type ComposerProps = {
   sending?: boolean;
   canCancel?: boolean;
   sendError?: string | null;
+  /** Non-destructive notice after an accepted send (e.g. timeline refresh failed). */
+  refreshWarning?: string | null;
   onOpenProject?: () => void;
   onNewProject?: () => void;
   /** Resolves on success; rejects so the composer can restore the draft. */
@@ -33,6 +35,7 @@ export function Composer({
   sending = false,
   canCancel = false,
   sendError = null,
+  refreshWarning = null,
   onOpenProject,
   onNewProject,
   onSend,
@@ -102,6 +105,15 @@ export function Composer({
         {sendError ? (
           <p className="composer__error" data-testid="composer-send-error" role="alert">
             {sendError}
+          </p>
+        ) : null}
+        {refreshWarning && !sendError ? (
+          <p
+            className="composer__warning"
+            data-testid="composer-refresh-warning"
+            role="status"
+          >
+            {refreshWarning}
           </p>
         ) : null}
         <div className="composer__footer">

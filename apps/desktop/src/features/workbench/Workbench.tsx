@@ -19,6 +19,7 @@ type WorkbenchProps = {
   busy?: boolean;
   sending?: boolean;
   sendError?: string | null;
+  refreshWarning?: string | null;
   timeline: ConversationTimelineView | null;
   run: RunView | null;
   showMockBadge?: boolean;
@@ -40,6 +41,7 @@ export function Workbench({
   busy = false,
   sending = false,
   sendError = null,
+  refreshWarning = null,
   timeline,
   run,
   showMockBadge = false,
@@ -120,6 +122,7 @@ export function Workbench({
           onOpenProject={onOpenProject}
           onSend={onSendTurn}
           projectName={project?.name ?? null}
+          refreshWarning={refreshWarning}
           sendError={sendError}
           sending={sending}
         />

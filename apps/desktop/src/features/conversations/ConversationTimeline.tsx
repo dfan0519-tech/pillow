@@ -3,7 +3,14 @@
  * Layout rhythm adapted from Grok App ConversationThread (MIT reference).
  */
 
-import { useCallback, useMemo, useRef, useState, type UIEvent } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type UIEvent,
+} from "react";
 import { RunActivity } from "./RunActivity";
 import type {
   ConversationTimelineView,
@@ -25,6 +32,8 @@ export const TIMELINE_WINDOW_THRESHOLD = 80;
 export const TIMELINE_WINDOW_SIZE = 40;
 const ESTIMATED_ITEM_HEIGHT = 88;
 const OVERSCAN = 6;
+const STICK_BOTTOM_PX = 48;
+const VIEWPORT_HEIGHT = 480;
 
 type TimelineItem =
   | { type: "message"; message: TimelineMessageDto }
@@ -53,7 +62,12 @@ export function ConversationTimeline({
       ) : null}
 
       {useWindow ? (
-        <WindowedItemList items={items} run={run} streaming={streaming} timeline={timeline} />
+        <WindowedItemList
+          items={items}
+          run={run}
+          streaming={streaming}
+          timeline={timeline}
+        />
       ) : (
         <div className="conversation-timeline__messages">
           {items.map((item, index) => (
@@ -92,16 +106,13 @@ function buildChronologicalItems(timeline: ConversationTimelineView): TimelineIt
       ?.index;
     const insertAt =
       lastUserIndex === undefined ? items.length : lastUserIndex + 1;
-    // Place activity after the last user and before subsequent assistants when possible.
     let at = insertAt;
     while (
       at < items.length
       && items[at]?.type === "message"
-      && items[at]?.type === "message"
       && (items[at] as { type: "message"; message: TimelineMessageDto }).message.role
         === "assistant"
     ) {
-      // Keep assistants after activity for the active turn only when streaming mid-turn.
       break;
     }
     items.splice(at, 0, { type: "activity" });
@@ -146,6 +157,7 @@ function TimelineItemView({
       data-testid={
         isAssistant ? "timeline-assistant-message" : "timeline-user-message"
       }
+      data-message-id={message.id}
     >
       <header>{isAssistant ? "助手" : "你"}</header>
       <p>{message.content}</p>
@@ -165,20 +177,62 @@ function WindowedItemList({
   streaming: boolean;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  // Anchor to newest content by default (initial load + streaming follow).
+  // jsdom lacks reliable scroll metrics, so the window is driven by this flag
+  // rather than scrollTop alone.
+  const [followBottom, setFollowBottom] = useState(true);
   const [scrollTop, setScrollTop] = useState(0);
-  const viewportHeight = 480;
-
-  const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    setScrollTop(event.currentTarget.scrollTop);
-  }, []);
-
   const totalHeight = items.length * ESTIMATED_ITEM_HEIGHT;
-  const startIndex = Math.max(
-    0,
-    Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN,
+  const estimatedMaxScroll = Math.max(0, totalHeight - VIEWPORT_HEIGHT);
+  const visibleCount =
+    Math.ceil(VIEWPORT_HEIGHT / ESTIMATED_ITEM_HEIGHT) + OVERSCAN * 2;
+  const windowSize = Math.max(visibleCount, TIMELINE_WINDOW_SIZE);
+
+  const onScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const el = event.currentTarget;
+      const nextTop = el.scrollTop;
+      setScrollTop(nextTop);
+
+      // Prefer live DOM metrics when the scroller actually overflows;
+      // fall back to estimated height so tests/jsdom still work.
+      const domOverflows = el.scrollHeight > el.clientHeight + 1;
+      const distanceFromBottom = domOverflows
+        ? el.scrollHeight - el.scrollTop - el.clientHeight
+        : estimatedMaxScroll - nextTop;
+      setFollowBottom(distanceFromBottom <= STICK_BOTTOM_PX);
+    },
+    [estimatedMaxScroll],
   );
-  const visibleCount = Math.ceil(viewportHeight / ESTIMATED_ITEM_HEIGHT) + OVERSCAN * 2;
-  const endIndex = Math.min(items.length, startIndex + Math.max(visibleCount, TIMELINE_WINDOW_SIZE));
+
+  useLayoutEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || !followBottom) return;
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (Math.abs(el.scrollTop - target) > 1) {
+      el.scrollTop = target;
+    }
+    setScrollTop(target > 0 ? target : estimatedMaxScroll);
+  }, [
+    items.length,
+    streaming,
+    timeline.assistantText,
+    followBottom,
+    estimatedMaxScroll,
+  ]);
+
+  let startIndex: number;
+  let endIndex: number;
+  if (followBottom) {
+    endIndex = items.length;
+    startIndex = Math.max(0, endIndex - windowSize - OVERSCAN);
+  } else {
+    startIndex = Math.max(
+      0,
+      Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN,
+    );
+    endIndex = Math.min(items.length, startIndex + windowSize);
+  }
   const slice = items.slice(startIndex, endIndex);
   const padTop = startIndex * ESTIMATED_ITEM_HEIGHT;
   const padBottom = Math.max(0, totalHeight - endIndex * ESTIMATED_ITEM_HEIGHT);
@@ -186,10 +240,11 @@ function WindowedItemList({
   return (
     <div
       className="conversation-timeline__messages conversation-timeline__messages--windowed"
+      data-follow-bottom={followBottom ? "true" : "false"}
       data-testid="timeline-window"
       onScroll={onScroll}
       ref={scrollerRef}
-      style={{ maxHeight: viewportHeight, overflowY: "auto" }}
+      style={{ maxHeight: VIEWPORT_HEIGHT, overflowY: "auto" }}
     >
       <div style={{ height: padTop }} aria-hidden="true" data-testid="timeline-pad-top" />
       {slice.map((item, offset) => (
@@ -201,7 +256,11 @@ function WindowedItemList({
           timeline={timeline}
         />
       ))}
-      <div style={{ height: padBottom }} aria-hidden="true" data-testid="timeline-pad-bottom" />
+      <div
+        style={{ height: padBottom }}
+        aria-hidden="true"
+        data-testid="timeline-pad-bottom"
+      />
     </div>
   );
 }

@@ -140,6 +140,7 @@ export function AppSidebar({
                       className={
                         isActive ? "project-row project-row--active" : "project-row"
                       }
+                      disabled={busy}
                       onClick={() => onSelect(project.id)}
                       title={project.rootPath}
                       type="button"

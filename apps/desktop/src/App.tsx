@@ -55,6 +55,7 @@ export function App({
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
   const [conversationState, dispatchConversation] = useReducer(
@@ -66,6 +67,10 @@ export function App({
   const defaultSelectSent = useRef(false);
   const conversationStateRef = useRef(conversationState);
   conversationStateRef.current = conversationState;
+  /** Bumps on every project-scope clear so in-flight create/send cannot select stale results. */
+  const projectScopeGenRef = useRef(0);
+  const activeProjectIdRef = useRef<string | null>(null);
+  activeProjectIdRef.current = activeProject?.id ?? null;
 
   useEffect(() => {
     let active = true;
@@ -153,8 +158,17 @@ export function App({
    * becomes active so sendTurn cannot target a foreign conversation.
    */
   function clearConversationScope() {
+    projectScopeGenRef.current += 1;
     dispatchConversation({ type: "conversation_selected", conversationId: null });
     setSendError(null);
+    setRefreshWarning(null);
+  }
+
+  function isScopeCurrent(projectId: string, generation: number): boolean {
+    return (
+      projectScopeGenRef.current === generation
+      && activeProjectIdRef.current === projectId
+    );
   }
 
   async function activateProject(project: ProjectDto) {
@@ -216,12 +230,18 @@ export function App({
 
   async function createConversation() {
     if (!activeProject) return;
+    const projectId = activeProject.id;
+    const generation = projectScopeGenRef.current;
     setBusy(true);
     try {
-      const conversation = await conversationGateway.createConversation(
-        activeProject.id,
-      );
-      dispatchConversation({ type: "conversation_created", conversation });
+      const conversation = await conversationGateway.createConversation(projectId);
+      const stillCurrent = isScopeCurrent(projectId, generation);
+      dispatchConversation({
+        type: "conversation_created",
+        conversation,
+        select: stillCurrent,
+      });
+      if (!stillCurrent) return;
       dispatchConversation({
         type: "timeline_loaded",
         timeline: {
@@ -254,8 +274,12 @@ export function App({
     if (!activeProject) {
       throw new Error("No active project.");
     }
+    const projectIdAtStart = activeProject.id;
+    const generationAtStart = projectScopeGenRef.current;
+
     setSending(true);
     setSendError(null);
+    setRefreshWarning(null);
 
     const state = conversationStateRef.current;
     let conversationId = state.selectedConversationId;
@@ -271,7 +295,7 @@ export function App({
     }
 
     // Never send against a conversation owned by another project.
-    if (conversationId && conversationProjectId !== activeProject.id) {
+    if (conversationId && conversationProjectId !== projectIdAtStart) {
       conversationId = null;
       dispatchConversation({ type: "conversation_selected", conversationId: null });
     }
@@ -279,27 +303,48 @@ export function App({
     try {
       if (!conversationId) {
         const conversation = await conversationGateway.createConversation(
-          activeProject.id,
+          projectIdAtStart,
           content.slice(0, 32),
         );
-        dispatchConversation({ type: "conversation_created", conversation });
+        const stillCurrent = isScopeCurrent(projectIdAtStart, generationAtStart);
+        dispatchConversation({
+          type: "conversation_created",
+          conversation,
+          select: stillCurrent,
+        });
+        if (!stillCurrent) {
+          throw new Error("项目已切换，发送已取消。");
+        }
         conversationId = conversation.id;
       } else if (
         !conversationBelongsToProject(
           conversationStateRef.current,
           conversationId,
-          activeProject.id,
+          projectIdAtStart,
         )
       ) {
         throw new Error("Conversation is not in the active project.");
       }
 
+      if (!isScopeCurrent(projectIdAtStart, generationAtStart)) {
+        throw new Error("项目已切换，发送已取消。");
+      }
+
+      // Accepted send: run id means the turn is durable on the gateway.
+      // Timeline refresh failures must not look like send failures.
       await conversationGateway.sendTurn(conversationId, content);
 
-      // Snapshot user message + runs from the gateway (no unqualified local success).
-      // Merge keeps any stream deltas that arrived while this load was in flight.
-      const timeline = await conversationGateway.loadTimeline(conversationId);
-      dispatchConversation({ type: "timeline_loaded", timeline });
+      try {
+        const timeline = await conversationGateway.loadTimeline(conversationId);
+        if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+          dispatchConversation({ type: "timeline_loaded", timeline });
+        }
+      } catch (cause) {
+        console.error("Failed to refresh timeline after accepted send.", cause);
+        if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+          setRefreshWarning("消息已发送，但时间线刷新失败。流式更新仍会继续。");
+        }
+      }
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "发送失败，请重试。";
@@ -370,6 +415,7 @@ export function App({
           onOpenProject={() => void openProject()}
           onSendTurn={sendTurn}
           project={activeProject}
+          refreshWarning={refreshWarning}
           run={activeRun}
           sendError={sendError}
           sending={sending}
