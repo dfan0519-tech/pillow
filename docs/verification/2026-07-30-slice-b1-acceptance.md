@@ -391,6 +391,53 @@ Release smoke summary (this machine):
 KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1463,"startupBudgetMs":2500,"startupMs":1424,"webviewProfile":"temporary-and-populated","readiness":"list-projects-and-lifecycle-command"}
 ```
 
+## CSS closeout (source-size invariant)
+
+Date of closeout: 2026-07-30
+
+**Non-claim:** no visual redesign. Selectors and cascade order are preserved;
+only the stylesheet split restores the ≤500-line source-size invariant.
+
+### Change
+
+- Split conversation/timeline/run-activity rules out of
+  `apps/desktop/src/styles/workbench-shell.css` into
+  `apps/desktop/src/styles/workbench-conversation.css`.
+- Import entry `apps/desktop/src/styles/workbench.css` now loads:
+  1. `workbench-shell.css` (sidebar + stage grid)
+  2. `workbench-conversation.css` (conversation surface / timeline / run-activity)
+  3. `workbench-chrome.css` (composer / dialog / resource)
+  4. existing shell media query
+
+### Line counts (post-split)
+
+| File | Lines | Limit |
+| --- | ---: | ---: |
+| `workbench-shell.css` | 418 | ≤ 500 |
+| `workbench-conversation.css` | 264 | ≤ 500 |
+| `workbench-chrome.css` | 279 | ≤ 500 (unchanged) |
+| `workbench.css` | 20 | entry only |
+
+### Gates (CSS closeout pass)
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
+| Unit tests (JS) | `pnpm test` | PASS — **80** tests |
+| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Diff hygiene | `git diff --check` | PASS |
+| Line counts | both split CSS files ≤ 500 | PASS (418 / 264) |
+
+### Commit SHAs
+
+| Wave | SHA | Message |
+| --- | --- | --- |
+| CSS closeout implementation | `1d2b719` | `refactor(desktop): split conversation styles under 500-line source limit` |
+| CSS closeout docs | `3eee77a` | `docs(verification): record Slice B1 CSS closeout evidence` |
+
+Exact implementation tip for controller citation: **`1d2b71967e913bbd35fddd2d5e2f8faa5ff3a1f3`**.
+Docs tip: **`3eee77adaa397e0c8c0041f101a45fa84bbae2b8`**.
+
 ## Remaining risks
 
 1. **Fixture speed vs interactive cancel** — production honor delays are 1 ms
