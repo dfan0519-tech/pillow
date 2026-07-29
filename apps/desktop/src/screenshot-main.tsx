@@ -19,9 +19,10 @@ const sample: ProjectDto = {
 const params = new URLSearchParams(window.location.search);
 const state = params.get("state") === "selected" ? "selected" : "empty";
 
-// Slow mock steps so the capture script can photograph mid-stream / cancel.
-// Keep well above Playwright interaction latency so streaming shots stay active.
-const conversationGateway = new MockConversationGateway({ stepDelayMs: 90 });
+// Screenshot-only mock pacing. Keep step delay large enough that the capture
+// script can drive to mid-stream, re-assert 运行中, and screenshot before
+// turn_completed. Runtime App.tsx default remains unchanged.
+const conversationGateway = new MockConversationGateway({ stepDelayMs: 350 });
 const gateway = new MockProjectGateway(state === "selected" ? [sample] : []);
 
 const root = document.getElementById("root");

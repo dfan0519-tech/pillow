@@ -55,6 +55,58 @@ function resolveModule(name) {
   }
 }
 
+/** DOM probe used immediately before streaming screenshots. */
+async function readRunStatus(page) {
+  return page.evaluate(() => {
+    const status = document.querySelector("[data-testid='run-status']");
+    return (status?.textContent ?? "").trim();
+  });
+}
+
+async function readRunActivityText(page) {
+  return page.evaluate(() => {
+    const activity = document.querySelector("[data-testid='run-activity']");
+    return activity?.textContent ?? "";
+  });
+}
+
+/**
+ * Final-moment gate: must still show 运行中 the instant before capture.
+ * Throws if the run already terminalized (the previous race).
+ */
+async function assertStreamingActiveAtCapture(page) {
+  const statusText = await readRunStatus(page);
+  if (!/运行中|running/i.test(statusText)) {
+    throw new Error(
+      `Streaming screenshot refused: expected 运行中 at capture time, got "${statusText || "(missing)"}". Increase screenshot stepDelayMs.`,
+    );
+  }
+  // Status chip itself must not already read completed/cancelled.
+  if (/已完成|completed|已取消|cancelled|失败|failed/i.test(statusText)) {
+    throw new Error(
+      `Streaming screenshot refused: terminal status at capture time ("${statusText}").`,
+    );
+  }
+}
+
+/**
+ * Final-moment gate: cancelled terminal with no live child activity labels.
+ */
+async function assertCancelledAtCapture(page) {
+  const statusText = await readRunStatus(page);
+  if (!/已取消|cancelled/i.test(statusText)) {
+    throw new Error(
+      `Cancelled screenshot refused: expected 已取消 at capture time, got "${statusText || "(missing)"}".`,
+    );
+  }
+  const activity = await readRunActivityText(page);
+  if (/\brunning\b|进行中/i.test(activity)) {
+    throw new Error(
+      "Cancelled screenshot refused: child activity still shows running/进行中.",
+    );
+  }
+}
+
 async function driveStreaming(page, mode) {
   await page.waitForSelector("[data-testid='active-project-name']");
   await page.click('button:has-text("新建对话")');
@@ -86,7 +138,7 @@ async function driveStreaming(page, mode) {
       { timeout: 5_000 },
     );
   } else {
-    // Capture while the run is still active — not after turn_completed.
+    // Drive into an active mid-stream surface (status + assistant + activity).
     await page.waitForFunction(
       () => {
         const status = document.querySelector("[data-testid='run-status']");
@@ -95,21 +147,12 @@ async function driveStreaming(page, mode) {
       { timeout: 15_000 },
     );
     await page.waitForSelector("[data-testid='timeline-assistant-message']", {
-      timeout: 10_000,
+      timeout: 15_000,
     });
     await page.waitForSelector("[data-testid='run-activity']", { timeout: 10_000 });
-    // Confirm still active at capture time (slow fixture keeps stream open).
-    const stillActive = await page.evaluate(() => {
-      const status = document.querySelector("[data-testid='run-status']");
-      return status && /运行中|running|取消中|cancelling/i.test(status.textContent ?? "");
-    });
-    if (!stillActive) {
-      throw new Error(
-        "Streaming screenshot would capture a completed run; increase stepDelayMs.",
-      );
-    }
+    // Do not sleep here: any post-check delay is a race against turn_completed.
+    // Final assert happens immediately before page.screenshot().
   }
-  await page.waitForTimeout(120);
 }
 
 async function main() {
@@ -191,16 +234,54 @@ async function main() {
       await waitForReady(page);
       if (shot.drive) {
         await driveStreaming(page, shot.drive);
+        // Brief paint settle only — then re-assert at the final moment so the
+        // PNG cannot claim a state the DOM no longer shows.
+        await page.evaluate(
+          () =>
+            new Promise((resolve) => {
+              requestAnimationFrame(() => requestAnimationFrame(resolve));
+            }),
+        );
+        if (shot.drive === "streaming") {
+          await assertStreamingActiveAtCapture(page);
+        } else {
+          await assertCancelledAtCapture(page);
+        }
       } else if (shot.state === "selected") {
         await page.waitForSelector("[data-testid='active-project-name']");
+        await page.waitForTimeout(150);
       } else {
         await page.waitForSelector("[data-testid='empty-workbench']");
+        await page.waitForTimeout(150);
       }
-      // Allow layout paint after selection effect.
-      await page.waitForTimeout(150);
       const target = path.join(outDir, shot.file);
       await page.screenshot({ path: target, fullPage: false });
-      console.log(`wrote ${target}`);
+      // Post-shot DOM claim for the report: re-read what the page still shows.
+      if (shot.drive === "streaming") {
+        const statusText = await readRunStatus(page);
+        console.log(`wrote ${target} (status=${JSON.stringify(statusText)})`);
+        if (!/运行中|running/i.test(statusText)) {
+          throw new Error(
+            `Post-shot streaming status drifted off 运行中: "${statusText}". PNG may be invalid.`,
+          );
+        }
+      } else if (shot.drive === "cancelled") {
+        const statusText = await readRunStatus(page);
+        const activity = await readRunActivityText(page);
+        console.log(`wrote ${target} (status=${JSON.stringify(statusText)})`);
+        if (!/已取消|cancelled/i.test(statusText)) {
+          throw new Error(
+            `Post-shot cancelled status drifted: "${statusText}". PNG may be invalid.`,
+          );
+        }
+        if (/\brunning\b|进行中/i.test(activity)) {
+          throw new Error(
+            "Post-shot cancelled activity still shows running/进行中. PNG may be invalid.",
+          );
+        }
+      } else {
+        console.log(`wrote ${target}`);
+      }
       await page.close();
     }
   } finally {
