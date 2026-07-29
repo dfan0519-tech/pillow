@@ -91,11 +91,15 @@ describe("project workbench shell", () => {
     render(<App gateway={fixtureGateway([])} />);
 
     expect(await screen.findByTestId("empty-workbench")).toBeVisible();
-    expect(screen.getByRole("navigation", { name: "项目" })).toBeVisible();
-    expect(screen.getByRole("navigation", { name: "项目对话" })).toBeVisible();
+    expect(screen.getByTestId("app-sidebar")).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "导航" })).toBeVisible();
     expect(screen.getByRole("region", { name: "对话工作台" })).toBeVisible();
     expect(screen.queryByRole("main", { name: "项目启动器" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("项目目录")).not.toBeInTheDocument();
+    // Single continuous left rail — no second conversation column rail
+    expect(document.querySelectorAll(".app-sidebar").length).toBe(1);
+    expect(document.querySelector(".conversation-sidebar")).toBeNull();
+    expect(document.querySelector(".project-sidebar")).toBeNull();
   });
 
   it("marks readiness only after the initial project list succeeds", async () => {
@@ -147,8 +151,7 @@ describe("project workbench shell", () => {
 
     render(<App gateway={gateway} />);
 
-    const openButtons = await screen.findAllByRole("button", { name: "打开项目" });
-    await user.click(openButtons[0]);
+    await user.click(await screen.findByTestId("nav-open-project"));
 
     await waitFor(() => {
       expect(gateway.pickDirectory).toHaveBeenCalledOnce();
@@ -169,7 +172,7 @@ describe("project workbench shell", () => {
     gateway.createProject = vi.fn();
 
     render(<App gateway={gateway} />);
-    await user.click((await screen.findAllByRole("button", { name: "打开项目" }))[0]);
+    await user.click(await screen.findByTestId("nav-open-project"));
 
     await waitFor(() => {
       expect(gateway.openOrRegisterProject).toHaveBeenCalledWith(existing.rootPath);
@@ -193,7 +196,7 @@ describe("project workbench shell", () => {
 
     render(<App gateway={gateway} />);
 
-    await user.click((await screen.findAllByRole("button", { name: "新建项目" }))[0]);
+    await user.click(await screen.findByTestId("nav-new-project"));
     await user.type(await screen.findByLabelText("项目名称"), created.name);
     await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
 
@@ -209,17 +212,15 @@ describe("project workbench shell", () => {
     expect(screen.queryByLabelText("项目目录")).not.toBeInTheDocument();
   });
 
-  it("keeps the selected project visible above its conversations", async () => {
+  it("keeps the selected project visible above its nested conversations", async () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
 
     await user.click(await screen.findByRole("button", { name: "Keeper IDE" }));
 
     expect(screen.getByTestId("active-project-name")).toHaveTextContent("Keeper IDE");
-    expect(screen.getByRole("navigation", { name: "项目对话" })).toBeVisible();
-    expect(screen.getByText("Keeper IDE", {
-      selector: ".conversation-sidebar__project",
-    })).toBeVisible();
+    expect(screen.getByTestId("project-conversations")).toBeVisible();
+    expect(screen.getByRole("group", { name: "项目对话" })).toBeVisible();
   });
 
   it("does not render provider internals or Grok branding", async () => {
@@ -242,7 +243,7 @@ describe("project workbench shell", () => {
     ));
     render(<App gateway={gateway} />);
 
-    await user.click((await screen.findAllByRole("button", { name: "新建项目" }))[0]);
+    await user.click(await screen.findByTestId("nav-new-project"));
     await user.type(await screen.findByLabelText("项目名称"), "Broken project");
     await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
 
