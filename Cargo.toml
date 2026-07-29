@@ -5,6 +5,7 @@ members = [
   "crates/agent-protocol",
   "crates/kernel-project",
   "crates/kernel-session",
+  "crates/runtime-host",
   "crates/storage-sqlite",
 ]
 

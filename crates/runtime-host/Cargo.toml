@@ -1,0 +1,16 @@
+[package]
+name = "keeper-runtime-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded runtime host and deterministic fake agent adapter"
+
+[dependencies]
+chrono.workspace = true
+keeper-agent-protocol = { path = "../agent-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
