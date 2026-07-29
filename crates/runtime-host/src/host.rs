@@ -2,7 +2,9 @@
 //!
 //! Spawn registration, cancel, and join are linearized through the host worker
 //! map and each [`WorkerRecord`]'s phase machine (`Starting -> Running ->
-//! Joining -> Joined`). There is no unregistered in-flight arm window.
+//! Joining -> Joined`). Async turn slots are RAII [`TurnSlotPermit`]s owned by
+//! the worker record — no unregistered in-flight window and no manual
+//! double/missed release on the async path.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,7 +20,7 @@ use keeper_agent_protocol::{
 use crate::delivery::DEFAULT_EVENT_QUEUE_CAPACITY;
 use crate::fake::FakeRuntimeAdapter;
 use crate::sink::ProtocolGuardSink;
-use crate::worker::{WorkerRecord, run_turn_worker};
+use crate::worker::{TurnSlotPermit, WorkerRecord, run_turn_worker};
 
 /// Default concurrent turn limit for the host (process-pool style bound).
 pub const DEFAULT_MAX_CONCURRENT_TURNS: u32 = 4;
@@ -75,7 +77,8 @@ pub fn normalize_max_concurrent_turns(raw: u32) -> u32 {
 pub struct RuntimeHost {
     adapter: Arc<dyn AgentRuntimeAdapter>,
     config: HostConfig,
-    in_flight: AtomicU32,
+    /// Shared turn-slot counter (async permits + sync `send_turn` guards).
+    slots: Arc<AtomicU32>,
     shut_down: AtomicBool,
     workers: Mutex<HashMap<RunId, Arc<WorkerRecord>>>,
 }
@@ -90,7 +93,7 @@ impl RuntimeHost {
                 event_queue_capacity: config.event_queue_capacity.max(1),
                 after_worker_registered: config.after_worker_registered,
             },
-            in_flight: AtomicU32::new(0),
+            slots: Arc::new(AtomicU32::new(0)),
             shut_down: AtomicBool::new(false),
             workers: Mutex::new(HashMap::new()),
         }
@@ -117,40 +120,40 @@ impl RuntimeHost {
         sink: &mut dyn EventSink,
     ) -> Result<(), RuntimeError> {
         self.ensure_alive()?;
-        self.acquire_turn_slot()?;
+        // Scoped RAII guard: increments once, decrements exactly once on drop
+        // (including early returns / panics in the closure body).
+        let _permit = TurnSlotPermit::try_acquire(&self.slots, self.config.max_concurrent_turns)?;
         let run_id = request.run_id;
-        let result = (|| {
-            let mut guarded = ProtocolGuardSink::new(run_id, sink);
-            self.adapter.send_turn(request, &mut guarded)?;
-            guarded.finish()?;
-            Ok(())
-        })();
-        self.release_turn_slot();
-        result
+        let mut guarded = ProtocolGuardSink::new(run_id, sink);
+        self.adapter.send_turn(request, &mut guarded)?;
+        guarded.finish()?;
+        Ok(())
     }
 
     /// Run a turn on a background thread; cancellable as soon as this returns.
     ///
-    /// The worker is registered in `Starting` **before** any blocking
-    /// `arm_turn` work. Shutdown either waits for that record or the spawn is
-    /// rejected before registration — there is no unregistered in-flight slot.
+    /// Shutdown check, turn-slot permit acquisition, and insertion of the
+    /// `Starting` worker record (with the permit moved into the record) are one
+    /// critical section under the workers map. Shutdown either waits for that
+    /// record or the spawn is rejected before any slot is held.
     pub fn spawn_turn(self: &Arc<Self>, request: SendTurn) -> Result<SpawnedTurn, RuntimeError> {
         self.ensure_alive()?;
-        self.acquire_turn_slot()?;
 
         let run_id = request.run_id;
-        let record = WorkerRecord::new(self.config.event_queue_capacity);
 
-        // Linearize with shutdown: register Starting before arm_turn/spawn.
-        {
+        // Linearize with shutdown: re-check shut_down, acquire the permit, and
+        // publish Starting with permit ownership under the same workers lock.
+        let record = {
             let mut workers = self.workers.lock().expect("workers");
             if self.shut_down.load(Ordering::SeqCst) {
-                drop(workers);
-                self.release_turn_slot();
                 return Err(RuntimeError::ShutDown);
             }
+            let permit =
+                TurnSlotPermit::try_acquire(&self.slots, self.config.max_concurrent_turns)?;
+            let record = WorkerRecord::new(self.config.event_queue_capacity, permit);
             workers.insert(run_id, Arc::clone(&record));
-        }
+            record
+        };
 
         if let Some(hook) = self.config.after_worker_registered.as_ref() {
             hook();
@@ -185,7 +188,9 @@ impl RuntimeHost {
                     &delivery_for_thread,
                 );
                 delivery_for_thread.close();
-                host.release_turn_slot();
+                // Free concurrency when the body finishes; await_joined also
+                // takes the permit (idempotent) before publishing Joined.
+                record_for_thread.release_slot_permit();
                 record_for_thread.mark_body_finished();
                 result
             });
@@ -244,17 +249,21 @@ impl RuntimeHost {
     /// Host workers in `Starting`, `Running`, or `Joining` are waited on even
     /// when `adapter.shutdown()` returns an error. The adapter error is
     /// returned only after host cleanup is complete.
+    ///
+    /// `shut_down` is published under the workers lock so a concurrent
+    /// `spawn_turn` either rejects before acquiring a permit or has already
+    /// inserted a `Starting` record that this path will join.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
-        let already = self.shut_down.swap(true, Ordering::SeqCst);
-
-        {
+        let already = {
             let workers = self.workers.lock().expect("workers");
+            let already = self.shut_down.swap(true, Ordering::SeqCst);
             for (run_id, worker) in workers.iter() {
                 worker.request_cancel();
                 let _ = self.adapter.cancel_turn(*run_id);
                 worker.delivery.close();
             }
-        }
+            already
+        };
 
         let adapter_result = self.adapter.shutdown();
         // Join host workers even when the adapter reports failure.
@@ -263,19 +272,34 @@ impl RuntimeHost {
         if already {
             return Ok(());
         }
-        if self.in_flight.load(Ordering::SeqCst) != 0 {
-            return Err(RuntimeError::Internal {
-                message: format!(
-                    "shutdown completed with {} in-flight turn slot(s)",
-                    self.in_flight.load(Ordering::SeqCst)
-                ),
-            });
-        }
+        // Empty registry must imply no outstanding turn slots (async permits
+        // live on worker records; sync send_turn cannot start after shut_down).
+        self.ensure_registry_empty_implies_no_slots()?;
         Ok(())
     }
 
     pub fn in_flight_turns(&self) -> u32 {
-        self.in_flight.load(Ordering::SeqCst)
+        self.slots.load(Ordering::SeqCst)
+    }
+
+    /// True when the worker registry is empty and no turn-slot permits remain.
+    ///
+    /// After a successful shutdown this must hold. It also documents the
+    /// invariant that an empty async worker map cannot leave a leaked permit.
+    pub fn is_fully_idle(&self) -> bool {
+        let workers = self.workers.lock().expect("workers");
+        workers.is_empty() && self.slots.load(Ordering::SeqCst) == 0
+    }
+
+    /// Number of worker records still registered (test / invariant helper).
+    pub fn worker_registry_len(&self) -> usize {
+        self.workers.lock().expect("workers").len()
+    }
+
+    /// Count of registered workers that still own their async slot permit.
+    pub fn workers_holding_slot_permits(&self) -> usize {
+        let workers = self.workers.lock().expect("workers");
+        workers.values().filter(|w| w.has_slot_permit()).count()
     }
 
     pub fn event_queue_capacity(&self) -> usize {
@@ -309,15 +333,14 @@ impl RuntimeHost {
         }
     }
 
+    /// Abandon a Starting record: permit is released inside `abandon_starting`
+    /// before `Joined` is published, then the map entry is removed.
     fn fail_spawn_cleanup(&self, run_id: RunId, record: &WorkerRecord) {
         record.request_cancel();
         record.delivery.close();
         record.abandon_starting();
-        {
-            let mut workers = self.workers.lock().expect("workers");
-            workers.remove(&run_id);
-        }
-        self.release_turn_slot();
+        let mut workers = self.workers.lock().expect("workers");
+        workers.remove(&run_id);
     }
 
     fn ensure_alive(&self) -> Result<(), RuntimeError> {
@@ -328,25 +351,30 @@ impl RuntimeHost {
         }
     }
 
-    fn acquire_turn_slot(&self) -> Result<(), RuntimeError> {
-        let max = self.config.max_concurrent_turns;
-        loop {
-            let current = self.in_flight.load(Ordering::SeqCst);
-            if current >= max {
-                return Err(RuntimeError::ConcurrencyLimit { max });
-            }
-            if self
-                .in_flight
-                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return Ok(());
-            }
+    /// Post-shutdown invariant: empty worker registry ⇒ no turn-slot permits.
+    ///
+    /// Async permits live on worker records and are dropped before `Joined` is
+    /// published. Sync `send_turn` cannot start after `shut_down` is set, so a
+    /// drained registry with a non-zero counter is always a bookkeeping leak.
+    fn ensure_registry_empty_implies_no_slots(&self) -> Result<(), RuntimeError> {
+        let workers = self.workers.lock().expect("workers");
+        if !workers.is_empty() {
+            return Err(RuntimeError::Internal {
+                message: format!(
+                    "shutdown completed with {} worker record(s) still registered",
+                    workers.len()
+                ),
+            });
         }
-    }
-
-    fn release_turn_slot(&self) {
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        let slots = self.slots.load(Ordering::SeqCst);
+        if slots != 0 {
+            return Err(RuntimeError::Internal {
+                message: format!(
+                    "shutdown completed with {slots} in-flight turn slot(s) and empty worker registry"
+                ),
+            });
+        }
+        Ok(())
     }
 }
 

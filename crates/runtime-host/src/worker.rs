@@ -7,8 +7,12 @@
 //! Exactly one waiter claims the OS join handle (`Joining`); other waiters
 //! block until the phase is truly `Joined`. Cancel intent is published through
 //! the same record (and into delivery so terminal commit is atomic with cancel).
+//!
+//! Async concurrency slots are owned as an RAII [`TurnSlotPermit`] on the
+//! record: acquire once under the host workers lock, drop exactly once on
+//! failure cleanup or worker completion (never via scattered manual releases).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -17,6 +21,41 @@ use keeper_agent_protocol::{AgentRuntimeAdapter, RunId, RuntimeError, RuntimeEve
 
 use crate::delivery::BoundedDelivery;
 use crate::sink::{BoundedDeliverySink, ProtocolGuardSink};
+
+/// Single-owner concurrency permit for one turn slot.
+///
+/// Increments the shared counter exactly once on successful acquire and
+/// decrements exactly once on [`Drop`]. No manual release API — drop (or
+/// `mem::forget` is intentionally not used) is the only path.
+pub(crate) struct TurnSlotPermit {
+    counter: Arc<AtomicU32>,
+}
+
+impl TurnSlotPermit {
+    /// CAS-increment `counter` if below `max`.
+    pub fn try_acquire(counter: &Arc<AtomicU32>, max: u32) -> Result<Self, RuntimeError> {
+        loop {
+            let current = counter.load(Ordering::SeqCst);
+            if current >= max {
+                return Err(RuntimeError::ConcurrencyLimit { max });
+            }
+            if counter
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Ok(Self {
+                    counter: Arc::clone(counter),
+                });
+            }
+        }
+    }
+}
+
+impl Drop for TurnSlotPermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Linearizable host worker lifecycle.
 #[derive(Debug)]
@@ -37,25 +76,42 @@ struct WorkerInner {
     body_finished: bool,
 }
 
-/// Per-run worker record: sole authority for phase, cancel publish, and join.
+/// Per-run worker record: sole authority for phase, cancel publish, join, and
+/// the async turn-slot permit.
 pub(crate) struct WorkerRecord {
     pub cancel: Arc<AtomicBool>,
     pub delivery: Arc<BoundedDelivery>,
+    /// Async slot permit. Taken exactly once (failure cleanup or completion).
+    slot: Mutex<Option<TurnSlotPermit>>,
     inner: Mutex<WorkerInner>,
     cv: Condvar,
 }
 
 impl WorkerRecord {
-    pub fn new(capacity: usize) -> Arc<Self> {
+    pub fn new(capacity: usize, permit: TurnSlotPermit) -> Arc<Self> {
         Arc::new(Self {
             cancel: Arc::new(AtomicBool::new(false)),
             delivery: BoundedDelivery::new(capacity),
+            slot: Mutex::new(Some(permit)),
             inner: Mutex::new(WorkerInner {
                 phase: WorkerPhase::Starting,
                 body_finished: false,
             }),
             cv: Condvar::new(),
         })
+    }
+
+    /// Whether this record still owns its async turn-slot permit.
+    pub fn has_slot_permit(&self) -> bool {
+        self.slot.lock().expect("slot").is_some()
+    }
+
+    /// Drop the slot permit exactly once. Further calls are no-ops.
+    ///
+    /// Used by the worker body (free concurrency early) and as a safety net
+    /// when publishing `Joined`.
+    pub fn release_slot_permit(&self) {
+        drop(self.slot.lock().expect("slot").take());
     }
 
     /// Publish cancel so ingress and terminal commit observe it.
@@ -99,7 +155,13 @@ impl WorkerRecord {
     }
 
     /// Fail a spawn that never obtained a live handle (`Starting -> Joined`).
+    ///
+    /// Releases the async slot permit **before** publishing `Joined` so a
+    /// concurrent `join_all` waiter cannot observe Joined / an empty registry
+    /// while the permit is still alive.
     pub fn abandon_starting(&self) {
+        // Permit first — critical ordering vs shutdown's in_flight check.
+        self.release_slot_permit();
         let mut g = self.inner.lock().expect("worker");
         if matches!(g.phase, WorkerPhase::Starting) {
             g.phase = WorkerPhase::Joined;
@@ -135,6 +197,9 @@ impl WorkerRecord {
         match handle {
             Some(h) => {
                 let result = join_handle_draining(&self.delivery, h, events);
+                // Safety net: body should already have dropped the permit; take
+                // is idempotent. Always drop before publishing Joined.
+                self.release_slot_permit();
                 {
                     let mut g = self.inner.lock().expect("worker");
                     g.phase = WorkerPhase::Joined;
@@ -144,6 +209,7 @@ impl WorkerRecord {
                 result
             }
             None => {
+                // Already Joined (abandon or prior waiter); permit must be gone.
                 events.extend(self.delivery.drain());
                 Ok(())
             }

@@ -15,6 +15,9 @@ use keeper_agent_protocol::{
 use keeper_runtime_host::{FakeRuntimeAdapter, HostConfig, RuntimeHost};
 
 const RACE_ITERS: usize = 24;
+/// Multi-thread spawn×shutdown stress: high enough to fail the old
+/// acquire-slot-before-register ordering reliably on multi-core hosts.
+const SPAWN_SHUTDOWN_RACE_ITERS: usize = 128;
 
 #[test]
 fn shutdown_joins_worker_still_in_starting_state() {
@@ -155,18 +158,19 @@ fn shutdown_waits_for_worker_blocked_in_arm_turn() {
 
 #[test]
 fn spawn_racing_shutdown_is_rejected_or_fully_joined() {
-    for _ in 0..RACE_ITERS {
-        let slow = r#"
+    for iter in 0..SPAWN_SHUTDOWN_RACE_ITERS {
+        // Short fixture: stress the slot/register linearization, not wall delay.
+        let fixture = r#"
 {"kind":"run_started","delay_ms":0,"payload":{}}
-{"kind":"assistant_delta","delay_ms":50,"payload":{"text":"x"}}
+{"kind":"assistant_delta","delay_ms":0,"payload":{"text":"x"}}
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
-        let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
+        let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap());
         let host = Arc::new(RuntimeHost::new(
             adapter,
             HostConfig {
                 max_concurrent_turns: 8,
-                honor_fixture_delays: true,
+                honor_fixture_delays: false,
                 event_queue_capacity: 8,
                 after_worker_registered: None,
             },
@@ -179,49 +183,80 @@ fn spawn_racing_shutdown_is_rejected_or_fully_joined() {
             .unwrap();
         let session_id = session.session_id;
 
-        let start = Arc::new(Barrier::new(5));
+        // 8 spawns + 1 shutdown racing from a shared barrier.
+        const SPAWNERS: usize = 8;
+        let parties = SPAWNERS + 2; // spawns + shutdown + driver
+        let start = Arc::new(Barrier::new(parties));
         let mut handles = Vec::new();
-        for i in 0..4 {
+        for i in 0..SPAWNERS {
             let host = Arc::clone(&host);
             let start = Arc::clone(&start);
             handles.push(thread::spawn(move || {
                 start.wait();
-                if i == 3 {
-                    host.shutdown()
-                } else {
-                    match host.spawn_turn(SendTurn {
-                        session_id,
-                        run_id: RunId::new(),
-                        content: format!("r{i}"),
-                    }) {
-                        Ok(s) => {
-                            drop(s);
-                            Ok(())
-                        }
-                        Err(RuntimeError::ShutDown) => Ok(()),
-                        Err(e) => Err(e),
+                match host.spawn_turn(SendTurn {
+                    session_id,
+                    run_id: RunId::new(),
+                    content: format!("r{i}"),
+                }) {
+                    Ok(s) => {
+                        // Accepted: fully joined via Drop (or already finished).
+                        drop(s);
+                        Ok(())
                     }
+                    Err(RuntimeError::ShutDown) => Ok(()),
+                    Err(e) => Err(e),
                 }
+            }));
+        }
+        {
+            let host = Arc::clone(&host);
+            let start = Arc::clone(&start);
+            handles.push(thread::spawn(move || {
+                start.wait();
+                host.shutdown()
             }));
         }
         start.wait();
         for h in handles {
-            h.join().expect("race thread").expect("spawn/shutdown race");
+            h.join()
+                .expect("race thread")
+                .unwrap_or_else(|e| panic!("iter {iter}: spawn/shutdown race: {e}"));
         }
+        assert_eq!(
+            host.worker_registry_len(),
+            0,
+            "iter {iter}: worker registry must be empty after race"
+        );
+        assert_eq!(
+            host.workers_holding_slot_permits(),
+            0,
+            "iter {iter}: no worker may still own an async slot permit"
+        );
         assert_eq!(
             host.in_flight_turns(),
             0,
-            "all workers must be joined after spawn×shutdown race"
+            "iter {iter}: in_flight must be 0 after every accepted/rejected race"
+        );
+        assert!(
+            host.is_fully_idle(),
+            "iter {iter}: empty registry must imply no turn-slot permits remain"
         );
         let err = match host.spawn_turn(SendTurn {
             session_id,
             run_id: RunId::new(),
             content: "after".into(),
         }) {
-            Ok(_) => panic!("spawn after shutdown must fail"),
+            Ok(_) => panic!("iter {iter}: spawn after shutdown must fail"),
             Err(e) => e,
         };
-        assert!(matches!(err, RuntimeError::ShutDown));
+        assert!(
+            matches!(err, RuntimeError::ShutDown),
+            "iter {iter}: expected ShutDown after race, got {err}"
+        );
+        assert!(
+            host.is_fully_idle(),
+            "iter {iter}: post-shutdown spawn rejection must leave host fully idle"
+        );
     }
 }
 
