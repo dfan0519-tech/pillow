@@ -9,6 +9,7 @@
 
 # Tauri and packaging
 **/src-tauri/target/
+**/src-tauri/gen/
 **/bundle/
 
 # Tests and diagnostics
