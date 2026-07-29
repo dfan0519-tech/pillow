@@ -29,6 +29,7 @@ credentials.json
 # Runtime state
 /.keeper/
 /.runtime/
+/.superpowers/
 *.db
 *.db-shm
 *.db-wal
