@@ -3,6 +3,7 @@ import {
   ProjectGatewayError,
   normalizeProjectGatewayError,
   type CreateProjectInput,
+  type CreateProjectWithFolderInput,
   type ProjectDto,
   type ProjectGateway,
 } from "./projectGateway";
@@ -58,7 +59,7 @@ async function invokeProject(
   }
 }
 
-/** Tauri-only boundary. The renderer does not access SQLite directly. */
+/** Tauri-only boundary. The renderer does not access the filesystem directly. */
 export class TauriProjectGateway implements ProjectGateway {
   async listProjects(): Promise<ProjectDto[]> {
     try {
@@ -79,5 +80,27 @@ export class TauriProjectGateway implements ProjectGateway {
 
   selectProject(projectId: string): Promise<ProjectDto> {
     return invokeProject("select_project", { projectId });
+  }
+
+  async pickDirectory(): Promise<string | null> {
+    try {
+      const payload = await invoke<unknown>("pick_directory");
+      if (payload === null) return null;
+      if (!isNonEmptyString(payload)) throw invalidProjectResponse();
+      return payload;
+    } catch (error) {
+      throw normalizeProjectGatewayError(error);
+    }
+  }
+
+  openOrRegisterProject(rootPath: string): Promise<ProjectDto> {
+    return invokeProject("open_or_register_project", { rootPath });
+  }
+
+  createProjectWithFolder(input: CreateProjectWithFolderInput): Promise<ProjectDto> {
+    return invokeProject("create_project_with_folder", {
+      name: input.name,
+      parentPath: input.parentPath,
+    });
   }
 }

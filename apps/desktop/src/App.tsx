@@ -1,33 +1,42 @@
 import { useEffect, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
-import { ProjectLauncher } from "./features/projects/ProjectLauncher";
+import { NewProjectDialog } from "./features/projects/NewProjectDialog";
 import { ProjectSidebar } from "./features/projects/ProjectSidebar";
 import { Workbench } from "./features/workbench/Workbench";
 import {
   normalizeProjectGatewayError,
   type CommandError,
-  type CreateProjectInput,
   type ProjectDto,
   type ProjectGateway,
 } from "./lib/projectGateway";
 
 type AppProps = {
   gateway: ProjectGateway;
+  /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
+  /** Optional project id to select after the initial list loads (screenshot harness). */
+  defaultSelectedProjectId?: string;
 };
 
 /**
- * Shell regions and adjustable navigation adapt Grok App's App.tsx layout under MIT.
- * Source: src/App.tsx at 1c3f9c8aa3a42e869f11afb3d075f1b52843aaa9.
+ * Shell regions adapt Grok App's App.tsx layout under MIT.
+ * Upstream: src/App.tsx at cbbbdf17bb8db1588b6707f3f42f6b00397e27f9.
+ * Always launches into the full workbench — never a full-screen project launcher.
  */
-export function App({ gateway, onProjectLauncherReady }: AppProps) {
+export function App({
+  gateway,
+  onProjectLauncherReady,
+  defaultSelectedProjectId,
+}: AppProps) {
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
-  const [launcherOpen, setLauncherOpen] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [launcherLoaded, setLauncherLoaded] = useState(false);
+  const [shellReady, setShellReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
   const readinessSent = useRef(false);
+  const defaultSelectSent = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -35,7 +44,7 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
       (result) => {
         if (!active) return;
         setProjects(result);
-        setLauncherLoaded(true);
+        setShellReady(true);
         setLoading(false);
       },
       (cause: unknown) => {
@@ -50,59 +59,99 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
   }, [gateway]);
 
   useEffect(() => {
-    if (!launcherLoaded || readinessSent.current || !onProjectLauncherReady) return;
+    if (!shellReady || readinessSent.current || !onProjectLauncherReady) return;
     readinessSent.current = true;
     void onProjectLauncherReady().catch((cause: unknown) => {
       console.error("Keeper IDE readiness command failed.", cause);
     });
-  }, [launcherLoaded, onProjectLauncherReady]);
+  }, [shellReady, onProjectLauncherReady]);
+
+  useEffect(() => {
+    if (
+      !shellReady
+      || !defaultSelectedProjectId
+      || defaultSelectSent.current
+    ) {
+      return;
+    }
+    defaultSelectSent.current = true;
+    void selectProject(defaultSelectedProjectId);
+  }, [shellReady, defaultSelectedProjectId]);
+
+  function upsertProject(project: ProjectDto) {
+    setProjects((current) => {
+      const existing = current.some((item) => item.id === project.id);
+      return existing
+        ? current.map((item) => (item.id === project.id ? project : item))
+        : [...current, project];
+    });
+  }
+
+  async function activateProject(project: ProjectDto) {
+    const selected = await gateway.selectProject(project.id);
+    upsertProject(selected);
+    setActiveProject(selected);
+    setError(null);
+  }
 
   async function selectProject(projectId: string) {
+    setBusy(true);
     try {
       const project = await gateway.selectProject(projectId);
+      upsertProject(project);
       setActiveProject(project);
-      setLauncherOpen(false);
       setError(null);
     } catch (cause) {
       setError(normalizeProjectGatewayError(cause));
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function createProject(input: CreateProjectInput) {
+  async function openProject() {
+    setBusy(true);
     try {
-      const createdProject = await gateway.createProject(input);
-      const selectedProject = await gateway.selectProject(createdProject.id);
-      setProjects((current) => {
-        const existing = current.some((project) => project.id === selectedProject.id);
-        return existing
-          ? current.map((project) => (
-              project.id === selectedProject.id ? selectedProject : project
-            ))
-          : [...current, selectedProject];
+      const path = await gateway.pickDirectory();
+      if (!path) return;
+      const project = await gateway.openOrRegisterProject(path);
+      await activateProject(project);
+    } catch (cause) {
+      setError(normalizeProjectGatewayError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmNewProject(name: string): Promise<boolean> {
+    setBusy(true);
+    try {
+      const parentPath = await gateway.pickDirectory();
+      if (!parentPath) return false;
+      const project = await gateway.createProjectWithFolder({
+        name,
+        parentPath,
       });
-      setActiveProject(selectedProject);
-      setLauncherOpen(false);
-      setError(null);
+      await activateProject(project);
+      setNewProjectOpen(false);
       return true;
     } catch (cause) {
       setError(normalizeProjectGatewayError(cause));
       return false;
+    } finally {
+      setBusy(false);
     }
   }
 
-  if (loading) return <main className="app-loading">正在加载项目…</main>;
+  if (loading) {
+    return <main className="app-loading">正在加载工作台…</main>;
+  }
 
   return (
     <div className="app-shell">
       <header className="titlebar" data-tauri-drag-region>
-        <button
-          aria-label="打开项目启动器"
-          className="brand"
-          onClick={() => setLauncherOpen(true)}
-          type="button"
-        >
+        <div className="brand" data-tauri-drag-region>
           Keeper IDE
-        </button>
+        </div>
         <WindowControls />
       </header>
       {error ? (
@@ -111,23 +160,28 @@ export function App({ gateway, onProjectLauncherReady }: AppProps) {
           <code>{error.code}</code>
         </p>
       ) : null}
-      {launcherOpen || !activeProject ? (
-        <ProjectLauncher
-          onCreate={createProject}
-          onSelect={selectProject}
+      <div className="project-shell">
+        <ProjectSidebar
+          activeProjectId={activeProject?.id ?? null}
+          busy={busy}
+          onNewProject={() => setNewProjectOpen(true)}
+          onOpenProject={() => void openProject()}
+          onSelect={(id) => void selectProject(id)}
           projects={projects}
         />
-      ) : (
-        <div className="project-shell">
-          <ProjectSidebar
-            activeProjectId={activeProject.id}
-            onCreate={() => setLauncherOpen(true)}
-            onSelect={(id) => void selectProject(id)}
-            projects={projects}
-          />
-          <Workbench project={activeProject} />
-        </div>
-      )}
+        <Workbench
+          busy={busy}
+          onNewProject={() => setNewProjectOpen(true)}
+          onOpenProject={() => void openProject()}
+          project={activeProject}
+        />
+      </div>
+      <NewProjectDialog
+        busy={busy}
+        onCancel={() => setNewProjectOpen(false)}
+        onConfirm={confirmNewProject}
+        open={newProjectOpen}
+      />
     </div>
   );
 }

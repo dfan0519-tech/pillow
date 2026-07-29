@@ -26,7 +26,7 @@ function reportWindowFailure(context: string, error: unknown) {
 
 /**
  * Adapted from Grok App's custom desktop chrome under its MIT license.
- * Source: src/components/WindowControls.tsx at 1c3f9c8aa3a42e869f11afb3d075f1b52843aaa9.
+ * Source: src/components/WindowControls.tsx at cbbbdf17bb8db1588b6707f3f42f6b00397e27f9.
  */
 export function WindowControls({
   visible = true,
