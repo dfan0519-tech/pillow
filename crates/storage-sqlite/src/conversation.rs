@@ -42,6 +42,42 @@ impl SqliteConversationRepository {
             .lock()
             .map_err(|_| SessionError::Store("conversation store lock was poisoned".into()))
     }
+
+    /// Append a runtime event and, when `target_status` is set, apply the legal
+    /// resulting run transition in a **single** IMMEDIATE SQLite transaction.
+    ///
+    /// Preserves strict sequence, idempotent exact-sequence replay, i64 bounds,
+    /// and `validate_run_transition` rules. Cancelled from Running walks through
+    /// Cancelling inside the same commit so a crash cannot leave a durable
+    /// terminal event with a non-terminal run status.
+    pub fn append_event_with_status(
+        &self,
+        event: NewRunEvent,
+        target_status: Option<RunStatus>,
+    ) -> Result<RunEvent, SessionError> {
+        let sequence_i64 = sequence_to_sqlite(event.sequence)?;
+
+        let mut connection = self.connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite)?;
+
+        let (recorded, inserted) = append_event_in_tx(&tx, event, sequence_i64)?;
+
+        if let Some(target) = target_status {
+            apply_status_in_tx(&tx, recorded.run_id, target)?;
+        }
+
+        if inserted {
+            tx.commit().map_err(map_sqlite)?;
+        } else {
+            // Idempotent replay: still commit when a status transition was applied;
+            // if neither insert nor status change occurred, drop the empty txn.
+            tx.commit().map_err(map_sqlite)?;
+        }
+
+        Ok(recorded)
+    }
 }
 
 impl ConversationRepository for SqliteConversationRepository {
@@ -155,6 +191,8 @@ impl ConversationRepository for SqliteConversationRepository {
 
     fn append_event(&self, event: NewRunEvent) -> Result<RunEvent, SessionError> {
         let sequence_i64 = sequence_to_sqlite(event.sequence)?;
+        let run_id = event.run_id;
+        let sequence = event.sequence;
 
         let mut connection = self.connection()?;
         // IMMEDIATE takes the write lock before the existence/max reads so a
@@ -163,63 +201,26 @@ impl ConversationRepository for SqliteConversationRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
 
-        ensure_run_exists(&tx, event.run_id)?;
-
-        if let Some(existing) = load_event_by_sequence(&tx, event.run_id, event.sequence)? {
-            // Exact duplicate replay of (run_id, sequence): return stored row.
-            return Ok(existing);
-        }
-
-        let expected = next_expected_sequence(&tx, event.run_id)?;
-        if event.sequence != expected {
-            return Err(SessionError::InvalidSequence {
-                run_id: event.run_id,
-                expected,
-                got: event.sequence,
-            });
-        }
-
-        let recorded = RunEvent {
-            event_id: EventId::new(),
-            run_id: event.run_id,
-            sequence: event.sequence,
-            kind: event.kind,
-            payload_json: event.payload_json.clone(),
-            created_at: Utc::now(),
-        };
-
-        let insert = tx.execute(
-            "INSERT INTO run_events (event_id, run_id, sequence, kind, payload_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                recorded.event_id.0.to_string(),
-                recorded.run_id.0.to_string(),
-                sequence_i64,
-                recorded.kind.as_str(),
-                recorded.payload_json,
-                recorded.created_at.to_rfc3339(),
-            ],
-        );
-
-        match insert {
-            Ok(_) => {
+        match append_event_in_tx(&tx, event, sequence_i64) {
+            Ok((recorded, true)) => {
                 tx.commit().map_err(map_sqlite)?;
                 Ok(recorded)
             }
-            Err(error) if is_unique_constraint(&error) => {
-                // Defense-in-depth: if another writer still won the UNIQUE race,
-                // the transaction is failed — roll back, then re-read the winner.
+            Ok((recorded, false)) => {
+                // Exact duplicate replay: no write needed.
                 drop(tx);
-                load_event_by_sequence(&connection, event.run_id, event.sequence)?.ok_or_else(
-                    || {
-                        SessionError::Store(format!(
-                            "unique constraint on run event but row missing for sequence {}",
-                            event.sequence
-                        ))
-                    },
-                )
+                Ok(recorded)
             }
-            Err(error) => Err(map_sqlite(error)),
+            Err(SessionError::Store(message)) if message.starts_with("unique constraint") => {
+                // Defense-in-depth: transaction is failed — roll back, re-read winner.
+                drop(tx);
+                load_event_by_sequence(&connection, run_id, sequence)?.ok_or_else(|| {
+                    SessionError::Store(format!(
+                        "unique constraint on run event but row missing for sequence {sequence}"
+                    ))
+                })
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -287,32 +288,9 @@ impl ConversationRepository for SqliteConversationRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
 
-        let current = load_run(&tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
-        validate_run_transition(current.status, next)?;
-
-        let now = Utc::now();
-        let updated_rows = tx
-            .execute(
-                "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
-                params![next.as_str(), now.to_rfc3339(), run_id.0.to_string()],
-            )
-            .map_err(map_sqlite)?;
-
-        if updated_rows != 1 {
-            return Err(SessionError::Store(format!(
-                "expected one run row update for {run_id:?}, got {updated_rows}"
-            )));
-        }
-
+        let updated = transition_run_in_tx(&tx, run_id, next)?;
         tx.commit().map_err(map_sqlite)?;
-
-        Ok(Run {
-            id: current.id,
-            conversation_id: current.conversation_id,
-            status: next,
-            created_at: current.created_at,
-            updated_at: now,
-        })
+        Ok(updated)
     }
 
     fn mark_inflight_interrupted(&self) -> Result<usize, SessionError> {
@@ -327,6 +305,125 @@ impl ConversationRepository for SqliteConversationRepository {
             )
             .map_err(map_sqlite)?;
         Ok(changed)
+    }
+}
+
+/// Insert (or idempotently load) a run event inside an open transaction.
+/// Returns `(event, inserted)` where `inserted` is false on exact-sequence replay.
+fn append_event_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    event: NewRunEvent,
+    sequence_i64: i64,
+) -> Result<(RunEvent, bool), SessionError> {
+    ensure_run_exists(tx, event.run_id)?;
+
+    if let Some(existing) = load_event_by_sequence(tx, event.run_id, event.sequence)? {
+        return Ok((existing, false));
+    }
+
+    let expected = next_expected_sequence(tx, event.run_id)?;
+    if event.sequence != expected {
+        return Err(SessionError::InvalidSequence {
+            run_id: event.run_id,
+            expected,
+            got: event.sequence,
+        });
+    }
+
+    let recorded = RunEvent {
+        event_id: EventId::new(),
+        run_id: event.run_id,
+        sequence: event.sequence,
+        kind: event.kind,
+        payload_json: event.payload_json.clone(),
+        created_at: Utc::now(),
+    };
+
+    let insert = tx.execute(
+        "INSERT INTO run_events (event_id, run_id, sequence, kind, payload_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            recorded.event_id.0.to_string(),
+            recorded.run_id.0.to_string(),
+            sequence_i64,
+            recorded.kind.as_str(),
+            recorded.payload_json,
+            recorded.created_at.to_rfc3339(),
+        ],
+    );
+
+    match insert {
+        Ok(_) => Ok((recorded, true)),
+        Err(error) if is_unique_constraint(&error) => Err(SessionError::Store(format!(
+            "unique constraint on run event for sequence {}",
+            event.sequence
+        ))),
+        Err(error) => Err(map_sqlite(error)),
+    }
+}
+
+fn transition_run_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: RunId,
+    next: RunStatus,
+) -> Result<Run, SessionError> {
+    let current = load_run(tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
+    validate_run_transition(current.status, next)?;
+
+    let now = Utc::now();
+    let updated_rows = tx
+        .execute(
+            "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![next.as_str(), now.to_rfc3339(), run_id.0.to_string()],
+        )
+        .map_err(map_sqlite)?;
+
+    if updated_rows != 1 {
+        return Err(SessionError::Store(format!(
+            "expected one run row update for {run_id:?}, got {updated_rows}"
+        )));
+    }
+
+    Ok(Run {
+        id: current.id,
+        conversation_id: current.conversation_id,
+        status: next,
+        created_at: current.created_at,
+        updated_at: now,
+    })
+}
+
+/// Apply resulting status for a runtime event inside the open transaction.
+/// Same-status, already-terminal, and illegal transitions are no-ops (match
+/// service-layer tolerance for cancel races).
+fn apply_status_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: RunId,
+    target: RunStatus,
+) -> Result<(), SessionError> {
+    let current = load_run(tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
+    if current.status == target || current.status.is_terminal() {
+        return Ok(());
+    }
+
+    // Cancel terminal may arrive while still Running if cancel raced past
+    // the explicit Cancelling transition.
+    if target == RunStatus::Cancelled && current.status == RunStatus::Running {
+        match transition_run_in_tx(tx, run_id, RunStatus::Cancelling) {
+            Ok(_) => {}
+            Err(SessionError::IllegalTransition { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let after = load_run(tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
+        if after.status == target || after.status.is_terminal() {
+            return Ok(());
+        }
+    }
+
+    match transition_run_in_tx(tx, run_id, target) {
+        Ok(_) => Ok(()),
+        Err(SessionError::IllegalTransition { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
