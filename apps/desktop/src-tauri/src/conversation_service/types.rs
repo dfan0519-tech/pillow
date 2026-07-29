@@ -1,8 +1,9 @@
-//! Shared types for the conversation service active-run registry.
+//! Shared types for the conversation service active-run registry and admission.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use keeper_session::{ConversationId, RunId};
 
@@ -28,6 +29,115 @@ impl std::fmt::Display for ConversationCommandError {
 }
 
 impl std::error::Error for ConversationCommandError {}
+
+/// Narrow admission gate shared by `send_turn` and `shutdown`.
+///
+/// Once shutdown closes the gate, no new durable run/session/pump can be
+/// admitted. In-flight admissions are waited on so a send that already owns
+/// the gate either finishes ownership handoff or cleans up to a terminal state.
+pub(super) struct ServiceAdmission {
+    state: Mutex<ServiceAdmissionState>,
+    cv: Condvar,
+}
+
+struct ServiceAdmissionState {
+    closed: bool,
+    in_flight: u32,
+}
+
+/// RAII admission for one `send_turn`. Drop releases the lifecycle slot.
+pub(super) struct ServiceAdmissionGuard<'a> {
+    gate: &'a ServiceAdmission,
+}
+
+impl ServiceAdmission {
+    pub(super) fn new() -> Self {
+        Self {
+            state: Mutex::new(ServiceAdmissionState {
+                closed: false,
+                in_flight: 0,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    pub(super) fn try_admit(&self) -> Result<ServiceAdmissionGuard<'_>, ConversationCommandError> {
+        let mut guard = self.state.lock().map_err(|_| {
+            ConversationCommandError::new(
+                "conversation_state_unavailable",
+                "Conversation state is temporarily unavailable.",
+            )
+        })?;
+        if guard.closed {
+            return Err(ConversationCommandError::new(
+                "conversation_shut_down",
+                "Conversation service is shut down.",
+            ));
+        }
+        guard.in_flight = guard.in_flight.saturating_add(1);
+        Ok(ServiceAdmissionGuard { gate: self })
+    }
+
+    pub(super) fn close(&self) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.closed = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Wait until every admitted `send_turn` has released, or until `timeout`.
+    pub(super) fn wait_until_idle(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), ConversationCommandError> {
+        let deadline = Instant::now() + timeout;
+        let Ok(mut guard) = self.state.lock() else {
+            return Err(ConversationCommandError::new(
+                "conversation_state_unavailable",
+                "Conversation state is temporarily unavailable.",
+            ));
+        };
+        while guard.in_flight > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ConversationCommandError::new(
+                    "shutdown_incomplete",
+                    format!(
+                        "Timed out waiting for {} admitted send_turn(s) during shutdown.",
+                        guard.in_flight
+                    ),
+                ));
+            }
+            let (next, wait_result) =
+                self.cv
+                    .wait_timeout(guard, remaining)
+                    .unwrap_or_else(|poisoned| {
+                        let (g, r) = poisoned.into_inner();
+                        (g, r)
+                    });
+            guard = next;
+            if wait_result.timed_out() && guard.in_flight > 0 {
+                return Err(ConversationCommandError::new(
+                    "shutdown_incomplete",
+                    format!(
+                        "Timed out waiting for {} admitted send_turn(s) during shutdown.",
+                        guard.in_flight
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ServiceAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.gate.state.lock() {
+            guard.in_flight = guard.in_flight.saturating_sub(1);
+            self.gate.cv.notify_all();
+        }
+    }
+}
 
 pub(super) struct ActiveRun {
     pub(super) conversation_id: ConversationId,

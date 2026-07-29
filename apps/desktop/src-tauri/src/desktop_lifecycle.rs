@@ -257,3 +257,80 @@ fn log_lifecycle_error(error: impl std::fmt::Display) -> LifecycleCommandError {
     eprintln!("Keeper IDE desktop lifecycle error: {error}");
     lifecycle_error()
 }
+
+/// Pure exit decision for `RunEvent::ExitRequested` after conversation drain.
+///
+/// Successful shutdown allows the process to exit. Failed shutdown must
+/// `prevent_exit` — a later `Exit` event cannot recover a failed drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationExitDecision {
+    AllowExit,
+    PreventExit { reason: String },
+}
+
+pub fn conversation_exit_decision<E: std::fmt::Display>(
+    shutdown_result: Result<(), E>,
+) -> ConversationExitDecision {
+    match shutdown_result {
+        Ok(()) => ConversationExitDecision::AllowExit,
+        Err(error) => ConversationExitDecision::PreventExit {
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Write the acceptance shutdown-success marker **only** after
+/// `ConversationService::shutdown` returns `Ok`.
+///
+/// Path is taken from `KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER` when set
+/// (native E2E). Silent no-op when unset so normal desktop runs are unchanged.
+pub fn write_conversation_shutdown_success_marker() {
+    let Some(raw) = std::env::var_os("KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER") else {
+        return;
+    };
+    if raw.is_empty() {
+        return;
+    }
+    let path = PathBuf::from(raw);
+    let payload = serde_json::json!({
+        "schemaVersion": 1,
+        "status": "shutdown_success",
+        "pid": std::process::id(),
+        "completedAtUnixMs": unix_time_ms(),
+    });
+    let Ok(bytes) = serde_json::to_vec_pretty(&payload) else {
+        eprintln!("Keeper IDE: failed to serialize conversation shutdown marker");
+        return;
+    };
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    if let Err(error) = fs::write(&temporary, &bytes) {
+        eprintln!("Keeper IDE: failed to write conversation shutdown marker: {error}");
+        return;
+    }
+    let _ = fs::remove_file(&path);
+    if let Err(error) = fs::rename(&temporary, &path) {
+        eprintln!("Keeper IDE: failed to publish conversation shutdown marker: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConversationExitDecision, conversation_exit_decision};
+
+    #[test]
+    fn successful_shutdown_allows_exit() {
+        let decision: ConversationExitDecision = conversation_exit_decision(Ok::<(), &str>(()));
+        assert_eq!(decision, ConversationExitDecision::AllowExit);
+    }
+
+    #[test]
+    fn failed_shutdown_prevents_exit_with_reason() {
+        let decision = conversation_exit_decision(Err("drain_timeout: pumps still active"));
+        assert_eq!(
+            decision,
+            ConversationExitDecision::PreventExit {
+                reason: "drain_timeout: pumps still active".into(),
+            }
+        );
+    }
+}

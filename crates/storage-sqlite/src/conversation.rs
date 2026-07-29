@@ -394,37 +394,35 @@ fn transition_run_in_tx(
 }
 
 /// Apply resulting status for a runtime event inside the open transaction.
-/// Same-status, already-terminal, and illegal transitions are no-ops (match
-/// service-layer tolerance for cancel races).
+///
+/// - Already at `target` is success (exact idempotent status match, including
+///   terminal replay).
+/// - Illegal transitions fail the whole transaction so the event insert is
+///   rolled back with the status change (no durable terminal event on a
+///   non-matching status).
+/// - `Running -> Cancelled` walks `Cancelling` atomically inside this txn.
 fn apply_status_in_tx(
     tx: &rusqlite::Transaction<'_>,
     run_id: RunId,
     target: RunStatus,
 ) -> Result<(), SessionError> {
     let current = load_run(tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
-    if current.status == target || current.status.is_terminal() {
+    if current.status == target {
         return Ok(());
     }
 
     // Cancel terminal may arrive while still Running if cancel raced past
     // the explicit Cancelling transition.
     if target == RunStatus::Cancelled && current.status == RunStatus::Running {
-        match transition_run_in_tx(tx, run_id, RunStatus::Cancelling) {
-            Ok(_) => {}
-            Err(SessionError::IllegalTransition { .. }) => return Ok(()),
-            Err(error) => return Err(error),
-        }
+        transition_run_in_tx(tx, run_id, RunStatus::Cancelling)?;
         let after = load_run(tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
-        if after.status == target || after.status.is_terminal() {
+        if after.status == target {
             return Ok(());
         }
     }
 
-    match transition_run_in_tx(tx, run_id, target) {
-        Ok(_) => Ok(()),
-        Err(SessionError::IllegalTransition { .. }) => Ok(()),
-        Err(error) => Err(error),
-    }
+    // Fail illegal / terminal mismatches so the outer event insert rolls back.
+    transition_run_in_tx(tx, run_id, target).map(|_| ())
 }
 
 fn ensure_project_exists(

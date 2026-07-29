@@ -8,9 +8,14 @@
  *
  * Each phase returns only after:
  * - evidence is published;
- * - the acceptance process exits through the graceful app path;
+ * - Rust shutdown-success marker is published (only after ConversationService
+ *   shutdown returns Ok);
+ * - child exit status === 0 and signal === null;
  * - a fresh process snapshot has no keeper-ide.exe;
  * - no inherited port listener remains.
+ *
+ * gracefulExit is true only when marker + exit code + snapshot all pass.
+ * Forced cleanup is a safety net and cannot satisfy the graceful proof.
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -69,6 +74,18 @@ function validateConversationEvidence(value, expected) {
   assert.ok(value.pid > 0);
 }
 
+function validateShutdownSuccessMarker(value, expectedPid) {
+  assert.equal(value.schemaVersion, 1);
+  assert.equal(value.status, "shutdown_success");
+  assert.equal(typeof value.pid, "number");
+  assert.equal(
+    value.pid,
+    expectedPid,
+    `shutdown marker pid ${value.pid} must match acceptance pid ${expectedPid}`,
+  );
+  assert.equal(typeof value.completedAtUnixMs, "number");
+}
+
 async function runPhase({
   phase,
   appDataDir,
@@ -80,8 +97,13 @@ async function runPhase({
 }) {
   const readinessPath = path.join(appDataDir, "desktop-ready.json");
   const resultPath = path.join(appDataDir, `conversation-acceptance-${phase}.json`);
+  const shutdownMarkerPath = path.join(
+    appDataDir,
+    `conversation-shutdown-success-${phase}.json`,
+  );
   await rm(readinessPath, { force: true });
   await rm(resultPath, { force: true });
+  await rm(shutdownMarkerPath, { force: true });
   const baseline = captureDesktopBaseline();
   assertDesktopBaselineClean(baseline);
   const nonce = randomUUID();
@@ -93,6 +115,7 @@ async function runPhase({
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE: phase,
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_PROMPT: prompt,
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_RESULT: resultPath,
+      KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER: shutdownMarkerPath,
       KEEPER_IDE_ACCEPTANCE_PROJECT_NAME: projectName,
       KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT: projectRoot,
       KEEPER_IDE_APP_DATA_DIR: appDataDir,
@@ -105,6 +128,11 @@ async function runPhase({
     baseline,
     rootPid: processRun.child.pid,
   });
+  let gracefulProof = {
+    markerOk: false,
+    exitCodeOk: false,
+    snapshotOk: false,
+  };
 
   try {
     const expectedReadiness = {
@@ -144,18 +172,34 @@ async function runPhase({
     });
     assert.equal(evidence.pid, readiness.pid);
 
-    // Evidence is published before graceful exit; wait for the app's own exit path.
+    // Shutdown-success marker is written only after ConversationService::shutdown Ok.
+    const shutdownMarker = await waitForJsonFile(shutdownMarkerPath, {
+      label: `conversation acceptance ${phase} shutdown marker`,
+      onPoll: () => supervisor.capture(),
+      processHandle: null,
+      timeoutMs: 60_000,
+      validate: (value) => validateShutdownSuccessMarker(value, readiness.pid),
+    });
+    assert.equal(shutdownMarker.pid, readiness.pid);
+    gracefulProof.markerOk = true;
+
+    // Evidence + marker published; wait for the app's own exit path.
     const exit = await waitForChildExit(
       processRun.child,
       60_000,
       `conversation acceptance ${phase}`,
     );
-    // Prefer clean exit code; Windows close may still yield 0.
     assert.equal(
       exit.signal,
       null,
       `${phase} terminated by signal ${exit.signal} instead of graceful exit`,
     );
+    assert.equal(
+      exit.status,
+      0,
+      `${phase} exit status must be 0 for graceful proof, got ${exit.status}`,
+    );
+    gracefulProof.exitCodeOk = true;
     assert.equal(
       isProcessAlive(readiness.pid),
       false,
@@ -168,16 +212,24 @@ async function runPhase({
       timeoutMs: 30_000,
       label: `conversation acceptance ${phase} post-exit snapshot`,
     });
+    gracefulProof.snapshotOk = true;
 
-    return evidence;
+    return {
+      evidence,
+      gracefulExit:
+        gracefulProof.markerOk
+        && gracefulProof.exitCodeOk
+        && gracefulProof.snapshotOk,
+    };
   } catch (error) {
     const output = processRun.output();
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
+      + `gracefulProof=${JSON.stringify(gracefulProof)}\n`
       + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
     );
   } finally {
-    // Safety net if graceful exit failed; still waits for snapshot cleanliness.
+    // Safety net if graceful exit failed; cannot satisfy gracefulExit proof.
     await supervisor.cleanup();
     await waitForDesktopProcessSnapshotClean({
       port: baseline.port,
@@ -216,7 +268,7 @@ try {
     { cwd: repositoryRoot, env: environment },
   );
 
-  const createEvidence = await runPhase({
+  const createPhase = await runPhase({
     phase: "create_stream",
     appDataDir,
     webviewProfileDir,
@@ -225,8 +277,14 @@ try {
     prompt,
     environment,
   });
+  const createEvidence = createPhase.evidence;
   assert.equal(createEvidence.runStatus, "completed");
   assert.ok(createEvidence.eventCount >= 5);
+  assert.equal(
+    createPhase.gracefulExit,
+    true,
+    "create_stream must prove graceful exit via marker + exit 0 + clean snapshot",
+  );
 
   // Between phases: prove recovery cannot poison the next process baseline.
   await waitForDesktopProcessSnapshotClean({
@@ -241,7 +299,7 @@ try {
     "Temporary WebView2 profile was not populated.",
   );
 
-  const restoreEvidence = await runPhase({
+  const restorePhase = await runPhase({
     phase: "restore",
     appDataDir,
     webviewProfileDir,
@@ -250,11 +308,17 @@ try {
     prompt,
     environment,
   });
+  const restoreEvidence = restorePhase.evidence;
   assert.equal(restoreEvidence.projectId, createEvidence.projectId);
   assert.equal(restoreEvidence.conversationId, createEvidence.conversationId);
   assert.equal(restoreEvidence.runId, createEvidence.runId);
   assert.equal(restoreEvidence.runStatus, "completed");
   assert.equal(restoreEvidence.eventCount, createEvidence.eventCount);
+  assert.equal(
+    restorePhase.gracefulExit,
+    true,
+    "restore must prove graceful exit via marker + exit 0 + clean snapshot",
+  );
 
   const databasePath = path.join(appDataDir, "keeper.db");
   const dbStat = await stat(databasePath);
@@ -267,6 +331,9 @@ try {
   });
   assertDesktopBaselineClean(captureDesktopBaseline());
 
+  const gracefulExit =
+    createPhase.gracefulExit === true && restorePhase.gracefulExit === true;
+
   summary = {
     status: "passed",
     createEventCount: createEvidence.eventCount,
@@ -277,7 +344,9 @@ try {
     webviewProfileEntries: profileEntriesAfterCreate.length,
     durationMs: Math.round(performance.now() - startedAt),
     ipcBoundary: "real-tauri-webview",
-    gracefulExit: true,
+    gracefulExit,
+    createGracefulExit: createPhase.gracefulExit,
+    restoreGracefulExit: restorePhase.gracefulExit,
   };
 } catch (error) {
   summary = {

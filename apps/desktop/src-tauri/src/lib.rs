@@ -17,8 +17,9 @@ use conversation_commands::{
 use conversation_events::TauriEmitter;
 use conversation_service::ConversationService;
 use desktop_lifecycle::{
-    DesktopLifecycleState, app_data_override, complete_native_acceptance,
-    get_native_acceptance_scenario, mark_project_launcher_ready,
+    ConversationExitDecision, DesktopLifecycleState, app_data_override, complete_native_acceptance,
+    conversation_exit_decision, get_native_acceptance_scenario, mark_project_launcher_ready,
+    write_conversation_shutdown_success_marker,
 };
 use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
@@ -76,13 +77,36 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         // Graceful ConversationService drain on app exit (window close / acceptance exit).
-        // Idempotent: ExitRequested and Exit may both fire.
+        // Fail closed on ExitRequested: prevent_exit when shutdown fails. A later
+        // Exit event cannot recover a failed drain — do not claim that it can.
         match event {
-            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>()
-                    && let Err(error) = service.shutdown()
-                {
-                    eprintln!("Keeper IDE conversation shutdown: {error}");
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>() {
+                    match conversation_exit_decision(service.shutdown()) {
+                        ConversationExitDecision::AllowExit => {
+                            // Marker only after successful ConversationService::shutdown.
+                            write_conversation_shutdown_success_marker();
+                        }
+                        ConversationExitDecision::PreventExit { reason } => {
+                            eprintln!(
+                                "Keeper IDE conversation shutdown failed; preventing exit: {reason}"
+                            );
+                            api.prevent_exit();
+                        }
+                    }
+                }
+            }
+            tauri::RunEvent::Exit => {
+                // Best-effort idempotent cleanup if Exit fires without a prior
+                // successful ExitRequested drain (e.g. forced termination paths).
+                // Do not treat this as recovery for a failed prevent_exit drain.
+                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>() {
+                    match service.shutdown() {
+                        Ok(()) => write_conversation_shutdown_success_marker(),
+                        Err(error) => {
+                            eprintln!("Keeper IDE conversation shutdown on Exit: {error}");
+                        }
+                    }
                 }
             }
             _ => {}

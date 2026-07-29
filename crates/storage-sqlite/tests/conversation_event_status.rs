@@ -195,6 +195,132 @@ fn append_event_with_status_cancelled_from_running_walks_cancelling() {
     assert_eq!(timeline.runs[0].status, RunStatus::Cancelled);
 }
 
+/// Illegal resulting status must roll back the event insert: a second
+/// connection must see neither the event nor a status change.
+#[test]
+fn illegal_status_transition_rolls_back_event_on_second_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let projects = keeper_storage_sqlite::SqliteProjectRepository::open(&db).unwrap();
+    let project = seed_project(&projects, &temp, "illegal-status");
+    let sessions = SqliteConversationRepository::open(&db).unwrap();
+    let conversation = sessions
+        .create_conversation(NewConversation {
+            project_id: project.id,
+            title: None,
+        })
+        .unwrap();
+    let run = sessions
+        .create_run(NewRun {
+            conversation_id: conversation.id,
+            user_message: "pending only".into(),
+        })
+        .unwrap();
+    assert_eq!(run.status, RunStatus::Pending);
+
+    let err = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::TurnCompleted,
+                payload_json: r#"{"summary":"skip running"}"#.into(),
+            },
+            Some(RunStatus::Completed),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, SessionError::IllegalTransition { .. }),
+        "Pending -> Completed must fail: {err:?}"
+    );
+
+    // Second connection must observe neither the event nor a status change.
+    let peer = SqliteConversationRepository::open(&db).unwrap();
+    let timeline = peer.load_timeline(conversation.id).unwrap();
+    assert_eq!(timeline.runs[0].status, RunStatus::Pending);
+    assert!(
+        timeline.events.is_empty(),
+        "illegal transition must not leave a durable turn_completed event: {:?}",
+        timeline.events
+    );
+
+    // Legal path still works after the failed attempt (sequence 0 free).
+    sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::RunStarted,
+                payload_json: r#"{"prompt_preview":"ok"}"#.into(),
+            },
+            Some(RunStatus::Running),
+        )
+        .unwrap();
+    let timeline = sessions.load_timeline(conversation.id).unwrap();
+    assert_eq!(timeline.runs[0].status, RunStatus::Running);
+    assert_eq!(timeline.events.len(), 1);
+}
+
+/// Exact idempotent replay against an already-matching terminal status
+/// remains successful and does not error.
+#[test]
+fn idempotent_terminal_replay_against_matching_status_succeeds() {
+    let temp = tempfile::tempdir().unwrap();
+    let (projects, sessions) = open_pair(&temp);
+    let project = seed_project(&projects, &temp, "idempotent-terminal");
+    let conversation = sessions
+        .create_conversation(NewConversation {
+            project_id: project.id,
+            title: None,
+        })
+        .unwrap();
+    let run = sessions
+        .create_run(NewRun {
+            conversation_id: conversation.id,
+            user_message: "replay".into(),
+        })
+        .unwrap();
+    sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 0,
+                kind: RuntimeEventKind::RunStarted,
+                payload_json: r#"{"prompt_preview":"r"}"#.into(),
+            },
+            Some(RunStatus::Running),
+        )
+        .unwrap();
+    sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 1,
+                kind: RuntimeEventKind::TurnCompleted,
+                payload_json: r#"{"summary":"done"}"#.into(),
+            },
+            Some(RunStatus::Completed),
+        )
+        .unwrap();
+
+    let replay = sessions
+        .append_event_with_status(
+            NewRunEvent {
+                run_id: run.id,
+                sequence: 1,
+                kind: RuntimeEventKind::TurnCompleted,
+                payload_json: r#"{"summary":"ignored"}"#.into(),
+            },
+            Some(RunStatus::Completed),
+        )
+        .unwrap();
+    assert_eq!(replay.sequence, 1);
+    assert_eq!(
+        sessions.load_timeline(conversation.id).unwrap().runs[0].status,
+        RunStatus::Completed
+    );
+}
+
 #[test]
 fn append_event_with_status_preserves_sequence_and_i64_bounds() {
     let temp = tempfile::tempdir().unwrap();

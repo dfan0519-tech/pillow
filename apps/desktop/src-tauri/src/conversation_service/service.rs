@@ -22,7 +22,8 @@ use crate::conversation_events::{
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
 use super::pipeline::pump_turn;
 use super::types::{
-    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, remove_active_run,
+    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, ServiceAdmission,
+    remove_active_run,
 };
 
 /// Optional test seams for pump registration ordering.
@@ -44,6 +45,8 @@ pub struct ConversationService {
     host: Arc<RuntimeHost>,
     emitter: Arc<dyn RuntimeEventEmitter>,
     active: ActiveMap,
+    /// Linearizes `send_turn` durable admission with `shutdown`.
+    admission: ServiceAdmission,
     shut_down: AtomicBool,
     after_spawn_before_register_pump: Option<Arc<dyn Fn() + Send + Sync>>,
     after_pump_before_registration_wait: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -83,6 +86,7 @@ impl ConversationService {
             host: Arc::new(host),
             emitter,
             active: Arc::new(Mutex::new(HashMap::new())),
+            admission: ServiceAdmission::new(),
             shut_down: AtomicBool::new(false),
             after_spawn_before_register_pump: None,
             after_pump_before_registration_wait: None,
@@ -166,19 +170,23 @@ impl ConversationService {
         conversation_id: String,
         content: String,
     ) -> Result<SendTurnResult, ConversationCommandError> {
-        if self.shut_down.load(Ordering::SeqCst) {
-            return Err(ConversationCommandError::new(
-                "conversation_shut_down",
-                "Conversation service is shut down.",
-            ));
-        }
-
         let conversation_id = parse_conversation_id(&conversation_id)?;
         let trimmed = content.trim().to_owned();
         if trimmed.is_empty() {
             return Err(ConversationCommandError::new(
                 "invalid_turn_content",
                 "Turn content must not be empty.",
+            ));
+        }
+
+        // Linearize durable run creation with shutdown: once shutdown owns the
+        // gate, no new Pending run/session/pump can appear.
+        let _admission = self.admission.try_admit()?;
+        // Mirror gate into AtomicBool for diagnostics / fast reject after close.
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(ConversationCommandError::new(
+                "conversation_shut_down",
+                "Conversation service is shut down.",
             ));
         }
 
@@ -190,15 +198,20 @@ impl ConversationService {
             })
             .map_err(map_session_error)?;
 
-        let session = self
-            .host
-            .start_session(StartSession {
-                conversation_key: conversation_id.0.to_string(),
-                working_directory: None,
-            })
-            .map_err(|error| {
-                ConversationCommandError::new("runtime_session_failed", error.to_string())
-            })?;
+        let session = match self.host.start_session(StartSession {
+            conversation_key: conversation_id.0.to_string(),
+            working_directory: None,
+        }) {
+            Ok(session) => session,
+            Err(error) => {
+                // Admitted but session failed: durable run must not stay Pending.
+                self.fail_admitted_run(run.id, RunStatus::Failed);
+                return Err(ConversationCommandError::new(
+                    "runtime_session_failed",
+                    error.to_string(),
+                ));
+            }
+        };
 
         let protocol_run_id = ProtocolRunId(run.id.0);
 
@@ -227,9 +240,9 @@ impl ConversationService {
         }) {
             Ok(spawned) => spawned,
             Err(error) => {
-                // Spawn failure: remove only this exact run entry.
+                // Spawn failure: remove only this exact run entry; terminal truth.
                 remove_active_run(&self.active, run.id);
-                let _ = self.repository.transition_run(run.id, RunStatus::Failed);
+                self.fail_admitted_run(run.id, RunStatus::Failed);
                 return Err(ConversationCommandError::new(
                     "runtime_spawn_failed",
                     error.to_string(),
@@ -272,10 +285,18 @@ impl ConversationService {
         }
         // Release the pump only after the JoinHandle is authoritatively stored.
         registration.mark_registered();
+        // Admission drops here: run is fully owned by active registry + pump;
+        // shutdown's subsequent drain joins it.
 
         Ok(SendTurnResult {
             run_id: run.id.0.to_string(),
         })
+    }
+
+    /// Transition an admitted run that never became a live pump to a terminal
+    /// status so shutdown cannot leave a truthful Pending orphan.
+    fn fail_admitted_run(&self, run_id: RunId, status: RunStatus) {
+        let _ = self.repository.transition_run(run_id, status);
     }
 
     pub fn cancel_run(&self, run_id: String) -> Result<(), ConversationCommandError> {
@@ -379,12 +400,19 @@ impl ConversationService {
     }
 
     /// Idempotent graceful shutdown:
-    /// 1. reject new work through the host (and local gate);
-    /// 2. join/drain all active pumps;
-    /// 3. leave zero active entries, workers and slots;
-    /// 4. surface a bounded actionable error rather than hanging forever.
+    /// 1. close the local admission gate (no new durable runs);
+    /// 2. wait for in-flight `send_turn` admissions to finish ownership handoff;
+    /// 3. reject new host work, cancel inflight workers, join them;
+    /// 4. join/drain all active pumps;
+    /// 5. leave zero active entries, workers and slots;
+    /// 6. surface a bounded actionable error rather than hanging forever.
     pub fn shutdown(&self) -> Result<(), ConversationCommandError> {
         let already = self.shut_down.swap(true, Ordering::SeqCst);
+        // Own the admission gate before any drain so racing send_turn cannot
+        // create a Pending run after we begin shutdown.
+        self.admission.close();
+        // Bounded wait: fail closed rather than hang forever.
+        self.admission.wait_until_idle(Duration::from_secs(15))?;
 
         // Host rejects new turns, cancels inflight workers, joins them.
         self.host.shutdown().map_err(|error| {

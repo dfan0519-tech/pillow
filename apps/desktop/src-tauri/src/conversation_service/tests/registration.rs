@@ -137,6 +137,90 @@ fn shutdown_is_idempotent_and_leaves_zero_residuals() {
     assert_eq!(err.code, "conversation_shut_down");
 }
 
+/// Deterministic barrier: send admitted first is fully owned and drained;
+/// once shutdown owns the gate, no new durable Pending run appears.
+#[test]
+fn send_turn_admission_linearized_with_shutdown() {
+    let (_temp, path) = temp_db();
+    let project = seed_project(&path, "admit-shutdown");
+    let enter = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let enter_hook = Arc::clone(&enter);
+    let release_hook = Arc::clone(&release);
+
+    let service = ConversationService::open_with_config_and_pump_hook(
+        &path,
+        Arc::new(RecordingEmitter::new()),
+        HostConfig {
+            max_concurrent_turns: 4,
+            honor_fixture_delays: false,
+            event_queue_capacity: 64,
+            after_worker_registered: None,
+        },
+        PumpRegistrationHooks {
+            // Hold after spawn so the durable run exists and is fully owned
+            // while shutdown races for the admission gate.
+            after_spawn_before_register: Some(Arc::new(move || {
+                enter_hook.wait();
+                release_hook.wait();
+            })),
+            after_pump_before_registration_wait: None,
+        },
+    )
+    .unwrap();
+    let service = Arc::new(service);
+    let conversation = service
+        .create_conversation(project.0.to_string(), Some("admit".into()))
+        .unwrap();
+
+    let service_send = Arc::clone(&service);
+    let conversation_id = conversation.id.clone();
+    let send =
+        thread::spawn(move || service_send.send_turn(conversation_id, "admitted first".into()));
+
+    // Admitted send holds the gate inside after_spawn_before_register.
+    enter.wait();
+    assert_eq!(service.active_run_count(), 1);
+
+    let service_shutdown = Arc::clone(&service);
+    let shutdown = thread::spawn(move || service_shutdown.shutdown());
+
+    // Shutdown must wait for the admitted send (gate held). Give it a beat.
+    thread::sleep(Duration::from_millis(40));
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must not finish while send_turn still holds admission"
+    );
+
+    release.wait();
+    let send_result = send.join().expect("send thread");
+    assert!(
+        send_result.is_ok(),
+        "admitted send must complete ownership: {send_result:?}"
+    );
+    shutdown
+        .join()
+        .expect("shutdown thread")
+        .expect("shutdown must succeed after admitted send releases");
+
+    assert_eq!(service.active_run_count(), 0);
+    assert_eq!(service.in_flight_turns(), 0);
+    assert!(service.host_is_idle());
+
+    // After shutdown owns the gate: no new durable work.
+    let rejected = service
+        .send_turn(conversation.id.clone(), "after shutdown".into())
+        .unwrap_err();
+    assert_eq!(rejected.code, "conversation_shut_down");
+
+    let timeline = service.load_timeline(conversation.id).unwrap();
+    assert!(
+        timeline.runs.iter().all(|run| run.status != "pending"),
+        "no residual Pending runs after send×shutdown barrier: {:?}",
+        timeline.runs
+    );
+}
+
 #[test]
 fn restart_marks_inflight_interrupted_idempotently() {
     let (temp, path) = temp_db();

@@ -223,39 +223,42 @@ impl RuntimeHost {
     /// returns an error. The adapter error is returned only after host cleanup
     /// is complete.
     ///
-    /// Order:
+    /// Deadlock-safe order:
     /// 1. Close the sync-turn gate (no new admissions; existing holds remain).
     /// 2. Publish `shut_down` under the workers lock and cancel async workers.
-    /// 3. `adapter.shutdown()` (error retained).
-    /// 4. Join every async worker record.
-    /// 5. Wait (condvar) until every admitted sync turn releases.
-    /// 6. Empty registry must imply zero turn slots.
+    /// 3. Wait (condvar) until every admitted sync turn releases — **before**
+    ///    adapter resource teardown, so an admitted sync turn cannot observe
+    ///    cleared sessions (`SessionNotFound`) as a normal shutdown race.
+    /// 4. `adapter.shutdown()` (error retained).
+    /// 5. Join every async worker record.
+    /// 6. Empty registry must imply zero turn slots (even on adapter error).
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
         // Close first so try_admit cannot race past AtomicBool shut_down alone.
         self.sync_turns.close();
 
-        let already = {
+        {
             let workers = self.workers.lock().expect("workers");
-            let already = self.shut_down.swap(true, Ordering::SeqCst);
+            let _already = self.shut_down.swap(true, Ordering::SeqCst);
             for (run_id, worker) in workers.iter() {
                 worker.request_cancel();
                 let _ = self.adapter.cancel_turn(*run_id);
                 worker.delivery.close();
             }
-            already
-        };
+        }
+
+        // Admitted sync turns must finish while adapter sessions are still live.
+        self.sync_turns.wait_until_idle();
 
         let adapter_result = self.adapter.shutdown();
         // Join host workers even when the adapter reports failure.
         self.join_all_workers();
-        // Wait for every admitted synchronous send_turn to release its slot.
-        self.sync_turns.wait_until_idle();
+
+        // Always require zero residuals after join, even if the adapter erred.
+        // Prefer the adapter error when both fail; residual is still evaluated
+        // so cleanup bookkeeping is verified either way.
+        let residual = self.ensure_registry_empty_implies_no_slots();
         adapter_result?;
-        if already {
-            return Ok(());
-        }
-        // Empty registry + idle sync gate ⇒ no outstanding turn slots.
-        self.ensure_registry_empty_implies_no_slots()?;
+        residual?;
         Ok(())
     }
 

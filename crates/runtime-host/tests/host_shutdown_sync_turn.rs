@@ -140,12 +140,10 @@ fn synchronous_send_turn_racing_shutdown_is_admitted_or_rejected() {
                     &mut sink,
                 ) {
                     // Admitted and completed, or rejected at host admission.
+                    // SessionNotFound is not a normal shutdown race result:
+                    // shutdown waits for admitted sync turns before adapter
+                    // teardown clears sessions.
                     Ok(()) | Err(RuntimeError::ShutDown) => Ok(()),
-                    // Host admitted the sync turn, then adapter.shutdown raced
-                    // between ensure_alive and the session map check (sessions
-                    // cleared under the host wait_until_idle window). Slot and
-                    // admission still release via RAII; host ends fully idle.
-                    Err(RuntimeError::SessionNotFound { .. }) => Ok(()),
                     Err(e) => Err(e),
                 }
             }));
