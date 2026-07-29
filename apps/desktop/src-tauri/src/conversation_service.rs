@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -64,12 +64,58 @@ struct ActiveRun {
 
 type ActiveMap = Arc<Mutex<HashMap<RunId, ActiveRun>>>;
 
+/// Handshake so a pump never removes its active entry before the `JoinHandle`
+/// is authoritatively stored.
+///
+/// Without this gate, a fast pump can finish and `remove` the pre-insert entry
+/// while `send_turn` still holds the handle. Re-inserting that completed handle
+/// then leaves a zombie entry (`active_run_count() == 1`) with no pump left to
+/// clean it up, and `drain`/shutdown can time out.
+struct PumpHandleRegistration {
+    ready: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl PumpHandleRegistration {
+    fn new() -> Self {
+        Self {
+            ready: Mutex::new(false),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn wait_until_registered(&self) {
+        let mut ready = self
+            .ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*ready {
+            ready = self
+                .cv
+                .wait(ready)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn mark_registered(&self) {
+        let mut ready = self
+            .ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *ready = true;
+        self.cv.notify_one();
+    }
+}
+
 pub struct ConversationService {
     repository: Arc<SqliteConversationRepository>,
     host: Arc<RuntimeHost>,
     emitter: Arc<dyn RuntimeEventEmitter>,
     active: ActiveMap,
     shut_down: AtomicBool,
+    /// Test seam: runs after the pump thread is spawned and before its
+    /// `JoinHandle` is stored (and before the registration gate is released).
+    after_spawn_before_register_pump: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ConversationService {
@@ -107,7 +153,21 @@ impl ConversationService {
             emitter,
             active: Arc::new(Mutex::new(HashMap::new())),
             shut_down: AtomicBool::new(false),
+            after_spawn_before_register_pump: None,
         })
+    }
+
+    /// Like [`open_with_config`], plus a test seam that fires after the pump
+    /// thread is spawned and before its `JoinHandle` is registered.
+    pub fn open_with_config_and_pump_hook(
+        path: impl AsRef<Path>,
+        emitter: Arc<dyn RuntimeEventEmitter>,
+        config: HostConfig,
+        after_spawn_before_register_pump: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Self, ConversationCommandError> {
+        let mut service = Self::open_with_config(path, emitter, config)?;
+        service.after_spawn_before_register_pump = after_spawn_before_register_pump;
+        Ok(service)
     }
 
     /// Idempotent recovery: non-terminal runs become `Interrupted`.
@@ -120,6 +180,11 @@ impl ConversationService {
     /// Observable size of the production active-run registry (tests / diagnostics).
     pub fn active_run_count(&self) -> usize {
         self.active.lock().map(|guard| guard.len()).unwrap_or(0)
+    }
+
+    /// Host worker registry size (tests / diagnostics).
+    pub fn worker_registry_len(&self) -> usize {
+        self.host.worker_registry_len()
     }
 
     pub fn list_conversations(
@@ -240,7 +305,16 @@ impl ConversationService {
             }
         };
 
-        let pump = self.spawn_pump(run.id, conversation_id, spawned);
+        let registration = Arc::new(PumpHandleRegistration::new());
+        let pump = self.spawn_pump(run.id, conversation_id, spawned, Arc::clone(&registration));
+
+        // Test seam: hold here so a fast pump can finish work before the handle
+        // is stored. The registration gate keeps the map entry alive until we
+        // mark_registered below — pumps must not remove early.
+        if let Some(hook) = self.after_spawn_before_register_pump.as_ref() {
+            hook();
+        }
+
         {
             let mut active = self.active.lock().map_err(|_| {
                 ConversationCommandError::new(
@@ -248,12 +322,13 @@ impl ConversationService {
                     "Conversation state is temporarily unavailable.",
                 )
             })?;
+            // Entry was inserted before spawn and the pump waits for registration
+            // before remove, so it must still be present. Never drop the handle.
             if let Some(entry) = active.get_mut(&run.id) {
                 entry.pump = Some(pump);
             } else {
-                // Entry was removed (shutdown/cancel race) — still join later via handle.
-                // Dropping the JoinHandle detaches; park it in a transient entry only if
-                // the map still rejects the id (should not happen for unique RunIds).
+                // Defensive: never detach a live JoinHandle if the map was cleared
+                // by an unexpected path (e.g. poisoned recovery). Keep joinable.
                 active.insert(
                     run.id,
                     ActiveRun {
@@ -263,6 +338,8 @@ impl ConversationService {
                 );
             }
         }
+        // Release the pump only after the JoinHandle is authoritatively stored.
+        registration.mark_registered();
 
         Ok(SendTurnResult {
             run_id: run.id.0.to_string(),
@@ -426,6 +503,7 @@ impl ConversationService {
         run_id: RunId,
         conversation_id: ConversationId,
         spawned: SpawnedTurn,
+        registration: Arc<PumpHandleRegistration>,
     ) -> thread::JoinHandle<()> {
         let repository = Arc::clone(&self.repository);
         let emitter = Arc::clone(&self.emitter);
@@ -435,6 +513,10 @@ impl ConversationService {
             .name(format!("keeper-conv-pump-{}", run_id.0))
             .spawn(move || {
                 pump_turn(repository, emitter, conversation_id, run_id, spawned);
+                // Do not remove the active entry until send_turn has stored this
+                // thread's JoinHandle. Otherwise a completed handle can be
+                // re-inserted with nobody left to clean it up.
+                registration.wait_until_registered();
                 // Production cleanup: remove this exact run only (never a foreign key).
                 remove_active_run(&active, run_id);
             })
@@ -875,6 +957,126 @@ mod tests {
             );
             assert_eq!(service.in_flight_turns(), 0);
             assert!(service.host_is_idle());
+        }
+    }
+
+    /// Deterministic regression for the active-pump registration race:
+    /// force the pump to finish work while `send_turn` still holds the
+    /// `JoinHandle` (before map registration). Without the registration gate,
+    /// the pump would remove the entry and the fallback re-insert would leak.
+    #[test]
+    fn pump_finish_before_handle_register_clears_active_entry() {
+        use std::sync::Barrier;
+
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "reg-race");
+        let enter = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let enter_hook = Arc::clone(&enter);
+        let release_hook = Arc::clone(&release);
+
+        let service = ConversationService::open_with_config_and_pump_hook(
+            &path,
+            Arc::new(RecordingEmitter::new()),
+            HostConfig {
+                max_concurrent_turns: 4,
+                // No fixture delays — pump can finish immediately after spawn.
+                honor_fixture_delays: false,
+                event_queue_capacity: 64,
+                after_worker_registered: None,
+            },
+            Some(Arc::new(move || {
+                // send_turn is blocked here with the JoinHandle not yet stored.
+                enter_hook.wait();
+                release_hook.wait();
+            })),
+        )
+        .unwrap();
+
+        let service = Arc::new(service);
+        let service_send = Arc::clone(&service);
+        let conversation = service
+            .create_conversation(project.0.to_string(), Some("reg-race".into()))
+            .unwrap();
+        let conversation_id = conversation.id.clone();
+        let send = thread::spawn(move || {
+            service_send
+                .send_turn(conversation_id, "finish before register".into())
+                .unwrap()
+        });
+
+        // Blocked in after_spawn_before_register_pump: handle not in map yet.
+        enter.wait();
+
+        // Wait until the host worker is fully done. The pump thread has finished
+        // pump_turn (or is about to) and is parked on the registration gate —
+        // the vulnerable point where the old code removed the map entry.
+        let settle_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < settle_deadline {
+            if service.worker_registry_len() == 0 && service.in_flight_turns() == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            service.worker_registry_len(),
+            0,
+            "host worker must finish while handle registration is held"
+        );
+        assert_eq!(service.in_flight_turns(), 0);
+        // Entry must still be present (pump cannot remove before registration).
+        assert_eq!(
+            service.active_run_count(),
+            1,
+            "active entry must survive until JoinHandle is stored"
+        );
+
+        release.wait();
+        let _ = send.join().expect("send thread");
+        service.drain(Duration::from_secs(10)).unwrap();
+
+        assert_eq!(service.active_run_count(), 0);
+        assert_eq!(service.worker_registry_len(), 0);
+        assert_eq!(service.in_flight_turns(), 0);
+        assert!(service.host_is_idle());
+
+        let timeline = service.load_timeline(conversation.id).unwrap();
+        assert_eq!(timeline.runs[0].status, "completed");
+    }
+
+    /// No-delay sequential stress: many turns back-to-back with fixture delays
+    /// off, each leaving zero residuals (active / workers / in-flight).
+    #[test]
+    fn no_delay_sequential_stress_clears_all_residuals() {
+        let (_temp, path) = temp_db();
+        let project = seed_project(&path, "stress-seq");
+        let service =
+            ConversationService::open(&path, Arc::new(RecordingEmitter::new()), false).unwrap();
+        let conversation = service
+            .create_conversation(project.0.to_string(), Some("stress".into()))
+            .unwrap();
+
+        for i in 0..32 {
+            let _ = service
+                .send_turn(conversation.id.clone(), format!("stress turn {i}"))
+                .unwrap();
+            service.drain(Duration::from_secs(10)).unwrap();
+            assert_eq!(
+                service.active_run_count(),
+                0,
+                "active registry residual after turn {i}"
+            );
+            assert_eq!(
+                service.worker_registry_len(),
+                0,
+                "worker registry residual after turn {i}"
+            );
+            assert_eq!(
+                service.in_flight_turns(),
+                0,
+                "in-flight residual after turn {i}"
+            );
+            assert!(service.host_is_idle(), "host not fully idle after turn {i}");
         }
     }
 
