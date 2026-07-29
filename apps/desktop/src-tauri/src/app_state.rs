@@ -1,10 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use keeper_project::{CreateProject, Project, ProjectId};
 use keeper_storage_sqlite::{ProjectStoreError, SqliteProjectRepository};
 use serde::Serialize;
 use uuid::Uuid;
+
+use crate::directory_ops::{create_child_directory, project_name_from_path};
+use crate::path_scope;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +102,52 @@ impl AppState {
         *selected = Some(id);
 
         Ok(project.into())
+    }
+
+    /// Open an existing registered project for `root_path`, or register it.
+    /// Project name is derived from the folder leaf when registering.
+    pub fn open_or_register_project(&self, root_path: String) -> Result<ProjectDto, CommandError> {
+        let trimmed = root_path.trim();
+        if trimmed.is_empty() {
+            return Err(command_error(
+                "invalid_project_root",
+                "Project folder cannot be empty.",
+            ));
+        }
+
+        let path = PathBuf::from(trimmed);
+        if !path.is_dir() {
+            return Err(command_error(
+                "invalid_project_root",
+                "The project folder does not exist or cannot be opened.",
+            ));
+        }
+
+        path_scope::grant_path(&path);
+
+        if let Some(existing) = self
+            .projects
+            .find_by_canonical_root(trimmed)
+            .map_err(map_store_error)?
+        {
+            return Ok(existing.into());
+        }
+
+        let name = project_name_from_path(&path)?;
+        self.create_project(name, trimmed.to_owned())
+    }
+
+    /// Create `parent/name`, register the project, and return the DTO.
+    pub fn create_project_with_folder(
+        &self,
+        name: String,
+        parent_path: String,
+    ) -> Result<ProjectDto, CommandError> {
+        let parent = PathBuf::from(parent_path.trim());
+        let child = create_child_directory(&parent, &name)?;
+        path_scope::grant_path(&child);
+        let root_path = child.to_string_lossy().into_owned();
+        self.create_project(name.trim().to_owned(), root_path)
     }
 }
 

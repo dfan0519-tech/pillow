@@ -1,5 +1,7 @@
 pub mod app_state;
 pub mod desktop_lifecycle;
+pub mod directory_ops;
+pub mod path_scope;
 mod project_commands;
 
 use app_state::AppState;
@@ -7,7 +9,10 @@ use desktop_lifecycle::{
     DesktopLifecycleState, app_data_override, complete_native_acceptance,
     get_native_acceptance_scenario, mark_project_launcher_ready,
 };
-use project_commands::{create_project, list_projects, select_project};
+use project_commands::{
+    create_project, create_project_directory, create_project_with_folder, list_projects,
+    open_or_register_project, pick_directory, select_project,
+};
 use tauri::Manager;
 
 fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
@@ -15,6 +20,10 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         create_project,
         list_projects,
         select_project,
+        pick_directory,
+        open_or_register_project,
+        create_project_directory,
+        create_project_with_folder,
         mark_project_launcher_ready,
         get_native_acceptance_scenario,
         complete_native_acceptance
