@@ -51,8 +51,11 @@ export function App({ gateway }: AppProps) {
       setProjects((current) => [...current, project]);
       setActiveProject(project);
       setLauncherOpen(false);
+      setError(null);
+      return true;
     } catch {
       setError("无法创建项目。请确认目录可用后重试。");
+      return false;
     }
   }
 

@@ -26,7 +26,10 @@ export class TauriProjectGateway implements ProjectGateway {
   }
 
   async createProject(input: CreateProjectInput): Promise<ProjectDto> {
-    const project = await invoke<ProjectWireDto>("create_project", { input });
+    const project = await invoke<ProjectWireDto>("create_project", {
+      name: input.name,
+      rootPath: input.rootPath,
+    });
     return toProjectDto(project);
   }
 

@@ -1,7 +1,6 @@
-import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { ProjectGateway } from "../src/lib/projectGateway";
 
@@ -34,8 +33,28 @@ describe("project workbench", () => {
   });
 
   it("does not render provider internals in the empty workbench", async () => {
+    const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
 
+    await user.click(await screen.findByRole("button", { name: "Keeper IDE" }));
+    await screen.findByRole("region", { name: "对话工作台" });
+
     expect(screen.queryByText(/routeCode|lease|slotId/)).not.toBeInTheDocument();
+  });
+
+  it("keeps project details open when creation fails", async () => {
+    const user = userEvent.setup();
+    const gateway = fixtureGateway();
+    gateway.listProjects = async () => [];
+    gateway.createProject = vi.fn().mockRejectedValue(new Error("store unavailable"));
+    render(<App gateway={gateway} />);
+
+    await user.type(await screen.findByLabelText("项目名称"), "Broken project");
+    await user.type(screen.getByLabelText("项目目录"), "Z:\\missing");
+    await user.click(screen.getByRole("button", { name: "创建" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法创建项目");
+    expect(screen.getByLabelText("项目名称")).toHaveValue("Broken project");
+    expect(screen.getByLabelText("项目目录")).toHaveValue("Z:\\missing");
   });
 });

@@ -3,7 +3,7 @@ import type { CreateProjectInput, ProjectDto } from "../../lib/projectGateway";
 
 type ProjectLauncherProps = {
   projects: ProjectDto[];
-  onCreate: (input: CreateProjectInput) => Promise<void>;
+  onCreate: (input: CreateProjectInput) => Promise<boolean>;
   onSelect: (projectId: string) => Promise<void>;
 };
 
@@ -18,7 +18,8 @@ export function ProjectLauncher({ projects, onCreate, onSelect }: ProjectLaunche
     if (!name.trim() || !rootPath.trim()) return;
     setSubmitting(true);
     try {
-      await onCreate({ name: name.trim(), rootPath: rootPath.trim() });
+      const created = await onCreate({ name: name.trim(), rootPath: rootPath.trim() });
+      if (!created) return;
       setName("");
       setRootPath("");
       setFormOpen(false);

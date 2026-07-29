@@ -8,8 +8,16 @@ license.workspace = true
 name = "keeper_ide_desktop"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "keeper-ide"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+keeper-project = { path = "../../../crates/kernel-project" }
+keeper-storage-sqlite = { path = "../../../crates/storage-sqlite" }
+serde.workspace = true
 tauri = { version = "2", features = [] }
+uuid.workspace = true
