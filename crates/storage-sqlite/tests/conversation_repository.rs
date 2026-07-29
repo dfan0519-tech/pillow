@@ -1,54 +1,55 @@
-use keeper_project::CreateProject;
-use keeper_session::{
-    ConversationRepository, NewConversation, NewRun, NewRunEvent, RunStatus, RuntimeEventKind,
-    SessionError,
+mod common;
+
+use common::{open_pair, seed_project, table_exists};
+use keeper_session::{ConversationRepository, NewConversation, NewRun, RunStatus, SessionError};
+use keeper_storage_sqlite::{
+    ProjectStoreError, SqliteConversationRepository, SqliteProjectRepository,
 };
-use keeper_storage_sqlite::{ProjectStoreError, SqliteConversationRepository, SqliteProjectRepository};
+use rusqlite::Connection;
 
-fn open_pair(temp: &tempfile::TempDir) -> (SqliteProjectRepository, SqliteConversationRepository) {
-    let db = temp.path().join("keeper.db");
-    let projects = SqliteProjectRepository::open(&db).unwrap();
-    let sessions = SqliteConversationRepository::open(&db).unwrap();
-    (projects, sessions)
-}
-
-fn seed_project(projects: &SqliteProjectRepository, temp: &tempfile::TempDir, name: &str) -> keeper_project::Project {
-    let root = temp.path().join(name);
-    std::fs::create_dir(&root).unwrap();
-    projects
-        .create(CreateProject {
-            name: name.into(),
-            root_path: root.to_string_lossy().into_owned(),
-        })
-        .unwrap()
-}
-
+/// True frozen Slice A database: only migration 0001, no conversation tables.
 #[test]
 fn migration_0001_project_data_remains_readable_after_0002() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("keeper.db");
+    let project_id = uuid::Uuid::new_v4().to_string();
+    let root = temp.path().join("legacy-project");
+    std::fs::create_dir(&root).unwrap();
+    let root_path = root.to_string_lossy().into_owned();
+    let canonical = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let now = "2026-07-30T00:00:00+00:00";
 
-    // Simulate a Slice A database: only projects exist.
     {
-        let projects = SqliteProjectRepository::open(&db).unwrap();
-        let root = temp.path().join("legacy-project");
-        std::fs::create_dir(&root).unwrap();
-        projects
-            .create(CreateProject {
-                name: "Legacy Project".into(),
-                root_path: root.to_string_lossy().into_owned(),
-            })
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_projects.sql"))
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects (
+                    id, name, root_path, canonical_root_path, trust_state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'untrusted', ?5, ?5)",
+                rusqlite::params![project_id, "Legacy Project", root_path, canonical, now],
+            )
+            .unwrap();
+
+        assert!(table_exists(&connection, "projects"));
+        assert!(
+            !table_exists(&connection, "conversations"),
+            "0002 tables must be absent before upgrade"
+        );
+        assert!(!table_exists(&connection, "messages"));
+        assert!(!table_exists(&connection, "runs"));
+        assert!(!table_exists(&connection, "run_events"));
     }
 
-    // Opening conversation repository applies migration 0002 on the same file.
     let sessions = SqliteConversationRepository::open(&db).unwrap();
     let projects = SqliteProjectRepository::open(&db).unwrap();
     let listed = projects.list().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "Legacy Project");
+    assert_eq!(listed[0].id.0.to_string(), project_id);
 
-    // Conversation tables are usable without destroying project rows.
     let conversation = sessions
         .create_conversation(NewConversation {
             project_id: listed[0].id,
@@ -145,75 +146,6 @@ fn create_run_persists_user_message_and_pending_run() {
 }
 
 #[test]
-fn append_event_orders_by_sequence_and_duplicate_replay_is_idempotent() {
-    let temp = tempfile::tempdir().unwrap();
-    let (projects, sessions) = open_pair(&temp);
-    let project = seed_project(&projects, &temp, "events-project");
-    let conversation = sessions
-        .create_conversation(NewConversation {
-            project_id: project.id,
-            title: None,
-        })
-        .unwrap();
-    let run = sessions
-        .create_run(NewRun {
-            conversation_id: conversation.id,
-            user_message: "stream please".into(),
-        })
-        .unwrap();
-
-    let first = sessions
-        .append_event(NewRunEvent {
-            run_id: run.id,
-            sequence: 1,
-            kind: RuntimeEventKind::RunStarted,
-            payload_json: r#"{"ok":true}"#.into(),
-        })
-        .unwrap();
-    let second = sessions
-        .append_event(NewRunEvent {
-            run_id: run.id,
-            sequence: 2,
-            kind: RuntimeEventKind::AssistantDelta,
-            payload_json: r#"{"text":"hello"}"#.into(),
-        })
-        .unwrap();
-
-    // Out-of-order insert is allowed; load_timeline must return sequence order.
-    let third = sessions
-        .append_event(NewRunEvent {
-            run_id: run.id,
-            sequence: 0,
-            kind: RuntimeEventKind::Heartbeat,
-            payload_json: "{}".into(),
-        })
-        .unwrap();
-
-    let replay = sessions
-        .append_event(NewRunEvent {
-            run_id: run.id,
-            sequence: 1,
-            kind: RuntimeEventKind::AssistantDelta,
-            payload_json: r#"{"text":"should not replace"}"#.into(),
-        })
-        .unwrap();
-
-    assert_eq!(replay, first);
-    assert_eq!(replay.kind, RuntimeEventKind::RunStarted);
-    assert_eq!(replay.payload_json, r#"{"ok":true}"#);
-
-    let timeline = sessions.load_timeline(conversation.id).unwrap();
-    assert_eq!(
-        timeline.events.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-        vec![0, 1, 2]
-    );
-    assert_eq!(timeline.events[0], third);
-    assert_eq!(timeline.events[1], first);
-    assert_eq!(timeline.events[2], second);
-    assert_eq!(timeline.events.len(), 3);
-}
-
-#[test]
 fn illegal_terminal_transition_fails_without_partial_writes() {
     let temp = tempfile::tempdir().unwrap();
     let (projects, sessions) = open_pair(&temp);
@@ -306,7 +238,6 @@ fn mark_inflight_interrupted_restores_non_terminal_runs_on_restart() {
         .transition_run(completed.id, RunStatus::Completed)
         .unwrap();
 
-    // Simulate process restart: reopen the same database.
     let sessions = SqliteConversationRepository::open(temp.path().join("keeper.db")).unwrap();
     let changed = sessions.mark_inflight_interrupted().unwrap();
     assert_eq!(changed, 3);
@@ -323,7 +254,6 @@ fn mark_inflight_interrupted_restores_non_terminal_runs_on_restart() {
     assert_eq!(status_by_id[&cancelling.id], RunStatus::Interrupted);
     assert_eq!(status_by_id[&completed.id], RunStatus::Completed);
 
-    // Idempotent on a second restart pass.
     assert_eq!(sessions.mark_inflight_interrupted().unwrap(), 0);
 }
 
@@ -340,6 +270,5 @@ fn transition_run_rejects_unknown_run() {
 
 #[test]
 fn existing_project_repository_errors_remain_available() {
-    // Guard against accidental public API regression while adding session store.
     let _ = ProjectStoreError::LockPoisoned;
 }

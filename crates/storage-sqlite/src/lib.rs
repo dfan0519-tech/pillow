@@ -132,10 +132,7 @@ impl ProjectRepository for SqliteProjectRepository {
         Ok(project)
     }
 
-    fn find_by_canonical_root(
-        &self,
-        root_path: &str,
-    ) -> Result<Option<Project>, Self::Error> {
+    fn find_by_canonical_root(&self, root_path: &str) -> Result<Option<Project>, Self::Error> {
         let canonical = canonical_root_path(root_path)?;
         let connection = self.connection()?;
         let project = connection

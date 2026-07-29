@@ -13,4 +13,6 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile = "3"
+uuid.workspace = true

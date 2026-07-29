@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use chrono::Utc;
 use keeper_project::ProjectId;
@@ -8,11 +9,12 @@ use keeper_session::{
     NewConversation, NewRun, NewRunEvent, Run, RunEvent, RunId, RunStatus, SessionError, Timeline,
     validate_run_transition,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::conversation_rows::{
     conversation_from_row, is_unique_constraint, load_conversation, load_event_by_sequence,
-    load_run, map_sqlite, message_from_row, run_event_from_row, run_from_row,
+    load_run, map_sqlite, message_from_row, next_expected_sequence, run_event_from_row,
+    run_from_row, sequence_to_sqlite,
 };
 use crate::migrations;
 
@@ -23,6 +25,11 @@ pub struct SqliteConversationRepository {
 impl SqliteConversationRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let connection = Connection::open(path).map_err(map_sqlite)?;
+        // Dual-connection writers serialize on IMMEDIATE transactions; wait
+        // rather than surface SQLITE_BUSY to callers during brief contention.
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(map_sqlite)?;
         migrations::apply(&connection).map_err(map_sqlite)?;
 
         Ok(Self {
@@ -38,10 +45,7 @@ impl SqliteConversationRepository {
 }
 
 impl ConversationRepository for SqliteConversationRepository {
-    fn create_conversation(
-        &self,
-        input: NewConversation,
-    ) -> Result<Conversation, SessionError> {
+    fn create_conversation(&self, input: NewConversation) -> Result<Conversation, SessionError> {
         let connection = self.connection()?;
         ensure_project_exists(&connection, input.project_id)?;
 
@@ -71,10 +75,7 @@ impl ConversationRepository for SqliteConversationRepository {
         Ok(conversation)
     }
 
-    fn list_conversations(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Vec<Conversation>, SessionError> {
+    fn list_conversations(&self, project_id: ProjectId) -> Result<Vec<Conversation>, SessionError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
@@ -94,7 +95,9 @@ impl ConversationRepository for SqliteConversationRepository {
 
     fn create_run(&self, input: NewRun) -> Result<Run, SessionError> {
         let mut connection = self.connection()?;
-        let tx = connection.transaction().map_err(map_sqlite)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite)?;
 
         ensure_conversation_exists(&tx, input.conversation_id)?;
 
@@ -151,14 +154,29 @@ impl ConversationRepository for SqliteConversationRepository {
     }
 
     fn append_event(&self, event: NewRunEvent) -> Result<RunEvent, SessionError> {
+        let sequence_i64 = sequence_to_sqlite(event.sequence)?;
+
         let mut connection = self.connection()?;
-        let tx = connection.transaction().map_err(map_sqlite)?;
+        // IMMEDIATE takes the write lock before the existence/max reads so a
+        // second connection cannot race a deferred read-then-insert path.
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite)?;
 
         ensure_run_exists(&tx, event.run_id)?;
 
         if let Some(existing) = load_event_by_sequence(&tx, event.run_id, event.sequence)? {
-            // Idempotent replay of (run_id, sequence): return the stored record.
+            // Exact duplicate replay of (run_id, sequence): return stored row.
             return Ok(existing);
+        }
+
+        let expected = next_expected_sequence(&tx, event.run_id)?;
+        if event.sequence != expected {
+            return Err(SessionError::InvalidSequence {
+                run_id: event.run_id,
+                expected,
+                got: event.sequence,
+            });
         }
 
         let recorded = RunEvent {
@@ -166,7 +184,7 @@ impl ConversationRepository for SqliteConversationRepository {
             run_id: event.run_id,
             sequence: event.sequence,
             kind: event.kind,
-            payload_json: event.payload_json,
+            payload_json: event.payload_json.clone(),
             created_at: Utc::now(),
         };
 
@@ -176,7 +194,7 @@ impl ConversationRepository for SqliteConversationRepository {
             params![
                 recorded.event_id.0.to_string(),
                 recorded.run_id.0.to_string(),
-                recorded.sequence as i64,
+                sequence_i64,
                 recorded.kind.as_str(),
                 recorded.payload_json,
                 recorded.created_at.to_rfc3339(),
@@ -189,25 +207,23 @@ impl ConversationRepository for SqliteConversationRepository {
                 Ok(recorded)
             }
             Err(error) if is_unique_constraint(&error) => {
-                // Concurrent insert of the same sequence: return the winner.
-                let existing = load_event_by_sequence(&tx, event.run_id, event.sequence)?
-                    .ok_or_else(|| {
+                // Defense-in-depth: if another writer still won the UNIQUE race,
+                // the transaction is failed — roll back, then re-read the winner.
+                drop(tx);
+                load_event_by_sequence(&connection, event.run_id, event.sequence)?.ok_or_else(
+                    || {
                         SessionError::Store(format!(
                             "unique constraint on run event but row missing for sequence {}",
                             event.sequence
                         ))
-                    })?;
-                drop(tx);
-                Ok(existing)
+                    },
+                )
             }
             Err(error) => Err(map_sqlite(error)),
         }
     }
 
-    fn load_timeline(
-        &self,
-        conversation_id: ConversationId,
-    ) -> Result<Timeline, SessionError> {
+    fn load_timeline(&self, conversation_id: ConversationId) -> Result<Timeline, SessionError> {
         let connection = self.connection()?;
         let conversation = load_conversation(&connection, conversation_id)?
             .ok_or(SessionError::ConversationNotFound(conversation_id))?;
@@ -240,13 +256,15 @@ impl ConversationRepository for SqliteConversationRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_sqlite)?;
 
+        // Group by owning run conversation order, then per-run sequence.
+        // Do not interleave multi-run timelines by global sequence + event_id.
         let mut event_stmt = connection
             .prepare(
                 "SELECT e.event_id, e.run_id, e.sequence, e.kind, e.payload_json, e.created_at
                  FROM run_events e
                  INNER JOIN runs r ON r.id = e.run_id
                  WHERE r.conversation_id = ?1
-                 ORDER BY e.sequence ASC, e.event_id ASC",
+                 ORDER BY r.created_at ASC, r.id ASC, e.sequence ASC",
             )
             .map_err(map_sqlite)?;
         let events = event_stmt
@@ -265,7 +283,9 @@ impl ConversationRepository for SqliteConversationRepository {
 
     fn transition_run(&self, run_id: RunId, next: RunStatus) -> Result<Run, SessionError> {
         let mut connection = self.connection()?;
-        let tx = connection.transaction().map_err(map_sqlite)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite)?;
 
         let current = load_run(&tx, run_id)?.ok_or(SessionError::RunNotFound(run_id))?;
         validate_run_transition(current.status, next)?;

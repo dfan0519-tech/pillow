@@ -45,16 +45,52 @@ pub(crate) fn load_event_by_sequence(
     run_id: RunId,
     sequence: u64,
 ) -> Result<Option<RunEvent>, SessionError> {
+    let sequence_i64 = sequence_to_sqlite(sequence)?;
     connection
         .query_row(
             "SELECT event_id, run_id, sequence, kind, payload_json, created_at
              FROM run_events
              WHERE run_id = ?1 AND sequence = ?2",
-            params![run_id.0.to_string(), sequence as i64],
+            params![run_id.0.to_string(), sequence_i64],
             run_event_from_row,
         )
         .optional()
         .map_err(map_sqlite)
+}
+
+/// Next sequence for a new event on this run: 0 when empty, otherwise max + 1.
+pub(crate) fn next_expected_sequence(
+    connection: &Connection,
+    run_id: RunId,
+) -> Result<u64, SessionError> {
+    let max: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(sequence) FROM run_events WHERE run_id = ?1",
+            [run_id.0.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite)?;
+
+    match max {
+        None => Ok(0),
+        Some(value) => {
+            if value < 0 {
+                return Err(SessionError::Store(format!(
+                    "negative sequence {value} stored for run {}",
+                    run_id.0
+                )));
+            }
+            let max_u64 = value as u64;
+            max_u64.checked_add(1).ok_or_else(|| {
+                SessionError::Store(format!("sequence counter overflow for run {}", run_id.0))
+            })
+        }
+    }
+}
+
+/// Convert domain `u64` sequence to SQLite INTEGER (`i64`), rejecting overflow.
+pub(crate) fn sequence_to_sqlite(sequence: u64) -> Result<i64, SessionError> {
+    i64::try_from(sequence).map_err(|_| SessionError::SequenceOutOfRange(sequence))
 }
 
 pub(crate) fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
@@ -118,25 +154,25 @@ pub(crate) fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
 pub(crate) fn run_event_from_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
     let event_id: String = row.get(0)?;
     let run_id: String = row.get(1)?;
-    let sequence: i64 = row.get(2)?;
+    let sequence_i64: i64 = row.get(2)?;
     let kind: String = row.get(3)?;
     let created_at: String = row.get(5)?;
 
-    if sequence < 0 {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
+    let sequence = u64::try_from(sequence_i64).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
             2,
             Type::Integer,
             Box::new(InvalidEnumValue(
                 "run event sequence",
-                sequence.to_string(),
+                sequence_i64.to_string(),
             )),
-        ));
-    }
+        )
+    })?;
 
     Ok(RunEvent {
         event_id: EventId(parse_uuid(&event_id, 0)?),
         run_id: RunId(parse_uuid(&run_id, 1)?),
-        sequence: sequence as u64,
+        sequence,
         kind: RuntimeEventKind::parse(&kind).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 3,

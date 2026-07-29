@@ -50,8 +50,26 @@ CREATE INDEX IF NOT EXISTS idx_runs_status
 CREATE TABLE IF NOT EXISTS run_events (
     event_id TEXT PRIMARY KEY NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(id),
-    sequence INTEGER NOT NULL,
-    kind TEXT NOT NULL,
+    sequence INTEGER NOT NULL
+        CHECK (sequence >= 0),
+    kind TEXT NOT NULL
+        CHECK (kind IN (
+            'run_started',
+            'assistant_delta',
+            'reasoning_summary_delta',
+            'plan_updated',
+            'tool_call_started',
+            'tool_call_output',
+            'tool_call_completed',
+            'subagent_started',
+            'subagent_progress',
+            'subagent_completed',
+            'artifact_produced',
+            'turn_completed',
+            'turn_failed',
+            'run_cancelled',
+            'heartbeat'
+        )),
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (run_id, sequence)

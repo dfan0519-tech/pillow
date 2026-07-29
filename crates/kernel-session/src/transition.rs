@@ -12,10 +12,7 @@ pub fn validate_run_transition(from: RunStatus, to: RunStatus) -> Result<(), Ses
     let allowed = match from {
         RunStatus::Pending => matches!(
             to,
-            RunStatus::Running
-                | RunStatus::Failed
-                | RunStatus::Cancelled
-                | RunStatus::Interrupted
+            RunStatus::Running | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
         ),
         RunStatus::Running => matches!(
             to,
