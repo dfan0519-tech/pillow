@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use keeper_ide_desktop::app_state::AppState;
 use keeper_ide_desktop::directory_ops::{create_child_directory, project_name_from_path};
+use keeper_ide_desktop::path_scope;
 
 fn test_state() -> (AppState, PathBuf) {
     let nonce = SystemTime::now()
@@ -89,10 +90,11 @@ fn open_or_register_registers_new_folder_using_leaf_name() {
 }
 
 #[test]
-fn create_project_with_folder_makes_directory_and_registers() {
+fn create_project_with_folder_makes_directory_and_registers_when_parent_granted() {
     let (state, temp_root) = test_state();
     let parent = temp_root.join("parents");
     fs::create_dir_all(&parent).expect("parent");
+    path_scope::grant_path(&parent);
 
     let project = state
         .create_project_with_folder("New App".to_owned(), parent.to_string_lossy().into_owned())
@@ -107,6 +109,24 @@ fn create_project_with_folder_makes_directory_and_registers() {
             .unwrap(),
         expected.canonicalize().unwrap()
     );
+}
+
+#[test]
+fn create_project_with_folder_rejects_parent_outside_allowlist() {
+    let (state, temp_root) = test_state();
+    let parent = temp_root.join("ungranted-parent");
+    fs::create_dir_all(&parent).expect("parent");
+    // Intentionally do not grant parent.
+
+    let error = state
+        .create_project_with_folder(
+            "Denied App".to_owned(),
+            parent.to_string_lossy().into_owned(),
+        )
+        .expect_err("ungranted parent must be rejected");
+
+    assert_eq!(error.code, "path_not_allowed");
+    assert!(!parent.join("Denied App").exists());
 }
 
 #[test]

@@ -138,17 +138,23 @@ impl AppState {
     }
 
     /// Create `parent/name`, register the project, and return the DTO.
+    /// Parent must already be on the path allowlist (native picker grants it).
     pub fn create_project_with_folder(
         &self,
         name: String,
         parent_path: String,
     ) -> Result<ProjectDto, CommandError> {
         let parent = PathBuf::from(parent_path.trim());
+        path_scope::require_allowed(&parent).map_err(map_path_scope_error)?;
         let child = create_child_directory(&parent, &name)?;
         path_scope::grant_path(&child);
         let root_path = child.to_string_lossy().into_owned();
         self.create_project(name.trim().to_owned(), root_path)
     }
+}
+
+fn map_path_scope_error(error: path_scope::PathScopeError) -> CommandError {
+    command_error(error.code(), error.message())
 }
 
 fn map_store_error(error: ProjectStoreError) -> CommandError {

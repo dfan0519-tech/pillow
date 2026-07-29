@@ -49,6 +49,33 @@ pub fn is_allowed(path: &Path) -> bool {
         .any(|root| path_under_root(&candidate, root))
 }
 
+/// Reject when `path` is outside the allowlist (used by write-capable create paths).
+pub fn require_allowed(path: &Path) -> Result<(), PathScopeError> {
+    if is_allowed(path) {
+        return Ok(());
+    }
+    Err(PathScopeError::NotAllowed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathScopeError {
+    NotAllowed,
+}
+
+impl PathScopeError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotAllowed => "path_not_allowed",
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotAllowed => "The selected folder is outside the granted path allowlist.",
+        }
+    }
+}
+
 fn path_under_root(path: &Path, root: &Path) -> bool {
     if path == root {
         return true;
@@ -61,6 +88,13 @@ fn path_under_root(path: &Path, root: &Path) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+pub fn clear_grants_for_tests() {
+    if let Ok(mut locked) = grants().lock() {
+        locked.clear();
+    }
 }
 
 #[cfg(test)]
@@ -84,12 +118,34 @@ mod tests {
 
     #[test]
     fn grants_allow_the_folder_and_its_children() {
+        clear_grants_for_tests();
         let root = temp_dir("grant");
         let child = root.join("nested");
         fs::create_dir_all(&child).unwrap();
         grant_path(&root);
         assert!(is_allowed(&root));
         assert!(is_allowed(&child));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ungranted_paths_are_not_allowed() {
+        clear_grants_for_tests();
+        let root = temp_dir("deny");
+        assert!(!is_allowed(&root));
+        assert_eq!(
+            require_allowed(&root).unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn require_allowed_accepts_granted_parent() {
+        clear_grants_for_tests();
+        let root = temp_dir("require-ok");
+        grant_path(&root);
+        assert!(require_allowed(&root).is_ok());
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -59,12 +59,18 @@ pub fn open_or_register_project(
 }
 
 /// Create a child directory under `parent_path` named `name` (no registration).
+/// Parent must already be on the path allowlist (native picker grants it).
 #[tauri::command]
 pub fn create_project_directory(
     parent_path: String,
     name: String,
 ) -> Result<String, CommandError> {
-    let child = create_child_directory(std::path::Path::new(parent_path.trim()), &name)?;
+    let parent = std::path::Path::new(parent_path.trim());
+    path_scope::require_allowed(parent).map_err(|error| CommandError {
+        code: error.code(),
+        message: error.message().to_owned(),
+    })?;
+    let child = create_child_directory(parent, &name)?;
     path_scope::grant_path(&child);
     Ok(child.to_string_lossy().into_owned())
 }
