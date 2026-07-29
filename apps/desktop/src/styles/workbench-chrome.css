@@ -1,0 +1,251 @@
+/*
+ * Composer / resource / dialog chrome ported/adapted from Grok App under MIT.
+ * Upstream: src/styles/app.css (composer, icon-btn) at
+ * cbbbdf17bb8db1588b6707f3f42f6b00397e27f9.
+ * Floating composer + optional resource aside + name-only project dialog.
+ */
+
+/* Floating composer — ~18px radius, soft layered shadow, no hard footer divider */
+.composer-wrap {
+  padding: 12px 22px 22px;
+  display: flex;
+  justify-content: center;
+}
+
+.composer-wrap--float .composer {
+  box-shadow: var(--shadow-composer);
+}
+
+.composer {
+  position: relative;
+  width: 100%;
+  max-width: 42rem;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-composer);
+  padding: 10px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  resize: none;
+  min-height: 48px;
+  max-height: 160px;
+  border: 0;
+  padding: 4px 4px 2px;
+  color: var(--text-primary);
+  background: transparent;
+  line-height: 1.45;
+}
+
+.composer textarea:disabled {
+  color: var(--text-tertiary);
+}
+
+.composer textarea:focus {
+  outline: none;
+}
+
+.composer__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 0;
+  /* no hard footer divider */
+}
+
+.composer__context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.composer-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-chip--action {
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+}
+
+.composer-chip--action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.composer-chip--action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.icon-btn {
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  flex-shrink: 0;
+  line-height: 0;
+  appearance: none;
+}
+
+.icon-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-active);
+}
+
+/* Circular primary send — dark fill, not rectangular text button */
+.icon-btn--primary {
+  background: var(--text-primary);
+  color: var(--bg-main);
+}
+
+.icon-btn--primary:hover:not(:disabled) {
+  background: var(--text-secondary);
+  color: var(--bg-main);
+}
+
+.icon-btn--primary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Resource pane chrome */
+.resource-pane {
+  padding: 12px 14px;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-aside);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.resource-pane__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  min-height: 28px;
+}
+
+.resource-pane p {
+  margin: 0;
+  color: var(--text-tertiary);
+}
+
+/* Name-only new project dialog */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 20, 24, 0.4);
+  padding: 24px;
+}
+
+.modal-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  box-shadow:
+    0 8px 28px rgba(0, 0, 0, 0.1),
+    0 20px 48px rgba(0, 0, 0, 0.08);
+}
+
+.modal-card__head h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.modal-card__head p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.modal-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.modal-field input {
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-actions button {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  padding: 8px 12px;
+}
+
+.modal-actions button[type="submit"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.modal-actions button[type="submit"]:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.modal-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

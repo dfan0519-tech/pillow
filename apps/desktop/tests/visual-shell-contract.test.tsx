@@ -8,9 +8,13 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { ProjectDto, ProjectGateway } from "../src/lib/projectGateway";
 import tokensCss from "../src/styles/tokens.css?raw";
-import workbenchCss from "../src/styles/workbench.css?raw";
+import workbenchShellCss from "../src/styles/workbench-shell.css?raw";
+import workbenchChromeCss from "../src/styles/workbench-chrome.css?raw";
 import "../src/styles/tokens.css";
 import "../src/styles/workbench.css";
+
+/** Composed workbench stylesheet (cascade order matches workbench.css imports). */
+const workbenchCss = `${workbenchShellCss}\n${workbenchChromeCss}`;
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
