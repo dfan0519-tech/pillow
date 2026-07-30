@@ -49,11 +49,20 @@ pub(crate) fn run_prompt_loop(
     let mut outcome: Option<PromptOutcome> = None;
     let deadline = Instant::now() + timeout + Duration::from_secs(2);
     let mut cancel_sent = false;
+    let mut cancel_deadline = None;
 
     while outcome.is_none() {
         if cancel.load(Ordering::SeqCst) && !cancel_sent {
             cancel_sent = true;
             let _ = rpc.notify("session/cancel", session_cancel_params(acp_session_id));
+            cancel_deadline = Some(Instant::now() + config.cancel_grace);
+        }
+        if cancel.load(Ordering::SeqCst)
+            && cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            terminate_after_cancel(inner);
+            outcome = Some(PromptOutcome::Err(process_exited()));
+            continue;
         }
 
         match rx.recv_timeout(Duration::from_millis(10)) {
@@ -172,6 +181,19 @@ pub(crate) fn run_prompt_loop(
         conn.rpc.set_event_sink(None);
     }
     Ok(())
+}
+
+/// A provider that ignores `session/cancel` must not retain the sole ACP slot.
+fn terminate_after_cancel(inner: &Mutex<Inner>) {
+    let mut guard = inner.lock().expect("inner lock");
+    let Some(mut conn) = guard.connection.take() else {
+        return;
+    };
+    conn.rpc.close();
+    let _ = conn.child.kill_tree(Duration::from_secs(2));
+    conn.rpc.join_reader();
+    guard.sessions.clear();
+    guard.probe_state = ProbeState::Unavailable;
 }
 
 /// Successful prompt establishes healthy; recognized auth failures clear it.

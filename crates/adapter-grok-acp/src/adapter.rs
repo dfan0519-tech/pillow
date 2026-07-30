@@ -24,6 +24,8 @@ use crate::turn::TurnRegistry;
 /// Grok Build ACP adapter. Provider wire state stays private to this type.
 pub struct GrokAcpAdapter {
     config: GrokAcpConfig,
+    /// ACP has one global event sink and accepts one prompt at a time.
+    operation_gate: Mutex<()>,
     inner: Mutex<Inner>,
     shut_down: AtomicBool,
 }
@@ -33,6 +35,7 @@ impl GrokAcpAdapter {
         config.validate()?;
         Ok(Self {
             config,
+            operation_gate: Mutex::new(()),
             inner: Mutex::new(Inner {
                 connection: None,
                 sessions: SessionMap::default(),
@@ -59,6 +62,7 @@ impl GrokAcpAdapter {
         acp_session_id: &str,
     ) -> Result<RuntimeSession, RuntimeError> {
         self.ensure_alive()?;
+        let _operation = self.operation_gate.lock().expect("operation gate");
         let cwd = canonical_project_root(
             request
                 .working_directory
@@ -136,6 +140,7 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
 
     fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError> {
         self.ensure_alive()?;
+        let _operation = self.operation_gate.lock().expect("operation gate");
         let cwd = canonical_project_root(
             request
                 .working_directory
@@ -183,6 +188,7 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
 
     fn send_turn(&self, request: SendTurn, sink: &mut dyn EventSink) -> Result<(), RuntimeError> {
         self.ensure_alive()?;
+        let _operation = self.operation_gate.lock().expect("operation gate");
 
         let (acp_session_id, cancel, rpc, rx) = {
             let mut inner = self.inner.lock().expect("inner lock");

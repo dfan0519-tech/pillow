@@ -87,6 +87,31 @@ pub(crate) fn run_prompt_script(
                 }
             }
         }
+        "race-session-operation" => {
+            emit_update(
+                stdout,
+                session_id,
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "before-session-operation" }
+                }),
+            );
+            thread::sleep(Duration::from_millis(150 + delay_ms));
+            emit_update(
+                stdout,
+                session_id,
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "after-session-operation" }
+                }),
+            );
+            loop {
+                let _ = rx.recv_timeout(Duration::from_millis(20));
+            }
+        }
+        "ignore-cancel" => loop {
+            let _ = rx.recv_timeout(Duration::from_millis(20));
+        },
         "permission-read" | "permission-read-parent" => {
             let target = if script == "permission-read-parent" {
                 ".."

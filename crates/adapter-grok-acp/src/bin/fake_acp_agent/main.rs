@@ -4,7 +4,7 @@
 //! `text-only` (default), `with-tools`, `permission-read`, `permission-write`,
 //! `hang-until-cancel`, `exit-early`, `malformed`, `oversized-line`,
 //! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
-//! `spawn-descendant`.
+//! `spawn-descendant`, `race-session-operation`, `ignore-cancel`.
 
 mod scripts;
 
