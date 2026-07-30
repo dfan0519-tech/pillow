@@ -4,7 +4,7 @@
 //! `text-only` (default), `with-tools`, `permission-read`, `permission-write`,
 //! `hang-until-cancel`, `exit-early`, `malformed`, `oversized-line`,
 //! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
-//! `spawn-descendant`, `race-session-operation`, `ignore-cancel`.
+//! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`.
 
 mod scripts;
 
@@ -36,6 +36,12 @@ fn main() {
         std::process::exit(2);
     }
 
+    if script == "hold-descendant" {
+        loop {
+            thread::park();
+        }
+    }
+
     // Record our own PID for process-tree cleanup tests.
     if let Ok(path) = std::env::var("KEEPER_FAKE_ACP_PARENT_PID_FILE") {
         let _ = std::fs::write(path, std::process::id().to_string());
@@ -43,6 +49,7 @@ fn main() {
 
     let mut descendant = None;
     if script == "spawn-descendant" {
+        // This is the first operation after the suspended primary thread resumes.
         descendant = spawn_hanging_descendant();
         if let (Some(child), Ok(path)) = (
             descendant.as_ref(),
@@ -241,28 +248,17 @@ fn main() {
     drop(descendant);
 }
 
-/// Spawn a long-lived child that survives only until the process tree is killed.
+/// Spawn an immediate long-lived child without a shell launcher or timer process.
 fn spawn_hanging_descendant() -> Option<std::process::Child> {
-    #[cfg(windows)]
-    {
-        Command::new("cmd.exe")
-            .args(["/C", "ping", "-n", "9999", "127.0.0.1", ">NUL"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()
-    }
-    #[cfg(not(windows))]
-    {
-        Command::new("sleep")
-            .arg("9999")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()
-    }
+    Command::new(std::env::current_exe().ok()?)
+        .env("KEEPER_FAKE_ACP_SCRIPT", "hold-descendant")
+        .env_remove("KEEPER_FAKE_ACP_PARENT_PID_FILE")
+        .env_remove("KEEPER_FAKE_ACP_DESCENDANT_PID_FILE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
 }
 
 fn simple_id() -> String {

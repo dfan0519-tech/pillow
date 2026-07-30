@@ -486,7 +486,7 @@ fn refuses_cancel_request_method_on_rpc() {
 }
 
 #[test]
-fn shutdown_kills_parent_and_descendant() {
+fn shutdown_kills_descendant_spawned_immediately_after_resume() {
     let stamp = format!(
         "{}-{}",
         std::process::id(),
@@ -510,7 +510,7 @@ fn shutdown_kills_parent_and_descendant() {
     let adapter = GrokAcpAdapter::new(cfg).unwrap();
     let _ = start(&adapter);
 
-    // Wait for the fake child to record PIDs.
+    // The fake parent records the immediate descendant it starts as its first work after resume.
     let parent_pid = wait_for_pid_file(&parent_pid_path, Duration::from_secs(3));
     let descendant_pid = wait_for_pid_file(&descendant_pid_path, Duration::from_secs(3));
     assert!(

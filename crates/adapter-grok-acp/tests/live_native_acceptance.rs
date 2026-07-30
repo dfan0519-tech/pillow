@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
+use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, process_gone_for_tests};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
@@ -376,7 +376,19 @@ fn controlled_live_native_acceptance() {
     );
 
     // 7) Shutdown — kill tree; no further turns.
+    let owned_provider_root_pid = adapter_arc
+        .owned_provider_root_pid_for_acceptance()
+        .expect("owned provider root pid before shutdown");
+    assert!(
+        !process_gone_for_tests(owned_provider_root_pid),
+        "owned provider root must be live before shutdown"
+    );
     adapter_arc.shutdown().expect("shutdown");
+    let owned_tree_clean = process_gone_for_tests(owned_provider_root_pid);
+    assert!(
+        owned_tree_clean,
+        "owned provider root pid {owned_provider_root_pid} survived shutdown"
+    );
 
     let evidence = serde_json::json!({
         "schemaVersion": 1,
@@ -414,6 +426,9 @@ fn controlled_live_native_acceptance() {
         },
         "writePermissionObserved": false,
         "shutdownOk": true,
+        // PID is non-secret; this ties cleanup evidence to the actual owned provider.
+        "ownedProviderRootPid": owned_provider_root_pid,
+        "ownedTreeClean": owned_tree_clean,
         "promptPolicy": "read_only_no_tool_mutation",
     });
 

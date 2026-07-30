@@ -134,6 +134,7 @@ export function buildSkipResult({ mode = "dry-run", reason, elapsedMs = 0 } = {}
       readOnlyTurn: { status: "skipped" },
       cooperativeCancel: { status: "skipped" },
       shutdown: { status: "skipped" },
+      ownedTreeClean: { status: "skipped" },
       residualPids: { status: "skipped" },
       singleTerminal: { status: "skipped" },
       noWritePermission: { status: "skipped" },
@@ -207,6 +208,12 @@ export function validateAdapterEvidence(value) {
   }
   if (v.shutdownOk !== true) {
     throw new Error("shutdownOk must be true");
+  }
+  if (!Number.isInteger(v.ownedProviderRootPid) || v.ownedProviderRootPid <= 0) {
+    throw new Error("ownedProviderRootPid must be a positive integer");
+  }
+  if (v.ownedTreeClean !== true) {
+    throw new Error("ownedTreeClean must be true");
   }
   return true;
 }

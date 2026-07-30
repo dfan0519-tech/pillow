@@ -203,8 +203,7 @@ async function runLive({ outDir }) {
     errorMessage = redactHarnessError(errorMessage);
   }
 
-  // Allow process reaping to settle before residual snapshot.
-  await new Promise((r) => setTimeout(r, 500));
+  // The adapter's PID-bound shutdown proof completes before the secondary snapshot.
   const finalSnap = captureGrokKeeperBaseline();
   const residuals = residualProcessIds(baseline, finalSnap);
 
@@ -220,8 +219,9 @@ async function runLive({ outDir }) {
     }
   }
 
+  const ownedTreeClean = adapterResult?.ownedTreeClean === true;
   const residualOk = residuals.clean;
-  const passed = cargoExitCode === 0 && residualOk && adapterResult?.status === "passed";
+  const passed = cargoExitCode === 0 && ownedTreeClean && residualOk && adapterResult?.status === "passed";
 
   const checks = {
     optIn: { status: "passed" },
@@ -245,6 +245,10 @@ async function runLive({ outDir }) {
       terminalCount: adapterResult?.cooperativeCancel?.terminalCount ?? null,
     },
     shutdown: { status: adapterResult?.shutdownOk === true ? "passed" : "failed" },
+    ownedTreeClean: {
+      status: ownedTreeClean ? "passed" : "failed",
+      ownedProviderRootPid: adapterResult?.ownedProviderRootPid ?? null,
+    },
     residualPids: {
       status: residualOk ? "passed" : "failed",
       residualCount: residuals.residualCount,
@@ -287,6 +291,8 @@ async function runLive({ outDir }) {
           readOnlyTerminal: adapterResult.readOnlyTurn?.terminalKind ?? null,
           cancelTerminal: adapterResult.cooperativeCancel?.terminalKind ?? null,
           shutdownOk: adapterResult.shutdownOk ?? null,
+          ownedProviderRootPid: adapterResult.ownedProviderRootPid ?? null,
+          ownedTreeClean: adapterResult.ownedTreeClean ?? null,
         }
       : null,
     checks,
@@ -433,6 +439,8 @@ async function runSelfTest() {
         cooperativeCancel: { terminalKind: "run_cancelled", terminalCount: 1 },
         writePermissionObserved: false,
         shutdownOk: true,
+        ownedProviderRootPid: 42,
+        ownedTreeClean: true,
       });
     } catch {
       rejected = true;
@@ -460,6 +468,8 @@ async function runSelfTest() {
         cooperativeCancel: { terminalKind: "run_cancelled", terminalCount: 1 },
         writePermissionObserved: false,
         shutdownOk: true,
+        ownedProviderRootPid: 42,
+        ownedTreeClean: true,
       }),
       true,
     );

@@ -73,6 +73,14 @@ When opted in, the ignored Rust test exercises:
 6. **No write permission** — fail if write/edit/execute tool activity is observed
 7. **Process residuals** — Node harness snapshots baseline/final Grok and Keeper PIDs; requires zero new residual PIDs
 
+## H5 PID-bound ownership proof
+
+The live adapter evidence includes `ownedProviderRootPid` (a non-secret PID) and
+`ownedTreeClean`. The Rust acceptance test records the PID while the adapter owns
+the provider, shuts down the adapter, and asserts the same PID has exited. The
+Node validator requires both fields and refuses PASS without `ownedTreeClean: true`.
+Grok/Keeper process-name snapshots remain secondary residual diagnostics only.
+
 Machine output: `artifacts/native-acceptance-grok-acp/result.json` (gitignored)
 Human report: `artifacts/native-acceptance-grok-acp/report.md` (gitignored)
 

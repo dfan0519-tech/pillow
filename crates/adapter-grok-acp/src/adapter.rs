@@ -47,6 +47,16 @@ impl GrokAcpAdapter {
         })
     }
 
+    /// Non-secret PID for controlled acceptance evidence while the provider is owned.
+    #[doc(hidden)]
+    pub fn owned_provider_root_pid_for_acceptance(&self) -> Option<u32> {
+        let inner = self.inner.lock().ok()?;
+        inner
+            .connection
+            .as_ref()
+            .map(|connection| connection.child.pid())
+    }
+
     fn ensure_alive(&self) -> Result<(), RuntimeError> {
         if self.shut_down.load(Ordering::SeqCst) {
             Err(RuntimeError::ShutDown)

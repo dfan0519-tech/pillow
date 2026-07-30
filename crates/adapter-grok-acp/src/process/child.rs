@@ -10,7 +10,7 @@ use crate::error::{internal, transport};
 use keeper_agent_protocol::RuntimeError;
 
 #[cfg(windows)]
-use super::job_windows::JobObject;
+use super::job_windows::{JobObject, SuspendedPrimaryThread};
 
 /// Owned child plus OS process id and (on Windows) a Job Object for tree kill.
 pub struct ChildHandle {
@@ -37,6 +37,10 @@ impl ChildHandle {
             Ok(None) => Ok(None),
             Err(e) => Err(transport(format!("try_wait failed: {e}"))),
         }
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Close stdin and terminate the process tree. Fails if cleanup cannot be proved.
@@ -108,8 +112,8 @@ impl Drop for ChildHandle {
 
 /// Spawn the ACP child with a fully constructed environment (no inherit).
 ///
-/// On Windows the child is assigned to a Job Object with kill-on-close so
-/// descendants are owned by the same cleanup domain as the direct child.
+/// On Windows the child is created suspended, assigned to a Job Object, then
+/// resumed, so it cannot create descendants before ownership is established.
 pub fn spawn_child(
     executable: &Path,
     args: &[String],
@@ -142,10 +146,11 @@ pub fn spawn_child(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     }
 
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         internal(format!(
             "failed to spawn ACP child {}: {e}",
             executable.display()
@@ -155,18 +160,23 @@ pub fn spawn_child(
 
     #[cfg(windows)]
     {
+        let primary_thread = match SuspendedPrimaryThread::find_for_process(pid) {
+            Ok(thread) => thread,
+            Err(err) => {
+                terminate_suspended_child(&mut child, job);
+                return Err(err);
+            }
+        };
+
         use std::os::windows::io::AsRawHandle;
         // SAFETY: Child's process handle is valid for the lifetime of `child`.
         let process_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
         if let Err(err) = job.assign_process(process_handle) {
-            // Best-effort kill if we cannot own the tree.
-            let mut orphan = ChildHandle {
-                child,
-                pid,
-                tracked_pids: vec![pid],
-                job: Some(job),
-            };
-            let _ = orphan.kill_tree(Duration::from_millis(500));
+            terminate_suspended_child(&mut child, job);
+            return Err(err);
+        }
+        if let Err(err) = primary_thread.resume() {
+            terminate_suspended_child(&mut child, job);
             return Err(err);
         }
         Ok(ChildHandle {
@@ -187,6 +197,15 @@ pub fn spawn_child(
     }
 }
 
+#[cfg(windows)]
+fn terminate_suspended_child(child: &mut Child, job: JobObject) {
+    // Assignment may have succeeded before a later failure; cover both paths.
+    job.terminate_tree();
+    drop(job);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(not(windows))]
 fn kill_process_tree(pid: u32) {
     let _ = Command::new("kill")
@@ -200,22 +219,23 @@ fn kill_process_tree(pid: u32) {
 pub(crate) fn process_gone(pid: u32) -> bool {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let output = Command::new("tasklist.exe")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match output {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                !text.contains(&pid.to_string())
-            }
-            Err(_) => false,
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        // SAFETY: opens only a synchronization handle for this explicit PID.
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if process.is_null() {
+            return true;
         }
+        // SAFETY: process is a valid synchronization handle, then closed below.
+        let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+        // SAFETY: process was opened above and is no longer needed.
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        exited
     }
     #[cfg(not(windows))]
     {
