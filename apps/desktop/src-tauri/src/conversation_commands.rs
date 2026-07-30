@@ -2,10 +2,13 @@
 
 use std::sync::Arc;
 
+use keeper_project::ProjectId;
+use keeper_session::ConversationId;
 use serde::Serialize;
-use tauri::State;
+use tauri::{State, WebviewWindow};
+use uuid::Uuid;
 
-use crate::app_state::CommandError;
+use crate::app_state::{AppState, CommandError};
 use crate::conversation_events::{ConversationDto, SendTurnResult, TimelineDto};
 use crate::conversation_service::{ConversationCommandError, ConversationService};
 
@@ -39,38 +42,75 @@ fn map_error(error: ConversationCommandError) -> CommandError {
 }
 
 #[tauri::command]
-pub fn list_conversations(
+pub fn list_conversations<R: tauri::Runtime>(
+    state: State<'_, AppState>,
     service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
     project_id: String,
 ) -> Result<Vec<ConversationDto>, CommandError> {
-    service.list_conversations(project_id).map_err(map_error)
+    let conversations = service
+        .list_conversations(project_id.clone())
+        .map_err(map_error)?;
+    let project_id = parse_project_id(&project_id)?;
+    let conversation_ids = conversations
+        .iter()
+        .map(|conversation| parse_conversation_id(&conversation.id))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.permit_existing_conversations_for_window(
+        window.label(),
+        project_id,
+        &conversation_ids,
+    )?;
+    Ok(conversations)
 }
 
 #[tauri::command]
-pub fn create_conversation(
+pub fn create_conversation<R: tauri::Runtime>(
+    state: State<'_, AppState>,
     service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
     project_id: String,
     title: Option<String>,
 ) -> Result<ConversationDto, CommandError> {
-    service
-        .create_conversation(project_id, title)
-        .map_err(map_error)
+    let bootstrap = state.begin_conversation_for_window(window.label(), project_id.clone())?;
+    let (conversation, conversation_id) =
+        match service.create_conversation_with_id(project_id, title) {
+            Ok(conversation) => conversation,
+            Err(error) => {
+                state.restore_conversation_bootstrap(bootstrap);
+                return Err(map_error(error));
+            }
+        };
+    state.bind_new_conversation(bootstrap, conversation_id);
+    Ok(conversation)
 }
 
 #[tauri::command]
-pub fn load_timeline(
+pub fn load_timeline<R: tauri::Runtime>(
+    state: State<'_, AppState>,
     service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
     conversation_id: String,
 ) -> Result<TimelineDto, CommandError> {
+    let (id, project_id, root) = service
+        .conversation_project_context(&conversation_id)
+        .map_err(map_error)?;
+    state.bind_existing_conversation_for_window(window.label(), project_id, id, &root)?;
     service.load_timeline(conversation_id).map_err(map_error)
 }
 
 #[tauri::command]
-pub fn send_turn(
+pub fn send_turn<R: tauri::Runtime>(
+    state: State<'_, AppState>,
     service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
     conversation_id: String,
     content: String,
 ) -> Result<SendTurnResult, CommandError> {
+    let (id, project_id, root) = service
+        .conversation_project_context(&conversation_id)
+        .map_err(map_error)?;
+    state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
         .send_turn(conversation_id, content)
         .map_err(map_error)
@@ -86,24 +126,56 @@ pub fn cancel_run(
 
 /// Optional native conversation acceptance scenario (Slice B1 recovery).
 #[tauri::command]
-pub fn get_conversation_acceptance_scenario() -> Option<ConversationAcceptanceScenario> {
-    let phase = std::env::var("KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE").ok()?;
+pub fn get_conversation_acceptance_scenario<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    window: WebviewWindow<R>,
+) -> Result<Option<ConversationAcceptanceScenario>, CommandError> {
+    let Ok(phase) = std::env::var("KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE") else {
+        return Ok(None);
+    };
     if !matches!(phase.as_str(), "create_stream" | "restore") {
-        return None;
+        return Ok(None);
     }
-    let project_name = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_NAME").ok()?;
-    let project_root = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT").ok()?;
+    let Ok(project_name) = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_NAME") else {
+        return Ok(None);
+    };
+    let Ok(mut project_root) = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT") else {
+        return Ok(None);
+    };
     let prompt = std::env::var("KEEPER_IDE_CONVERSATION_ACCEPTANCE_PROMPT")
         .unwrap_or_else(|_| "summarize the workspace".to_owned());
     if project_name.trim().is_empty() || project_root.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(ConversationAcceptanceScenario {
+    if phase == "create_stream" {
+        project_root =
+            state.register_picker_selection(window.label(), std::path::Path::new(&project_root))?;
+    }
+    Ok(Some(ConversationAcceptanceScenario {
         phase,
         project_name,
         project_root,
         prompt,
-    })
+    }))
+}
+
+fn parse_project_id(value: &str) -> Result<ProjectId, CommandError> {
+    Uuid::parse_str(value)
+        .map(ProjectId)
+        .map_err(|_| invalid_conversation_authority())
+}
+
+fn parse_conversation_id(value: &str) -> Result<ConversationId, CommandError> {
+    Uuid::parse_str(value)
+        .map(ConversationId)
+        .map_err(|_| invalid_conversation_authority())
+}
+
+fn invalid_conversation_authority() -> CommandError {
+    CommandError {
+        code: "conversation_authority_invalid",
+        message: "Conversation authority could not be established.".into(),
+    }
 }
 
 #[tauri::command]

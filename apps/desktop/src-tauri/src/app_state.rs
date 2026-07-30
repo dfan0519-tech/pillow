@@ -1,13 +1,12 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use keeper_project::{CreateProject, Project, ProjectId};
+use keeper_session::ConversationId;
 use keeper_storage_sqlite::{ProjectStoreError, SqliteProjectRepository};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::directory_ops::{create_child_directory, project_name_from_path};
+use crate::directory_ops::project_name_from_path;
 use crate::path_scope;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -43,7 +42,6 @@ pub struct CommandError {
 
 pub struct AppState {
     projects: SqliteProjectRepository,
-    selected_projects: Mutex<HashMap<String, ProjectId>>,
     path_capabilities: path_scope::PathCapabilities,
 }
 
@@ -51,7 +49,6 @@ impl AppState {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProjectStoreError> {
         Ok(Self {
             projects: SqliteProjectRepository::open(path)?,
-            selected_projects: Mutex::new(HashMap::new()),
             path_capabilities: path_scope::PathCapabilities::default(),
         })
     }
@@ -65,6 +62,10 @@ impl AppState {
             .register_picker_selection(window_id, path)
             .map(|canonical| canonical.to_string_lossy().into_owned())
             .map_err(map_path_scope_error)
+    }
+
+    pub fn revoke_picker_selection(&self, window_id: &str) {
+        self.path_capabilities.revoke_picker_selection(window_id);
     }
 
     pub fn create_project_from_picker_for_window(
@@ -85,16 +86,20 @@ impl AppState {
             .consume_picker_selection(window_id, &path)
             .map_err(map_path_scope_error)?;
         let canonical_root = picker_selection.canonical_root().to_path_buf();
-        let project = self
-            .projects
-            .create(CreateProject {
-                name,
-                root_path: canonical_root.to_string_lossy().into_owned(),
-            })
-            .map_err(map_store_error)?;
+        let project = self.projects.create(CreateProject {
+            name,
+            root_path: canonical_root.to_string_lossy().into_owned(),
+        });
+        let project = match project {
+            Ok(project) => project,
+            Err(error) => {
+                self.path_capabilities
+                    .restore_picker_selection(picker_selection);
+                return Err(map_store_error(error));
+            }
+        };
         self.path_capabilities
-            .bind_project(picker_selection, project.id, &canonical_root)
-            .map_err(map_path_scope_error)?;
+            .bind_project(picker_selection, project.id);
         Ok(project.into())
     }
 
@@ -125,29 +130,85 @@ impl AppState {
         self.path_capabilities
             .activate_registered_project(window_id, id, Path::new(&project.root_path))
             .map_err(map_path_scope_error)?;
-        let mut selected = self.selected_projects.lock().map_err(|_| {
-            command_error(
-                "project_state_unavailable",
-                "Project selection is temporarily unavailable.",
-            )
-        })?;
-        selected.insert(window_id.to_owned(), id);
 
         Ok(project.into())
     }
 
-    pub fn require_project_root_for_window(
+    pub(crate) fn begin_conversation_for_window(
         &self,
         window_id: &str,
         project_id: String,
+    ) -> Result<path_scope::ConversationBootstrap, CommandError> {
+        let id = parse_project_id(&project_id)?;
+        self.path_capabilities
+            .begin_conversation(window_id, id)
+            .map_err(map_path_scope_error)
+    }
+
+    pub(crate) fn restore_conversation_bootstrap(
+        &self,
+        bootstrap: path_scope::ConversationBootstrap,
+    ) {
+        self.path_capabilities
+            .restore_conversation_bootstrap(bootstrap);
+    }
+
+    pub(crate) fn bind_new_conversation(
+        &self,
+        bootstrap: path_scope::ConversationBootstrap,
+        conversation_id: ConversationId,
+    ) {
+        self.path_capabilities
+            .bind_new_conversation(bootstrap, conversation_id);
+    }
+
+    pub(crate) fn permit_existing_conversations_for_window(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        conversation_ids: &[ConversationId],
+    ) -> Result<(), CommandError> {
+        let project = self
+            .projects
+            .get(project_id)
+            .map_err(map_store_error)?
+            .ok_or_else(project_not_found)?;
+        self.path_capabilities
+            .permit_existing_conversations(
+                window_id,
+                project_id,
+                Path::new(&project.root_path),
+                conversation_ids,
+            )
+            .map_err(map_path_scope_error)
+    }
+
+    pub(crate) fn bind_existing_conversation_for_window(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        conversation_id: ConversationId,
+        expected_root: &Path,
+    ) -> Result<(), CommandError> {
+        self.path_capabilities
+            .bind_existing_conversation(window_id, project_id, conversation_id, expected_root)
+            .map_err(map_path_scope_error)
+    }
+
+    pub(crate) fn require_conversation_root_for_window(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        conversation_id: ConversationId,
         expected_root: &Path,
     ) -> Result<PathBuf, CommandError> {
-        let id = Uuid::parse_str(&project_id)
-            .map(ProjectId)
-            .map_err(|_| project_not_found())?;
         self.path_capabilities
-            .require_project_root(window_id, id, expected_root)
+            .require_conversation_root(window_id, project_id, conversation_id, expected_root)
             .map_err(map_path_scope_error)
+    }
+
+    pub fn revoke_window(&self, window_id: &str) {
+        self.path_capabilities.revoke_window(window_id);
     }
 
     /// Open an existing registered project for `root_path`, or register it.
@@ -184,30 +245,37 @@ impl AppState {
         let canonical_root = picker_selection.canonical_root().to_path_buf();
         let canonical_root_string = canonical_root.to_string_lossy().into_owned();
 
-        let project = if let Some(existing) = self
-            .projects
-            .find_by_canonical_root(&canonical_root_string)
-            .map_err(map_store_error)?
-        {
-            existing
-        } else {
+        let project_result = (|| {
+            if let Some(existing) = self
+                .projects
+                .find_by_canonical_root(&canonical_root_string)
+                .map_err(map_store_error)?
+            {
+                return Ok(existing);
+            }
             let name = project_name_from_path(&canonical_root)?;
             self.projects
                 .create(CreateProject {
                     name,
                     root_path: canonical_root_string,
                 })
-                .map_err(map_store_error)?
+                .map_err(map_store_error)
+        })();
+        let project = match project_result {
+            Ok(project) => project,
+            Err(error) => {
+                self.path_capabilities
+                    .restore_picker_selection(picker_selection);
+                return Err(error);
+            }
         };
 
         self.path_capabilities
-            .bind_project(picker_selection, project.id, Path::new(&project.root_path))
-            .map_err(map_path_scope_error)?;
+            .bind_project(picker_selection, project.id);
         Ok(project.into())
     }
 
-    /// Create `parent/name`, register the project, and return the DTO.
-    /// Parent must have a live one-use native-picker capability.
+    /// Disabled until Windows-safe handle-relative directory creation exists.
     pub fn create_project_with_folder(
         &self,
         name: String,
@@ -218,49 +286,27 @@ impl AppState {
 
     pub fn create_project_directory_from_picker_for_window(
         &self,
-        window_id: &str,
-        parent_path: String,
-        name: String,
+        _window_id: &str,
+        _parent_path: String,
+        _name: String,
     ) -> Result<String, CommandError> {
-        let parent = PathBuf::from(parent_path.trim());
-        let picker_selection = self
-            .path_capabilities
-            .consume_picker_selection(window_id, &parent)
-            .map_err(map_path_scope_error)?;
-        let child = create_child_directory(&parent, &name)?;
-        self.path_capabilities
-            .derive_child_selection(picker_selection, &child)
-            .map(|_| child.to_string_lossy().into_owned())
-            .map_err(map_path_scope_error)
+        Err(project_folder_creation_disabled())
     }
 
     pub fn create_project_with_folder_for_window(
         &self,
-        window_id: &str,
-        name: String,
-        parent_path: String,
+        _window_id: &str,
+        _name: String,
+        _parent_path: String,
     ) -> Result<ProjectDto, CommandError> {
-        let parent = PathBuf::from(parent_path.trim());
-        let picker_selection = self
-            .path_capabilities
-            .consume_picker_selection(window_id, &parent)
-            .map_err(map_path_scope_error)?;
-        let child = create_child_directory(picker_selection.canonical_root(), &name)?;
-        let canonical_child = child
-            .canonicalize()
-            .map_err(|_| map_path_scope_error(path_scope::PathScopeError::NotAllowed))?;
-        let project = self
-            .projects
-            .create(CreateProject {
-                name: name.trim().to_owned(),
-                root_path: canonical_child.to_string_lossy().into_owned(),
-            })
-            .map_err(map_store_error)?;
-        self.path_capabilities
-            .activate_registered_project(window_id, project.id, &canonical_child)
-            .map_err(map_path_scope_error)?;
-        Ok(project.into())
+        Err(project_folder_creation_disabled())
     }
+}
+
+fn parse_project_id(project_id: &str) -> Result<ProjectId, CommandError> {
+    Uuid::parse_str(project_id)
+        .map(ProjectId)
+        .map_err(|_| project_not_found())
 }
 
 fn map_path_scope_error(error: path_scope::PathScopeError) -> CommandError {
@@ -287,6 +333,13 @@ fn map_store_error(error: ProjectStoreError) -> CommandError {
 
 fn project_not_found() -> CommandError {
     command_error("project_not_found", "Project not found.")
+}
+
+fn project_folder_creation_disabled() -> CommandError {
+    command_error(
+        "project_folder_creation_disabled",
+        "Creating project folders is disabled until handle-relative creation is available.",
+    )
 }
 
 fn command_error(code: &'static str, message: &'static str) -> CommandError {

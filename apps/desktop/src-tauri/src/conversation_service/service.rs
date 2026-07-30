@@ -2,7 +2,7 @@
 //! active registry, and shutdown lifecycle.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,6 +11,7 @@ use std::time::Duration;
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, RunId as ProtocolRunId, RuntimeProbe, SendTurn, StartSession,
 };
+use keeper_project::ProjectId;
 use keeper_runtime_host::{HostConfig, RuntimeHost, SpawnedTurn};
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
@@ -183,6 +184,15 @@ impl ConversationService {
         project_id: String,
         title: Option<String>,
     ) -> Result<ConversationDto, ConversationCommandError> {
+        self.create_conversation_with_id(project_id, title)
+            .map(|(conversation, _)| conversation)
+    }
+
+    pub(crate) fn create_conversation_with_id(
+        &self,
+        project_id: String,
+        title: Option<String>,
+    ) -> Result<(ConversationDto, ConversationId), ConversationCommandError> {
         let project_id = parse_project_id(&project_id)?;
         let title = title
             .map(|value| value.trim().to_owned())
@@ -191,7 +201,8 @@ impl ConversationService {
             .repository
             .create_conversation(NewConversation { project_id, title })
             .map_err(map_session_error)?;
-        Ok(ConversationDto::from(&conversation))
+        let conversation_id = conversation.id;
+        Ok((ConversationDto::from(&conversation), conversation_id))
     }
 
     pub fn load_timeline(
@@ -206,6 +217,23 @@ impl ConversationService {
         timeline_dto(&timeline).map_err(|error| {
             ConversationCommandError::new("timeline_payload_invalid", error.to_string())
         })
+    }
+
+    pub(crate) fn conversation_project_context(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(ConversationId, ProjectId, PathBuf), ConversationCommandError> {
+        let conversation_id = parse_conversation_id(conversation_id)?;
+        let timeline = self
+            .repository
+            .load_timeline(conversation_id)
+            .map_err(map_session_error)?;
+        let root = resolve_working_directory(&self.repository, &self.projects, conversation_id)?;
+        Ok((
+            conversation_id,
+            timeline.conversation.project_id,
+            PathBuf::from(root),
+        ))
     }
 
     pub fn send_turn(

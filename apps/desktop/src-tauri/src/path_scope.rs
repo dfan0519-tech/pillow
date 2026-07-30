@@ -11,30 +11,55 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use keeper_project::ProjectId;
+use keeper_session::ConversationId;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+use uuid::Uuid;
 
 #[derive(Default)]
 struct CapabilityState {
+    window_instances: HashMap<String, Uuid>,
     picker_grants: Vec<PickerGrant>,
-    project_grants: HashMap<(String, ProjectId), PathBuf>,
+    project_bootstraps: HashMap<Uuid, ProjectBootstrapGrant>,
+    conversation_permits: HashMap<(Uuid, ConversationId), ProjectRootAuthority>,
+    conversation_grants: HashMap<(Uuid, ConversationId), ProjectRootAuthority>,
 }
 
 struct PickerGrant {
-    window_id: String,
+    window_instance: Uuid,
     canonical_root: PathBuf,
     expires_at: Instant,
 }
 
+#[derive(Debug)]
 pub(crate) struct PickerSelection {
-    window_id: String,
+    window_instance: Uuid,
     canonical_root: PathBuf,
+    expires_at: Instant,
 }
 
 impl PickerSelection {
     pub(crate) fn canonical_root(&self) -> &Path {
         &self.canonical_root
     }
+}
+
+#[derive(Clone, Debug)]
+struct ProjectRootAuthority {
+    project_id: ProjectId,
+    canonical_root: PathBuf,
+}
+
+#[derive(Debug)]
+struct ProjectBootstrapGrant {
+    authority: ProjectRootAuthority,
+    nonce: Uuid,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConversationBootstrap {
+    window_instance: Uuid,
+    grant: ProjectBootstrapGrant,
 }
 
 pub struct PathCapabilities {
@@ -67,14 +92,15 @@ impl PathCapabilities {
     ) -> Result<PathBuf, PathScopeError> {
         validate_picker_path(path)?;
         let canonical_root = canonical_directory(path)?;
-        let mut state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
+        let mut state = self.lock_state();
         let now = Instant::now();
+        let window_instance = window_instance(&mut state, window_id);
         state.picker_grants.retain(|grant| grant.expires_at > now);
         state
             .picker_grants
-            .retain(|grant| grant.window_id != window_id);
+            .retain(|grant| grant.window_instance != window_instance);
         state.picker_grants.push(PickerGrant {
-            window_id: window_id.to_owned(),
+            window_instance,
             canonical_root: canonical_root.clone(),
             expires_at: now + self.picker_ttl,
         });
@@ -93,90 +119,68 @@ impl PathCapabilities {
     ) -> Result<PickerSelection, PathScopeError> {
         validate_picker_path(path)?;
         let canonical_root = canonical_directory(path)?;
-        let mut state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
+        let mut state = self.lock_state();
         let now = Instant::now();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return Err(PathScopeError::NotAllowed);
+        };
         state.picker_grants.retain(|grant| grant.expires_at > now);
         let Some(grant_index) = state.picker_grants.iter().position(|grant| {
-            grant.window_id == window_id && grant.canonical_root == canonical_root
+            grant.window_instance == window_instance && grant.canonical_root == canonical_root
         }) else {
             return Err(PathScopeError::NotAllowed);
         };
-        state.picker_grants.remove(grant_index);
+        let grant = state.picker_grants.remove(grant_index);
         Ok(PickerSelection {
-            window_id: window_id.to_owned(),
+            window_instance,
             canonical_root,
+            expires_at: grant.expires_at,
         })
     }
 
-    pub(crate) fn bind_project(
-        &self,
-        selection: PickerSelection,
-        project_id: ProjectId,
-        expected_root: &Path,
-    ) -> Result<(), PathScopeError> {
-        let canonical_root = canonical_directory(expected_root)?;
-        if selection.canonical_root != canonical_root {
-            return Err(PathScopeError::NotAllowed);
-        }
-        let mut state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
-        state
-            .project_grants
-            .retain(|(window_id, _), _| window_id != &selection.window_id);
-        state
-            .project_grants
-            .insert((selection.window_id, project_id), canonical_root);
-        Ok(())
-    }
-
-    pub(crate) fn derive_child_selection(
-        &self,
-        selection: PickerSelection,
-        child: &Path,
-    ) -> Result<PathBuf, PathScopeError> {
-        #[cfg(windows)]
-        reject_reparse_components(child)?;
-        let canonical_child = canonical_directory(child)?;
-        if canonical_child.parent() != Some(selection.canonical_root.as_path()) {
-            return Err(PathScopeError::NotAllowed);
-        }
-        let mut state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
+    pub(crate) fn revoke_picker_selection(&self, window_id: &str) {
+        let mut state = self.lock_state();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return;
+        };
         state
             .picker_grants
-            .retain(|grant| grant.window_id != selection.window_id);
-        state.picker_grants.push(PickerGrant {
-            window_id: selection.window_id,
-            canonical_root: canonical_child.clone(),
-            expires_at: Instant::now() + self.picker_ttl,
-        });
-        Ok(canonical_child)
+            .retain(|grant| grant.window_instance != window_instance);
     }
 
-    #[cfg(test)]
-    fn bind_picker_selection(
-        &self,
-        window_id: &str,
-        project_id: ProjectId,
-        expected_root: &Path,
-    ) -> Result<(), PathScopeError> {
-        let selection = self.consume_picker_selection(window_id, expected_root)?;
-        self.bind_project(selection, project_id, expected_root)
-    }
-
-    pub(crate) fn require_project_root(
-        &self,
-        window_id: &str,
-        project_id: ProjectId,
-        expected_root: &Path,
-    ) -> Result<PathBuf, PathScopeError> {
-        let canonical_root = canonical_directory(expected_root)?;
-        let state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
-        match state
-            .project_grants
-            .get(&(window_id.to_owned(), project_id))
+    pub(crate) fn restore_picker_selection(&self, selection: PickerSelection) {
+        let mut state = self.lock_state();
+        if !is_live_window_instance(&state, selection.window_instance)
+            || selection.expires_at <= Instant::now()
         {
-            Some(granted_root) if granted_root == &canonical_root => Ok(canonical_root),
-            _ => Err(PathScopeError::NotAllowed),
+            return;
         }
+        state
+            .picker_grants
+            .retain(|grant| grant.window_instance != selection.window_instance);
+        state.picker_grants.push(PickerGrant {
+            window_instance: selection.window_instance,
+            canonical_root: selection.canonical_root,
+            expires_at: selection.expires_at,
+        });
+    }
+
+    pub(crate) fn bind_project(&self, selection: PickerSelection, project_id: ProjectId) {
+        let mut state = self.lock_state();
+        if !is_live_window_instance(&state, selection.window_instance) {
+            return;
+        }
+        revoke_instance_authority(&mut state, selection.window_instance);
+        state.project_bootstraps.insert(
+            selection.window_instance,
+            ProjectBootstrapGrant {
+                authority: ProjectRootAuthority {
+                    project_id,
+                    canonical_root: selection.canonical_root,
+                },
+                nonce: Uuid::new_v4(),
+            },
+        );
     }
 
     pub(crate) fn activate_registered_project(
@@ -188,15 +192,214 @@ impl PathCapabilities {
         #[cfg(windows)]
         reject_reparse_components(expected_root)?;
         let canonical_root = canonical_directory(expected_root)?;
-        let mut state = self.state.lock().map_err(|_| PathScopeError::NotAllowed)?;
-        state
-            .project_grants
-            .retain(|(grant_window, _), _| grant_window != window_id);
-        state
-            .project_grants
-            .insert((window_id.to_owned(), project_id), canonical_root.clone());
+        let mut state = self.lock_state();
+        let window_instance = window_instance(&mut state, window_id);
+        revoke_instance_authority(&mut state, window_instance);
+        state.project_bootstraps.insert(
+            window_instance,
+            ProjectBootstrapGrant {
+                authority: ProjectRootAuthority {
+                    project_id,
+                    canonical_root: canonical_root.clone(),
+                },
+                nonce: Uuid::new_v4(),
+            },
+        );
         Ok(canonical_root)
     }
+
+    pub(crate) fn begin_conversation(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+    ) -> Result<ConversationBootstrap, PathScopeError> {
+        let mut state = self.lock_state();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        let Some(grant) = state.project_bootstraps.remove(&window_instance) else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        if grant.authority.project_id != project_id {
+            state.project_bootstraps.insert(window_instance, grant);
+            return Err(PathScopeError::NotAllowed);
+        }
+        Ok(ConversationBootstrap {
+            window_instance,
+            grant,
+        })
+    }
+
+    pub(crate) fn restore_conversation_bootstrap(&self, bootstrap: ConversationBootstrap) {
+        let mut state = self.lock_state();
+        if !is_live_window_instance(&state, bootstrap.window_instance) {
+            return;
+        }
+        state
+            .project_bootstraps
+            .entry(bootstrap.window_instance)
+            .or_insert(bootstrap.grant);
+    }
+
+    pub(crate) fn bind_new_conversation(
+        &self,
+        bootstrap: ConversationBootstrap,
+        conversation_id: ConversationId,
+    ) {
+        let mut state = self.lock_state();
+        if !is_live_window_instance(&state, bootstrap.window_instance) {
+            return;
+        }
+        let _consumed_nonce = bootstrap.grant.nonce;
+        let next_bootstrap = ProjectBootstrapGrant {
+            authority: bootstrap.grant.authority.clone(),
+            nonce: Uuid::new_v4(),
+        };
+        state.conversation_grants.insert(
+            (bootstrap.window_instance, conversation_id),
+            bootstrap.grant.authority,
+        );
+        state
+            .project_bootstraps
+            .insert(bootstrap.window_instance, next_bootstrap);
+    }
+
+    pub(crate) fn permit_existing_conversations(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        expected_root: &Path,
+        conversation_ids: &[ConversationId],
+    ) -> Result<(), PathScopeError> {
+        let canonical_root = canonical_directory(expected_root)?;
+        let mut state = self.lock_state();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        let Some(bootstrap) = state.project_bootstraps.get(&window_instance) else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        if bootstrap.authority.project_id != project_id
+            || bootstrap.authority.canonical_root != canonical_root
+        {
+            return Err(PathScopeError::NotAllowed);
+        }
+        let authority = bootstrap.authority.clone();
+        for conversation_id in conversation_ids {
+            state
+                .conversation_permits
+                .insert((window_instance, *conversation_id), authority.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_existing_conversation(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        conversation_id: ConversationId,
+        expected_root: &Path,
+    ) -> Result<(), PathScopeError> {
+        let canonical_root = canonical_directory(expected_root)?;
+        let mut state = self.lock_state();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        if matches!(
+            state
+                .conversation_grants
+                .get(&(window_instance, conversation_id)),
+            Some(authority)
+                if authority.project_id == project_id
+                    && authority.canonical_root == canonical_root
+        ) {
+            return Ok(());
+        }
+        let Some(authority) = state
+            .conversation_permits
+            .remove(&(window_instance, conversation_id))
+        else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        if authority.project_id != project_id || authority.canonical_root != canonical_root {
+            return Err(PathScopeError::NotAllowed);
+        }
+        state
+            .conversation_grants
+            .insert((window_instance, conversation_id), authority);
+        Ok(())
+    }
+
+    pub(crate) fn require_conversation_root(
+        &self,
+        window_id: &str,
+        project_id: ProjectId,
+        conversation_id: ConversationId,
+        expected_root: &Path,
+    ) -> Result<PathBuf, PathScopeError> {
+        let canonical_root = canonical_directory(expected_root)?;
+        let state = self.lock_state();
+        let Some(window_instance) = state.window_instances.get(window_id).copied() else {
+            return Err(PathScopeError::NotAllowed);
+        };
+        match state
+            .conversation_grants
+            .get(&(window_instance, conversation_id))
+        {
+            Some(authority)
+                if authority.project_id == project_id
+                    && authority.canonical_root == canonical_root =>
+            {
+                Ok(canonical_root)
+            }
+            _ => Err(PathScopeError::NotAllowed),
+        }
+    }
+
+    pub(crate) fn revoke_window(&self, window_id: &str) {
+        let mut state = self.lock_state();
+        let Some(window_instance) = state.window_instances.remove(window_id) else {
+            return;
+        };
+        state
+            .picker_grants
+            .retain(|grant| grant.window_instance != window_instance);
+        revoke_instance_authority(&mut state, window_instance);
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, CapabilityState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn window_instance(state: &mut CapabilityState, window_id: &str) -> Uuid {
+    *state
+        .window_instances
+        .entry(window_id.to_owned())
+        .or_insert_with(Uuid::new_v4)
+}
+
+fn is_live_window_instance(state: &CapabilityState, instance: Uuid) -> bool {
+    state
+        .window_instances
+        .values()
+        .any(|candidate| *candidate == instance)
+}
+
+fn revoke_instance_conversations(state: &mut CapabilityState, instance: Uuid) {
+    state
+        .conversation_grants
+        .retain(|(window_instance, _), _| *window_instance != instance);
+}
+
+fn revoke_instance_authority(state: &mut CapabilityState, instance: Uuid) {
+    state.project_bootstraps.remove(&instance);
+    state
+        .conversation_permits
+        .retain(|(window_instance, _), _| *window_instance != instance);
+    revoke_instance_conversations(state, instance);
 }
 
 fn validate_picker_path(path: &Path) -> Result<(), PathScopeError> {
@@ -307,6 +510,7 @@ impl PathScopeError {
 mod tests {
     use super::*;
     use keeper_project::ProjectId;
+    use keeper_session::ConversationId;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -323,25 +527,80 @@ mod tests {
         root
     }
 
+    fn bind_project(
+        capabilities: &PathCapabilities,
+        window_id: &str,
+        project_id: ProjectId,
+        root: &Path,
+    ) {
+        let selection = capabilities
+            .consume_picker_selection(window_id, root)
+            .expect("picker selection");
+        capabilities.bind_project(selection, project_id);
+    }
+
     #[test]
-    fn project_capability_rejects_cross_project_lookup() {
+    fn conversation_capability_rejects_cross_project_lookup() {
         let root = temp_dir("cross-project");
         let capabilities = PathCapabilities::default();
         let project_a = ProjectId::new();
         let project_b = ProjectId::new();
+        let conversation_id = ConversationId::new();
 
-        let canonical = capabilities
+        capabilities
             .register_picker_selection("window-a", &root)
             .expect("native picker selection should be accepted");
-        capabilities
-            .bind_picker_selection("window-a", project_a, &root)
-            .expect("picker grant should bind to the owning project");
+        bind_project(&capabilities, "window-a", project_a, &root);
+        let bootstrap = capabilities
+            .begin_conversation("window-a", project_a)
+            .expect("conversation bootstrap");
+        capabilities.bind_new_conversation(bootstrap, conversation_id);
 
         assert_eq!(
             capabilities
-                .require_project_root("window-a", project_b, &canonical)
+                .require_conversation_root("window-a", project_b, conversation_id, &root)
                 .unwrap_err(),
             PathScopeError::NotAllowed
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_bootstrap_is_consumed_into_one_conversation() {
+        let root = temp_dir("conversation-bound");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        let first_conversation = ConversationId::new();
+        let second_conversation = ConversationId::new();
+
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("native picker selection should be accepted");
+        bind_project(&capabilities, "window-a", project_id, &root);
+        let bootstrap = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("project bootstrap should be consumable once");
+        let first_nonce = bootstrap.grant.nonce;
+        capabilities.bind_new_conversation(bootstrap, first_conversation);
+
+        assert!(
+            capabilities
+                .require_conversation_root("window-a", project_id, first_conversation, &root)
+                .is_ok()
+        );
+        assert_eq!(
+            capabilities
+                .require_conversation_root("window-a", project_id, second_conversation, &root)
+                .unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+        let second_bootstrap = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("the host should mint a fresh bootstrap for another conversation");
+        assert_ne!(
+            first_nonce, second_bootstrap.grant.nonce,
+            "a consumed bootstrap nonce must never be reused"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -374,7 +633,7 @@ mod tests {
 
         assert_eq!(
             capabilities
-                .bind_picker_selection("window-a", ProjectId::new(), &root)
+                .consume_picker_selection("window-a", &root)
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
@@ -404,6 +663,24 @@ mod tests {
     }
 
     #[test]
+    fn opening_or_cancelling_a_new_picker_revokes_the_prior_selection() {
+        let root = temp_dir("picker-cancel");
+        let capabilities = PathCapabilities::default();
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("picker selection");
+
+        capabilities.revoke_picker_selection("window-a");
+
+        assert!(matches!(
+            capabilities.consume_picker_selection("window-a", &root),
+            Err(PathScopeError::NotAllowed)
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn binding_new_project_revokes_prior_project_in_same_window() {
         let first = temp_dir("project-first");
         let second = temp_dir("project-second");
@@ -413,25 +690,162 @@ mod tests {
         capabilities
             .register_picker_selection("window-a", &first)
             .expect("first picker");
-        capabilities
-            .bind_picker_selection("window-a", project_a, &first)
-            .expect("first project");
+        bind_project(&capabilities, "window-a", project_a, &first);
         capabilities
             .register_picker_selection("window-a", &second)
             .expect("second picker");
-        capabilities
-            .bind_picker_selection("window-a", project_b, &second)
-            .expect("second project");
+        bind_project(&capabilities, "window-a", project_b, &second);
 
         assert_eq!(
             capabilities
-                .require_project_root("window-a", project_a, &first)
+                .begin_conversation("window-a", project_a)
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
 
         let _ = fs::remove_dir_all(&first);
         let _ = fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    fn existing_conversation_permit_cannot_authorize_another_conversation() {
+        let root = temp_dir("existing-conversation");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        let permitted = ConversationId::new();
+        let denied = ConversationId::new();
+        capabilities
+            .activate_registered_project("window-a", project_id, &root)
+            .expect("project activation");
+        capabilities
+            .permit_existing_conversations("window-a", project_id, &root, &[permitted])
+            .expect("host permit");
+
+        assert_eq!(
+            capabilities
+                .bind_existing_conversation("window-a", project_id, denied, &root)
+                .unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+        capabilities
+            .bind_existing_conversation("window-a", project_id, permitted, &root)
+            .expect("matching permit");
+        assert!(
+            capabilities
+                .require_conversation_root("window-a", project_id, permitted, &root)
+                .is_ok()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_conversation_persist_can_restore_the_same_bootstrap() {
+        let root = temp_dir("conversation-rollback");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        capabilities
+            .activate_registered_project("window-a", project_id, &root)
+            .expect("project activation");
+        let bootstrap = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("conversation bootstrap");
+        let nonce = bootstrap.grant.nonce;
+
+        capabilities.restore_conversation_bootstrap(bootstrap);
+        let retried = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("failed persistence must restore the bootstrap");
+
+        assert_eq!(retried.grant.nonce, nonce);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn window_close_revokes_authority_and_label_reuse_does_not_inherit_it() {
+        let root = temp_dir("window-reuse");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        let conversation_id = ConversationId::new();
+        capabilities
+            .activate_registered_project("window-a", project_id, &root)
+            .expect("project activation");
+        let bootstrap = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("conversation bootstrap");
+        capabilities.bind_new_conversation(bootstrap, conversation_id);
+
+        capabilities.revoke_window("window-a");
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("reused label receives a fresh window instance");
+
+        assert_eq!(
+            capabilities
+                .require_conversation_root("window-a", project_id, conversation_id, &root)
+                .unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delayed_post_persist_bind_cannot_target_a_reused_window_label() {
+        let root = temp_dir("delayed-bind");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("picker selection");
+        let selection = capabilities
+            .consume_picker_selection("window-a", &root)
+            .expect("persistence reservation");
+
+        capabilities.revoke_window("window-a");
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("new window instance");
+        capabilities.bind_project(selection, project_id);
+
+        assert_eq!(
+            capabilities
+                .begin_conversation("window-a", project_id)
+                .unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delayed_conversation_bind_after_close_stays_revoked() {
+        let root = temp_dir("delayed-conversation");
+        let capabilities = PathCapabilities::default();
+        let project_id = ProjectId::new();
+        let conversation_id = ConversationId::new();
+        capabilities
+            .activate_registered_project("window-a", project_id, &root)
+            .expect("project activation");
+        let bootstrap = capabilities
+            .begin_conversation("window-a", project_id)
+            .expect("conversation persistence reservation");
+
+        capabilities.revoke_window("window-a");
+        capabilities
+            .register_picker_selection("window-a", &root)
+            .expect("new window instance");
+        capabilities.bind_new_conversation(bootstrap, conversation_id);
+
+        assert_eq!(
+            capabilities
+                .require_conversation_root("window-a", project_id, conversation_id, &root)
+                .unwrap_err(),
+            PathScopeError::NotAllowed
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]

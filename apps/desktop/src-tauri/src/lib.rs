@@ -85,6 +85,15 @@ pub fn run() {
         // Fail closed on ExitRequested: prevent_exit when shutdown fails. A later
         // Exit event cannot recover a failed drain — do not claim that it can.
         match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.revoke_window(&label);
+                }
+            }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 if let Some(service) = app_handle.try_state::<Arc<ConversationService>>() {
                     match conversation_exit_decision(service.shutdown()) {

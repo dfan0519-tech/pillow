@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use keeper_ide_desktop::app_state::AppState;
-use keeper_ide_desktop::directory_ops::{create_child_directory, project_name_from_path};
+use keeper_ide_desktop::directory_ops::project_name_from_path;
 
 fn test_state() -> (AppState, PathBuf) {
     let nonce = SystemTime::now()
@@ -181,7 +181,7 @@ fn renderer_create_project_requires_native_picker_capability() {
 }
 
 #[test]
-fn create_project_with_folder_makes_directory_and_registers_when_parent_granted() {
+fn create_project_with_folder_is_explicitly_disabled_even_when_parent_is_granted() {
     let (state, temp_root) = test_state();
     let parent = temp_root.join("parents");
     fs::create_dir_all(&parent).expect("parent");
@@ -189,21 +189,16 @@ fn create_project_with_folder_makes_directory_and_registers_when_parent_granted(
         .register_picker_selection("window-a", &parent)
         .expect("picker grant");
 
-    let project = state
+    let error = state
         .create_project_with_folder_for_window(
             "window-a",
             "New App".to_owned(),
             parent.to_string_lossy().into_owned(),
         )
-        .expect("create with folder");
+        .expect_err("pathname-based folder creation must stay disabled");
 
-    let expected = parent.join("New App");
-    assert!(expected.is_dir());
-    assert_eq!(project.name, "New App");
-    assert_eq!(
-        PathBuf::from(&project.root_path).canonicalize().unwrap(),
-        expected.canonicalize().unwrap()
-    );
+    assert_eq!(error.code, "project_folder_creation_disabled");
+    assert!(!parent.join("New App").exists());
 }
 
 #[test]
@@ -221,81 +216,12 @@ fn create_project_with_folder_rejects_parent_without_picker_capability() {
         )
         .expect_err("ungranted parent must be rejected");
 
-    assert_eq!(error.code, "path_not_allowed");
+    assert_eq!(error.code, "project_folder_creation_disabled");
     assert!(!parent.join("Denied App").exists());
 }
 
 #[test]
-fn selecting_durable_project_activates_only_its_root_for_that_window() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("durable-project");
-    let other_root = temp_root.join("other-project");
-    fs::create_dir_all(&project_root).expect("project root");
-    fs::create_dir_all(&other_root).expect("other root");
-    state
-        .register_picker_selection("setup-window", &project_root)
-        .expect("picker grant");
-    let project = state
-        .create_project_from_picker_for_window(
-            "setup-window",
-            "Durable".to_owned(),
-            project_root.to_string_lossy().into_owned(),
-        )
-        .expect("project");
-    drop(state);
-    let state = AppState::open(temp_root.join("keeper.db")).expect("restarted state");
-
-    assert_eq!(
-        state
-            .require_project_root_for_window("window-a", project.id.clone(), &project_root)
-            .expect_err("ephemeral authority must not survive restart")
-            .code,
-        "path_not_allowed"
-    );
-
-    state
-        .select_project_for_window("window-a", project.id.clone())
-        .expect("durable project should activate explicitly");
-
-    assert!(
-        state
-            .require_project_root_for_window("window-a", project.id.clone(), &project_root)
-            .is_ok()
-    );
-    assert_eq!(
-        state
-            .require_project_root_for_window("window-b", project.id.clone(), &project_root)
-            .unwrap_err()
-            .code,
-        "path_not_allowed"
-    );
-    assert_eq!(
-        state
-            .require_project_root_for_window("window-a", project.id, &other_root)
-            .unwrap_err()
-            .code,
-        "path_not_allowed"
-    );
-}
-
-#[test]
-fn create_child_directory_service_is_testable_without_os_dialog() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let parent = std::env::temp_dir().join(format!(
-        "keeper-ide-create-dir-{}-{nonce}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&parent).unwrap();
-    let child = create_child_directory(&parent, "widget").unwrap();
-    assert!(child.is_dir());
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn standalone_directory_creation_derives_one_use_child_picker_capability() {
+fn standalone_folder_creation_is_disabled_without_consuming_picker_authority() {
     let (state, temp_root) = test_state();
     let parent = temp_root.join("standalone-parent");
     fs::create_dir_all(&parent).expect("parent");
@@ -303,23 +229,56 @@ fn standalone_directory_creation_derives_one_use_child_picker_capability() {
         .register_picker_selection("window-a", &parent)
         .expect("picker grant");
 
-    let child = state
+    let error = state
         .create_project_directory_from_picker_for_window(
             "window-a",
             parent.to_string_lossy().into_owned(),
             "child".to_owned(),
         )
-        .expect("child directory");
-    let project = state
-        .create_project_from_picker_for_window("window-a", "Child".to_owned(), child.clone())
-        .expect("derived child grant should be consumable once");
+        .expect_err("pathname-based folder creation must stay disabled");
+    assert_eq!(error.code, "project_folder_creation_disabled");
+    assert!(!parent.join("child").exists());
 
-    assert_eq!(PathBuf::from(project.root_path), PathBuf::from(&child));
+    state
+        .open_or_register_project_for_window("window-a", parent.to_string_lossy().into_owned())
+        .expect("disabled operation must not consume picker authority");
+}
+
+#[test]
+fn failed_project_persist_restores_the_one_use_picker_grant() {
+    let (state, temp_root) = test_state();
+    let project_root = temp_root.join("duplicate-project");
+    fs::create_dir_all(&project_root).expect("project root");
+    state
+        .register_picker_selection("window-a", &project_root)
+        .expect("picker grant");
+    state
+        .create_project_from_picker_for_window(
+            "window-a",
+            "First".to_owned(),
+            project_root.to_string_lossy().into_owned(),
+        )
+        .expect("project");
+    state
+        .register_picker_selection("window-a", &project_root)
+        .expect("second picker grant");
+
     assert_eq!(
         state
-            .create_project_from_picker_for_window("window-a", "Replay".to_owned(), child)
-            .expect_err("derived child grant must not be reusable")
+            .create_project_from_picker_for_window(
+                "window-a",
+                "Duplicate".to_owned(),
+                project_root.to_string_lossy().into_owned(),
+            )
+            .expect_err("duplicate persistence should fail")
             .code,
-        "path_not_allowed"
+        "project_root_exists"
     );
+    let reopened = state
+        .open_or_register_project_for_window(
+            "window-a",
+            project_root.to_string_lossy().into_owned(),
+        )
+        .expect("failed persistence must restore picker authority");
+    assert_eq!(reopened.name, "First");
 }

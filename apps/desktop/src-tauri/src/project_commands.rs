@@ -38,6 +38,7 @@ pub async fn pick_directory<R: tauri::Runtime>(
     state: State<'_, AppState>,
     window: WebviewWindow<R>,
 ) -> Result<Option<String>, String> {
+    state.revoke_picker_selection(window.label());
     let folder = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new().set_title("选择文件夹").pick_folder()
     })
@@ -48,7 +49,6 @@ pub async fn pick_directory<R: tauri::Runtime>(
         .map(|path| {
             state
                 .register_picker_selection(window.label(), &path)
-                .map(|_| path.display().to_string())
                 .map_err(|error| error.message)
         })
         .transpose()
@@ -64,8 +64,7 @@ pub fn open_or_register_project<R: tauri::Runtime>(
     state.open_or_register_project_for_window(window.label(), root_path)
 }
 
-/// Create a child directory under `parent_path` named `name` (no registration).
-/// Parent must have a live one-use native-picker capability.
+/// Disabled until Windows-safe handle-relative directory creation exists.
 #[tauri::command]
 pub fn create_project_directory<R: tauri::Runtime>(
     state: State<'_, AppState>,
@@ -76,7 +75,7 @@ pub fn create_project_directory<R: tauri::Runtime>(
     state.create_project_directory_from_picker_for_window(window.label(), parent_path, name)
 }
 
-/// Create child folder, register, and return the project.
+/// Disabled until Windows-safe handle-relative directory creation exists.
 #[tauri::command]
 pub fn create_project_with_folder<R: tauri::Runtime>(
     state: State<'_, AppState>,

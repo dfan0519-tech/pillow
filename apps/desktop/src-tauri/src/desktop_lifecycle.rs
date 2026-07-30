@@ -4,7 +4,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{State, WebviewWindow};
+
+use crate::app_state::{AppState, CommandError};
 
 const APP_DATA_OVERRIDE: &str = "KEEPER_IDE_APP_DATA_DIR";
 const LAUNCH_NONCE: &str = "KEEPER_IDE_LAUNCH_NONCE";
@@ -196,10 +198,19 @@ pub fn mark_project_launcher_ready(
 }
 
 #[tauri::command]
-pub fn get_native_acceptance_scenario(
-    state: State<'_, DesktopLifecycleState>,
-) -> Option<NativeAcceptanceScenario> {
-    state.acceptance_scenario()
+pub fn get_native_acceptance_scenario<R: tauri::Runtime>(
+    lifecycle: State<'_, DesktopLifecycleState>,
+    state: State<'_, AppState>,
+    window: WebviewWindow<R>,
+) -> Result<Option<NativeAcceptanceScenario>, CommandError> {
+    let mut scenario = lifecycle.acceptance_scenario();
+    if let Some(scenario) = &mut scenario
+        && scenario.phase == "create"
+    {
+        scenario.project_root =
+            state.register_picker_selection(window.label(), Path::new(&scenario.project_root))?;
+    }
+    Ok(scenario)
 }
 
 #[tauri::command]
