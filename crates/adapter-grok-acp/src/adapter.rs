@@ -13,6 +13,7 @@ use keeper_agent_protocol::{
 
 use crate::config::GrokAcpConfig;
 use crate::error::internal;
+use crate::health::ProbeState;
 use crate::map::{SessionMap, map_stop_reason};
 use crate::prompt::run_prompt_loop;
 use crate::rpc::{Incoming, session_cancel_params, session_load_params, session_new_params};
@@ -35,6 +36,8 @@ impl GrokAcpAdapter {
                 connection: None,
                 sessions: SessionMap::default(),
                 turns: TurnRegistry::default(),
+                probe_state: ProbeState::Unavailable,
+                agent_version: None,
             }),
             shut_down: AtomicBool::new(false),
         })
@@ -100,22 +103,32 @@ impl GrokAcpAdapter {
         )?;
         sink.emit(event)
     }
+
+    fn build_probe(inner: &Inner, executable_present: bool) -> RuntimeProbe {
+        let state = if !executable_present {
+            ProbeState::Unavailable
+        } else {
+            inner.probe_state
+        };
+        let version = inner
+            .agent_version
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
+        RuntimeProbe {
+            healthy: state.is_healthy(),
+            adapter_name: "grok-acp".into(),
+            version,
+            detail: Some(state.detail_code().into()),
+        }
+    }
 }
 
 impl AgentRuntimeAdapter for GrokAcpAdapter {
     fn probe(&self) -> Result<RuntimeProbe, RuntimeError> {
         self.ensure_alive()?;
-        let healthy = self.config.executable.is_file();
-        Ok(RuntimeProbe {
-            healthy,
-            adapter_name: "grok-acp".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            detail: Some(if healthy {
-                "executable present".into()
-            } else {
-                "executable missing".into()
-            }),
-        })
+        let executable_present = self.config.executable.is_file();
+        let inner = self.inner.lock().expect("inner lock");
+        Ok(Self::build_probe(&inner, executable_present))
     }
 
     fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError> {
@@ -249,13 +262,20 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
                     .notify("session/cancel", session_cancel_params(&sid));
             }
         }
-        if let Some(mut conn) = inner.connection.take() {
+        let kill_result = if let Some(mut conn) = inner.connection.take() {
             conn.rpc.close();
-            let _ = conn.child.kill_tree(Duration::from_secs(2));
+            // Shutdown fails if process-tree cleanup cannot be proved.
+            let result = conn.child.kill_tree(Duration::from_secs(2));
             conn.rpc.join_reader();
-        }
+            result
+        } else {
+            Ok(())
+        };
         inner.sessions.clear();
         inner.turns.clear();
-        Ok(())
+        if !matches!(inner.probe_state, ProbeState::AuthenticationFailed) {
+            inner.probe_state = ProbeState::Unavailable;
+        }
+        kill_result
     }
 }

@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use keeper_agent_protocol::RuntimeError;
 
+/// Production ACP launch argv. Fixed; not overridable from untrusted product input.
+pub const PRODUCTION_ACP_ARGV: &[&str] = &["agent", "--no-leader", "stdio"];
+
 /// Default per-request timeout (legacy ACP client: 3 minutes).
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -22,8 +25,6 @@ pub const DEFAULT_MAX_TOOL_ACTIVITY: usize = 24;
 pub struct GrokAcpConfig {
     /// Path to the Grok CLI (or fake child binary in tests).
     pub executable: PathBuf,
-    /// Arguments after the executable. Default: `agent --no-leader stdio`.
-    pub extra_args: Vec<String>,
     /// Per JSON-RPC request timeout.
     pub request_timeout: Duration,
     /// Hard cap on buffered/incomplete stdout line bytes.
@@ -36,6 +37,10 @@ pub struct GrokAcpConfig {
     pub extra_env: Vec<(String, String)>,
     /// Grace period after cooperative cancel before kill-tree.
     pub cancel_grace: Duration,
+    /// Test-only argv override. `None` means production `agent --no-leader stdio`.
+    ///
+    /// Must never be populated from untrusted product configuration.
+    argv_override: Option<Vec<String>>,
 }
 
 impl GrokAcpConfig {
@@ -43,14 +48,37 @@ impl GrokAcpConfig {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
-            extra_args: vec!["agent".into(), "--no-leader".into(), "stdio".into()],
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             max_response_chars: DEFAULT_MAX_RESPONSE_CHARS,
             honor_isolated_home: None,
             extra_env: Vec::new(),
             cancel_grace: Duration::from_millis(250),
+            argv_override: None,
         }
+    }
+
+    /// Launch argv for the child process.
+    ///
+    /// Production is always [`PRODUCTION_ACP_ARGV`]. Overrides exist only via
+    /// [`Self::with_test_argv`] for the fake ACP child.
+    pub fn launch_argv(&self) -> Vec<String> {
+        match &self.argv_override {
+            Some(args) => args.clone(),
+            None => PRODUCTION_ACP_ARGV
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+
+    /// Override launch argv for deterministic fake-child tests.
+    ///
+    /// This is intentionally explicit and test-oriented. Product wiring must
+    /// not call this with untrusted input.
+    pub fn with_test_argv(mut self, args: Vec<String>) -> Self {
+        self.argv_override = Some(args);
+        self
     }
 
     /// Validate paths and limits without launching a process.
@@ -114,7 +142,16 @@ mod tests {
         assert_eq!(cfg.max_line_bytes, DEFAULT_MAX_LINE_BYTES);
         assert_eq!(cfg.max_response_chars, DEFAULT_MAX_RESPONSE_CHARS);
         assert_eq!(cfg.request_timeout, DEFAULT_REQUEST_TIMEOUT);
-        assert_eq!(cfg.extra_args, vec!["agent", "--no-leader", "stdio"]);
+        assert_eq!(cfg.launch_argv(), vec!["agent", "--no-leader", "stdio"]);
+        assert_eq!(PRODUCTION_ACP_ARGV, &["agent", "--no-leader", "stdio"]);
+    }
+
+    #[test]
+    fn test_argv_override_is_explicit() {
+        let cfg = GrokAcpConfig::new("fake").with_test_argv(vec![]);
+        assert!(cfg.launch_argv().is_empty());
+        let production = GrokAcpConfig::new("grok");
+        assert_eq!(production.launch_argv().len(), 3);
     }
 
     #[test]

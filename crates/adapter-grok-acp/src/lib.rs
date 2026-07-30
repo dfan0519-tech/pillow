@@ -7,6 +7,7 @@
 mod adapter;
 mod config;
 mod error;
+mod health;
 mod map;
 mod process;
 mod prompt;
@@ -15,4 +16,10 @@ mod state;
 mod turn;
 
 pub use adapter::GrokAcpAdapter;
-pub use config::GrokAcpConfig;
+pub use config::{GrokAcpConfig, PRODUCTION_ACP_ARGV};
+
+/// Re-export for process-tree cleanup tests (PID liveness without secrets).
+#[doc(hidden)]
+pub fn process_gone_for_tests(pid: u32) -> bool {
+    process::process_gone(pid)
+}

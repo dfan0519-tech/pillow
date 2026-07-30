@@ -9,10 +9,17 @@ use std::time::{Duration, Instant};
 use crate::error::{internal, transport};
 use keeper_agent_protocol::RuntimeError;
 
-/// Owned child plus its OS process id for kill-tree cleanup.
+#[cfg(windows)]
+use super::job_windows::JobObject;
+
+/// Owned child plus OS process id and (on Windows) a Job Object for tree kill.
 pub struct ChildHandle {
     child: Child,
     pid: u32,
+    /// PIDs that must be dead after kill_tree (direct child + known descendants).
+    tracked_pids: Vec<u32>,
+    #[cfg(windows)]
+    job: Option<JobObject>,
 }
 
 impl ChildHandle {
@@ -32,38 +39,64 @@ impl ChildHandle {
         }
     }
 
-    /// Close stdin and terminate the process tree. Best-effort bounded wait.
+    /// Close stdin and terminate the process tree. Fails if cleanup cannot be proved.
+    ///
+    /// On Windows, termination is driven by a Job Object with kill-on-close (and
+    /// an explicit TerminateJobObject). Success is not claimed from the direct
+    /// child alone: every tracked PID must be gone.
     pub fn kill_tree(&mut self, wait: Duration) -> Result<(), RuntimeError> {
         if let Some(mut stdin) = self.child.stdin.take() {
             let _ = stdin.flush();
             drop(stdin);
         }
 
-        if self.try_wait()?.is_some() {
-            return Ok(());
+        #[cfg(windows)]
+        {
+            if let Some(job) = self.job.as_ref() {
+                job.terminate_tree();
+            }
+            // Drop the job handle: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE kills residuals.
+            self.job.take();
         }
-
-        kill_process_tree(self.pid);
+        #[cfg(not(windows))]
+        {
+            kill_process_tree(self.pid);
+        }
 
         let deadline = Instant::now() + wait;
         loop {
-            if self.try_wait()?.is_some() {
+            let child_exited = self.try_wait()?.is_some();
+            if child_exited && self.all_tracked_gone() {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                // Final attempt.
+                // Final escalation.
                 let _ = self.child.kill();
                 let _ = self.child.wait();
-                if self.try_wait()?.is_some() || process_gone(self.pid) {
+                #[cfg(not(windows))]
+                {
+                    kill_process_tree(self.pid);
+                }
+                if self.all_tracked_gone() {
                     return Ok(());
                 }
+                let alive: Vec<u32> = self
+                    .tracked_pids
+                    .iter()
+                    .copied()
+                    .filter(|p| !process_gone(*p))
+                    .collect();
                 return Err(internal(format!(
-                    "acp_kill_tree_failed: pid {} still alive",
+                    "acp_kill_tree_failed: root pid {} still has live tree members {alive:?}",
                     self.pid
                 )));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn all_tracked_gone(&self) -> bool {
+        self.tracked_pids.iter().all(|pid| process_gone(*pid))
     }
 }
 
@@ -74,6 +107,9 @@ impl Drop for ChildHandle {
 }
 
 /// Spawn the ACP child with a fully constructed environment (no inherit).
+///
+/// On Windows the child is assigned to a Job Object with kill-on-close so
+/// descendants are owned by the same cleanup domain as the direct child.
 pub fn spawn_child(
     executable: &Path,
     args: &[String],
@@ -86,6 +122,9 @@ pub fn spawn_child(
             executable.display()
         )));
     }
+
+    #[cfg(windows)]
+    let job = JobObject::create()?;
 
     let mut cmd = Command::new(executable);
     cmd.args(args)
@@ -113,39 +152,56 @@ pub fn spawn_child(
         ))
     })?;
     let pid = child.id();
-    Ok(ChildHandle { child, pid })
-}
 
-fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = Command::new("taskkill.exe")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: Child's process handle is valid for the lifetime of `child`.
+        let process_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        if let Err(err) = job.assign_process(process_handle) {
+            // Best-effort kill if we cannot own the tree.
+            let mut orphan = ChildHandle {
+                child,
+                pid,
+                tracked_pids: vec![pid],
+                job: Some(job),
+            };
+            let _ = orphan.kill_tree(Duration::from_millis(500));
+            return Err(err);
+        }
+        Ok(ChildHandle {
+            child,
+            pid,
+            tracked_pids: vec![pid],
+            job: Some(job),
+        })
     }
+
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .status();
-        let _ = Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status();
+        Ok(ChildHandle {
+            child,
+            pid,
+            tracked_pids: vec![pid],
+        })
     }
 }
 
-fn process_gone(pid: u32) -> bool {
+#[cfg(not(windows))]
+fn kill_process_tree(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-TERM", &format!("-{pid}")])
+        .status();
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+}
+
+pub(crate) fn process_gone(pid: u32) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // tasklist exit 0 always; parse for image presence is heavy — use OpenProcess via tasklist filter.
         let output = Command::new("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .stdin(Stdio::null())

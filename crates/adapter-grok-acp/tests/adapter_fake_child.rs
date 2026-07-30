@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
+use keeper_adapter_grok_acp::{
+    GrokAcpAdapter, GrokAcpConfig, PRODUCTION_ACP_ARGV, process_gone_for_tests,
+};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
@@ -47,17 +49,19 @@ fn fake_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_acp_agent"))
 }
 
-fn adapter_with_script(script: &str) -> GrokAcpAdapter {
-    let mut cfg = GrokAcpConfig::new(fake_bin());
-    // Fake binary ignores real ACP args; keep defaults.
-    cfg.extra_args = vec![];
+fn base_config(script: &str) -> GrokAcpConfig {
+    let mut cfg = GrokAcpConfig::new(fake_bin()).with_test_argv(vec![]);
     cfg.request_timeout = Duration::from_secs(5);
     cfg.max_line_bytes = 256 * 1024;
     cfg.extra_env = vec![
         ("KEEPER_FAKE_ACP_SCRIPT".into(), script.into()),
         ("KEEPER_FAKE_ACP_DELAY_MS".into(), "0".into()),
     ];
-    GrokAcpAdapter::new(cfg).expect("adapter")
+    cfg
+}
+
+fn adapter_with_script(script: &str) -> GrokAcpAdapter {
+    GrokAcpAdapter::new(base_config(script)).expect("adapter")
 }
 
 fn cwd() -> String {
@@ -74,11 +78,97 @@ fn start(adapter: &GrokAcpAdapter) -> keeper_agent_protocol::RuntimeSession {
 }
 
 #[test]
-fn probe_reports_grok_acp_not_fake() {
+fn production_argv_is_fixed() {
+    assert_eq!(PRODUCTION_ACP_ARGV, &["agent", "--no-leader", "stdio"]);
+    let cfg = GrokAcpConfig::new("grok");
+    assert_eq!(cfg.launch_argv(), vec!["agent", "--no-leader", "stdio"]);
+}
+
+#[test]
+fn probe_not_healthy_from_executable_presence_alone() {
     let adapter = adapter_with_script("text-only");
     let probe = adapter.probe().unwrap();
     assert_eq!(probe.adapter_name, "grok-acp");
+    assert!(!probe.healthy, "file presence must not report healthy");
+    assert_eq!(probe.detail.as_deref(), Some("unavailable"));
+    // Adapter package version until initialize observes agent metadata.
+    assert_eq!(probe.version, env!("CARGO_PKG_VERSION"));
+    adapter.shutdown().unwrap();
+}
+
+#[test]
+fn initialize_is_transport_ready_not_healthy() {
+    let adapter = adapter_with_script("text-only");
+    let _ = start(&adapter);
+    let probe = adapter.probe().unwrap();
+    assert!(!probe.healthy);
+    assert_eq!(
+        probe.detail.as_deref(),
+        Some("transport_ready_auth_unverified")
+    );
+    assert_eq!(probe.version, "0.0.0-fake");
+    adapter.shutdown().unwrap();
+}
+
+#[test]
+fn successful_prompt_establishes_healthy() {
+    let adapter = adapter_with_script("text-only");
+    let session = start(&adapter);
+    let run_id = RunId::new();
+    adapter.arm_turn(run_id).unwrap();
+    let mut sink = CollectingSink::new();
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "hello".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(sink.kinds().last(), Some(&RuntimeEventKind::TurnCompleted));
+    let probe = adapter.probe().unwrap();
     assert!(probe.healthy);
+    assert_eq!(probe.detail.as_deref(), Some("healthy"));
+    assert_eq!(probe.version, "0.0.0-fake");
+    adapter.shutdown().unwrap();
+}
+
+#[test]
+fn auth_failure_clears_healthy_with_stable_detail() {
+    let adapter = adapter_with_script("auth-failed");
+    let session = start(&adapter);
+    // Transport ready after initialize.
+    let probe = adapter.probe().unwrap();
+    assert_eq!(
+        probe.detail.as_deref(),
+        Some("transport_ready_auth_unverified")
+    );
+
+    let run_id = RunId::new();
+    let mut sink = CollectingSink::new();
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "need auth".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(sink.kinds().last(), Some(&RuntimeEventKind::TurnFailed));
+    let msg = sink.events.last().unwrap().payload["message"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !msg.contains("token=") && !msg.contains("Bearer") && !msg.contains("auth.json"),
+        "secret-shaped text in detail/message: {msg}"
+    );
+    let probe = adapter.probe().unwrap();
+    assert!(!probe.healthy);
+    assert_eq!(probe.detail.as_deref(), Some("authentication_failed"));
     adapter.shutdown().unwrap();
 }
 
@@ -222,11 +312,8 @@ fn malformed_output_fails_turn() {
 
 #[test]
 fn oversized_line_fails_closed() {
-    let mut cfg = GrokAcpConfig::new(fake_bin());
-    cfg.extra_args = vec![];
-    cfg.request_timeout = Duration::from_secs(5);
+    let mut cfg = base_config("oversized-line");
     cfg.max_line_bytes = 1024;
-    cfg.extra_env = vec![("KEEPER_FAKE_ACP_SCRIPT".into(), "oversized-line".into())];
     let adapter = GrokAcpAdapter::new(cfg).unwrap();
     let session = start(&adapter);
     let run_id = RunId::new();
@@ -317,10 +404,8 @@ fn load_replay_suppressed_until_prompt() {
 
 #[test]
 fn timeout_prompt_fails_or_cancels() {
-    let mut cfg = GrokAcpConfig::new(fake_bin());
-    cfg.extra_args = vec![];
+    let mut cfg = base_config("timeout-prompt");
     cfg.request_timeout = Duration::from_millis(300);
-    cfg.extra_env = vec![("KEEPER_FAKE_ACP_SCRIPT".into(), "timeout-prompt".into())];
     let adapter = GrokAcpAdapter::new(cfg).unwrap();
     let session = start(&adapter);
     let run_id = RunId::new();
@@ -378,6 +463,75 @@ fn refuses_cancel_request_method_on_rpc() {
         .unwrap();
     t.join().unwrap();
     adapter.shutdown().unwrap();
+}
+
+#[test]
+fn shutdown_kills_parent_and_descendant() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let parent_pid_path = std::env::temp_dir().join(format!("keeper-fake-parent-{stamp}.pid"));
+    let descendant_pid_path = std::env::temp_dir().join(format!("keeper-fake-desc-{stamp}.pid"));
+
+    let mut cfg = base_config("spawn-descendant");
+    cfg.extra_env.push((
+        "KEEPER_FAKE_ACP_PARENT_PID_FILE".into(),
+        parent_pid_path.to_string_lossy().into_owned(),
+    ));
+    cfg.extra_env.push((
+        "KEEPER_FAKE_ACP_DESCENDANT_PID_FILE".into(),
+        descendant_pid_path.to_string_lossy().into_owned(),
+    ));
+    let adapter = GrokAcpAdapter::new(cfg).unwrap();
+    let _ = start(&adapter);
+
+    // Wait for the fake child to record PIDs.
+    let parent_pid = wait_for_pid_file(&parent_pid_path, Duration::from_secs(3));
+    let descendant_pid = wait_for_pid_file(&descendant_pid_path, Duration::from_secs(3));
+    assert!(
+        !process_gone_for_tests(parent_pid),
+        "parent should be alive before shutdown"
+    );
+    assert!(
+        !process_gone_for_tests(descendant_pid),
+        "descendant should be alive before shutdown"
+    );
+
+    adapter.shutdown().unwrap();
+
+    // Prove tree cleanup: direct child and descendant must both be gone.
+    assert!(
+        process_gone_for_tests(parent_pid),
+        "parent pid {parent_pid} still alive after shutdown"
+    );
+    assert!(
+        process_gone_for_tests(descendant_pid),
+        "descendant pid {descendant_pid} still alive after shutdown (job/tree kill failed)"
+    );
+
+    let _ = std::fs::remove_file(&parent_pid_path);
+    let _ = std::fs::remove_file(&descendant_pid_path);
+}
+
+fn wait_for_pid_file(path: &std::path::Path, timeout: Duration) -> u32 {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<u32>()
+            && pid > 0
+        {
+            return pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for pid file {}", path.display());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Shared sink for concurrent cancel registration tests.

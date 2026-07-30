@@ -3,11 +3,13 @@
 //! Script selection via `KEEPER_FAKE_ACP_SCRIPT`:
 //! `text-only` (default), `with-tools`, `permission-read`, `permission-write`,
 //! `hang-until-cancel`, `exit-early`, `malformed`, `oversized-line`,
-//! `load-replay`, `timeout-prompt`, `vendor-noise`.
+//! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
+//! `spawn-descendant`.
 
 mod scripts;
 
 use std::io::{self, BufRead, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -32,6 +34,22 @@ fn main() {
     if script == "exit-early" {
         let _ = writeln!(io::stderr(), "fake exit-early");
         std::process::exit(2);
+    }
+
+    // Record our own PID for process-tree cleanup tests.
+    if let Ok(path) = std::env::var("KEEPER_FAKE_ACP_PARENT_PID_FILE") {
+        let _ = std::fs::write(path, std::process::id().to_string());
+    }
+
+    let mut descendant = None;
+    if script == "spawn-descendant" {
+        descendant = spawn_hanging_descendant();
+        if let (Some(child), Ok(path)) = (
+            descendant.as_ref(),
+            std::env::var("KEEPER_FAKE_ACP_DESCENDANT_PID_FILE"),
+        ) {
+            let _ = std::fs::write(path, child.id().to_string());
+        }
     }
 
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -98,6 +116,9 @@ fn main() {
                                     "audio": false,
                                     "embeddedContext": true
                                 }
+                            },
+                            "_meta": {
+                                "agentVersion": "0.0.0-fake"
                             }
                         }
                     }),
@@ -198,6 +219,10 @@ fn main() {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&session_id)
                     .to_string();
+                if script == "auth-failed" {
+                    write_error(&mut stdout, id, -32000, "unauthenticated: login required");
+                    continue;
+                }
                 run_prompt_script(
                     &mut stdout,
                     &rx,
@@ -210,6 +235,33 @@ fn main() {
             }
             _ => write_error(&mut stdout, id, -32601, "Method not found"),
         }
+    }
+
+    // Keep descendant handle alive until we exit so the OS job tree can kill it.
+    drop(descendant);
+}
+
+/// Spawn a long-lived child that survives only until the process tree is killed.
+fn spawn_hanging_descendant() -> Option<std::process::Child> {
+    #[cfg(windows)]
+    {
+        Command::new("cmd.exe")
+            .args(["/C", "ping", "-n", "9999", "127.0.0.1", ">NUL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("sleep")
+            .arg("9999")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
     }
 }
 

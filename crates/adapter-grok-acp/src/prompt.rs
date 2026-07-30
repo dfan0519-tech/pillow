@@ -11,6 +11,7 @@ use keeper_agent_protocol::{EventSink, RuntimeError, RuntimeEventKind, SendTurn}
 
 use crate::config::GrokAcpConfig;
 use crate::error::{internal, process_exited, response_too_large};
+use crate::health::{ProbeState, is_auth_failure_error};
 use crate::map::{
     MappedEvent, decide_permission, map_session_update, map_stop_reason, observe_tool_update,
     terminal_for_error,
@@ -150,12 +151,14 @@ pub(crate) fn run_prompt_loop(
     let sequence = guard.turns.active().map(|a| a.sequence).unwrap_or(1) + 1;
     let terminal = match outcome.unwrap_or(PromptOutcome::Err(process_exited())) {
         PromptOutcome::Stop(reason) => {
+            update_health_after_prompt(&mut guard, &reason, cancelled, None);
             map_stop_reason(request.run_id, sequence, &reason, cancelled, Utc::now())?
         }
         PromptOutcome::Err(err) => {
             if cancelled {
                 map_stop_reason(request.run_id, sequence, "cancelled", true, Utc::now())?
             } else {
+                update_health_after_prompt(&mut guard, "", false, Some(&err));
                 terminal_for_error(request.run_id, sequence, &err, false, Utc::now())?
             }
         }
@@ -169,6 +172,30 @@ pub(crate) fn run_prompt_loop(
         conn.rpc.set_event_sink(None);
     }
     Ok(())
+}
+
+/// Successful prompt establishes healthy; recognized auth failures clear it.
+fn update_health_after_prompt(
+    inner: &mut Inner,
+    stop_reason: &str,
+    cancelled: bool,
+    err: Option<&RuntimeError>,
+) {
+    if let Some(e) = err {
+        if is_auth_failure_error(e) {
+            inner.probe_state = ProbeState::AuthenticationFailed;
+        }
+        return;
+    }
+    if cancelled || stop_reason.eq_ignore_ascii_case("cancelled") {
+        return;
+    }
+    if stop_reason.eq_ignore_ascii_case("end_turn")
+        || stop_reason.eq_ignore_ascii_case("max_tokens")
+    {
+        // Only a successful real prompt proves authentication/health.
+        inner.probe_state = ProbeState::Healthy;
+    }
 }
 
 fn handle_incoming(
