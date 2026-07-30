@@ -3,7 +3,6 @@ import {
   ProjectGatewayError,
   normalizeProjectGatewayError,
   type CreateProjectInput,
-  type CreateProjectWithFolderInput,
   type ProjectDto,
   type ProjectGateway,
 } from "./projectGateway";
@@ -95,12 +94,5 @@ export class TauriProjectGateway implements ProjectGateway {
 
   openOrRegisterProject(rootPath: string): Promise<ProjectDto> {
     return invokeProject("open_or_register_project", { rootPath });
-  }
-
-  createProjectWithFolder(input: CreateProjectWithFolderInput): Promise<ProjectDto> {
-    return invokeProject("create_project_with_folder", {
-      name: input.name,
-      parentPath: input.parentPath,
-    });
   }
 }

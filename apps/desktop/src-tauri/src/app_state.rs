@@ -64,8 +64,19 @@ impl AppState {
             .map_err(map_path_scope_error)
     }
 
-    pub fn revoke_picker_selection(&self, window_id: &str) {
-        self.path_capabilities.revoke_picker_selection(window_id);
+    pub(crate) fn begin_picker_operation(&self, window_id: &str) -> path_scope::PickerOperation {
+        self.path_capabilities.begin_picker_operation(window_id)
+    }
+
+    pub(crate) fn complete_picker_operation(
+        &self,
+        operation: path_scope::PickerOperation,
+        path: Option<&Path>,
+    ) -> Result<Option<String>, CommandError> {
+        self.path_capabilities
+            .complete_picker_operation(operation, path)
+            .map(|root| root.map(|root| root.to_string_lossy().into_owned()))
+            .map_err(map_path_scope_error)
     }
 
     pub fn create_project_from_picker_for_window(

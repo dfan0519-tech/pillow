@@ -26,7 +26,6 @@ function gateway(): ProjectGateway {
     selectProject: vi.fn().mockResolvedValue(project),
     pickDirectory: vi.fn().mockResolvedValue(null),
     openOrRegisterProject: vi.fn().mockResolvedValue(project),
-    createProjectWithFolder: vi.fn().mockResolvedValue(project),
   };
 }
 

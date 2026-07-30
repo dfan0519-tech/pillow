@@ -65,12 +65,6 @@ function fixtureProjectGateway(projects: ProjectDto[]): ProjectGateway {
     },
     pickDirectory: async () => "F:\\work\\picked",
     openOrRegisterProject: async () => store[0]!,
-    createProjectWithFolder: async (input) =>
-      fixtureProject({
-        id: "created",
-        name: input.name,
-        rootPath: `F:\\work\\${input.name}`,
-      }),
   };
 }
 

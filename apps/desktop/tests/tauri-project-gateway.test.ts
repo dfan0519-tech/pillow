@@ -54,25 +54,17 @@ describe("TauriProjectGateway", () => {
   it("uses typed picker and open/register commands", async () => {
     vi.mocked(invoke)
       .mockResolvedValueOnce("F:\\work\\demo")
-      .mockResolvedValueOnce(project)
       .mockResolvedValueOnce(project);
     const gateway = new TauriProjectGateway();
 
     await expect(gateway.pickDirectory()).resolves.toBe("F:\\work\\demo");
     await expect(gateway.openOrRegisterProject("F:\\work\\demo")).resolves.toEqual(project);
-    await expect(gateway.createProjectWithFolder({
-      name: "demo",
-      parentPath: "F:\\work",
-    })).resolves.toEqual(project);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "pick_directory");
     expect(invoke).toHaveBeenNthCalledWith(2, "open_or_register_project", {
       rootPath: "F:\\work\\demo",
     });
-    expect(invoke).toHaveBeenNthCalledWith(3, "create_project_with_folder", {
-      name: "demo",
-      parentPath: "F:\\work",
-    });
+    expect("createProjectWithFolder" in gateway).toBe(false);
   });
 
   it("maps a cancelled folder picker to null", async () => {

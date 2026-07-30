@@ -6,7 +6,6 @@ import {
   IconChevronRight,
   IconCircleDot,
   IconFolder,
-  IconFolderPlus,
   IconKeeperMark,
   IconNewChat,
   IconSearch,
@@ -19,7 +18,6 @@ type AppSidebarProps = {
   selectedConversationId: string | null;
   busy: boolean;
   onOpenProject: () => void;
-  onNewProject: () => void;
   onSelect: (projectId: string) => void;
   onNewConversation: () => void;
   onSelectConversation: (conversationId: string) => void;
@@ -39,7 +37,6 @@ export function AppSidebar({
   selectedConversationId,
   busy,
   onOpenProject,
-  onNewProject,
   onSelect,
   onNewConversation,
   onSelectConversation,
@@ -94,18 +91,6 @@ export function AppSidebar({
           </span>
           打开项目
         </button>
-        <button
-          className="nav-item"
-          data-testid="nav-new-project"
-          disabled={busy}
-          onClick={onNewProject}
-          type="button"
-        >
-          <span className="nav-item__icon">
-            <IconFolderPlus size={16} />
-          </span>
-          新建项目
-        </button>
       </div>
 
       <div className="sidebar__scroll">
@@ -128,7 +113,7 @@ export function AppSidebar({
         {projectsOpen ? (
           <div className="sidebar-projects" role="list">
             {projects.length === 0 ? (
-              <p className="sidebar-empty">还没有项目。打开文件夹或新建一个。</p>
+              <p className="sidebar-empty">还没有项目。打开现有文件夹以开始。</p>
             ) : (
               projects.map((project) => {
                 const isActive = project.id === activeProjectId;

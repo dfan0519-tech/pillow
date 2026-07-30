@@ -1,6 +1,5 @@
 import type {
   CreateProjectInput,
-  CreateProjectWithFolderInput,
   ProjectDto,
   ProjectGateway,
 } from "./projectGateway";
@@ -69,14 +68,5 @@ export class MockProjectGateway implements ProjectGateway {
     if (existing) return existing;
     const leaf = rootPath.replace(/[\\/]+$/u, "").split(/[\\/]/u).pop() ?? rootPath;
     return this.createProject({ name: leaf, rootPath });
-  }
-
-  async createProjectWithFolder(
-    input: CreateProjectWithFolderInput,
-  ): Promise<ProjectDto> {
-    const parent = input.parentPath.replace(/[\\/]+$/u, "");
-    const separator = parent.includes("\\") ? "\\" : "/";
-    const rootPath = `${parent}${separator}${input.name.trim()}`;
-    return this.createProject({ name: input.name.trim(), rootPath });
   }
 }

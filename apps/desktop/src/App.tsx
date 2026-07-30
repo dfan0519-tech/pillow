@@ -10,7 +10,6 @@ import {
   selectConversationsForProject,
 } from "./features/conversations/conversationReducer";
 import { AppSidebar } from "./features/projects/AppSidebar";
-import { NewProjectDialog } from "./features/projects/NewProjectDialog";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
 import { MockConversationGateway, MOCK_RUNTIME_BADGE } from "./lib/mockConversationGateway";
@@ -56,7 +55,6 @@ export function App({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
   const [conversationState, dispatchConversation] = useReducer(
     conversationReducer,
@@ -203,26 +201,6 @@ export function App({
       await activateProject(project);
     } catch (cause) {
       setError(normalizeProjectGatewayError(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function confirmNewProject(name: string): Promise<boolean> {
-    setBusy(true);
-    try {
-      const parentPath = await gateway.pickDirectory();
-      if (!parentPath) return false;
-      const project = await gateway.createProjectWithFolder({
-        name,
-        parentPath,
-      });
-      await activateProject(project);
-      setNewProjectOpen(false);
-      return true;
-    } catch (cause) {
-      setError(normalizeProjectGatewayError(cause));
-      return false;
     } finally {
       setBusy(false);
     }
@@ -408,7 +386,6 @@ export function App({
           busy={busy}
           conversations={projectConversations}
           onNewConversation={() => void createConversation()}
-          onNewProject={() => setNewProjectOpen(true)}
           onOpenProject={() => void openProject()}
           onSelect={(id) => void selectProject(id)}
           onSelectConversation={(id) => void selectConversation(id)}
@@ -419,7 +396,6 @@ export function App({
           busy={busy}
           mockBadgeLabel={MOCK_RUNTIME_BADGE}
           onCancelRun={() => void cancelActiveRun()}
-          onNewProject={() => setNewProjectOpen(true)}
           onOpenProject={() => void openProject()}
           onSendTurn={sendTurn}
           project={activeProject}
@@ -431,12 +407,6 @@ export function App({
           timeline={activeTimeline}
         />
       </div>
-      <NewProjectDialog
-        busy={busy}
-        onCancel={() => setNewProjectOpen(false)}
-        onConfirm={confirmNewProject}
-        open={newProjectOpen}
-      />
     </div>
   );
 }

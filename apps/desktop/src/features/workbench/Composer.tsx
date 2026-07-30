@@ -2,7 +2,6 @@ import { useState, type FormEvent, type KeyboardEvent } from "react";
 import {
   IconClose,
   IconFolder,
-  IconFolderPlus,
   IconSend,
 } from "../../components/icons";
 
@@ -16,7 +15,6 @@ type ComposerProps = {
   /** Non-destructive notice after an accepted send (e.g. timeline refresh failed). */
   refreshWarning?: string | null;
   onOpenProject?: () => void;
-  onNewProject?: () => void;
   /** Resolves on success; rejects so the composer can restore the draft. */
   onSend?: (content: string) => void | Promise<void>;
   onCancelRun?: () => void;
@@ -37,7 +35,6 @@ export function Composer({
   sendError = null,
   refreshWarning = null,
   onOpenProject,
-  onNewProject,
   onSend,
   onCancelRun,
 }: ComposerProps) {
@@ -94,7 +91,7 @@ export function Composer({
           onKeyDown={handleKeyDown}
           placeholder={
             disabled
-              ? "打开或新建项目后开始描述工作"
+              ? "打开现有项目后开始描述工作"
               : canCancel
                 ? "运行中…可取消当前回合"
                 : "描述要完成的工作"
@@ -124,26 +121,15 @@ export function Composer({
                 <span>{projectName}</span>
               </span>
             ) : (
-              <>
-                <button
-                  className="composer-chip composer-chip--action"
-                  disabled={busy}
-                  onClick={onOpenProject}
-                  type="button"
-                >
-                  <IconFolder size={14} />
-                  <span>打开项目</span>
-                </button>
-                <button
-                  className="composer-chip composer-chip--action"
-                  disabled={busy}
-                  onClick={onNewProject}
-                  type="button"
-                >
-                  <IconFolderPlus size={14} />
-                  <span>新建项目</span>
-                </button>
-              </>
+              <button
+                className="composer-chip composer-chip--action"
+                disabled={busy}
+                onClick={onOpenProject}
+                type="button"
+              >
+                <IconFolder size={14} />
+                <span>打开项目</span>
+              </button>
             )}
           </div>
           <div className="composer__actions">

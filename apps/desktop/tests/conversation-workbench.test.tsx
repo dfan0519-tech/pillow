@@ -143,49 +143,6 @@ describe("conversation workbench UI", () => {
     expect(screen.queryByText("Stay behind")).not.toBeInTheDocument();
   });
 
-  it("clears conversation scope when creating a project folder", async () => {
-    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
-    const created = fixtureProject({
-      id: "created-project",
-      name: "Brand New",
-      rootPath: "F:\\work\\Brand New",
-    });
-    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
-    const chat = await conversationGateway.createConversation("project-a", "Old chat");
-    conversationGateway.seedTimeline(chat.id, {
-      messages: [
-        {
-          id: "seed-u1",
-          role: "user",
-          content: "old",
-          createdAt: "2026-07-30T00:00:00.000Z",
-        },
-      ],
-    });
-
-    const user = userEvent.setup();
-    render(
-      <App
-        conversationGateway={conversationGateway}
-        gateway={fixtureProjectGateway([projectA], { createProject: created })}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "Project A" }));
-    await user.click(await screen.findByRole("button", { name: "Old chat" }));
-    expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
-
-    await user.click(screen.getByTestId("nav-new-project"));
-    await user.type(await screen.findByLabelText("项目名称"), "Brand New");
-    await user.click(screen.getByRole("button", { name: "选择位置并创建" }));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("active-project-name")).toHaveTextContent("Brand New");
-    });
-    expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
-    expect(screen.queryByText("Old chat")).not.toBeInTheDocument();
-  });
-
   it("shows 模拟运行时 before the first send when mock gateway is active", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     await selectProjectAfterRender(conversationGateway);

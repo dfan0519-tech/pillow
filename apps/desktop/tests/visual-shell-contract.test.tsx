@@ -41,7 +41,6 @@ function fixtureGateway(): ProjectGateway {
     selectProject: async () => project,
     pickDirectory: async () => null,
     openOrRegisterProject: async () => project,
-    createProjectWithFolder: async () => project,
   };
 }
 

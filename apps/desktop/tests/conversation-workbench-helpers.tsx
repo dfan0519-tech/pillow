@@ -29,7 +29,6 @@ export function fixtureProjectGateway(
   projects: ProjectDto[] = [fixtureProject()],
   options: {
     openProject?: ProjectDto;
-    createProject?: ProjectDto;
   } = {},
 ): ProjectGateway {
   const store = [...projects];
@@ -59,17 +58,6 @@ export function fixtureProjectGateway(
           id: "opened-project",
           name: "Opened Project",
           rootPath: "F:\\work\\opened",
-        });
-      if (!store.some((item) => item.id === project.id)) store.push(project);
-      return project;
-    },
-    createProjectWithFolder: async (input) => {
-      const project =
-        options.createProject
-        ?? fixtureProject({
-          id: "created-project",
-          name: input.name,
-          rootPath: `F:\\work\\${input.name}`,
         });
       if (!store.some((item) => item.id === project.id)) store.push(project);
       return project;

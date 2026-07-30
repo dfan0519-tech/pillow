@@ -13,7 +13,6 @@ import { ResourcePane } from "./ResourcePane";
 type WorkbenchProps = {
   project: ProjectDto | null;
   onOpenProject: () => void;
-  onNewProject: () => void;
   onSendTurn: (content: string) => void | Promise<void>;
   onCancelRun: () => void;
   busy?: boolean;
@@ -35,7 +34,6 @@ type WorkbenchProps = {
 export function Workbench({
   project,
   onOpenProject,
-  onNewProject,
   onSendTurn,
   onCancelRun,
   busy = false,
@@ -108,7 +106,7 @@ export function Workbench({
             <div className="stage-empty" data-testid="empty-workbench">
               <IconKeeperMark size={40} title="Keeper" />
               <h2>Keeper IDE</h2>
-              <p>打开或新建项目以开始本地工作。项目命令在左侧边栏与输入区。</p>
+              <p>打开现有项目文件夹以开始本地工作。</p>
             </div>
           )}
         </div>
@@ -118,7 +116,6 @@ export function Workbench({
           canCancel={canCancel}
           disabled={!project}
           onCancelRun={onCancelRun}
-          onNewProject={onNewProject}
           onOpenProject={onOpenProject}
           onSend={onSendTurn}
           projectName={project?.name ?? null}

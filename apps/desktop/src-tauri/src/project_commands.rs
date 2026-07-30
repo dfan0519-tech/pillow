@@ -38,20 +38,16 @@ pub async fn pick_directory<R: tauri::Runtime>(
     state: State<'_, AppState>,
     window: WebviewWindow<R>,
 ) -> Result<Option<String>, String> {
-    state.revoke_picker_selection(window.label());
+    let picker_operation = state.begin_picker_operation(window.label());
     let folder = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new().set_title("选择文件夹").pick_folder()
     })
     .await
     .map_err(|error| error.to_string())?;
 
-    folder
-        .map(|path| {
-            state
-                .register_picker_selection(window.label(), &path)
-                .map_err(|error| error.message)
-        })
-        .transpose()
+    state
+        .complete_picker_operation(picker_operation, folder.as_deref())
+        .map_err(|error| error.message)
 }
 
 /// Select an existing registered project for the path, or register a new one.

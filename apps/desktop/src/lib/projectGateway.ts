@@ -9,11 +9,6 @@ export type ProjectDto = {
 
 export type CreateProjectInput = Pick<ProjectDto, "name" | "rootPath">;
 
-export type CreateProjectWithFolderInput = {
-  name: string;
-  parentPath: string;
-};
-
 const HOST_COMMAND_ERROR_CODES = [
   "invalid_project_name",
   "invalid_project_root",
@@ -21,8 +16,6 @@ const HOST_COMMAND_ERROR_CODES = [
   "project_store_unavailable",
   "project_not_found",
   "project_state_unavailable",
-  "project_directory_exists",
-  "project_directory_create_failed",
 ] as const;
 
 export type HostCommandErrorCode = typeof HOST_COMMAND_ERROR_CODES[number];
@@ -79,6 +72,4 @@ export interface ProjectGateway {
   pickDirectory(): Promise<string | null>;
   /** Select existing registered project for path, or register it. */
   openOrRegisterProject(rootPath: string): Promise<ProjectDto>;
-  /** Create child folder under parent and register the project. */
-  createProjectWithFolder(input: CreateProjectWithFolderInput): Promise<ProjectDto>;
 }
