@@ -45,12 +45,7 @@ fn host_with_capacity(capacity: usize, fixture: &str) -> Arc<RuntimeHost> {
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap());
     Arc::new(RuntimeHost::new(
         adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: false,
-            event_queue_capacity: capacity,
-            after_worker_registered: None,
-        },
+        HostConfig::new(2, false, capacity),
     ))
 }
 

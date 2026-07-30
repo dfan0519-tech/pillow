@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Bounded runtime host and deterministic fake agent adapter"
 
+[features]
+default = []
+# Non-default: exposes HostConfig test seams for external test crates.
+# Unit tests of this crate use cfg(test) instead. Release builds leave this off.
+test-support = []
+
 [dependencies]
 chrono.workspace = true
 keeper-agent-protocol = { path = "../agent-protocol" }

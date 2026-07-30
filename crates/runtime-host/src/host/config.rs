@@ -1,6 +1,7 @@
 //! Host configuration and concurrency-limit normalization.
 
 use std::path::PathBuf;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
 
 use crate::delivery::DEFAULT_EVENT_QUEUE_CAPACITY;
@@ -11,9 +12,10 @@ pub(super) const MAX_CONCURRENT_TURNS_CAP: u32 = 32;
 
 /// Host configuration.
 ///
-/// `after_worker_registered` is a test seam used to force the
-/// register-before-handle race with barriers. Production callers leave it
-/// `None`.
+/// Prefer [`HostConfig::new`] (or [`Default`]) for construction. The optional
+/// post-registration test seam is compiled only under `cfg(test)` or the
+/// non-default `test-support` feature and is installed via
+/// [`HostConfig::with_after_worker_registered`].
 #[derive(Clone)]
 pub struct HostConfig {
     pub max_concurrent_turns: u32,
@@ -22,33 +24,70 @@ pub struct HostConfig {
     /// Per-turn bounded event queue capacity (backpressure when full).
     pub event_queue_capacity: usize,
     /// Test seam: invoked after the worker is registered (`Starting`) and
-    /// before `arm_turn` / thread install. Default `None`.
-    #[doc(hidden)]
-    pub after_worker_registered: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// before `arm_turn` / thread install. Omitted from release builds.
+    /// Crate-private: not constructible from outside via field assignment;
+    /// install only through [`HostConfig::with_after_worker_registered`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) after_worker_registered: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for HostConfig {
     fn default() -> Self {
-        Self {
-            max_concurrent_turns: DEFAULT_MAX_CONCURRENT_TURNS,
-            honor_fixture_delays: true,
-            event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
-            after_worker_registered: None,
-        }
+        Self::new(
+            DEFAULT_MAX_CONCURRENT_TURNS,
+            true,
+            DEFAULT_EVENT_QUEUE_CAPACITY,
+        )
     }
 }
 
 impl std::fmt::Debug for HostConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostConfig")
+        let mut debug = f.debug_struct("HostConfig");
+        debug
             .field("max_concurrent_turns", &self.max_concurrent_turns)
             .field("honor_fixture_delays", &self.honor_fixture_delays)
-            .field("event_queue_capacity", &self.event_queue_capacity)
-            .field(
-                "after_worker_registered",
-                &self.after_worker_registered.is_some(),
-            )
-            .finish()
+            .field("event_queue_capacity", &self.event_queue_capacity);
+        #[cfg(any(test, feature = "test-support"))]
+        debug.field(
+            "after_worker_registered",
+            &self.after_worker_registered.is_some(),
+        );
+        debug.finish()
+    }
+}
+
+impl HostConfig {
+    /// Construct host configuration without test seams.
+    pub fn new(
+        max_concurrent_turns: u32,
+        honor_fixture_delays: bool,
+        event_queue_capacity: usize,
+    ) -> Self {
+        Self {
+            max_concurrent_turns,
+            honor_fixture_delays,
+            event_queue_capacity,
+            #[cfg(any(test, feature = "test-support"))]
+            after_worker_registered: None,
+        }
+    }
+
+    /// Install a post-worker-registration barrier used by race tests.
+    ///
+    /// Available when building this crate's unit tests (`cfg(test)`) or when
+    /// the non-default `test-support` feature is enabled (desktop / external
+    /// test crates). Release production builds do not compile this method.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_after_worker_registered(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.after_worker_registered = Some(hook);
+        self
+    }
+
+    /// Borrow the test registration hook when the seam is compiled in.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn after_worker_registered_hook(&self) -> Option<&Arc<dyn Fn() + Send + Sync>> {
+        self.after_worker_registered.as_ref()
     }
 }
 

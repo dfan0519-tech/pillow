@@ -29,4 +29,6 @@ tauri = { version = "2", features = [] }
 uuid.workspace = true
 
 [dev-dependencies]
+# Enable host test seams only for desktop unit/integration tests (not release).
+keeper-runtime-host = { path = "../../../crates/runtime-host", features = ["test-support"] }
 tempfile = "3"

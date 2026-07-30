@@ -20,12 +20,7 @@ fn drop_requests_adapter_cancel_for_blocked_turn() {
         let adapter = Arc::new(CancelUnblocksAdapter::new());
         let host = Arc::new(RuntimeHost::new(
             adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: false,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
+            HostConfig::new(2, false, 8),
         ));
         let session = host
             .start_session(StartSession {
@@ -91,12 +86,7 @@ fn cancel_after_spawn_emits_exactly_one_terminal() {
         let adapter = Arc::new(CancelUnblocksAdapter::new());
         let host = Arc::new(RuntimeHost::new(
             adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: false,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
+            HostConfig::new(2, false, 8),
         ));
         let session = host
             .start_session(StartSession {

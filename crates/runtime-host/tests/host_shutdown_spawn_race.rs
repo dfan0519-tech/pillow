@@ -22,70 +22,9 @@ const RACE_ITERS: usize = 24;
 /// acquire-slot-before-register ordering reliably on multi-core hosts.
 const SPAWN_SHUTDOWN_RACE_ITERS: usize = 128;
 
-#[test]
-fn shutdown_joins_worker_still_in_starting_state() {
-    let enter = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let enter_h = Arc::clone(&enter);
-    let release_h = Arc::clone(&release);
-
-    let slow = r#"
-{"kind":"run_started","delay_ms":0,"payload":{}}
-{"kind":"assistant_delta","delay_ms":100,"payload":{"text":"x"}}
-{"kind":"turn_completed","delay_ms":0,"payload":{}}
-"#;
-    let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: true,
-            event_queue_capacity: 8,
-            after_worker_registered: Some(Arc::new(move || {
-                enter_h.wait();
-                release_h.wait();
-            })),
-        },
-    ));
-    let session = host
-        .start_session(StartSession {
-            conversation_key: "starting".into(),
-            working_directory: None,
-        })
-        .unwrap();
-    let session_id = session.session_id;
-    let host_spawn = Arc::clone(&host);
-    let spawner = thread::spawn(move || {
-        host_spawn.spawn_turn(SendTurn {
-            session_id,
-            run_id: RunId::new(),
-            content: "race".into(),
-        })
-    });
-
-    // Worker registered; join handle not installed yet.
-    enter.wait();
-
-    let host_shutdown = Arc::clone(&host);
-    let shutdown_thread = thread::spawn(move || host_shutdown.shutdown());
-
-    // Allow spawn to install the handle; shutdown must wait and join it.
-    release.wait();
-
-    let spawned = spawner.join().expect("spawn thread");
-    let shutdown_result = shutdown_thread.join().expect("shutdown thread");
-    shutdown_result.expect("shutdown must succeed after joining Starting worker");
-    assert_eq!(host.in_flight_turns(), 0);
-
-    match spawned {
-        Ok(s) => {
-            assert!(s.is_finished());
-            drop(s);
-        }
-        Err(RuntimeError::ShutDown) => {}
-        Err(e) => panic!("unexpected spawn error: {e}"),
-    }
-}
+// `shutdown_joins_worker_still_in_starting_state` lives as a unit test under
+// `src/host/registration_race_tests.rs` so the registration seam stays off
+// the release API while race coverage is preserved.
 
 /// Barrier inside blocking `arm_turn`: shutdown must wait for Starting or the
 /// spawn must be rejected with no residual work.
@@ -100,12 +39,7 @@ fn shutdown_waits_for_worker_blocked_in_arm_turn() {
         ));
         let host = Arc::new(RuntimeHost::new(
             adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: false,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
+            HostConfig::new(2, false, 8),
         ));
         let session = host
             .start_session(StartSession {
@@ -169,15 +103,7 @@ fn spawn_racing_shutdown_is_rejected_or_fully_joined() {
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
         let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap());
-        let host = Arc::new(RuntimeHost::new(
-            adapter,
-            HostConfig {
-                max_concurrent_turns: 8,
-                honor_fixture_delays: false,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
-        ));
+        let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(8, false, 8)));
         let session = host
             .start_session(StartSession {
                 conversation_key: "race".into(),
@@ -268,12 +194,7 @@ fn host_joins_workers_even_when_adapter_shutdown_errors() {
     let adapter = Arc::new(ShutdownErrorsAdapter::new());
     let host = Arc::new(RuntimeHost::new(
         adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: true,
-            event_queue_capacity: 8,
-            after_worker_registered: None,
-        },
+        HostConfig::new(2, true, 8),
     ));
     let session = host
         .start_session(StartSession {
@@ -318,12 +239,7 @@ fn shutdown_waits_for_external_join_while_adapter_errors() {
         let adapter = Arc::new(ShutdownErrorsAdapter::new());
         let host = Arc::new(RuntimeHost::new(
             adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: true,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
+            HostConfig::new(2, true, 8),
         ));
         let session = host
             .start_session(StartSession {

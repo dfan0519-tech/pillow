@@ -29,15 +29,7 @@ fn spawn_turn_is_cancellable_immediately_after_return() {
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
-    ));
+    let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, true, 64)));
     let session = host
         .start_session(StartSession {
             conversation_key: "imm".into(),
@@ -72,15 +64,7 @@ fn shutdown_joins_workers_without_later_join_masking() {
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
-    ));
+    let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, true, 64)));
     let session = host
         .start_session(StartSession {
             conversation_key: "join".into(),
@@ -124,15 +108,7 @@ fn slow_consumer_experiences_bounded_backpressure() {
     lines.push('\n');
 
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(&lines, false).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: false,
-            event_queue_capacity: 1,
-            after_worker_registered: None,
-        },
-    ));
+    let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, false, 1)));
     let session = host
         .start_session(StartSession {
             conversation_key: "bp".into(),
@@ -245,12 +221,7 @@ impl AgentRuntimeAdapter for ArmFailsAdapter {
 fn slot_is_released_when_arm_turn_fails() {
     let host = Arc::new(RuntimeHost::new(
         Arc::new(ArmFailsAdapter),
-        HostConfig {
-            max_concurrent_turns: 1,
-            honor_fixture_delays: false,
-            event_queue_capacity: 8,
-            after_worker_registered: None,
-        },
+        HostConfig::new(1, false, 8),
     ));
     let session = host
         .start_session(StartSession {

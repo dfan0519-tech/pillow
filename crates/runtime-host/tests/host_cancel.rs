@@ -128,15 +128,7 @@ impl AgentRuntimeAdapter for DelayedRegistrationAdapter {
 fn cancel_immediately_after_spawn_never_yields_turn_completed_with_delayed_registration() {
     for _ in 0..16 {
         let adapter = Arc::new(DelayedRegistrationAdapter::new(50));
-        let host = Arc::new(RuntimeHost::new(
-            adapter,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: false,
-                event_queue_capacity: 16,
-                after_worker_registered: None,
-            },
-        ));
+        let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, false, 16)));
         let session = host
             .start_session(StartSession {
                 conversation_key: "delayed".into(),
@@ -184,15 +176,7 @@ fn cancel_wins_over_turn_completed_blocked_on_full_queue() {
         let adapter = Arc::new(
             keeper_runtime_host::FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap(),
         );
-        let host = Arc::new(RuntimeHost::new(
-            adapter,
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: false,
-                event_queue_capacity: 1,
-                after_worker_registered: None,
-            },
-        ));
+        let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, false, 1)));
         let session = host
             .start_session(StartSession {
                 conversation_key: "term-block".into(),

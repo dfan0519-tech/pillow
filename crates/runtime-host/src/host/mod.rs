@@ -15,6 +15,9 @@
 mod config;
 mod spawned;
 
+#[cfg(test)]
+mod registration_race_tests;
+
 pub use config::{
     DEFAULT_MAX_CONCURRENT_TURNS, HostConfig, normalize_max_concurrent_turns,
     workspace_fixture_path,
@@ -49,14 +52,19 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     pub fn new(adapter: Arc<dyn AgentRuntimeAdapter>, config: HostConfig) -> Self {
+        #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_mut))]
+        let mut normalized = HostConfig::new(
+            normalize_max_concurrent_turns(config.max_concurrent_turns),
+            config.honor_fixture_delays,
+            config.event_queue_capacity.max(1),
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            normalized.after_worker_registered = config.after_worker_registered;
+        }
         Self {
             adapter,
-            config: HostConfig {
-                max_concurrent_turns: normalize_max_concurrent_turns(config.max_concurrent_turns),
-                honor_fixture_delays: config.honor_fixture_delays,
-                event_queue_capacity: config.event_queue_capacity.max(1),
-                after_worker_registered: config.after_worker_registered,
-            },
+            config: normalized,
             slots: Arc::new(AtomicU32::new(0)),
             shut_down: AtomicBool::new(false),
             workers: Mutex::new(HashMap::new()),
@@ -127,7 +135,8 @@ impl RuntimeHost {
             record
         };
 
-        if let Some(hook) = self.config.after_worker_registered.as_ref() {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self.config.after_worker_registered_hook() {
             hook();
         }
 

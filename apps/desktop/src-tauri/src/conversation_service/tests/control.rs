@@ -24,15 +24,10 @@ fn cancellation_yields_one_terminal_and_no_residual_slots() {
     let service = ConversationService::open_with_config(
         &path,
         Arc::clone(&emitter) as Arc<_>,
-        HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: Some(Arc::new(move || {
-                enter_hook.wait();
-                release_hook.wait();
-            })),
-        },
+        HostConfig::new(4, true, 64).with_after_worker_registered(Arc::new(move || {
+            enter_hook.wait();
+            release_hook.wait();
+        })),
     )
     .unwrap();
     let conversation = service
@@ -136,12 +131,7 @@ fn real_pump_authoritative_process_failure_interrupts_cleanly() {
     let service = ConversationService::open_with_config_and_pump_hook(
         &path,
         Arc::new(RecordingEmitter::new()),
-        HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: false,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
+        HostConfig::new(4, false, 64),
         PumpRegistrationHooks {
             force_process_error: Some(Arc::new(|| {
                 Err("forced authoritative process failure".into())
@@ -196,12 +186,7 @@ fn real_pump_terminalization_failure_fail_closed_on_drain_and_shutdown() {
     let service = ConversationService::open_with_config_and_pump_hook(
         &path,
         Arc::new(RecordingEmitter::new()),
-        HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: false,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
+        HostConfig::new(4, false, 64),
         PumpRegistrationHooks {
             force_process_error: Some(Arc::new(|| {
                 Err("forced authoritative process failure".into())
@@ -340,15 +325,10 @@ fn spawn_failure_removes_active_run_entry() {
     let service = ConversationService::open_with_config(
         &path,
         Arc::new(RecordingEmitter::new()),
-        HostConfig {
-            max_concurrent_turns: 1,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: Some(Arc::new(move || {
-                enter_hook.wait();
-                release_hook.wait();
-            })),
-        },
+        HostConfig::new(1, true, 64).with_after_worker_registered(Arc::new(move || {
+            enter_hook.wait();
+            release_hook.wait();
+        })),
     )
     .unwrap();
     let conversation = service

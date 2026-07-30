@@ -41,13 +41,7 @@ fn pump_finish_before_handle_register_clears_active_entry() {
     let service = ConversationService::open_with_config_and_pump_hook(
         &path,
         Arc::new(RecordingEmitter::new()),
-        HostConfig {
-            max_concurrent_turns: 4,
-            // No fixture delays — pump can finish immediately after spawn.
-            honor_fixture_delays: false,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
+        HostConfig::new(4, false, 64),
         PumpRegistrationHooks {
             after_spawn_before_register: Some(Arc::new(move || {
                 // send_turn is blocked here with the JoinHandle not yet stored.
@@ -152,12 +146,7 @@ fn send_turn_admission_linearized_with_shutdown() {
     let service = ConversationService::open_with_config_and_pump_hook(
         &path,
         Arc::new(RecordingEmitter::new()),
-        HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: false,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
+        HostConfig::new(4, false, 64),
         PumpRegistrationHooks {
             // Hold after spawn so the durable run exists and is fully owned
             // while shutdown races for the admission gate.

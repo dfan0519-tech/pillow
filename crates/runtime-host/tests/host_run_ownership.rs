@@ -22,12 +22,7 @@ fn duplicate_run_id_rejected_without_replacing_live_worker() {
     ));
     let host = Arc::new(RuntimeHost::new(
         adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-        HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: false,
-            event_queue_capacity: 8,
-            after_worker_registered: None,
-        },
+        HostConfig::new(4, false, 8),
     ));
     let session = host
         .start_session(StartSession {

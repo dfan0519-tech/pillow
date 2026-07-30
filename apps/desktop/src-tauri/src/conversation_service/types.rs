@@ -9,7 +9,9 @@ use keeper_session::{ConversationId, RunId};
 
 /// Optional test seams for pump registration ordering and fail-closed paths.
 ///
-/// Production defaults are no-ops (`None` / false).
+/// Available only under `cfg(test)`. Production builds do not expose these
+/// hooks as part of the ordinary service API.
+#[cfg(test)]
 #[derive(Default)]
 pub struct PumpRegistrationHooks {
     /// Fires on the `send_turn` thread after the pump is spawned and before its

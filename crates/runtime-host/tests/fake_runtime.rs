@@ -14,15 +14,7 @@ use keeper_runtime_host::{
 };
 
 fn start_host(honor_delays: bool) -> Arc<RuntimeHost> {
-    Arc::new(
-        RuntimeHost::with_fake(HostConfig {
-            max_concurrent_turns: 4,
-            honor_fixture_delays: honor_delays,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        })
-        .expect("host"),
-    )
+    Arc::new(RuntimeHost::with_fake(HostConfig::new(4, honor_delays, 64)).expect("host"))
 }
 
 fn kinds_and_payloads(events: &[RuntimeEvent]) -> Vec<(RuntimeEventKind, serde_json::Value)> {
@@ -161,15 +153,7 @@ fn cancellation_stops_emission_with_exactly_one_terminal() {
 {"kind":"turn_completed","delay_ms":0,"payload":{"summary":"should not finish"}}
 "#;
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
-    ));
+    let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(2, true, 64)));
     let session = host
         .start_session(StartSession {
             conversation_key: "conv-cancel".into(),
@@ -277,12 +261,7 @@ fn shutdown_rejects_new_work_and_leaves_no_active_turns() {
         let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
         Arc::new(RuntimeHost::new(
             adapter.clone(),
-            HostConfig {
-                max_concurrent_turns: 2,
-                honor_fixture_delays: true,
-                event_queue_capacity: 64,
-                after_worker_registered: None,
-            },
+            HostConfig::new(2, true, 64),
         ))
     };
 
@@ -351,15 +330,7 @@ fn concurrency_limit_is_enforced() {
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
     let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(slow, true).unwrap());
-    let host = Arc::new(RuntimeHost::new(
-        adapter,
-        HostConfig {
-            max_concurrent_turns: 1,
-            honor_fixture_delays: true,
-            event_queue_capacity: 64,
-            after_worker_registered: None,
-        },
-    ));
+    let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(1, true, 64)));
     let session = host
         .start_session(StartSession {
             conversation_key: "lim".into(),

@@ -17,4 +17,6 @@ mod types;
 mod tests;
 
 pub use service::ConversationService;
-pub use types::{ConversationCommandError, PumpRegistrationHooks};
+pub use types::ConversationCommandError;
+#[cfg(test)]
+pub use types::PumpRegistrationHooks;

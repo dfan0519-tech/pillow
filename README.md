@@ -13,8 +13,14 @@ migration source. New product code belongs in this repository.
 
 ## Current Status
 
-Architecture and migration design only. No runtime or UI implementation has
-been accepted yet.
+**Slice B1 (conversation kernel) is accepted.** The desktop shell owns a
+project-scoped conversation service with durable SQLite authority, a
+provider-neutral runtime host, and the deterministic fake adapter path. Every
+runtime event follows `validate -> persist -> commit -> emit`.
+
+**Slice B2 (real Grok ACP adapter) is in progress.** Live provider execution
+behind the accepted B1 protocol boundary is the active wave. B1 must not be
+cited as Grok connectivity evidence.
 
 ## Design Authority
 
@@ -22,4 +28,3 @@ been accepted yet.
 - `docs/migration/legacy-capability-inventory.md`
 - `docs/references/upstream-baseline.md`
 - `docs/decisions/ADR-0001-clean-successor.md`
-

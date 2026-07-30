@@ -21,9 +21,11 @@ use crate::conversation_events::{
 
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
 use super::pipeline::{PumpFailSeams, PumpOutcome, pump_turn};
+#[cfg(test)]
+use super::types::PumpRegistrationHooks;
 use super::types::{
-    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, PumpRegistrationHooks,
-    ServiceAdmission, remove_active_run,
+    ActiveMap, ActiveRun, ConversationCommandError, PumpHandleRegistration, ServiceAdmission,
+    remove_active_run,
 };
 
 pub struct ConversationService {
@@ -34,9 +36,13 @@ pub struct ConversationService {
     /// Linearizes `send_turn` durable admission with `shutdown`.
     admission: ServiceAdmission,
     shut_down: AtomicBool,
+    #[cfg(test)]
     after_spawn_before_register_pump: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
     after_pump_before_registration_wait: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
     force_process_error: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    #[cfg(test)]
     force_terminalization_failure: bool,
 }
 
@@ -46,16 +52,7 @@ impl ConversationService {
         emitter: Arc<dyn RuntimeEventEmitter>,
         honor_fixture_delays: bool,
     ) -> Result<Self, ConversationCommandError> {
-        Self::open_with_config(
-            path,
-            emitter,
-            HostConfig {
-                max_concurrent_turns: 4,
-                honor_fixture_delays,
-                event_queue_capacity: 64,
-                after_worker_registered: None,
-            },
-        )
+        Self::open_with_config(path, emitter, HostConfig::new(4, honor_fixture_delays, 64))
     }
 
     /// Test / advanced construction with a custom host config (e.g. cancel barriers).
@@ -76,14 +73,21 @@ impl ConversationService {
             active: Arc::new(Mutex::new(HashMap::new())),
             admission: ServiceAdmission::new(),
             shut_down: AtomicBool::new(false),
+            #[cfg(test)]
             after_spawn_before_register_pump: None,
+            #[cfg(test)]
             after_pump_before_registration_wait: None,
+            #[cfg(test)]
             force_process_error: None,
+            #[cfg(test)]
             force_terminalization_failure: false,
         })
     }
 
     /// Like [`open_with_config`], plus test seams for pump registration / fail-closed.
+    ///
+    /// Test-only: not part of the production conversation service API.
+    #[cfg(test)]
     pub fn open_with_config_and_pump_hook(
         path: impl AsRef<Path>,
         emitter: Arc<dyn RuntimeEventEmitter>,
@@ -248,6 +252,7 @@ impl ConversationService {
         // Test seam: hold here so a fast pump can finish work before the handle
         // is stored. The registration gate keeps the map entry alive until we
         // mark_registered below — pumps must not remove early.
+        #[cfg(test)]
         if let Some(hook) = self.after_spawn_before_register_pump.as_ref() {
             hook();
         }
@@ -460,11 +465,15 @@ impl ConversationService {
         let repository = Arc::clone(&self.repository);
         let emitter = Arc::clone(&self.emitter);
         let active = Arc::clone(&self.active);
+        #[cfg(test)]
         let after_pump = self.after_pump_before_registration_wait.clone();
+        #[cfg(test)]
         let seams = PumpFailSeams {
             force_process_error: self.force_process_error.clone(),
             force_terminalization_failure: self.force_terminalization_failure,
         };
+        #[cfg(not(test))]
+        let seams = PumpFailSeams::default();
 
         thread::Builder::new()
             .name(format!("keeper-conv-pump-{}", run_id.0))
@@ -472,6 +481,7 @@ impl ConversationService {
                 let outcome =
                     pump_turn(repository, emitter, conversation_id, run_id, spawned, seams);
                 // Test seam: post-pump_turn, pre-registration-wait.
+                #[cfg(test)]
                 if let Some(hook) = after_pump.as_ref() {
                     hook();
                 }

@@ -31,12 +31,7 @@ fn shutdown_waits_for_admitted_synchronous_send_turn() {
     ));
     let host = Arc::new(RuntimeHost::new(
         adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: false,
-            event_queue_capacity: 8,
-            after_worker_registered: None,
-        },
+        HostConfig::new(2, false, 8),
     ));
     let session = host
         .start_session(StartSession {
@@ -104,15 +99,7 @@ fn synchronous_send_turn_racing_shutdown_is_admitted_or_rejected() {
 {"kind":"turn_completed","delay_ms":0,"payload":{}}
 "#;
         let adapter = Arc::new(FakeRuntimeAdapter::from_fixture_text(fixture, false).unwrap());
-        let host = Arc::new(RuntimeHost::new(
-            adapter,
-            HostConfig {
-                max_concurrent_turns: 4,
-                honor_fixture_delays: false,
-                event_queue_capacity: 8,
-                after_worker_registered: None,
-            },
-        ));
+        let host = Arc::new(RuntimeHost::new(adapter, HostConfig::new(4, false, 8)));
         let session = host
             .start_session(StartSession {
                 conversation_key: "sync-race".into(),
@@ -195,12 +182,7 @@ fn adapter_shutdown_error_waits_for_admitted_synchronous_turn() {
     ));
     let host = Arc::new(RuntimeHost::new(
         adapter.clone() as Arc<dyn AgentRuntimeAdapter>,
-        HostConfig {
-            max_concurrent_turns: 2,
-            honor_fixture_delays: false,
-            event_queue_capacity: 8,
-            after_worker_registered: None,
-        },
+        HostConfig::new(2, false, 8),
     ));
     let session = host
         .start_session(StartSession {
