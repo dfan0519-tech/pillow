@@ -6,11 +6,12 @@ use super::digest::canonical_arguments_digest;
 use super::manifest::{
     LIST_RESULT_COUNT_CAP, READ_OUTPUT_BYTE_CAP, SEARCH_RESULT_COUNT_CAP, manifest_for,
 };
+use super::protocol_error::{ToolProtocolError, ToolProtocolErrorCode};
+use super::reservation::{ToolCallReservation, ToolCallReservationKey, ToolProposalFingerprint};
 use super::types::{
     FsListArguments, FsListOutput, FsReadArguments, FsReadOutput, FsSearchArguments,
     FsSearchOutput, ToolActiveContext, ToolArguments, ToolContentKind, ToolExecutionState, ToolId,
-    ToolProposal, ToolProposalFingerprint, ToolProtocolError, ToolProtocolErrorCode, ToolResult,
-    ValidatedToolProposal,
+    ToolProposal, ToolResult, ValidatedToolProposal, ValidatedToolResult,
 };
 
 impl ToolActiveContext {
@@ -71,6 +72,7 @@ impl ToolProposal {
             ));
         }
         let fingerprint = proposal_fingerprint(self, &normalized_arguments_digest)?;
+        let reservation_key = call_reservation_key(self)?;
 
         Ok(ValidatedToolProposal {
             proposal: self.clone(),
@@ -79,7 +81,7 @@ impl ToolProposal {
             arguments,
             canonical_arguments,
             normalized_arguments_digest,
-            fingerprint,
+            reservation: ToolCallReservation::new(reservation_key, fingerprint),
         })
     }
 }
@@ -89,7 +91,7 @@ impl ToolResult {
         &self,
         expected: &ToolActiveContext,
         proposal: &ValidatedToolProposal,
-    ) -> Result<Self, ToolProtocolError> {
+    ) -> Result<ValidatedToolResult, ToolProtocolError> {
         if proposal.context != *expected {
             return Err(error(
                 ToolProtocolErrorCode::ActiveContextMismatch,
@@ -105,6 +107,8 @@ impl ToolResult {
             || self.call_id != proposal.call_id()
             || self.tool_id != proposal.tool_id()
             || self.tool_version != proposal.tool_version()
+            || self.proposal_fingerprint != *proposal.fingerprint()
+            || self.arguments_digest != *proposal.normalized_arguments_digest()
         {
             return Err(invalid_result(
                 "tool result identity does not match the validated proposal",
@@ -136,7 +140,7 @@ impl ToolResult {
                     .output
                     .as_ref()
                     .ok_or_else(|| invalid_result("a succeeded tool result requires output"))?;
-                validated.output = Some(decode_output(tool_id, output)?);
+                validated.output = Some(decode_output(tool_id, output, proposal.arguments())?);
             }
             ToolExecutionState::Failed => {
                 if self.output.is_some() {
@@ -154,8 +158,24 @@ impl ToolResult {
                 }
             }
         }
-        Ok(validated)
+        Ok(ValidatedToolResult {
+            result: validated,
+            context: expected.clone(),
+        })
     }
+}
+
+fn call_reservation_key(
+    proposal: &ToolProposal,
+) -> Result<ToolCallReservationKey, ToolProtocolError> {
+    let value = json!({
+        "project_id": proposal.project_id,
+        "conversation_id": proposal.conversation_id,
+        "run_id": proposal.run_id,
+        "call_id": proposal.call_id,
+    });
+    let digest = canonical_arguments_digest(&value)?;
+    Ok(ToolCallReservationKey::from_digest(&digest))
 }
 
 fn proposal_fingerprint(
@@ -227,14 +247,28 @@ fn decode_arguments(
     }
 }
 
-fn decode_output(tool_id: ToolId, raw: &Value) -> Result<Value, ToolProtocolError> {
+fn decode_output(
+    tool_id: ToolId,
+    raw: &Value,
+    arguments: &ToolArguments,
+) -> Result<Value, ToolProtocolError> {
     let (output, count) = match tool_id {
         ToolId::FsList => {
             let output = decode::<FsListOutput>(raw, ToolProtocolErrorCode::InvalidResult)?;
+            let ToolArguments::FsList(arguments) = arguments else {
+                return Err(invalid_result(
+                    "validated argument type does not match tool",
+                ));
+            };
             for entry in &output.entries {
                 validate_project_path_for_result(&entry.path)?;
             }
             let count = output.entries.len();
+            if count > arguments.max_results as usize {
+                return Err(invalid_result(
+                    "fs.list output exceeds the proposal max_results",
+                ));
+            }
             (
                 encode(&output, ToolProtocolErrorCode::InvalidResult)?,
                 Some(count),
@@ -242,6 +276,11 @@ fn decode_output(tool_id: ToolId, raw: &Value) -> Result<Value, ToolProtocolErro
         }
         ToolId::FsRead => {
             let output = decode::<FsReadOutput>(raw, ToolProtocolErrorCode::InvalidResult)?;
+            let ToolArguments::FsRead(arguments) = arguments else {
+                return Err(invalid_result(
+                    "validated argument type does not match tool",
+                ));
+            };
             validate_project_path_for_result(&output.path)?;
             match (&output.content_kind, &output.content) {
                 (ToolContentKind::Utf8, Some(content))
@@ -253,10 +292,20 @@ fn decode_output(tool_id: ToolId, raw: &Value) -> Result<Value, ToolProtocolErro
                     ));
                 }
             }
+            if output.bytes_returned > arguments.max_bytes {
+                return Err(invalid_result(
+                    "fs.read output exceeds the proposal max_bytes",
+                ));
+            }
             (encode(&output, ToolProtocolErrorCode::InvalidResult)?, None)
         }
         ToolId::FsSearch => {
             let output = decode::<FsSearchOutput>(raw, ToolProtocolErrorCode::InvalidResult)?;
+            let ToolArguments::FsSearch(arguments) = arguments else {
+                return Err(invalid_result(
+                    "validated argument type does not match tool",
+                ));
+            };
             for item in &output.matches {
                 validate_project_path_for_result(&item.path)?;
                 if item.line == 0
@@ -273,6 +322,11 @@ fn decode_output(tool_id: ToolId, raw: &Value) -> Result<Value, ToolProtocolErro
                 }
             }
             let count = output.matches.len();
+            if count > arguments.max_results as usize {
+                return Err(invalid_result(
+                    "fs.search output exceeds the proposal max_results",
+                ));
+            }
             (
                 encode(&output, ToolProtocolErrorCode::InvalidResult)?,
                 Some(count),
@@ -373,7 +427,12 @@ fn is_windows_device_component(component: &str) -> bool {
     (bytes.len() == 4 && matches!(&bytes[..3], b"COM" | b"LPT") && matches!(bytes[3], b'1'..=b'9'))
         || matches!(
             stem.as_str(),
-            "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+            "COM\u{00b9}"
+                | "COM\u{00b2}"
+                | "COM\u{00b3}"
+                | "LPT\u{00b9}"
+                | "LPT\u{00b2}"
+                | "LPT\u{00b3}"
         )
 }
 
@@ -381,12 +440,8 @@ fn decode<T>(raw: &Value, code: ToolProtocolErrorCode) -> Result<T, ToolProtocol
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(raw.clone()).map_err(|failure| {
-        error(
-            code,
-            format!("payload does not match the fixed schema: {failure}"),
-        )
-    })
+    serde_json::from_value(raw.clone())
+        .map_err(|_| error(code, "payload does not match the fixed schema"))
 }
 
 fn encode<T>(value: &T, code: ToolProtocolErrorCode) -> Result<Value, ToolProtocolError>
@@ -404,6 +459,6 @@ fn invalid_result(message: impl Into<String>) -> ToolProtocolError {
     error(ToolProtocolErrorCode::InvalidResult, message)
 }
 
-fn error(code: ToolProtocolErrorCode, message: impl Into<String>) -> ToolProtocolError {
-    ToolProtocolError::new(code, message)
+fn error(code: ToolProtocolErrorCode, _message: impl Into<String>) -> ToolProtocolError {
+    ToolProtocolError::new(code)
 }

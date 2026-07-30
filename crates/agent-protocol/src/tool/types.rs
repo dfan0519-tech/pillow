@@ -1,8 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use thiserror::Error;
 
+use super::protocol_error::{ToolProtocolError, ToolProtocolErrorCode};
 use super::public_error::ToolPublicError;
+use super::reservation::{ToolCallReservation, ToolProposalFingerprint};
 use crate::RunId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -14,7 +15,6 @@ impl ArgumentsDigest {
         let Some(hex) = value.strip_prefix("sha256:") else {
             return Err(ToolProtocolError::new(
                 ToolProtocolErrorCode::InvalidArguments,
-                "arguments_digest must use the sha256:<lowercase-hex> format",
             ));
         };
         if hex.len() != 64
@@ -25,7 +25,6 @@ impl ArgumentsDigest {
         {
             return Err(ToolProtocolError::new(
                 ToolProtocolErrorCode::InvalidArguments,
-                "arguments_digest must contain exactly 64 lowercase hexadecimal characters",
             ));
         }
         Ok(Self(value))
@@ -164,20 +163,6 @@ impl ToolActiveContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct ToolProposalFingerprint(String);
-
-impl ToolProposalFingerprint {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(super) fn from_digest(value: &ArgumentsDigest) -> Self {
-        Self(value.as_str().to_owned())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A proposal that passed strict context, schema, digest, and identity validation.
 ///
@@ -202,7 +187,7 @@ pub struct ValidatedToolProposal {
     pub(super) arguments: ToolArguments,
     pub(super) canonical_arguments: Value,
     pub(super) normalized_arguments_digest: ArgumentsDigest,
-    pub(super) fingerprint: ToolProposalFingerprint,
+    pub(super) reservation: ToolCallReservation,
 }
 
 impl ValidatedToolProposal {
@@ -230,12 +215,17 @@ impl ValidatedToolProposal {
         &self.normalized_arguments_digest
     }
 
-    /// Stable reservation key for this validated proposal.
-    ///
-    /// The caller must atomically reserve this fingerprint before execution.
-    /// This crate intentionally does not implement reservation persistence.
+    /// Stable semantic fingerprint for this validated proposal.
     pub fn fingerprint(&self) -> &ToolProposalFingerprint {
-        &self.fingerprint
+        self.reservation.fingerprint()
+    }
+
+    /// Call identity and proposal fingerprint to reserve before execution.
+    ///
+    /// The caller must atomically apply the reservation classification. This
+    /// crate intentionally does not implement reservation persistence.
+    pub fn reservation(&self) -> &ToolCallReservation {
+        &self.reservation
     }
 
     pub fn project_id(&self) -> &str {
@@ -402,35 +392,88 @@ pub struct ToolResult {
     pub call_id: String,
     pub tool_id: String,
     pub tool_version: u16,
+    pub proposal_fingerprint: ToolProposalFingerprint,
+    pub arguments_digest: ArgumentsDigest,
     pub state: ToolExecutionState,
     pub output: Option<Value>,
     pub error: Option<ToolPublicError>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolProtocolErrorCode {
-    InvalidEnvelope,
-    UnknownTool,
-    UnsupportedToolVersion,
-    ActiveContextMismatch,
-    InvalidArguments,
-    ArgumentsDigestMismatch,
-    InvalidResult,
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// A tool result that is strictly bound to one validated proposal and context.
+///
+/// Fields are private and all accessors are read-only, so validation cannot be
+/// forged or mutated by callers.
+///
+/// ```compile_fail
+/// use keeper_agent_protocol::ValidatedToolResult;
+///
+/// let value: ValidatedToolResult = todo!();
+/// let ValidatedToolResult { result, context } = value;
+/// ```
+///
+/// ```compile_fail
+/// use keeper_agent_protocol::ValidatedToolResult;
+///
+/// fn mutate(value: &mut ValidatedToolResult) {
+///     value.result().state = keeper_agent_protocol::ToolExecutionState::Failed;
+/// }
+/// ```
+pub struct ValidatedToolResult {
+    pub(super) result: ToolResult,
+    pub(super) context: ToolActiveContext,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{code:?}: {message}")]
-pub struct ToolProtocolError {
-    pub code: ToolProtocolErrorCode,
-    pub message: String,
-}
+impl ValidatedToolResult {
+    pub fn result(&self) -> &ToolResult {
+        &self.result
+    }
 
-impl ToolProtocolError {
-    pub(crate) fn new(code: ToolProtocolErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
+    pub fn context(&self) -> &ToolActiveContext {
+        &self.context
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.result.project_id
+    }
+
+    pub fn conversation_id(&self) -> &str {
+        &self.result.conversation_id
+    }
+
+    pub fn run_id(&self) -> RunId {
+        self.result.run_id
+    }
+
+    pub fn call_id(&self) -> &str {
+        &self.result.call_id
+    }
+
+    pub fn tool_id(&self) -> &str {
+        &self.result.tool_id
+    }
+
+    pub fn tool_version(&self) -> u16 {
+        self.result.tool_version
+    }
+
+    pub fn proposal_fingerprint(&self) -> &ToolProposalFingerprint {
+        &self.result.proposal_fingerprint
+    }
+
+    pub fn normalized_arguments_digest(&self) -> &ArgumentsDigest {
+        &self.result.arguments_digest
+    }
+
+    pub fn state(&self) -> ToolExecutionState {
+        self.result.state
+    }
+
+    pub fn output(&self) -> Option<&Value> {
+        self.result.output.as_ref()
+    }
+
+    pub fn error(&self) -> Option<ToolPublicError> {
+        self.result.error
     }
 }

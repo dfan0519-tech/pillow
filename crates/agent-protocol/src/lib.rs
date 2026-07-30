@@ -15,10 +15,11 @@ pub use error::RuntimeError;
 pub use tool::{
     ArgumentsDigest, FsListArguments, FsListEntry, FsListOutput, FsReadArguments, FsReadOutput,
     FsSearchArguments, FsSearchMatch, FsSearchOutput, ToolActiveContext, ToolArgumentSpec,
-    ToolArgumentType, ToolArguments, ToolContentKind, ToolEntryKind, ToolExecutionLimits,
+    ToolArgumentType, ToolArguments, ToolCallReservation, ToolCallReservationDecision,
+    ToolCallReservationKey, ToolContentKind, ToolEntryKind, ToolExecutionLimits,
     ToolExecutionState, ToolId, ToolManifest, ToolProposal, ToolProposalFingerprint,
     ToolProtocolError, ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult,
-    ValidatedToolProposal, canonical_arguments_digest, fixed_tool_manifests,
+    ValidatedToolProposal, ValidatedToolResult, canonical_arguments_digest, fixed_tool_manifests,
 };
 pub use types::{
     ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PlanStep, PlanUpdatedPayload,

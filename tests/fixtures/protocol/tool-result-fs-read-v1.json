@@ -5,6 +5,8 @@
   "call_id": "call-read-1",
   "tool_id": "fs.read",
   "tool_version": 1,
+  "proposal_fingerprint": "sha256:1c723ae1033107c5f8431372811e9a203b23f69e4401127cc0db5e8ed9dd5975",
+  "arguments_digest": "sha256:54928b277e37c7b2ff55a04677fec352eff5db41a3ed25ab38229783076b04e6",
   "state": "succeeded",
   "output": {
     "path": "src/lib.rs",

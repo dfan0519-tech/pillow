@@ -5,6 +5,8 @@
   "call_id": "call-search-1",
   "tool_id": "fs.search",
   "tool_version": 1,
+  "proposal_fingerprint": "sha256:2d5b178e8fe16d777eade15d9bdc1c68553e251ba1ce9c968bf25a59d2b1bbdb",
+  "arguments_digest": "sha256:de70e972e42c36c1df5d453bce807c4461afbe7498b4bcb034e84402125c4ebd",
   "state": "succeeded",
   "output": {
     "matches": [

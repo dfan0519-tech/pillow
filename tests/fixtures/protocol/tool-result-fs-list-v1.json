@@ -5,6 +5,8 @@
   "call_id": "call-list-1",
   "tool_id": "fs.list",
   "tool_version": 1,
+  "proposal_fingerprint": "sha256:22cc24cbc32218981200d938da5e46b2e0d16df0efb1db9ddfcaa529c971d9ba",
+  "arguments_digest": "sha256:7af098a8c350f42d85880c89fa2506caf77b35da030d368dbb17c0c596f54c9f",
   "state": "succeeded",
   "output": {
     "entries": [

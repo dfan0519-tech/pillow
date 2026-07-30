@@ -58,7 +58,7 @@ fn canonical_digest_is_key_order_independent_and_sha256_tagged() {
 #[test]
 fn canonical_digest_rejects_non_integer_numbers_fail_closed() {
     let error = canonical_arguments_digest(&json!({"path": "src", "ratio": 0.5})).unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidArguments);
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn proposal_arguments_deny_unknown_fields_even_with_a_matching_digest() {
     let error = proposal
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidArguments);
 }
 
 #[test]
@@ -135,14 +135,14 @@ fn proposal_rejects_unknown_tool_and_version() {
     let error = unknown_tool
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::UnknownTool);
+    assert_eq!(error.code(), ToolProtocolErrorCode::UnknownTool);
 
     let mut unknown_version = proposal_fixture();
     unknown_version.tool_version = 2;
     let error = unknown_version
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::UnsupportedToolVersion);
+    assert_eq!(error.code(), ToolProtocolErrorCode::UnsupportedToolVersion);
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn proposal_rejects_active_context_mismatches_and_digest_mismatch() {
         let error = proposal_fixture()
             .validate_for_context(&context)
             .unwrap_err();
-        assert_eq!(error.code, ToolProtocolErrorCode::ActiveContextMismatch);
+        assert_eq!(error.code(), ToolProtocolErrorCode::ActiveContextMismatch);
     }
 
     let mut proposal = proposal_fixture();
@@ -167,7 +167,7 @@ fn proposal_rejects_active_context_mismatches_and_digest_mismatch() {
     let error = proposal
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::ArgumentsDigestMismatch);
+    assert_eq!(error.code(), ToolProtocolErrorCode::ArgumentsDigestMismatch);
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn call_id_is_validated_and_part_of_the_stable_fingerprint() {
     let mut invalid = proposal_fixture();
     invalid.call_id = "call/read/1".into();
     let error = invalid.validate_for_context(&active_context()).unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidEnvelope);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidEnvelope);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn proposal_rejects_path_escape_and_manifest_limit_overrides() {
     });
     escaped.arguments_digest = canonical_arguments_digest(&escaped.arguments).unwrap();
     let error = escaped.validate_for_context(&active_context()).unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidArguments);
 
     let mut oversized = proposal_fixture();
     oversized.arguments = json!({
@@ -209,7 +209,7 @@ fn proposal_rejects_path_escape_and_manifest_limit_overrides() {
     let error = oversized
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidArguments);
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn search_rejects_whitespace_only_queries() {
     let error = proposal
         .validate_for_context(&active_context())
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidArguments);
 }
 
 #[test]
@@ -256,11 +256,12 @@ fn successful_result_fixture_is_strict_and_valid() {
     let result: ToolResult =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     let validated = result.validate_for_proposal(&context, &proposal).unwrap();
-    assert_eq!(validated.state, ToolExecutionState::Succeeded);
+    assert_eq!(validated.state(), ToolExecutionState::Succeeded);
     assert_eq!(
-        validated.output.unwrap()["content_kind"],
+        validated.output().unwrap()["content_kind"],
         Value::String("utf8".into())
     );
+    assert_eq!(validated.proposal_fingerprint(), proposal.fingerprint());
 }
 
 #[test]
@@ -274,9 +275,9 @@ fn every_fixed_tool_has_a_valid_proposal_and_result_fixture() {
 
         let proposal = proposal.validate_for_context(&context).unwrap();
         let result = result.validate_for_proposal(&context, &proposal).unwrap();
-        assert_eq!(proposal.tool_id(), result.tool_id);
-        assert_eq!(proposal.call_id(), result.call_id);
-        assert_eq!(result.state, ToolExecutionState::Succeeded);
+        assert_eq!(proposal.tool_id(), result.tool_id());
+        assert_eq!(proposal.call_id(), result.call_id());
+        assert_eq!(result.state(), ToolExecutionState::Succeeded);
     }
 }
 
@@ -301,7 +302,7 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
     let error = wrong_output
         .validate_for_proposal(&context, &proposal)
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidResult);
 
     let mut executing: ToolResult =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
@@ -309,7 +310,7 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
     let error = executing
         .validate_for_proposal(&context, &proposal)
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidResult);
 }
 
 #[test]
@@ -343,7 +344,7 @@ fn result_rejects_every_proposal_and_context_identity_mismatch() {
         let error = mismatch
             .validate_for_proposal(&context, &proposal)
             .unwrap_err();
-        assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
+        assert_eq!(error.code(), ToolProtocolErrorCode::InvalidResult);
     }
 
     let other_context =
@@ -351,7 +352,7 @@ fn result_rejects_every_proposal_and_context_identity_mismatch() {
     let error = base
         .validate_for_proposal(&other_context, &proposal)
         .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::ActiveContextMismatch);
+    assert_eq!(error.code(), ToolProtocolErrorCode::ActiveContextMismatch);
 }
 
 #[test]
@@ -419,7 +420,7 @@ fn protocol_paths_reject_windows_devices_and_non_portable_aliases() {
         proposal.arguments = json!({"path": path});
         let error = proposal.validate_for_context(&context).unwrap_err();
         assert_eq!(
-            error.code,
+            error.code(),
             ToolProtocolErrorCode::InvalidArguments,
             "proposal path should be rejected: {path}"
         );
@@ -428,7 +429,7 @@ fn protocol_paths_reject_windows_devices_and_non_portable_aliases() {
         result.output.as_mut().unwrap()["path"] = json!(path);
         let error = result.validate_for_proposal(&context, &valid).unwrap_err();
         assert_eq!(
-            error.code,
+            error.code(),
             ToolProtocolErrorCode::InvalidResult,
             "result path should be rejected: {path}"
         );

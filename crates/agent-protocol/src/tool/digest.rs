@@ -1,7 +1,8 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::types::{ArgumentsDigest, ToolProtocolError, ToolProtocolErrorCode};
+use super::protocol_error::{ToolProtocolError, ToolProtocolErrorCode};
+use super::types::ArgumentsDigest;
 
 const MAX_ARGUMENT_BYTES: usize = 65_536;
 const MAX_ARGUMENT_DEPTH: usize = 32;
@@ -48,8 +49,7 @@ fn write_canonical(
         }
         Value::String(value) => {
             output.push_str(
-                &serde_json::to_string(value)
-                    .map_err(|error| invalid_arguments(format!("invalid string: {error}")))?,
+                &serde_json::to_string(value).map_err(|_| invalid_arguments("invalid string"))?,
             );
         }
         Value::Array(values) => {
@@ -71,8 +71,7 @@ fn write_canonical(
                     output.push(',');
                 }
                 output.push_str(
-                    &serde_json::to_string(key)
-                        .map_err(|error| invalid_arguments(format!("invalid key: {error}")))?,
+                    &serde_json::to_string(key).map_err(|_| invalid_arguments("invalid key"))?,
                 );
                 output.push(':');
                 write_canonical(&values[key], depth + 1, output)?;
@@ -83,8 +82,8 @@ fn write_canonical(
     Ok(())
 }
 
-fn invalid_arguments(message: impl Into<String>) -> ToolProtocolError {
-    ToolProtocolError::new(ToolProtocolErrorCode::InvalidArguments, message)
+fn invalid_arguments(_message: impl Into<String>) -> ToolProtocolError {
+    ToolProtocolError::new(ToolProtocolErrorCode::InvalidArguments)
 }
 
 #[cfg(test)]
