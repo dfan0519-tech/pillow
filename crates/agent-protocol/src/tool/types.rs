@@ -129,8 +129,18 @@ pub struct ToolManifest {
     pub limits: ToolExecutionLimits,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Provider-neutral wire proposal.
+///
+/// Operational callers must use [`ToolProposal::parse_str`],
+/// [`ToolProposal::parse_bytes`], or [`ToolProposal::parse_value`] so malformed
+/// provider input cannot expose serde diagnostics.
+///
+/// ```compile_fail
+/// use keeper_agent_protocol::ToolProposal;
+///
+/// let _: ToolProposal = serde_json::from_str("{}").unwrap();
+/// ```
 pub struct ToolProposal {
     pub project_id: String,
     pub conversation_id: String,
@@ -383,8 +393,18 @@ pub struct FsSearchOutput {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Unvalidated tool result wire data.
+///
+/// Operational callers must use [`ToolResult::parse_str`],
+/// [`ToolResult::parse_bytes`], or [`ToolResult::parse_value`] and then validate
+/// against the owning proposal.
+///
+/// ```compile_fail
+/// use keeper_agent_protocol::ToolResult;
+///
+/// let _: ToolResult = serde_json::from_str("{}").unwrap();
+/// ```
 pub struct ToolResult {
     pub project_id: String,
     pub conversation_id: String,

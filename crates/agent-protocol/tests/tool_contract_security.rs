@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use keeper_agent_protocol::{
     RunId, ToolActiveContext, ToolCallReservationDecision, ToolExecutionState, ToolProposal,
-    ToolProtocolErrorCode, ToolResult, ValidatedToolProposal, canonical_arguments_digest,
+    ToolProtocolError, ToolProtocolErrorCode, ToolResult, ValidatedToolProposal,
+    canonical_arguments_digest,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -19,13 +20,13 @@ fn read_fixture(name: &str) -> String {
 }
 
 fn proposal_fixture(tool: &str) -> ToolProposal {
-    serde_json::from_str(&read_fixture(&format!("tool-proposal-{tool}-v1.json")))
-        .expect("strict proposal fixture")
+    ToolProposal::parse_str(&read_fixture(&format!("tool-proposal-{tool}-v1.json")))
+        .expect("safe strict proposal fixture")
 }
 
 fn result_fixture(tool: &str) -> ToolResult {
-    serde_json::from_str(&read_fixture(&format!("tool-result-{tool}-v1.json")))
-        .expect("strict result fixture")
+    ToolResult::parse_str(&read_fixture(&format!("tool-result-{tool}-v1.json")))
+        .expect("safe strict result fixture")
 }
 
 fn active_context() -> ToolActiveContext {
@@ -42,6 +43,56 @@ fn bind_result(mut result: ToolResult, proposal: &ValidatedToolProposal) -> Tool
     result.proposal_fingerprint = proposal.fingerprint().clone();
     result.arguments_digest = proposal.normalized_arguments_digest().clone();
     result
+}
+
+fn assert_secret_safe(error: ToolProtocolError, code: ToolProtocolErrorCode) {
+    assert_eq!(error.code(), code);
+    for diagnostic in [error.to_string(), format!("{error:?}")] {
+        assert!(!diagnostic.contains("TOP_SECRET"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn operational_wire_parsers_hide_all_proposal_and_result_serde_failures() {
+    let mut proposal: Value =
+        serde_json::from_str(&read_fixture("tool-proposal-fs-read-v1.json")).unwrap();
+    proposal
+        .as_object_mut()
+        .unwrap()
+        .insert("TOP_SECRET_FIELD".into(), json!("TOP_SECRET_VALUE"));
+    let proposal_text = serde_json::to_string(&proposal).unwrap();
+    assert_secret_safe(
+        ToolProposal::parse_str(&proposal_text).unwrap_err(),
+        ToolProtocolErrorCode::InvalidEnvelope,
+    );
+    assert_secret_safe(
+        ToolProposal::parse_bytes(proposal_text.as_bytes()).unwrap_err(),
+        ToolProtocolErrorCode::InvalidEnvelope,
+    );
+    assert_secret_safe(
+        ToolProposal::parse_value(proposal).unwrap_err(),
+        ToolProtocolErrorCode::InvalidEnvelope,
+    );
+
+    let mut result: Value =
+        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    result
+        .as_object_mut()
+        .unwrap()
+        .insert("TOP_SECRET_RESULT".into(), json!("TOP_SECRET_VALUE"));
+    let result_text = serde_json::to_string(&result).unwrap();
+    assert_secret_safe(
+        ToolResult::parse_str(&result_text).unwrap_err(),
+        ToolProtocolErrorCode::InvalidResult,
+    );
+    assert_secret_safe(
+        ToolResult::parse_bytes(result_text.as_bytes()).unwrap_err(),
+        ToolProtocolErrorCode::InvalidResult,
+    );
+    assert_secret_safe(
+        ToolResult::parse_value(result).unwrap_err(),
+        ToolProtocolErrorCode::InvalidResult,
+    );
 }
 
 #[test]
@@ -230,6 +281,86 @@ fn result_enforces_each_proposals_requested_count_and_byte_limits() {
 }
 
 #[test]
+fn read_result_path_must_equal_the_requested_path() {
+    let context = active_context();
+    let proposal = proposal_fixture("fs-read")
+        .validate_for_context(&context)
+        .unwrap();
+    let mut result = bind_result(result_fixture("fs-read"), &proposal);
+    result.output.as_mut().unwrap()["path"] = json!("src/other.rs");
+
+    let error = result
+        .validate_for_proposal(&context, &proposal)
+        .unwrap_err();
+    assert_eq!(error.code(), ToolProtocolErrorCode::InvalidResult);
+}
+
+#[test]
+fn list_and_search_results_use_component_aware_proposal_scope() {
+    let context = active_context();
+
+    let list = proposal_fixture("fs-list")
+        .validate_for_context(&context)
+        .unwrap();
+    assert!(
+        bind_result(result_fixture("fs-list"), &list)
+            .validate_for_proposal(&context, &list)
+            .is_ok()
+    );
+    for path in ["src2/file.rs", "Cargo.toml", "src/./file.rs"] {
+        let mut result = bind_result(result_fixture("fs-list"), &list);
+        result.output.as_mut().unwrap()["entries"][1]["path"] = json!(path);
+        assert_eq!(
+            result
+                .validate_for_proposal(&context, &list)
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidResult,
+            "list path should be rejected: {path}"
+        );
+    }
+
+    let mut search = proposal_fixture("fs-search");
+    search.arguments = json!({
+        "path": "src",
+        "query": "ToolProposal",
+        "case_sensitive": false,
+        "max_results": 100
+    });
+    search.arguments_digest = canonical_arguments_digest(&search.arguments).unwrap();
+    let search = search.validate_for_context(&context).unwrap();
+    let search_result = bind_result(result_fixture("fs-search"), &search);
+    assert!(
+        search_result
+            .validate_for_proposal(&context, &search)
+            .is_ok()
+    );
+    for path in ["src2/lib.rs", "tests/tool.rs", "src/../tests/tool.rs"] {
+        let mut result = bind_result(result_fixture("fs-search"), &search);
+        result.output.as_mut().unwrap()["matches"][0]["path"] = json!(path);
+        assert_eq!(
+            result
+                .validate_for_proposal(&context, &search)
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidResult,
+            "search path should be rejected: {path}"
+        );
+    }
+
+    let root_search = proposal_fixture("fs-search")
+        .validate_for_context(&context)
+        .unwrap();
+    let mut root_result = bind_result(result_fixture("fs-search"), &root_search);
+    root_result.output.as_mut().unwrap()["matches"][0]["path"] = json!("tests/tool.rs");
+    assert!(
+        root_result
+            .validate_for_proposal(&context, &root_search)
+            .is_ok()
+    );
+}
+
+#[test]
 fn protocol_errors_never_reflect_provider_controlled_serde_text() {
     let context = active_context();
     let mut proposal = proposal_fixture("fs-read");
@@ -318,10 +449,10 @@ fn result_receipt_fields_are_required_and_strict() {
         .as_object_mut()
         .unwrap()
         .remove("proposal_fingerprint");
-    assert!(serde_json::from_value::<ToolResult>(value).is_err());
+    assert!(ToolResult::parse_value(value).is_err());
 
     let mut value: Value =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     value.as_object_mut().unwrap().remove("arguments_digest");
-    assert!(serde_json::from_value::<ToolResult>(value).is_err());
+    assert!(ToolResult::parse_value(value).is_err());
 }

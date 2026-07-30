@@ -20,8 +20,8 @@ fn read_fixture(name: &str) -> String {
 }
 
 fn proposal_fixture() -> ToolProposal {
-    serde_json::from_str(&read_fixture("tool-proposal-fs-read-v1.json"))
-        .expect("strict proposal fixture")
+    ToolProposal::parse_str(&read_fixture("tool-proposal-fs-read-v1.json"))
+        .expect("safe strict proposal fixture")
 }
 
 fn active_context() -> ToolActiveContext {
@@ -104,11 +104,9 @@ fn proposal_envelope_denies_unknown_and_authority_fields() {
             .unwrap()
             .insert(forbidden.into(), json!("provider-owned"));
 
-        let error = serde_json::from_value::<ToolProposal>(value).unwrap_err();
-        assert!(
-            error.to_string().contains("unknown field"),
-            "{forbidden}: {error}"
-        );
+        let error = ToolProposal::parse_value(value).unwrap_err();
+        assert_eq!(error.code(), ToolProtocolErrorCode::InvalidEnvelope);
+        assert!(!error.to_string().contains(forbidden));
     }
 }
 
@@ -253,8 +251,7 @@ fn tool_state_vocabulary_is_fixed_and_ordered() {
 fn successful_result_fixture_is_strict_and_valid() {
     let context = active_context();
     let proposal = proposal_fixture().validate_for_context(&context).unwrap();
-    let result: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let result = ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     let validated = result.validate_for_proposal(&context, &proposal).unwrap();
     assert_eq!(validated.state(), ToolExecutionState::Succeeded);
     assert_eq!(
@@ -268,10 +265,11 @@ fn successful_result_fixture_is_strict_and_valid() {
 fn every_fixed_tool_has_a_valid_proposal_and_result_fixture() {
     let context = active_context();
     for tool in ["fs-list", "fs-read", "fs-search"] {
-        let proposal: ToolProposal =
-            serde_json::from_str(&read_fixture(&format!("tool-proposal-{tool}-v1.json"))).unwrap();
-        let result: ToolResult =
-            serde_json::from_str(&read_fixture(&format!("tool-result-{tool}-v1.json"))).unwrap();
+        let proposal =
+            ToolProposal::parse_str(&read_fixture(&format!("tool-proposal-{tool}-v1.json")))
+                .unwrap();
+        let result =
+            ToolResult::parse_str(&read_fixture(&format!("tool-result-{tool}-v1.json"))).unwrap();
 
         let proposal = proposal.validate_for_context(&context).unwrap();
         let result = result.validate_for_proposal(&context, &proposal).unwrap();
@@ -291,10 +289,10 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
         .as_object_mut()
         .unwrap()
         .insert("provider_payload".into(), json!({}));
-    assert!(serde_json::from_value::<ToolResult>(unknown).is_err());
+    assert!(ToolResult::parse_value(unknown).is_err());
 
-    let mut wrong_output: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let mut wrong_output =
+        ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     wrong_output.output = Some(json!({
         "entries": [],
         "truncated": false
@@ -304,8 +302,8 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
         .unwrap_err();
     assert_eq!(error.code(), ToolProtocolErrorCode::InvalidResult);
 
-    let mut executing: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let mut executing =
+        ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     executing.state = ToolExecutionState::Executing;
     let error = executing
         .validate_for_proposal(&context, &proposal)
@@ -317,8 +315,7 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
 fn result_rejects_every_proposal_and_context_identity_mismatch() {
     let context = active_context();
     let proposal = proposal_fixture().validate_for_context(&context).unwrap();
-    let base: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let base = ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
 
     let mut mismatches = Vec::new();
     let mut value = base.clone();
@@ -376,8 +373,7 @@ fn public_errors_are_secret_safe_by_construction_and_serialization() {
 
     let context = active_context();
     let proposal = proposal_fixture().validate_for_context(&context).unwrap();
-    let mut result: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let mut result = ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     result.state = ToolExecutionState::Failed;
     result.output = None;
     result.error = Some(safe_error);
@@ -388,8 +384,7 @@ fn public_errors_are_secret_safe_by_construction_and_serialization() {
 fn protocol_paths_reject_windows_devices_and_non_portable_aliases() {
     let context = active_context();
     let valid = proposal_fixture().validate_for_context(&context).unwrap();
-    let base_result: ToolResult =
-        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let base_result = ToolResult::parse_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     let mut paths = vec![
         "CON".to_string(),
         "con.txt".to_string(),

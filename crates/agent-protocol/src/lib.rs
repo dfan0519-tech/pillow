@@ -3,6 +3,13 @@
 //! Adapters normalize provider wire formats into this vocabulary before any
 //! event crosses into the runtime host, domain store, or renderer. Provider
 //! payloads must not appear in these types.
+//!
+//! Operational tool ingress must use the crate-owned
+//! [`ToolProposal::parse_str`], [`ToolProposal::parse_bytes`],
+//! [`ToolProposal::parse_value`], [`ToolResult::parse_str`],
+//! [`ToolResult::parse_bytes`], or [`ToolResult::parse_value`] boundaries.
+//! They intentionally replace raw serde diagnostics with fixed
+//! [`ToolProtocolError`] values.
 
 mod adapter;
 mod error;

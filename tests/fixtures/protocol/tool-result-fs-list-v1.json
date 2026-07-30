@@ -16,7 +16,7 @@
         "size_bytes": null
       },
       {
-        "path": "Cargo.toml",
+        "path": "src/lib.rs",
         "kind": "file",
         "size_bytes": 602
       }

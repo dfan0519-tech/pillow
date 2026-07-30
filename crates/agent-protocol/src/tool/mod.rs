@@ -5,6 +5,7 @@ mod public_error;
 mod reservation;
 mod types;
 mod validate;
+mod wire;
 
 pub use digest::canonical_arguments_digest;
 pub use manifest::fixed_tool_manifests;

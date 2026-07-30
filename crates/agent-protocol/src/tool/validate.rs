@@ -262,6 +262,7 @@ fn decode_output(
             };
             for entry in &output.entries {
                 validate_project_path_for_result(&entry.path)?;
+                validate_result_scope(&arguments.path, &entry.path)?;
             }
             let count = output.entries.len();
             if count > arguments.max_results as usize {
@@ -282,6 +283,11 @@ fn decode_output(
                 ));
             };
             validate_project_path_for_result(&output.path)?;
+            if output.path != arguments.path {
+                return Err(invalid_result(
+                    "fs.read output path does not match the requested path",
+                ));
+            }
             match (&output.content_kind, &output.content) {
                 (ToolContentKind::Utf8, Some(content))
                     if content.len() as u64 == output.bytes_returned => {}
@@ -308,6 +314,7 @@ fn decode_output(
             };
             for item in &output.matches {
                 validate_project_path_for_result(&item.path)?;
+                validate_result_scope(&arguments.path, &item.path)?;
                 if item.line == 0
                     || item.column == 0
                     || item.preview.len() > 2_048
@@ -375,6 +382,20 @@ fn validate_project_path(path: &str) -> Result<(), ToolProtocolError> {
 fn validate_project_path_for_result(path: &str) -> Result<(), ToolProtocolError> {
     validate_project_path_inner(path)
         .map_err(|message| invalid_result(format!("invalid result path: {message}")))
+}
+
+fn validate_result_scope(requested: &str, candidate: &str) -> Result<(), ToolProtocolError> {
+    if requested == "."
+        || candidate == requested
+        || candidate
+            .strip_prefix(requested)
+            .is_some_and(|remainder| remainder.starts_with('/'))
+    {
+        return Ok(());
+    }
+    Err(invalid_result(
+        "result path is outside the requested project-relative scope",
+    ))
 }
 
 fn validate_project_path_inner(path: &str) -> Result<(), &'static str> {
