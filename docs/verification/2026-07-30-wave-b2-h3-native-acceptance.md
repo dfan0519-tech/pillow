@@ -1,7 +1,7 @@
 # Wave B2-H3 Controlled Native Acceptance Harness
 
-Date: 2026-07-30  
-Package: **H3 — harness only**  
+Date: 2026-07-30
+Package: **H3 — harness only**
 Branch: `wave-b2-h3-native-acceptance`
 
 ## Purpose

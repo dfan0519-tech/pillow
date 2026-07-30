@@ -160,8 +160,28 @@ export function validateAdapterEvidence(value) {
   if (v.adapterName !== "grok-acp") {
     throw new Error(`adapterName must be grok-acp, got ${v.adapterName}`);
   }
-  if (v.probe?.healthy !== true) {
-    throw new Error("probe.healthy must be true for live pass");
+  const probe = v.probe;
+  if (
+    probe?.beforeSession?.healthy !== false
+    || probe.beforeSession.detail !== "unavailable"
+  ) {
+    throw new Error("probe.beforeSession must be unavailable and not healthy");
+  }
+  if (
+    probe?.afterSessionNew?.healthy !== false
+    || probe.afterSessionNew.detail !== "transport_ready_auth_unverified"
+  ) {
+    throw new Error(
+      "probe.afterSessionNew must be transport_ready_auth_unverified and not healthy",
+    );
+  }
+  if (
+    probe?.afterFirstSuccessfulPrompt?.healthy !== true
+    || probe.afterFirstSuccessfulPrompt.detail !== "healthy"
+  ) {
+    throw new Error(
+      "probe.afterFirstSuccessfulPrompt must be healthy for live pass",
+    );
   }
   for (const key of ["readOnlyTurn", "cooperativeCancel"]) {
     const turn = v[key];

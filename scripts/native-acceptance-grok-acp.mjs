@@ -228,7 +228,10 @@ async function runLive({ outDir }) {
     probe: {
       status: adapterResult?.probe ? "passed" : "failed",
       adapterName: adapterResult?.adapterName ?? null,
-      healthy: adapterResult?.probe?.healthy ?? null,
+      beforeSession: adapterResult?.probe?.beforeSession ?? null,
+      afterSessionNew: adapterResult?.probe?.afterSessionNew ?? null,
+      afterFirstSuccessfulPrompt:
+        adapterResult?.probe?.afterFirstSuccessfulPrompt ?? null,
     },
     sessionNew: { status: adapterResult?.sessionNew === true ? "passed" : "failed" },
     readOnlyTurn: {
@@ -275,7 +278,12 @@ async function runLive({ outDir }) {
       ? {
           status: adapterResult.status,
           adapterName: adapterResult.adapterName,
-          probeHealthy: adapterResult.probe?.healthy ?? null,
+          probe: {
+            beforeSession: adapterResult.probe?.beforeSession ?? null,
+            afterSessionNew: adapterResult.probe?.afterSessionNew ?? null,
+            afterFirstSuccessfulPrompt:
+              adapterResult.probe?.afterFirstSuccessfulPrompt ?? null,
+          },
           readOnlyTerminal: adapterResult.readOnlyTurn?.terminalKind ?? null,
           cancelTerminal: adapterResult.cooperativeCancel?.terminalKind ?? null,
           shutdownOk: adapterResult.shutdownOk ?? null,
@@ -412,7 +420,14 @@ async function runSelfTest() {
         schemaVersion: 1,
         status: "passed",
         adapterName: "fake",
-        probe: { healthy: true },
+        probe: {
+          beforeSession: { healthy: false, detail: "unavailable" },
+          afterSessionNew: {
+            healthy: false,
+            detail: "transport_ready_auth_unverified",
+          },
+          afterFirstSuccessfulPrompt: { healthy: true, detail: "healthy" },
+        },
         sessionNew: true,
         readOnlyTurn: { terminalKind: "turn_completed", terminalCount: 1 },
         cooperativeCancel: { terminalKind: "run_cancelled", terminalCount: 1 },
@@ -425,7 +440,32 @@ async function runSelfTest() {
     assert.equal(rejected, true, "must reject adapter_name=fake for live gate");
   }
 
-  // 9) Live ignored test is present and marked ignore in source
+  // 9) Adapter evidence validator accepts the factual H1 probe ladder.
+  {
+    assert.equal(
+      validateAdapterEvidence({
+        schemaVersion: 1,
+        status: "passed",
+        adapterName: "grok-acp",
+        probe: {
+          beforeSession: { healthy: false, detail: "unavailable" },
+          afterSessionNew: {
+            healthy: false,
+            detail: "transport_ready_auth_unverified",
+          },
+          afterFirstSuccessfulPrompt: { healthy: true, detail: "healthy" },
+        },
+        sessionNew: true,
+        readOnlyTurn: { terminalKind: "turn_completed", terminalCount: 1 },
+        cooperativeCancel: { terminalKind: "run_cancelled", terminalCount: 1 },
+        writePermissionObserved: false,
+        shutdownOk: true,
+      }),
+      true,
+    );
+  }
+
+  // 10) Live ignored test is present and marked ignore in source
   {
     const liveSrc = await readFile(
       path.join(
