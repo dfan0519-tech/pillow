@@ -1,0 +1,15 @@
+{
+  "project_id": "VK-013",
+  "conversation_id": "VK-013-C116",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "call_id": "call-search-1",
+  "tool_id": "fs.search",
+  "tool_version": 1,
+  "arguments": {
+    "path": "src",
+    "query": "ToolProposal",
+    "case_sensitive": false,
+    "max_results": 50
+  },
+  "arguments_digest": "sha256:16dd197ea1d666e80dde03eab5597595adc9f22ac5d103a736a1230af8fba431"
+}

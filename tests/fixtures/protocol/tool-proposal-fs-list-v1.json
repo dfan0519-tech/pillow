@@ -1,0 +1,13 @@
+{
+  "project_id": "VK-013",
+  "conversation_id": "VK-013-C116",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "call_id": "call-list-1",
+  "tool_id": "fs.list",
+  "tool_version": 1,
+  "arguments": {
+    "path": "src",
+    "max_results": 25
+  },
+  "arguments_digest": "sha256:a6d6252899905eedc0ac7b9e23185ed7231ad0b56bd37496429c0251f37511cd"
+}

@@ -1,0 +1,95 @@
+[
+  {
+    "tool_id": "fs.list",
+    "tool_version": 1,
+    "description": "List entries under one project-relative directory without following links.",
+    "arguments": [
+      {
+        "name": "path",
+        "value_type": "project_relative_path",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "max_results",
+        "value_type": "u32",
+        "required": false,
+        "default": 100
+      }
+    ],
+    "limits": {
+      "output_byte_cap": 262144,
+      "result_count_cap": 1000,
+      "timeout_ms": 2000,
+      "cancellation_checks_required": true
+    }
+  },
+  {
+    "tool_id": "fs.read",
+    "tool_version": 1,
+    "description": "Read a bounded byte range from one project-relative file.",
+    "arguments": [
+      {
+        "name": "path",
+        "value_type": "project_relative_path",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "offset_bytes",
+        "value_type": "u64",
+        "required": false,
+        "default": 0
+      },
+      {
+        "name": "max_bytes",
+        "value_type": "u64",
+        "required": false,
+        "default": 65536
+      }
+    ],
+    "limits": {
+      "output_byte_cap": 1048576,
+      "result_count_cap": null,
+      "timeout_ms": 2000,
+      "cancellation_checks_required": true
+    }
+  },
+  {
+    "tool_id": "fs.search",
+    "tool_version": 1,
+    "description": "Search UTF-8 project files for a literal query and return bounded matches.",
+    "arguments": [
+      {
+        "name": "path",
+        "value_type": "project_relative_path",
+        "required": false,
+        "default": "."
+      },
+      {
+        "name": "query",
+        "value_type": "string",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "case_sensitive",
+        "value_type": "bool",
+        "required": false,
+        "default": false
+      },
+      {
+        "name": "max_results",
+        "value_type": "u32",
+        "required": false,
+        "default": 100
+      }
+    ],
+    "limits": {
+      "output_byte_cap": 524288,
+      "result_count_cap": 500,
+      "timeout_ms": 5000,
+      "cancellation_checks_required": true
+    }
+  }
+]

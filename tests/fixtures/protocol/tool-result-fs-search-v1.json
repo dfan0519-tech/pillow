@@ -1,0 +1,21 @@
+{
+  "project_id": "VK-013",
+  "conversation_id": "VK-013-C116",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "call_id": "call-search-1",
+  "tool_id": "fs.search",
+  "tool_version": 1,
+  "state": "succeeded",
+  "output": {
+    "matches": [
+      {
+        "path": "src/lib.rs",
+        "line": 1,
+        "column": 1,
+        "preview": "//! Provider-neutral agent runtime protocol."
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}

@@ -1,0 +1,14 @@
+{
+  "project_id": "VK-013",
+  "conversation_id": "VK-013-C116",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "call_id": "call-read-1",
+  "tool_id": "fs.read",
+  "tool_version": 1,
+  "arguments": {
+    "path": "src/lib.rs",
+    "offset_bytes": 0,
+    "max_bytes": 4096
+  },
+  "arguments_digest": "sha256:39d1d5468d2801975f58ad7bb568647f4dbf73581bf34a3af040cae092805cdb"
+}

@@ -1,0 +1,17 @@
+{
+  "project_id": "VK-013",
+  "conversation_id": "VK-013-C116",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "call_id": "call-read-1",
+  "tool_id": "fs.read",
+  "tool_version": 1,
+  "state": "succeeded",
+  "output": {
+    "path": "src/lib.rs",
+    "content_kind": "utf8",
+    "content": "pub fn main() {}\n",
+    "bytes_returned": 17,
+    "truncated": false
+  },
+  "error": null
+}
