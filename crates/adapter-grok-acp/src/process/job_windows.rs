@@ -51,11 +51,9 @@ impl SuspendedPrimaryThread {
         // SAFETY: snapshot is valid and entry points to initialized writable storage.
         let mut present = unsafe { Thread32First(snapshot, &raw mut entry) } != 0;
         while present {
-            if entry.th32OwnerProcessID == pid {
-                if thread_id.replace(entry.th32ThreadID).is_some() {
-                    multiple_threads = true;
-                    break;
-                }
+            if entry.th32OwnerProcessID == pid && thread_id.replace(entry.th32ThreadID).is_some() {
+                multiple_threads = true;
+                break;
             }
             // SAFETY: snapshot and entry remain valid for the enumeration.
             present = unsafe { Thread32Next(snapshot, &raw mut entry) } != 0;
