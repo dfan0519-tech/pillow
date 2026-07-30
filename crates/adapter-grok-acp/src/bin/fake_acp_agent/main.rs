@@ -146,6 +146,10 @@ fn main() {
                     write_error(&mut stdout, id, -32000, "not initialized");
                     continue;
                 }
+                if !has_safe_agent_profile(&params) {
+                    write_error(&mut stdout, id, -32602, "unsafe session profile");
+                    continue;
+                }
                 session_id = format!("fake-session-{}", simple_id());
                 write_json(
                     &mut stdout,
@@ -174,6 +178,10 @@ fn main() {
                 );
             }
             "session/load" => {
+                if !has_safe_agent_profile(&params) {
+                    write_error(&mut stdout, id, -32602, "unsafe session profile");
+                    continue;
+                }
                 let sid = params
                     .get("sessionId")
                     .and_then(|v| v.as_str())
@@ -246,6 +254,32 @@ fn main() {
 
     // Keep descendant handle alive until we exit so the OS job tree can kill it.
     drop(descendant);
+}
+
+fn has_safe_agent_profile(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(|meta| meta.get("agentProfile"))
+        == Some(&json!({
+            "tools": ["read_file", "grep_search", "list_dir"],
+            "disallowedTools": [
+                "bash",
+                "run_terminal_command",
+                "search_replace",
+                "write_file",
+                "task",
+                "kill_task",
+                "get_task_output",
+                "search_tool",
+                "use_tool",
+                "web_search",
+                "web_fetch",
+                "memory_search",
+                "memory_get",
+                "todo_write",
+                "lsp"
+            ]
+        }))
 }
 
 /// Spawn an immediate long-lived child without a shell launcher or timer process.
