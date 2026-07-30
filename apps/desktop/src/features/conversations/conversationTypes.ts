@@ -8,6 +8,7 @@ import type {
   RuntimeEventKind,
   RunStatus,
   TimelineMessageDto,
+  ToolInputSummaryDto,
 } from "../../lib/conversationGateway";
 
 export type PlanStepView = {
@@ -20,6 +21,21 @@ export type PlanActivity = {
   steps: PlanStepView[];
 };
 
+export type ResourceReferenceView = {
+  resourceId: string;
+  kind: "file" | "directory" | "search_results" | "artifact" | "receipt";
+  label: string;
+  path?: string;
+  contentPreview?: string;
+  truncated: boolean;
+};
+
+export type ReceiptReferenceView = {
+  receiptId: string;
+  label: string;
+  resource: ResourceReferenceView;
+};
+
 export type ToolActivity = {
   toolCallId: string;
   name: string;
@@ -27,7 +43,12 @@ export type ToolActivity = {
   status: "running" | "completed" | "failed" | "cancelled";
   startedAt: string;
   updatedAt: string;
+  inputSummary?: ToolInputSummaryDto;
   output?: string;
+  outputTruncated?: boolean;
+  omittedOutputChars?: number;
+  receipt?: ReceiptReferenceView;
+  resources?: ResourceReferenceView[];
 };
 
 export type SubagentActivity = {
@@ -44,16 +65,21 @@ export type ArtifactActivity = {
   path: string;
   kind: string;
   createdAt: string;
+  resource?: ResourceReferenceView;
 };
 
 export type RunActivityView = {
   runId: string;
   status: RunStatus;
-  startedAt: string;
-  updatedAt: string;
+  startedAt: string | null;
+  updatedAt: string | null;
   promptPreview?: string;
   assistantText: string;
+  assistantTextTruncated?: boolean;
+  omittedAssistantChars?: number;
   reasoningText: string;
+  reasoningTextTruncated?: boolean;
+  omittedReasoningChars?: number;
   plan: PlanActivity | null;
   tools: ToolActivity[];
   subagents: SubagentActivity[];

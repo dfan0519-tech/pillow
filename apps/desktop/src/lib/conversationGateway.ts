@@ -63,30 +63,73 @@ export type RunStartedPayload = {
 
 export type AssistantDeltaPayload = {
   text: string;
+  /** Renderer projection metadata; transport events normally omit this. */
+  omitted_chars?: number;
 };
 
 export type ReasoningSummaryDeltaPayload = {
   text: string;
+  /** Renderer projection metadata; transport events normally omit this. */
+  omitted_chars?: number;
 };
 
 export type PlanUpdatedPayload = {
   steps: PlanStepDto[];
 };
 
+export type ToolInputSummaryDto =
+  | {
+      kind: "fs_list";
+      path: string;
+      max_results: number;
+    }
+  | {
+      kind: "fs_read";
+      path: string;
+      offset_bytes: number;
+      max_bytes: number;
+    }
+  | {
+      kind: "fs_search";
+      path: string;
+      query_preview: string;
+      case_sensitive: boolean;
+      max_results: number;
+    };
+
+export type ResourceReferenceDto = {
+  resource_id: string;
+  kind: "file" | "directory" | "search_results" | "artifact" | "receipt";
+  label: string;
+  path?: string;
+  content_preview?: string;
+  truncated?: boolean;
+};
+
+export type ToolReceiptReferenceDto = {
+  receipt_id: string;
+  label: string;
+  resource?: ResourceReferenceDto;
+};
+
 export type ToolCallStartedPayload = {
   tool_call_id: string;
   name: string;
   summary?: string;
+  input_summary?: ToolInputSummaryDto;
 };
 
 export type ToolCallOutputPayload = {
   tool_call_id: string;
   chunk: string;
+  /** Renderer projection metadata; transport events normally omit this. */
+  omitted_chars?: number;
 };
 
 export type ToolCallCompletedPayload = {
   tool_call_id: string;
   status: "completed" | "failed" | "cancelled";
+  receipt?: ToolReceiptReferenceDto;
 };
 
 export type SubagentStartedPayload = {
@@ -108,6 +151,7 @@ export type ArtifactProducedPayload = {
   artifact_id: string;
   path: string;
   kind: string;
+  resource?: ResourceReferenceDto;
 };
 
 export type TurnCompletedPayload = {

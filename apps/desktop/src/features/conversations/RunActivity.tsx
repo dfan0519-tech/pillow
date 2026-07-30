@@ -2,11 +2,17 @@
  * Concise, expandable activity projected for one durable run.
  */
 
-import { useEffect, useRef } from "react";
-import type { RunActivityView } from "./conversationReducer";
+import { useEffect, useId, useRef } from "react";
+import { IconPanelRight } from "../../components/icons";
+import type {
+  ResourceReferenceView,
+  RunActivityView,
+} from "./conversationReducer";
+import type { ToolInputSummaryDto } from "../../lib/conversationGateway";
 
 type RunActivityProps = {
   activity: RunActivityView;
+  onOpenResource?: (resource: ResourceReferenceView) => void;
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -34,7 +40,10 @@ const ACTIVITY_STATUS_LABEL: Record<string, string> = {
   cancelled: "已取消",
 };
 
-export function RunActivity({ activity }: RunActivityProps) {
+export function RunActivity({
+  activity,
+  onOpenResource,
+}: RunActivityProps) {
   const isActive =
     activity.status === "pending"
     || activity.status === "running"
@@ -44,6 +53,7 @@ export function RunActivity({ activity }: RunActivityProps) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const initializedRef = useRef(false);
   const wasActiveRef = useRef(isActive);
+  const headingId = useId();
 
   useEffect(() => {
     if (!detailsRef.current) return;
@@ -58,11 +68,12 @@ export function RunActivity({ activity }: RunActivityProps) {
 
   return (
     <section
-      aria-label="运行活动"
+      aria-labelledby={headingId}
       className="run-activity"
       data-run-id={activity.runId}
       data-testid="run-activity"
     >
+      <h2 className="sr-only" id={headingId}>运行活动</h2>
       <details ref={detailsRef}>
         <summary>
           <span
@@ -88,16 +99,29 @@ export function RunActivity({ activity }: RunActivityProps) {
               ))}
             </span>
           ) : null}
-          <time
-            className="run-activity__time"
-            dateTime={activity.updatedAt}
-            title={formatFullTimestamp(activity.updatedAt)}
-          >
-            {formatActivityTime(activity.updatedAt)}
-          </time>
+          {activity.updatedAt ? (
+            <time
+              className="run-activity__time"
+              dateTime={activity.updatedAt}
+              title={formatFullTimestamp(activity.updatedAt)}
+            >
+              {formatActivityTime(activity.updatedAt)}
+            </time>
+          ) : (
+            <span aria-hidden="true" />
+          )}
         </summary>
 
         <div className="run-activity__content">
+          {activity.assistantTextTruncated ? (
+            <p
+              className="run-activity__truncation"
+              data-testid="run-activity-assistant-truncated"
+            >
+              回复已截断，省略 {activity.omittedAssistantChars ?? 0} 个字符
+            </p>
+          ) : null}
+
           {activity.reasoningText ? (
             <div
               className="run-activity__block"
@@ -105,6 +129,14 @@ export function RunActivity({ activity }: RunActivityProps) {
             >
               <h3>推理摘要</h3>
               <p>{activity.reasoningText}</p>
+              {activity.reasoningTextTruncated ? (
+                <p
+                  className="run-activity__truncation"
+                  data-testid="run-activity-reasoning-truncated"
+                >
+                  推理已截断，省略 {activity.omittedReasoningChars ?? 0} 个字符
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -144,9 +176,34 @@ export function RunActivity({ activity }: RunActivityProps) {
                         {formatActivityTime(tool.updatedAt)}
                       </time>
                     </span>
-                    {tool.output ? (
-                      <pre className="run-activity__item-detail">{tool.output}</pre>
+                    {tool.inputSummary ? (
+                      <p className="run-activity__item-detail">
+                        输入 · {formatInputSummary(tool.inputSummary)}
+                      </p>
                     ) : null}
+                    {tool.output ? (
+                      <pre
+                        className="run-activity__item-detail"
+                        tabIndex={0}
+                      >
+                        {tool.output}
+                      </pre>
+                    ) : null}
+                    {tool.outputTruncated ? (
+                      <p
+                        className="run-activity__truncation"
+                        data-testid="run-activity-output-truncated"
+                      >
+                        输出已截断，省略 {tool.omittedOutputChars ?? 0} 个字符
+                      </p>
+                    ) : null}
+                    {(tool.resources ?? []).map((resource) => (
+                      <ResourceButton
+                        key={resource.resourceId}
+                        onOpenResource={onOpenResource}
+                        resource={resource}
+                      />
+                    ))}
                   </li>
                 ))}
               </ul>
@@ -198,6 +255,12 @@ export function RunActivity({ activity }: RunActivityProps) {
                     <span className="run-activity__item-meta">
                       {artifact.kind}
                     </span>
+                    {artifact.resource ? (
+                      <ResourceButton
+                        onOpenResource={onOpenResource}
+                        resource={artifact.resource}
+                      />
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -209,8 +272,43 @@ export function RunActivity({ activity }: RunActivityProps) {
   );
 }
 
+function ResourceButton({
+  resource,
+  onOpenResource,
+}: {
+  resource: ResourceReferenceView;
+  onOpenResource?: (resource: ResourceReferenceView) => void;
+}) {
+  if (!onOpenResource) return null;
+  return (
+    <button
+      aria-label={`打开 ${resource.label}`}
+      className="run-activity__resource"
+      onClick={() => onOpenResource(resource)}
+      type="button"
+    >
+      <IconPanelRight size={13} />
+      <span>{resource.label}</span>
+    </button>
+  );
+}
+
+function formatInputSummary(summary: ToolInputSummaryDto): string {
+  if (summary.kind === "fs_list") {
+    return `${summary.path} · 最多 ${summary.max_results} 项`;
+  }
+  if (summary.kind === "fs_read") {
+    const end = summary.offset_bytes + summary.max_bytes;
+    return `${summary.path} · ${summary.offset_bytes}–${end} 字节`;
+  }
+  const caseLabel = summary.case_sensitive ? "区分大小写" : "忽略大小写";
+  return `${summary.path} · “${summary.query_preview}” · ${caseLabel} · 最多 ${summary.max_results} 项`;
+}
+
 function activitySummaryParts(activity: RunActivityView): string[] {
   const parts: string[] = [];
+  if (activity.assistantTextTruncated) parts.push("回复已截断");
+  if (activity.reasoningTextTruncated) parts.push("推理已截断");
   if (activity.plan) parts.push(`${activity.plan.steps.length} 步`);
   if (activity.tools.length > 0) parts.push(`${activity.tools.length} 工具`);
   if (activity.subagents.length > 0) {

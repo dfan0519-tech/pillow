@@ -23,6 +23,8 @@ export type {
   ConversationUiState,
   PlanActivity,
   PlanStepView,
+  ReceiptReferenceView,
+  ResourceReferenceView,
   RunActivityView,
   RunView,
   SubagentActivity,

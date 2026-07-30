@@ -160,6 +160,238 @@ describe("event dedupe by (runId, sequence)", () => {
       "bounded result",
     );
   });
+
+  it("bounds retained output per tool and across the owning run", () => {
+    let state = createInitialConversationState();
+    let sequence = 1;
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-bounded",
+        sequence: sequence++,
+        kind: "run_started",
+        payload: {},
+      }),
+    });
+
+    for (let index = 0; index < 4; index += 1) {
+      const toolCallId = `tool-${index}`;
+      state = dispatch(state, {
+        type: "runtime_event",
+        event: baseEvent({
+          runId: "run-bounded",
+          sequence: sequence++,
+          kind: "tool_call_started",
+          payload: {
+            tool_call_id: toolCallId,
+            name: "fs.read",
+            summary: `Read ${index}`,
+          },
+        }),
+      });
+      state = dispatch(state, {
+        type: "runtime_event",
+        event: baseEvent({
+          runId: "run-bounded",
+          sequence: sequence++,
+          kind: "tool_call_output",
+          payload: { tool_call_id: toolCallId, chunk: "x".repeat(20_000) },
+        }),
+      });
+    }
+
+    const activity = state.timelines.c1?.activitiesByRunId["run-bounded"];
+    const retainedChars =
+      activity?.tools.reduce((total, tool) => total + (tool.output?.length ?? 0), 0)
+      ?? 0;
+    const retainedEventChars =
+      state.timelines.c1?.events.reduce(
+        (total, event) =>
+          total
+          + (event.kind === "tool_call_output" ? event.payload.chunk.length : 0),
+        0,
+      )
+      ?? 0;
+
+    expect(activity?.tools[0]?.output).toHaveLength(16_384);
+    expect(activity?.tools[0]).toMatchObject({
+      outputTruncated: true,
+      omittedOutputChars: 3_616,
+    });
+    expect(retainedChars).toBeLessThanOrEqual(49_152);
+    expect(retainedEventChars).toBeLessThanOrEqual(49_152);
+    expect(activity?.tools[3]).toMatchObject({
+      outputTruncated: true,
+      omittedOutputChars: 20_000,
+    });
+
+    const snapshotEvents =
+      state.timelines.c1?.events.filter(
+        (event) => event.kind !== "tool_call_output",
+      )
+      ?? [];
+    state = dispatch(state, {
+      type: "timeline_loaded",
+      timeline: {
+        conversationId: "c1",
+        messages: [],
+        events: snapshotEvents,
+        runs: [
+          {
+            runId: "run-bounded",
+            conversationId: "c1",
+            status: "running",
+          },
+        ],
+      },
+    });
+
+    const reloaded =
+      state.timelines.c1?.activitiesByRunId["run-bounded"]?.tools
+      ?? [];
+    expect(
+      reloaded.reduce(
+        (total, tool) => total + (tool.output?.length ?? 0),
+        0,
+      ),
+    ).toBe(49_152);
+    expect(reloaded[0]).toMatchObject({
+      outputTruncated: true,
+      omittedOutputChars: 3_616,
+    });
+  });
+
+  it("bounds retained assistant and reasoning output across the owning run", () => {
+    let state = createInitialConversationState();
+    const events = [
+      baseEvent({
+        runId: "run-text-bounded",
+        sequence: 1,
+        kind: "run_started",
+        payload: {},
+      }),
+      baseEvent({
+        runId: "run-text-bounded",
+        sequence: 2,
+        kind: "assistant_delta",
+        payload: { text: "a".repeat(50_000) },
+      }),
+      baseEvent({
+        runId: "run-text-bounded",
+        sequence: 3,
+        kind: "reasoning_summary_delta",
+        payload: { text: "r".repeat(30_000) },
+      }),
+    ];
+    for (const event of events) {
+      state = dispatch(state, { type: "runtime_event", event });
+    }
+
+    const activity =
+      state.timelines.c1?.activitiesByRunId["run-text-bounded"];
+    const retainedTextChars =
+      (activity?.assistantText.length ?? 0)
+      + (activity?.reasoningText.length ?? 0);
+    const retainedEventChars =
+      state.timelines.c1?.events.reduce((total, event) => {
+        if (
+          event.kind === "assistant_delta"
+          || event.kind === "reasoning_summary_delta"
+        ) {
+          return total + event.payload.text.length;
+        }
+        return total;
+      }, 0)
+      ?? 0;
+
+    expect(retainedTextChars).toBe(65_536);
+    expect(retainedEventChars).toBe(65_536);
+    expect(activity).toMatchObject({
+      assistantTextTruncated: false,
+      omittedAssistantChars: 0,
+      reasoningTextTruncated: true,
+      omittedReasoningChars: 14_464,
+    });
+
+    const snapshot = state.timelines.c1;
+    state = dispatch(state, {
+      type: "timeline_loaded",
+      timeline: {
+        conversationId: "c1",
+        messages: [],
+        events: snapshot?.events ?? [],
+        runs: [
+          {
+            runId: "run-text-bounded",
+            conversationId: "c1",
+            status: "running",
+          },
+        ],
+      },
+    });
+    expect(
+      state.timelines.c1?.activitiesByRunId["run-text-bounded"],
+    ).toMatchObject({
+      assistantTextTruncated: false,
+      omittedAssistantChars: 0,
+      reasoningTextTruncated: true,
+      omittedReasoningChars: 14_464,
+    });
+  });
+
+  it("bounds readable receipt previews before retaining renderer events", () => {
+    let state = createInitialConversationState();
+    const events = [
+      baseEvent({
+        runId: "run-preview",
+        sequence: 1,
+        kind: "tool_call_started",
+        payload: {
+          tool_call_id: "tool-preview",
+          name: "fs.read",
+          summary: "Read preview",
+        },
+      }),
+      baseEvent({
+        runId: "run-preview",
+        sequence: 2,
+        kind: "tool_call_completed",
+        payload: {
+          tool_call_id: "tool-preview",
+          status: "completed",
+          receipt: {
+            receipt_id: "receipt-preview",
+            label: "Preview receipt",
+            resource: {
+              resource_id: "resource-preview",
+              kind: "file",
+              label: "large.txt",
+              path: "large.txt",
+              content_preview: "z".repeat(20_000),
+            },
+          },
+        },
+      }),
+    ];
+    for (const event of events) {
+      state = dispatch(state, { type: "runtime_event", event });
+    }
+
+    const resource =
+      state.timelines.c1?.activitiesByRunId["run-preview"]?.tools[0]
+        ?.receipt?.resource;
+    const retainedCompletion = state.timelines.c1?.events.find(
+      (event) => event.kind === "tool_call_completed",
+    );
+    const retainedPreview =
+      retainedCompletion?.kind === "tool_call_completed"
+        ? retainedCompletion.payload.receipt?.resource?.content_preview
+        : undefined;
+
+    expect(resource?.contentPreview).toHaveLength(16_384);
+    expect(resource?.truncated).toBe(true);
+    expect(retainedPreview).toHaveLength(16_384);
+  });
 });
 
 describe("canonical Task 2 fixture projection", () => {
@@ -268,6 +500,77 @@ describe("timeline load merge and run restoration", () => {
     expect(state.runs["r-pending"]?.status).toBe("pending");
     expect(state.runs["r-cancelling"]?.status).toBe("cancelling");
     expect(state.runs["r-interrupted"]?.status).toBe("interrupted");
+    expect(state.timelines.c1?.activitiesByRunId["r-pending"]?.status).toBe(
+      "pending",
+    );
+    expect(state.timelines.c1?.activitiesByRunId["r-cancelling"]?.status).toBe(
+      "cancelling",
+    );
+    expect(state.timelines.c1?.activitiesByRunId["r-interrupted"]?.status).toBe(
+      "interrupted",
+    );
+  });
+
+  it("keeps eventless runs while merging subscribed activity over a reload", () => {
+    let state = createInitialConversationState();
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-live",
+        sequence: 2,
+        kind: "tool_call_started",
+        payload: {
+          tool_call_id: "read-live",
+          name: "fs.read",
+          summary: "Read live file",
+        },
+      }),
+    });
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        runId: "run-live",
+        sequence: 3,
+        kind: "tool_call_output",
+        payload: {
+          tool_call_id: "read-live",
+          chunk: "live result",
+        },
+      }),
+    });
+
+    state = dispatch(state, {
+      type: "timeline_loaded",
+      timeline: {
+        conversationId: "c1",
+        messages: [],
+        events: [
+          baseEvent({
+            runId: "run-live",
+            sequence: 1,
+            kind: "run_started",
+            payload: {},
+          }),
+        ],
+        runs: [
+          { runId: "run-live", conversationId: "c1", status: "running" },
+          {
+            runId: "run-eventless",
+            conversationId: "c1",
+            status: "interrupted",
+          },
+        ],
+      },
+    });
+
+    const activities = state.timelines.c1?.activitiesByRunId;
+    expect(Object.keys(activities ?? {})).toEqual([
+      "run-live",
+      "run-eventless",
+    ]);
+    expect(activities?.["run-live"]?.tools[0]?.output).toBe("live result");
+    expect(activities?.["run-eventless"]?.status).toBe("interrupted");
+    expect(state.timelines.c1?.events).toHaveLength(3);
   });
 
   it("rebuilds structured activity for every run in a multi-turn snapshot", () => {

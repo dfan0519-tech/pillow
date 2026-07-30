@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   ConversationTimelineView,
+  ResourceReferenceView,
   RunView,
 } from "../conversations/conversationReducer";
 import { isRunActive } from "../conversations/conversationReducer";
@@ -46,8 +47,21 @@ export function Workbench({
   mockBadgeLabel = "模拟运行时",
 }: WorkbenchProps) {
   const [resourcesOpen, setResourcesOpen] = useState(false);
-  const hasTimeline = Boolean(timeline && timeline.messages.length > 0);
+  const [selectedResource, setSelectedResource] =
+    useState<ResourceReferenceView | null>(null);
+  const hasTimeline = Boolean(
+    timeline
+    && (
+      timeline.messages.length > 0
+      || Object.keys(timeline.activitiesByRunId).length > 0
+    ),
+  );
   const canCancel = isRunActive(run);
+
+  useEffect(() => {
+    setSelectedResource(null);
+    setResourcesOpen(false);
+  }, [project?.id]);
 
   return (
     <main
@@ -87,6 +101,10 @@ export function Workbench({
           {hasTimeline && timeline ? (
             <ConversationTimeline
               mockBadgeLabel={mockBadgeLabel}
+              onOpenResource={(resource) => {
+                setSelectedResource(resource);
+                setResourcesOpen(true);
+              }}
               run={run}
               showMockBadge={showMockBadge}
               timeline={timeline}
@@ -128,6 +146,7 @@ export function Workbench({
         hasProject={Boolean(project)}
         onClose={() => setResourcesOpen(false)}
         open={resourcesOpen}
+        resource={selectedResource}
       />
     </main>
   );

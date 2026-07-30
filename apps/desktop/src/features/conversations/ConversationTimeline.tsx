@@ -4,16 +4,16 @@
  */
 
 import {
-  useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type UIEvent,
 } from "react";
 import { RunActivity } from "./RunActivity";
 import type {
   ConversationTimelineView,
+  ResourceReferenceView,
   RunActivityView,
   RunView,
 } from "./conversationReducer";
@@ -25,36 +25,36 @@ type ConversationTimelineProps = {
   run: RunView | null;
   showMockBadge?: boolean;
   mockBadgeLabel?: string;
+  onOpenResource?: (resource: ResourceReferenceView) => void;
 };
 
-/** Messages above this count use windowed rendering (Stage 1 scale rule). */
+/** Histories above this count use explicit recent-page rendering. */
 export const TIMELINE_WINDOW_THRESHOLD = 80;
-/** Visible message capacity for the virtual window (plus small overscan). */
-export const TIMELINE_WINDOW_SIZE = 40;
-const ESTIMATED_ITEM_HEIGHT = 88;
-const OVERSCAN = 6;
+export const TIMELINE_PAGE_SIZE = 40;
 const STICK_BOTTOM_PX = 48;
 const VIEWPORT_HEIGHT = 480;
 
 type TimelineItem =
-  | { type: "message"; message: TimelineMessageDto }
-  | { type: "activity"; activity: RunActivityView };
+  | { type: "message"; message: TimelineMessageDto; sourceOrder: number }
+  | { type: "activity"; activity: RunActivityView; sourceOrder: number };
 
 export function ConversationTimeline({
   timeline,
   run,
   showMockBadge = false,
   mockBadgeLabel = "模拟运行时",
+  onOpenResource,
 }: ConversationTimelineProps) {
   const items = useMemo(() => buildChronologicalItems(timeline), [timeline]);
   const streaming = isRunActive(run);
-  const useWindow = items.length > TIMELINE_WINDOW_THRESHOLD;
+  const usePagination = items.length > TIMELINE_WINDOW_THRESHOLD;
 
   return (
     <div
       className="conversation-timeline"
       data-testid="conversation-timeline"
-      data-windowed={useWindow ? "true" : "false"}
+      data-paginated={usePagination ? "true" : "false"}
+      data-windowed="false"
     >
       {showMockBadge ? (
         <div className="mock-runtime-badge" data-testid="mock-runtime-badge">
@@ -62,9 +62,10 @@ export function ConversationTimeline({
         </div>
       ) : null}
 
-      {useWindow ? (
-        <WindowedItemList
+      {usePagination ? (
+        <PaginatedItemList
           items={items}
+          onOpenResource={onOpenResource}
           run={run}
           streaming={streaming}
           timeline={timeline}
@@ -75,9 +76,9 @@ export function ConversationTimeline({
             <TimelineItemView
               item={item}
               key={itemKey(item, index)}
+              onOpenResource={onOpenResource}
               run={run}
               streaming={streaming}
-              timeline={timeline}
             />
           ))}
         </div>
@@ -89,14 +90,26 @@ export function ConversationTimeline({
 function buildChronologicalItems(timeline: ConversationTimelineView): TimelineItem[] {
   const messages: TimelineItem[] = timeline.messages
     .filter((message) => message.role !== "system")
-    .map((message) => ({ type: "message", message }));
+    .map((message, sourceOrder) => ({ type: "message", message, sourceOrder }));
   const activities: TimelineItem[] = Object.values(timeline.activitiesByRunId)
-    .map((activity) => ({ type: "activity", activity }));
+    .map((activity, index) => ({
+      type: "activity",
+      activity,
+      sourceOrder: timeline.messages.length + index,
+    }));
 
   return [...messages, ...activities].sort((left, right) => {
-    const byTime = itemTimestamp(left).localeCompare(itemTimestamp(right));
-    if (byTime !== 0) return byTime;
-    return itemPriority(left) - itemPriority(right);
+    const leftTime = itemTimestamp(left);
+    const rightTime = itemTimestamp(right);
+    if (leftTime && rightTime) {
+      const byTime = leftTime.localeCompare(rightTime);
+      if (byTime !== 0) return byTime;
+      const byPriority = itemPriority(left) - itemPriority(right);
+      if (byPriority !== 0) return byPriority;
+    } else if (leftTime || rightTime) {
+      return leftTime ? -1 : 1;
+    }
+    return left.sourceOrder - right.sourceOrder;
   });
 }
 
@@ -105,7 +118,7 @@ function itemKey(item: TimelineItem, index: number): string {
   return item.message.id;
 }
 
-function itemTimestamp(item: TimelineItem): string {
+function itemTimestamp(item: TimelineItem): string | null {
   return item.type === "activity"
     ? item.activity.startedAt
     : item.message.createdAt;
@@ -118,17 +131,22 @@ function itemPriority(item: TimelineItem): number {
 
 function TimelineItemView({
   item,
-  timeline,
+  onOpenResource,
   run,
   streaming,
 }: {
   item: TimelineItem;
-  timeline: ConversationTimelineView;
+  onOpenResource?: (resource: ResourceReferenceView) => void;
   run: RunView | null;
   streaming: boolean;
 }) {
   if (item.type === "activity") {
-    return <RunActivity activity={item.activity} />;
+    return (
+      <RunActivity
+        activity={item.activity}
+        onOpenResource={onOpenResource}
+      />
+    );
   }
 
   const { message } = item;
@@ -156,102 +174,93 @@ function TimelineItemView({
   );
 }
 
-function WindowedItemList({
+function PaginatedItemList({
   items,
+  onOpenResource,
   timeline,
   run,
   streaming,
 }: {
   items: TimelineItem[];
+  onOpenResource?: (resource: ResourceReferenceView) => void;
   timeline: ConversationTimelineView;
   run: RunView | null;
   streaming: boolean;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
-  // Anchor to newest content by default (initial load + streaming follow).
-  // jsdom lacks reliable scroll metrics, so the window is driven by this flag
-  // rather than scrollTop alone.
   const [followBottom, setFollowBottom] = useState(true);
-  const [scrollTop, setScrollTop] = useState(0);
-  const totalHeight = items.length * ESTIMATED_ITEM_HEIGHT;
-  const estimatedMaxScroll = Math.max(0, totalHeight - VIEWPORT_HEIGHT);
-  const visibleCount =
-    Math.ceil(VIEWPORT_HEIGHT / ESTIMATED_ITEM_HEIGHT) + OVERSCAN * 2;
-  const windowSize = Math.max(visibleCount, TIMELINE_WINDOW_SIZE);
+  const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE);
+  const prependHeightRef = useRef<number | null>(null);
 
-  const onScroll = useCallback(
-    (event: UIEvent<HTMLDivElement>) => {
-      const el = event.currentTarget;
-      const nextTop = el.scrollTop;
-      setScrollTop(nextTop);
-
-      // Prefer live DOM metrics when the scroller actually overflows;
-      // fall back to estimated height so tests/jsdom still work.
-      const domOverflows = el.scrollHeight > el.clientHeight + 1;
-      const distanceFromBottom = domOverflows
-        ? el.scrollHeight - el.scrollTop - el.clientHeight
-        : estimatedMaxScroll - nextTop;
-      setFollowBottom(distanceFromBottom <= STICK_BOTTOM_PX);
-    },
-    [estimatedMaxScroll],
-  );
+  useEffect(() => {
+    setVisibleCount(TIMELINE_PAGE_SIZE);
+    prependHeightRef.current = null;
+  }, [timeline.conversationId]);
 
   useLayoutEffect(() => {
     const el = scrollerRef.current;
-    if (!el || !followBottom) return;
-    const target = Math.max(0, el.scrollHeight - el.clientHeight);
-    if (Math.abs(el.scrollTop - target) > 1) {
-      el.scrollTop = target;
+    if (!el) return;
+    if (prependHeightRef.current !== null) {
+      el.scrollTop += el.scrollHeight - prependHeightRef.current;
+      prependHeightRef.current = null;
+      return;
     }
-    setScrollTop(target > 0 ? target : estimatedMaxScroll);
+    if (followBottom) {
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    }
   }, [
     items.length,
     streaming,
     timeline.assistantText,
     followBottom,
-    estimatedMaxScroll,
+    visibleCount,
   ]);
 
-  let startIndex: number;
-  let endIndex: number;
-  if (followBottom) {
-    endIndex = items.length;
-    startIndex = Math.max(0, endIndex - windowSize - OVERSCAN);
-  } else {
-    startIndex = Math.max(
-      0,
-      Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN,
+  const startIndex = Math.max(0, items.length - visibleCount);
+  const slice = items.slice(startIndex);
+  const hasOlder = startIndex > 0;
+
+  const loadOlder = () => {
+    const el = scrollerRef.current;
+    prependHeightRef.current = el?.scrollHeight ?? null;
+    setFollowBottom(false);
+    setVisibleCount((count) =>
+      Math.min(items.length, count + TIMELINE_PAGE_SIZE),
     );
-    endIndex = Math.min(items.length, startIndex + windowSize);
-  }
-  const slice = items.slice(startIndex, endIndex);
-  const padTop = startIndex * ESTIMATED_ITEM_HEIGHT;
-  const padBottom = Math.max(0, totalHeight - endIndex * ESTIMATED_ITEM_HEIGHT);
+  };
 
   return (
     <div
-      className="conversation-timeline__messages conversation-timeline__messages--windowed"
+      className="conversation-timeline__messages conversation-timeline__messages--paginated"
       data-follow-bottom={followBottom ? "true" : "false"}
-      data-testid="timeline-window"
-      onScroll={onScroll}
+      data-testid="timeline-page"
+      onScroll={(event) => {
+        const el = event.currentTarget;
+        const distanceFromBottom =
+          el.scrollHeight - el.scrollTop - el.clientHeight;
+        setFollowBottom(distanceFromBottom <= STICK_BOTTOM_PX);
+      }}
       ref={scrollerRef}
       style={{ maxHeight: VIEWPORT_HEIGHT, overflowY: "auto" }}
     >
-      <div style={{ height: padTop }} aria-hidden="true" data-testid="timeline-pad-top" />
+      {hasOlder ? (
+        <button
+          className="conversation-timeline__load-older"
+          onClick={loadOlder}
+          type="button"
+        >
+          加载更早消息
+        </button>
+      ) : null}
       {slice.map((item, offset) => (
         <TimelineItemView
           item={item}
           key={itemKey(item, startIndex + offset)}
+          onOpenResource={onOpenResource}
           run={run}
           streaming={streaming}
-          timeline={timeline}
         />
       ))}
-      <div
-        style={{ height: padBottom }}
-        aria-hidden="true"
-        data-testid="timeline-pad-bottom"
-      />
     </div>
   );
 }

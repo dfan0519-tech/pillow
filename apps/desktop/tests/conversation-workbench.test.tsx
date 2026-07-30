@@ -21,7 +21,9 @@ import {
   MOCK_RUNTIME_BADGE,
 } from "../src/lib/mockConversationGateway";
 import { materializeCanonicalEvents } from "../src/lib/canonicalTurnFixture";
+import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import { Composer } from "../src/features/workbench/Composer";
+import { Workbench } from "../src/features/workbench/Workbench";
 import {
   drainMock,
   fixtureProject,
@@ -355,6 +357,52 @@ describe("conversation workbench UI", () => {
     expect(within(activities[0]!).getByText(/crates\//)).toBeVisible();
   });
 
+  it("renders authoritative eventless run rows even without messages", () => {
+    const state = conversationReducer(createInitialConversationState(), {
+      type: "timeline_loaded",
+      timeline: {
+        conversationId: "c-eventless",
+        messages: [],
+        events: [],
+        runs: [
+          {
+            runId: "pending-run",
+            conversationId: "c-eventless",
+            status: "pending",
+          },
+          {
+            runId: "interrupted-run",
+            conversationId: "c-eventless",
+            status: "interrupted",
+          },
+        ],
+      },
+    });
+
+    render(
+      <Workbench
+        onCancelRun={() => undefined}
+        onNewProject={() => undefined}
+        onOpenProject={() => undefined}
+        onSendTurn={() => undefined}
+        project={fixtureProject()}
+        run={state.runs["pending-run"] ?? null}
+        timeline={state.timelines["c-eventless"] ?? null}
+      />,
+    );
+
+    const activities = screen.getAllByTestId("run-activity");
+    expect(activities).toHaveLength(2);
+    expect(activities[0]).toHaveAttribute("data-run-id", "pending-run");
+    expect(activities[1]).toHaveAttribute("data-run-id", "interrupted-run");
+    expect(within(activities[0]!).getByTestId("run-status")).toHaveTextContent(
+      "等待中",
+    );
+    expect(within(activities[1]!).getByTestId("run-status")).toHaveTextContent(
+      "已中断",
+    );
+  });
+
   it("preserves Slice A empty and selected empty-conversation surfaces", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     renderApp(conversationGateway, []);
@@ -417,12 +465,15 @@ describe("composer contracts", () => {
 });
 
 describe("timeline scale", () => {
-  it("window-renders long histories without mounting every message", () => {
+  it("paginates mixed-height history without fixed-height spacers or skipped content", async () => {
     const count = TIMELINE_WINDOW_THRESHOLD + 40;
     const messages = Array.from({ length: count }, (_, index) => ({
       id: `m-${index}`,
       role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
-      content: `Message ${index}`,
+      content:
+        index % 3 === 0
+          ? `Message ${index}\n${"variable height ".repeat(24)}`
+          : `Message ${index}`,
       createdAt: `2026-07-30T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
     }));
     const timeline: ConversationTimelineView = {
@@ -445,12 +496,74 @@ describe("timeline scale", () => {
 
     expect(screen.getByTestId("conversation-timeline")).toHaveAttribute(
       "data-windowed",
+      "false",
+    );
+    expect(screen.getByTestId("conversation-timeline")).toHaveAttribute(
+      "data-paginated",
       "true",
     );
-    const mounted = screen.getAllByTestId(/timeline-(user|assistant)-message/);
-    expect(mounted.length).toBeLessThan(count);
-    expect(mounted.length).toBeLessThanOrEqual(60);
-    expect(screen.getByTestId("timeline-window")).toBeInTheDocument();
+    expect(screen.queryByTestId("timeline-pad-top")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("timeline-pad-bottom")).not.toBeInTheDocument();
+
+    const page = screen.getByTestId("timeline-page");
+    expect(
+      within(page).getAllByTestId(/timeline-(user|assistant)-message/),
+    ).toHaveLength(40);
+    expect(within(page).getByText(/Message 119/)).toBeVisible();
+    expect(within(page).queryByText(/Message 0/)).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "加载更早消息" }));
+    await user.click(screen.getByRole("button", { name: "加载更早消息" }));
+
+    const allMessages = within(page).getAllByTestId(
+      /timeline-(user|assistant)-message/,
+    );
+    expect(allMessages).toHaveLength(count);
+    expect(within(page).getByText(/Message 0/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "加载更早消息" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves the visible anchor when older variable-height items are prepended", async () => {
+    const count = TIMELINE_WINDOW_THRESHOLD + 40;
+    const timeline: ConversationTimelineView = {
+      conversationId: "c-anchor",
+      messages: Array.from({ length: count }, (_, index) => ({
+        id: `anchor-${index}`,
+        role: "user" as const,
+        content: `Message ${index}${index % 2 ? "\nextra\nheight" : ""}`,
+        createdAt: `2026-07-30T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      })),
+      events: [],
+      seenEventKeys: new Set(),
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      activitiesByRunId: {},
+      activeRunId: null,
+    };
+
+    render(<ConversationTimeline run={null} timeline={timeline} />);
+    const page = screen.getByTestId("timeline-page");
+    Object.defineProperty(page, "scrollHeight", {
+      configurable: true,
+      get: () =>
+        within(page).getAllByTestId(/timeline-(user|assistant)-message/)
+          .length <= 40
+          ? 1_000
+          : 2_420,
+    });
+    page.scrollTop = 240;
+
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "加载更早消息" }),
+    );
+
+    await waitFor(() => expect(page.scrollTop).toBe(1_660));
   });
 });
 
@@ -485,5 +598,176 @@ describe("run activity disclosure", () => {
 
     await userEvent.setup().click(details.querySelector("summary")!);
     expect(details).toHaveAttribute("open");
+  });
+
+  it("uses a complete heading hierarchy and exposes truncated output to the keyboard", () => {
+    const running: RunActivityView = {
+      runId: "run-a11y",
+      status: "completed",
+      startedAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:02.000Z",
+      assistantText: "",
+      assistantTextTruncated: true,
+      omittedAssistantChars: 256,
+      reasoningText: "",
+      plan: null,
+      tools: [
+        {
+          toolCallId: "tool-a11y",
+          name: "fs.read",
+          title: "Read README",
+          status: "completed",
+          startedAt: "2026-07-30T00:00:01.000Z",
+          updatedAt: "2026-07-30T00:00:02.000Z",
+          output: "bounded output",
+          outputTruncated: true,
+          omittedOutputChars: 128,
+          resources: [],
+        },
+      ],
+      subagents: [],
+      artifacts: [],
+    };
+
+    render(<RunActivity activity={running} />);
+    expect(
+      screen.getByRole("heading", { level: 2, name: "运行活动" }),
+    ).toBeInTheDocument();
+    const details = screen.getByTestId("run-activity").querySelector("details")!;
+    details.open = true;
+    expect(screen.getByRole("heading", { level: 3, name: "工具" })).toBeVisible();
+    expect(screen.getByText("回复已截断，省略 256 个字符")).toBeVisible();
+    expect(screen.getByText("输出已截断，省略 128 个字符")).toBeVisible();
+    expect(screen.getByText("bounded output")).toHaveAttribute("tabindex", "0");
+  });
+});
+
+describe("run resource navigation", () => {
+  it("projects safe input, receipt, and artifact references into ResourcePane", async () => {
+    let state = createInitialConversationState();
+    const events = [
+      {
+        eventId: "resource-start",
+        runId: "run-resource",
+        conversationId: "c-resource",
+        sequence: 1,
+        createdAt: "2026-07-30T00:00:01.000Z",
+        kind: "run_started",
+        payload: {},
+      },
+      {
+        eventId: "resource-tool",
+        runId: "run-resource",
+        conversationId: "c-resource",
+        sequence: 2,
+        createdAt: "2026-07-30T00:00:02.000Z",
+        kind: "tool_call_started",
+        payload: {
+          tool_call_id: "read-readme",
+          name: "fs.read",
+          summary: "Read README",
+          input_summary: {
+            kind: "fs_read",
+            path: "README.md",
+            offset_bytes: 0,
+            max_bytes: 1024,
+          },
+        },
+      },
+      {
+        eventId: "resource-complete",
+        runId: "run-resource",
+        conversationId: "c-resource",
+        sequence: 3,
+        createdAt: "2026-07-30T00:00:03.000Z",
+        kind: "tool_call_completed",
+        payload: {
+          tool_call_id: "read-readme",
+          status: "completed",
+          receipt: {
+            receipt_id: "receipt-readme",
+            label: "Read receipt",
+            resource: {
+              resource_id: "resource-readme",
+              kind: "file",
+              label: "README.md",
+              path: "README.md",
+              content_preview: "# Keeper\nReadable result",
+              truncated: false,
+            },
+          },
+        },
+      },
+      {
+        eventId: "resource-artifact",
+        runId: "run-resource",
+        conversationId: "c-resource",
+        sequence: 4,
+        createdAt: "2026-07-30T00:00:04.000Z",
+        kind: "artifact_produced",
+        payload: {
+          artifact_id: "artifact-report",
+          path: "reports/result.md",
+          kind: "report",
+          resource: {
+            resource_id: "resource-report",
+            kind: "artifact",
+            label: "Result report",
+            path: "reports/result.md",
+            content_preview: "Report preview",
+            truncated: true,
+          },
+        },
+      },
+      {
+        eventId: "resource-turn-complete",
+        runId: "run-resource",
+        conversationId: "c-resource",
+        sequence: 5,
+        createdAt: "2026-07-30T00:00:05.000Z",
+        kind: "turn_completed",
+        payload: {},
+      },
+    ] as RuntimeEventDto[];
+    for (const event of events) {
+      state = conversationReducer(state, { type: "runtime_event", event });
+    }
+
+    render(
+      <Workbench
+        onCancelRun={() => undefined}
+        onNewProject={() => undefined}
+        onOpenProject={() => undefined}
+        onSendTurn={() => undefined}
+        project={fixtureProject()}
+        run={state.runs["run-resource"] ?? null}
+        timeline={state.timelines["c-resource"] ?? null}
+      />,
+    );
+
+    const activity = screen.getByTestId("run-activity");
+    const disclosure = activity.querySelector("details")!;
+    disclosure.open = true;
+    expect(
+      within(activity).getByText("输入 · README.md · 0–1024 字节"),
+    ).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(
+      within(activity).getByRole("button", { name: "打开 README.md" }),
+    );
+    const pane = screen.getByTestId("resource-pane");
+    expect(within(pane).getByRole("heading", { level: 2, name: "资源" })).toBeVisible();
+    expect(within(pane).getByText("README.md")).toBeVisible();
+    expect(within(pane).getByText(/Readable result/)).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
+
+    await user.click(
+      within(activity).getByRole("button", { name: "打开 Result report" }),
+    );
+    expect(within(pane).getByText("reports/result.md")).toBeVisible();
+    expect(within(pane).getByText("内容预览已截断")).toBeVisible();
   });
 });

@@ -288,18 +288,17 @@ describe("accepted send vs timeline refresh", () => {
   });
 });
 
-describe("windowed timeline newest window and follow", () => {
-  it("initial window shows newest messages, not the oldest page", () => {
+describe("paginated timeline newest page and follow", () => {
+  it("initial page shows newest messages, not the oldest page", () => {
     const count = TIMELINE_WINDOW_THRESHOLD + 40;
     const timeline = makeLongTimeline(count);
 
     render(<ConversationTimeline run={null} timeline={timeline} />);
 
-    const window = screen.getByTestId("timeline-window");
-    expect(window).toBeInTheDocument();
-    expect(window).toHaveAttribute("data-follow-bottom", "true");
+    const page = screen.getByTestId("timeline-page");
+    expect(page).toBeInTheDocument();
 
-    const mounted = within(window).getAllByTestId(
+    const mounted = within(page).getAllByTestId(
       /timeline-(user|assistant)-message/,
     );
     const texts = mounted.map((node) => node.textContent ?? "");
@@ -307,7 +306,7 @@ describe("windowed timeline newest window and follow", () => {
     expect(texts.some((t) => t.includes("Message 0"))).toBe(false);
   });
 
-  it("follows new content while stick-to-bottom is active", async () => {
+  it("follows new content on the recent page", async () => {
     const baseCount = TIMELINE_WINDOW_THRESHOLD + 10;
     const timeline = makeLongTimeline(baseCount);
     const { rerender } = render(
@@ -328,34 +327,26 @@ describe("windowed timeline newest window and follow", () => {
     });
   });
 
-  it("does not force-scroll when the user has scrolled upward", async () => {
+  it("loads older pages explicitly without virtual spacer content", async () => {
     const count = TIMELINE_WINDOW_THRESHOLD + 40;
     const timeline = makeLongTimeline(count);
-    const { rerender } = render(
-      <ConversationTimeline run={null} timeline={timeline} />,
+    render(<ConversationTimeline run={null} timeline={timeline} />);
+
+    expect(screen.queryByTestId("timeline-pad-top")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("timeline-pad-bottom")).not.toBeInTheDocument();
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "加载更早消息" }),
     );
 
-    const windowEl = screen.getByTestId("timeline-window");
-    // Leave the bottom intentionally.
-    act(() => {
-      windowEl.scrollTop = 0;
-      windowEl.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
-
-    await waitFor(() => {
-      expect(windowEl).toHaveAttribute("data-follow-bottom", "false");
-    });
-
-    const grown = makeLongTimeline(count + 5);
-    rerender(<ConversationTimeline run={null} timeline={grown} />);
-
-    // Stay near top — oldest content still preferred; newest not forced into view.
-    expect(windowEl.scrollTop).toBeLessThan(200);
-    const mounted = within(windowEl).getAllByTestId(
+    // One explicit page adds exactly 40 older records.
+    const page = screen.getByTestId("timeline-page");
+    const mounted = within(page).getAllByTestId(
       /timeline-(user|assistant)-message/,
     );
-    const texts = mounted.map((node) => node.textContent ?? "");
-    expect(texts.some((t) => t.includes("Message 0"))).toBe(true);
+    expect(mounted).toHaveLength(80);
+    expect(
+      mounted.some((node) => node.textContent?.includes("Message 0")),
+    ).toBe(false);
   });
 });
 

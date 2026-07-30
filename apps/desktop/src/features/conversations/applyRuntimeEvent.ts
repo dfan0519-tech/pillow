@@ -18,6 +18,7 @@ import type {
 } from "./conversationTypes";
 import { normalizeTimelineActivitiesForRuns } from "./normalizeTerminalActivity";
 import {
+  boundEventForRetention,
   emptyRunActivity,
   projectRunActivity,
 } from "./projectRunActivity";
@@ -55,14 +56,15 @@ export function applyRuntimeEvent(
 
   const seenEventKeys = new Set(timeline.seenEventKeys);
   seenEventKeys.add(key);
-  const events = [...timeline.events, event];
 
   let messages = timeline.messages;
   let activeRunId = timeline.activeRunId ?? event.runId;
   const currentActivity =
     timeline.activitiesByRunId[event.runId]
     ?? emptyRunActivity(event.runId, event.createdAt);
-  let activity = projectRunActivity(currentActivity, event);
+  const retainedEvent = boundEventForRetention(currentActivity, event);
+  const events = [...timeline.events, retainedEvent];
+  let activity = projectRunActivity(currentActivity, retainedEvent);
 
   if (event.kind === "run_started") {
     activeRunId = event.runId;
@@ -135,6 +137,7 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
   runs: Record<string, RunView>;
 } {
   const seedRuns: Record<string, RunView> = {};
+  const seedActivities: ConversationTimelineView["activitiesByRunId"] = {};
   for (const run of timeline.runs) {
     seedRuns[run.runId] = {
       runId: run.runId,
@@ -142,6 +145,11 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
       status: run.status,
       terminalKind: terminalKindFromStatus(run.status),
     };
+    seedActivities[run.runId] = emptyRunActivity(
+      run.runId,
+      null,
+      run.status,
+    );
   }
 
   let view: ConversationTimelineView = {
@@ -149,6 +157,7 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
     messages: timeline.messages
       .filter((message) => message.role === "user" || message.role === "system")
       .map((message) => ({ ...message })),
+    activitiesByRunId: seedActivities,
   };
 
   let runs = { ...seedRuns };
@@ -166,8 +175,7 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
   view = working.timelines[timeline.conversationId] ?? view;
   runs = { ...seedRuns, ...working.runs };
 
-  // Authoritative statuses win for runs present in the snapshot
-  // (pending / cancelling / interrupted that have no terminal event yet).
+  // Authoritative snapshot statuses win after idempotent event reconstruction.
   for (const run of timeline.runs) {
     const projected = runs[run.runId];
     if (!projected) {
@@ -179,17 +187,11 @@ export function rebuildFromTimeline(timeline: TimelineDto): {
       };
       continue;
     }
-    if (
-      run.status === "pending"
-      || run.status === "cancelling"
-      || run.status === "interrupted"
-    ) {
-      runs[run.runId] = {
-        ...projected,
-        status: run.status,
-        terminalKind: terminalKindFromStatus(run.status),
-      };
-    }
+    runs[run.runId] = {
+      ...projected,
+      status: run.status,
+      terminalKind: terminalKindFromStatus(run.status),
+    };
   }
 
   // Interleave user snapshot messages with event-built assistant turns by time.

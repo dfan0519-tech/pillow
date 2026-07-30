@@ -2,27 +2,46 @@
  * Pure projection of one runtime event into its owning run activity.
  */
 
-import type { RuntimeEventDto } from "../../lib/conversationGateway";
+import type {
+  ResourceReferenceDto,
+  RuntimeEventDto,
+  RunStatus,
+  ToolInputSummaryDto,
+} from "../../lib/conversationGateway";
 import type {
   ArtifactActivity,
   PlanStepView,
+  ResourceReferenceView,
   RunActivityView,
   SubagentActivity,
   ToolActivity,
 } from "./conversationTypes";
 import { closeOpenActivities } from "./normalizeTerminalActivity";
 
+export const MAX_TOOL_OUTPUT_CHARS = 16_384;
+export const MAX_RUN_TOOL_OUTPUT_CHARS = 49_152;
+export const MAX_RUN_TEXT_CHARS = 65_536;
+export const MAX_RESOURCE_PREVIEW_CHARS = 16_384;
+const MAX_REFERENCE_PATH_CHARS = 1_024;
+const MAX_LABEL_CHARS = 256;
+const MAX_QUERY_PREVIEW_CHARS = 256;
+
 export function emptyRunActivity(
   runId: string,
-  createdAt: string,
+  createdAt: string | null,
+  status: RunStatus = "pending",
 ): RunActivityView {
   return {
     runId,
-    status: "pending",
+    status,
     startedAt: createdAt,
     updatedAt: createdAt,
     assistantText: "",
+    assistantTextTruncated: false,
+    omittedAssistantChars: 0,
     reasoningText: "",
+    reasoningTextTruncated: false,
+    omittedReasoningChars: 0,
     plan: null,
     tools: [],
     subagents: [],
@@ -30,11 +49,111 @@ export function emptyRunActivity(
   };
 }
 
+export function boundEventForRetention(
+  current: RunActivityView,
+  event: RuntimeEventDto,
+): RuntimeEventDto {
+  if (
+    event.kind === "assistant_delta"
+    || event.kind === "reasoning_summary_delta"
+  ) {
+    const allowed = runTextAllowance(current, event.payload.text.length);
+    const omitted =
+      (event.payload.omitted_chars ?? 0)
+      + event.payload.text.length
+      - allowed;
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        text: event.payload.text.slice(0, allowed),
+        ...(omitted > 0 ? { omitted_chars: omitted } : {}),
+      },
+    } as RuntimeEventDto;
+  }
+  if (event.kind === "tool_call_started") {
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        name: boundedSingleLine(event.payload.name, MAX_LABEL_CHARS),
+        summary: event.payload.summary
+          ? boundedSingleLine(event.payload.summary, MAX_LABEL_CHARS)
+          : undefined,
+        input_summary: event.payload.input_summary
+          ? boundInputSummary(event.payload.input_summary)
+          : undefined,
+      },
+    };
+  }
+  if (event.kind === "tool_call_completed" && event.payload.receipt) {
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        receipt: {
+          ...event.payload.receipt,
+          receipt_id: event.payload.receipt.receipt_id.slice(
+            0,
+            MAX_LABEL_CHARS,
+          ),
+          label: boundedSingleLine(
+            event.payload.receipt.label,
+            MAX_LABEL_CHARS,
+          ),
+          resource: event.payload.receipt.resource
+            ? boundResource(event.payload.receipt.resource)
+            : undefined,
+        },
+      },
+    };
+  }
+  if (event.kind === "artifact_produced") {
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        path: boundedSingleLine(
+          event.payload.path,
+          MAX_REFERENCE_PATH_CHARS,
+        ),
+        kind: boundedSingleLine(event.payload.kind, MAX_LABEL_CHARS),
+        resource: event.payload.resource
+          ? boundResource(event.payload.resource)
+          : undefined,
+      },
+    };
+  }
+  if (event.kind !== "tool_call_output") return event;
+
+  const allowed = outputAllowance(
+    current,
+    event.payload.tool_call_id,
+    event.payload.chunk.length,
+  );
+  const omitted =
+    (event.payload.omitted_chars ?? 0)
+    + event.payload.chunk.length
+    - allowed;
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      chunk: event.payload.chunk.slice(0, allowed),
+      ...(omitted > 0 ? { omitted_chars: omitted } : {}),
+    },
+  };
+}
+
 export function projectRunActivity(
   current: RunActivityView,
   event: RuntimeEventDto,
 ): RunActivityView {
-  let activity = { ...current, updatedAt: event.createdAt };
+  let activity: RunActivityView = {
+    ...current,
+    startedAt: current.startedAt ?? event.createdAt,
+    updatedAt: event.createdAt,
+  };
 
   if (event.kind === "run_started") {
     activity = {
@@ -43,14 +162,34 @@ export function projectRunActivity(
       status: "running",
     };
   } else if (event.kind === "assistant_delta") {
+    const allowed = runTextAllowance(activity, event.payload.text.length);
+    const retained = event.payload.text.slice(0, allowed);
+    const omitted =
+      (event.payload.omitted_chars ?? 0)
+      + event.payload.text.length
+      - allowed;
     activity = {
       ...activity,
-      assistantText: `${activity.assistantText}${event.payload.text}`,
+      assistantText: `${activity.assistantText}${retained}`,
+      assistantTextTruncated:
+        activity.assistantTextTruncated || omitted > 0,
+      omittedAssistantChars:
+        (activity.omittedAssistantChars ?? 0) + omitted,
     };
   } else if (event.kind === "reasoning_summary_delta") {
+    const allowed = runTextAllowance(activity, event.payload.text.length);
+    const retained = event.payload.text.slice(0, allowed);
+    const omitted =
+      (event.payload.omitted_chars ?? 0)
+      + event.payload.text.length
+      - allowed;
     activity = {
       ...activity,
-      reasoningText: `${activity.reasoningText}${event.payload.text}`,
+      reasoningText: `${activity.reasoningText}${retained}`,
+      reasoningTextTruncated:
+        activity.reasoningTextTruncated || omitted > 0,
+      omittedReasoningChars:
+        (activity.omittedReasoningChars ?? 0) + omitted,
     };
   } else if (event.kind === "plan_updated") {
     activity = {
@@ -75,16 +214,33 @@ export function projectRunActivity(
         status: "running",
         startedAt: event.createdAt,
         updatedAt: event.createdAt,
+        inputSummary: event.payload.input_summary
+          ? boundInputSummary(event.payload.input_summary)
+          : undefined,
+        resources: [],
       }),
     };
   } else if (event.kind === "tool_call_output") {
+    const allowed = outputAllowance(
+      activity,
+      event.payload.tool_call_id,
+      event.payload.chunk.length,
+    );
+    const retained = event.payload.chunk.slice(0, allowed);
+    const omitted =
+      (event.payload.omitted_chars ?? 0)
+      + event.payload.chunk.length
+      - allowed;
     activity = {
       ...activity,
       tools: activity.tools.map((tool) =>
         tool.toolCallId === event.payload.tool_call_id
           ? {
               ...tool,
-              output: `${tool.output ?? ""}${event.payload.chunk}`,
+              output: `${tool.output ?? ""}${retained}`,
+              outputTruncated: tool.outputTruncated || omitted > 0,
+              omittedOutputChars:
+                (tool.omittedOutputChars ?? 0) + omitted,
               updatedAt: event.createdAt,
             }
           : tool,
@@ -99,6 +255,7 @@ export function projectRunActivity(
               ...tool,
               status: event.payload.status,
               updatedAt: event.createdAt,
+              ...projectReceipt(event.payload.receipt),
             }
           : tool,
       ),
@@ -141,6 +298,15 @@ export function projectRunActivity(
       ),
     };
   } else if (event.kind === "artifact_produced") {
+    const resource = event.payload.resource
+      ? projectResource(event.payload.resource)
+      : {
+          resourceId: `artifact:${event.payload.artifact_id}`,
+          kind: "artifact" as const,
+          label: event.payload.path,
+          path: event.payload.path,
+          truncated: false,
+        };
     activity = {
       ...activity,
       artifacts: upsertArtifact(activity.artifacts, {
@@ -148,6 +314,7 @@ export function projectRunActivity(
         path: event.payload.path,
         kind: event.payload.kind,
         createdAt: event.createdAt,
+        resource,
       }),
     };
   }
@@ -161,6 +328,123 @@ export function projectRunActivity(
   }
 
   return activity;
+}
+
+function outputAllowance(
+  activity: RunActivityView,
+  toolCallId: string,
+  requested: number,
+): number {
+  const tool = activity.tools.find((item) => item.toolCallId === toolCallId);
+  const toolRemaining = Math.max(
+    0,
+    MAX_TOOL_OUTPUT_CHARS - (tool?.output?.length ?? 0),
+  );
+  const runRetained = activity.tools.reduce(
+    (total, item) => total + (item.output?.length ?? 0),
+    0,
+  );
+  const runRemaining = Math.max(0, MAX_RUN_TOOL_OUTPUT_CHARS - runRetained);
+  return Math.min(requested, toolRemaining, runRemaining);
+}
+
+function runTextAllowance(
+  activity: RunActivityView,
+  requested: number,
+): number {
+  const retained =
+    activity.assistantText.length + activity.reasoningText.length;
+  return Math.min(
+    requested,
+    Math.max(0, MAX_RUN_TEXT_CHARS - retained),
+  );
+}
+
+function projectReceipt(
+  receipt:
+    | Extract<
+        RuntimeEventDto,
+        { kind: "tool_call_completed" }
+      >["payload"]["receipt"]
+    | undefined,
+): Pick<ToolActivity, "receipt" | "resources"> | Record<string, never> {
+  if (!receipt) return {};
+  const resource = receipt.resource
+    ? projectResource(receipt.resource)
+    : {
+        resourceId: `receipt:${receipt.receipt_id}`,
+        kind: "receipt" as const,
+        label: receipt.label,
+        truncated: false,
+      };
+  return {
+    receipt: {
+      receiptId: receipt.receipt_id,
+      label: receipt.label,
+      resource,
+    },
+    resources: [resource],
+  };
+}
+
+function projectResource(
+  resource: ResourceReferenceDto,
+): ResourceReferenceView {
+  const bounded = boundResource(resource);
+  return {
+    resourceId: bounded.resource_id,
+    kind: bounded.kind,
+    label: bounded.label,
+    path: bounded.path,
+    contentPreview: bounded.content_preview,
+    truncated: bounded.truncated ?? false,
+  };
+}
+
+function boundInputSummary(summary: ToolInputSummaryDto): ToolInputSummaryDto {
+  if (summary.kind === "fs_list") {
+    return {
+      ...summary,
+      path: boundedSingleLine(summary.path, MAX_REFERENCE_PATH_CHARS),
+    };
+  }
+  if (summary.kind === "fs_read") {
+    return {
+      ...summary,
+      path: boundedSingleLine(summary.path, MAX_REFERENCE_PATH_CHARS),
+    };
+  }
+  return {
+    ...summary,
+    path: boundedSingleLine(summary.path, MAX_REFERENCE_PATH_CHARS),
+    query_preview: boundedSingleLine(
+      summary.query_preview,
+      MAX_QUERY_PREVIEW_CHARS,
+    ),
+  };
+}
+
+function boundResource(resource: ResourceReferenceDto): ResourceReferenceDto {
+  const content = resource.content_preview?.slice(
+    0,
+    MAX_RESOURCE_PREVIEW_CHARS,
+  );
+  return {
+    ...resource,
+    resource_id: resource.resource_id.slice(0, MAX_LABEL_CHARS),
+    label: boundedSingleLine(resource.label, MAX_LABEL_CHARS),
+    path: resource.path
+      ? boundedSingleLine(resource.path, MAX_REFERENCE_PATH_CHARS)
+      : undefined,
+    content_preview: content,
+    truncated:
+      resource.truncated
+      || (resource.content_preview?.length ?? 0) > (content?.length ?? 0),
+  };
+}
+
+function boundedSingleLine(value: string, maxChars: number): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, maxChars);
 }
 
 function closeActivity(
