@@ -30,11 +30,10 @@ fn active_context() -> ToolActiveContext {
 
 #[test]
 fn fixed_manifests_match_the_deterministic_v1_fixture() {
-    let actual = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&fixed_tool_manifests()).expect("serialize manifests")
-    );
-    assert_eq!(actual, read_fixture("tool-manifests-v1.json"));
+    let actual = serde_json::to_value(fixed_tool_manifests()).expect("serialize manifests");
+    let expected: Value =
+        serde_json::from_str(&read_fixture("tool-manifests-v1.json")).expect("manifest fixture");
+    assert_eq!(actual, expected);
 }
 
 #[test]

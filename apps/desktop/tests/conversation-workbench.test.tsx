@@ -389,7 +389,6 @@ describe("conversation workbench UI", () => {
     render(
       <Workbench
         onCancelRun={() => undefined}
-        onNewProject={() => undefined}
         onOpenProject={() => undefined}
         onSendTurn={() => undefined}
         project={fixtureProject()}
@@ -834,7 +833,6 @@ describe("run resource navigation", () => {
     render(
       <Workbench
         onCancelRun={() => undefined}
-        onNewProject={() => undefined}
         onOpenProject={() => undefined}
         onSendTurn={() => undefined}
         project={fixtureProject()}
