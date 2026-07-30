@@ -146,7 +146,7 @@ fn main() {
                     write_error(&mut stdout, id, -32000, "not initialized");
                     continue;
                 }
-                if !has_safe_agent_profile(&params) {
+                if !has_safe_plaintext_session_params(&params) {
                     write_error(&mut stdout, id, -32602, "unsafe session profile");
                     continue;
                 }
@@ -178,7 +178,7 @@ fn main() {
                 );
             }
             "session/load" => {
-                if !has_safe_agent_profile(&params) {
+                if !has_safe_plaintext_session_params(&params) {
                     write_error(&mut stdout, id, -32602, "unsafe session profile");
                     continue;
                 }
@@ -256,30 +256,37 @@ fn main() {
     drop(descendant);
 }
 
-fn has_safe_agent_profile(params: &Value) -> bool {
-    params
-        .get("_meta")
-        .and_then(|meta| meta.get("agentProfile"))
-        == Some(&json!({
-            "tools": ["read_file", "grep_search", "list_dir"],
-            "disallowedTools": [
-                "bash",
-                "run_terminal_command",
-                "search_replace",
-                "write_file",
-                "task",
-                "kill_task",
-                "get_task_output",
-                "search_tool",
-                "use_tool",
-                "web_search",
-                "web_fetch",
-                "memory_search",
-                "memory_get",
-                "todo_write",
-                "lsp"
-            ]
-        }))
+fn has_safe_plaintext_session_params(params: &Value) -> bool {
+    let encoded = params.to_string().to_ascii_lowercase();
+    params.get("mcpServers") == Some(&json!([]))
+        && !encoded.contains("yolomode")
+        && !encoded.contains("automode")
+        && params
+            .get("_meta")
+            .and_then(|meta| meta.get("agentProfile"))
+            == Some(&json!({
+                "tools": [],
+                "disallowedTools": [
+                    "read_file",
+                    "grep_search",
+                    "list_dir",
+                    "bash",
+                    "run_terminal_command",
+                    "search_replace",
+                    "write_file",
+                    "task",
+                    "kill_task",
+                    "get_task_output",
+                    "search_tool",
+                    "use_tool",
+                    "web_search",
+                    "web_fetch",
+                    "memory_search",
+                    "memory_get",
+                    "todo_write",
+                    "lsp"
+                ]
+            }))
 }
 
 /// Spawn an immediate long-lived child without a shell launcher or timer process.

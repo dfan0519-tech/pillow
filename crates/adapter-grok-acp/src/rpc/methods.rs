@@ -2,10 +2,13 @@
 
 use serde_json::{Value, json};
 
-fn read_only_agent_profile() -> Value {
+fn plaintext_agent_profile() -> Value {
     json!({
-        "tools": ["read_file", "grep_search", "list_dir"],
+        "tools": [],
         "disallowedTools": [
+            "read_file",
+            "grep_search",
+            "list_dir",
             "bash",
             "run_terminal_command",
             "search_replace",
@@ -44,7 +47,7 @@ pub fn session_new_params(cwd: &str) -> Value {
         "cwd": cwd,
         "mcpServers": [],
         "_meta": {
-            "agentProfile": read_only_agent_profile()
+            "agentProfile": plaintext_agent_profile()
         }
     })
 }
@@ -55,7 +58,7 @@ pub fn session_load_params(session_id: &str, cwd: &str) -> Value {
         "cwd": cwd,
         "mcpServers": [],
         "_meta": {
-            "agentProfile": read_only_agent_profile()
+            "agentProfile": plaintext_agent_profile()
         }
     })
 }
@@ -113,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn new_and_load_use_the_same_fixed_read_only_agent_profile() {
+    fn new_and_load_use_the_same_fixed_plaintext_agent_profile() {
         let new_params = session_new_params("C:/project");
         let load_params = session_load_params("session-1", "C:/project");
         let new_profile = &new_params["_meta"]["agentProfile"];
@@ -123,8 +126,11 @@ mod tests {
         assert_eq!(
             new_profile,
             &json!({
-                "tools": ["read_file", "grep_search", "list_dir"],
+                "tools": [],
                 "disallowedTools": [
+                    "read_file",
+                    "grep_search",
+                    "list_dir",
                     "bash",
                     "run_terminal_command",
                     "search_replace",
@@ -165,28 +171,11 @@ mod tests {
                 );
             }
 
-            let allowed_tools = params["_meta"]["agentProfile"]["tools"]
-                .as_array()
-                .expect("tools array");
-            for forbidden in [
-                "terminal",
-                "bash",
-                "search_replace",
-                "write",
-                "subagent",
-                "task",
-            ] {
-                assert!(
-                    allowed_tools.iter().all(|tool| {
-                        !tool
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase()
-                            .contains(forbidden)
-                    }),
-                    "allowlist contains forbidden capability {forbidden}: {allowed_tools:?}"
-                );
-            }
+            assert_eq!(
+                params["_meta"]["agentProfile"]["tools"],
+                json!([]),
+                "the plaintext profile may not expose provider tools"
+            );
         }
     }
 }
