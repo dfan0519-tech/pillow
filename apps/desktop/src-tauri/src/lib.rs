@@ -6,6 +6,7 @@ pub mod desktop_lifecycle;
 pub mod directory_ops;
 pub mod path_scope;
 mod project_commands;
+pub mod runtime_composition;
 
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
 };
+use runtime_composition::open_conversation_service;
 use tauri::Manager;
 
 fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
@@ -60,13 +62,12 @@ pub fn run() {
             let db_path = app_data_dir.join("keeper.db");
             let state = AppState::open(&db_path)?;
             let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
-            // Explicit development / pre-Grok-composition startup: deterministic
-            // fake runtime via RuntimeHost::with_fake. Production composition
-            // injects Arc<dyn AgentRuntimeAdapter> through
-            // ConversationService::open_with_adapter (see B2-2 boundary).
-            let conversations = Arc::new(ConversationService::open(
-                &db_path, emitter, /* honor_fixture_delays */ true,
-            )?);
+            // Production default: GrokAcpAdapter. Fake only when
+            // KEEPER_IDE_RUNTIME=fake (explicit development / test selection).
+            // Never silent-fallback from a missing Grok install to Fake.
+            let (conversations, selection) = open_conversation_service(&db_path, emitter)?;
+            eprintln!("Keeper IDE runtime selection: {}", selection.as_str());
+            let conversations = Arc::new(conversations);
             let recovered = conversations.recover_inflight()?;
             if recovered > 0 {
                 eprintln!("Keeper IDE recovered {recovered} interrupted run(s) as Interrupted");

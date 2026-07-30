@@ -33,7 +33,8 @@ pub struct ConversationCommandError {
 }
 
 impl ConversationCommandError {
-    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    /// Construct a typed command error (service + desktop composition layer).
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),

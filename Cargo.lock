@@ -1939,6 +1939,7 @@ name = "keeper-ide-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "keeper-adapter-grok-acp",
  "keeper-agent-protocol",
  "keeper-project",
  "keeper-runtime-host",

@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 chrono.workspace = true
+# Grok ACP is composed only in desktop `runtime_composition` (not domain/service).
+keeper-adapter-grok-acp = { path = "../../../crates/adapter-grok-acp" }
 keeper-agent-protocol = { path = "../../../crates/agent-protocol" }
 keeper-project = { path = "../../../crates/kernel-project" }
 keeper-runtime-host = { path = "../../../crates/runtime-host" }

@@ -15,7 +15,7 @@ use keeper_runtime_host::{HostConfig, RuntimeHost, SpawnedTurn};
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
 };
-use keeper_storage_sqlite::SqliteConversationRepository;
+use keeper_storage_sqlite::{SqliteConversationRepository, SqliteProjectRepository};
 
 use crate::conversation_events::{
     ConversationDto, RuntimeEventEmitter, SendTurnResult, TimelineDto, timeline_dto,
@@ -23,6 +23,7 @@ use crate::conversation_events::{
 
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
 use super::pipeline::{PumpFailSeams, PumpOutcome, pump_turn};
+use super::project_cwd::resolve_working_directory;
 #[cfg(test)]
 use super::types::PumpRegistrationHooks;
 use super::types::{
@@ -32,6 +33,7 @@ use super::types::{
 
 pub struct ConversationService {
     repository: Arc<SqliteConversationRepository>,
+    projects: Arc<SqliteProjectRepository>,
     host: Arc<RuntimeHost>,
     emitter: Arc<dyn RuntimeEventEmitter>,
     active: ActiveMap,
@@ -60,15 +62,18 @@ impl ConversationService {
         adapter: Arc<dyn AgentRuntimeAdapter>,
         config: HostConfig,
     ) -> Result<Self, ConversationCommandError> {
+        let path = path.as_ref();
         let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let projects = open_projects(path)?;
         let host = RuntimeHost::new(adapter, config);
-        Ok(Self::from_parts(repository, host, emitter))
+        Ok(Self::from_parts(repository, projects, host, emitter))
     }
 
-    /// Deterministic fake runtime for tests and explicit development startup.
+    /// Deterministic fake runtime for tests and **explicit** development startup.
     ///
     /// Uses [`RuntimeHost::with_fake`]. This is **not** the production Grok
-    /// runtime; production composition must use [`open_with_adapter`].
+    /// runtime. Production composition must use [`open_with_adapter`] via the
+    /// desktop runtime composition layer; fake must never be a silent fallback.
     pub fn open(
         path: impl AsRef<Path>,
         emitter: Arc<dyn RuntimeEventEmitter>,
@@ -85,11 +90,13 @@ impl ConversationService {
         emitter: Arc<dyn RuntimeEventEmitter>,
         config: HostConfig,
     ) -> Result<Self, ConversationCommandError> {
+        let path = path.as_ref();
         let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let projects = open_projects(path)?;
         let host = RuntimeHost::with_fake(config).map_err(|error| {
             ConversationCommandError::new("runtime_host_unavailable", error.to_string())
         })?;
-        Ok(Self::from_parts(repository, host, emitter))
+        Ok(Self::from_parts(repository, projects, host, emitter))
     }
 
     /// Like [`open_with_config`], plus test seams for pump registration / fail-closed.
@@ -112,11 +119,13 @@ impl ConversationService {
 
     fn from_parts(
         repository: SqliteConversationRepository,
+        projects: SqliteProjectRepository,
         host: RuntimeHost,
         emitter: Arc<dyn RuntimeEventEmitter>,
     ) -> Self {
         Self {
             repository: Arc::new(repository),
+            projects: Arc::new(projects),
             host: Arc::new(host),
             emitter,
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -224,6 +233,11 @@ impl ConversationService {
             ));
         }
 
+        // Resolve project root before durable run / adapter session so invalid
+        // roots never reach the provider process.
+        let working_directory =
+            resolve_working_directory(&self.repository, &self.projects, conversation_id)?;
+
         let run = self
             .repository
             .create_run(NewRun {
@@ -234,7 +248,7 @@ impl ConversationService {
 
         let session = match self.host.start_session(StartSession {
             conversation_key: conversation_id.0.to_string(),
-            working_directory: None,
+            working_directory: Some(working_directory),
         }) {
             Ok(session) => session,
             Err(error) => {
@@ -537,4 +551,14 @@ impl ConversationService {
             })
             .expect("conversation pump thread")
     }
+}
+
+fn open_projects(path: &Path) -> Result<SqliteProjectRepository, ConversationCommandError> {
+    SqliteProjectRepository::open(path).map_err(|error| {
+        eprintln!("Keeper IDE project store open error: {error}");
+        ConversationCommandError::new(
+            "project_store_unavailable",
+            "Project storage is temporarily unavailable.",
+        )
+    })
 }

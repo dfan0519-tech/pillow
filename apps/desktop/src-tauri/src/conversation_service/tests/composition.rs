@@ -1,7 +1,10 @@
 //! Prove ConversationService routes through an injected AgentRuntimeAdapter
 //! (probe / session / turn / cancel) without hard-coding FakeRuntimeAdapter.
+//! Also covers project-root `working_directory` propagation and one-prompt
+//! host admission for the Grok production config shape.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -12,10 +15,13 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind,
     RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn, StartSession,
 };
+use keeper_project::CreateProject;
 use keeper_runtime_host::HostConfig;
+use keeper_storage_sqlite::SqliteProjectRepository;
 
 use crate::conversation_events::RecordingEmitter;
 use crate::conversation_service::ConversationService;
+use crate::runtime_composition::production_grok_host_config;
 
 use super::support::{seed_project, temp_db};
 
@@ -29,8 +35,13 @@ struct InjectedRoutingAdapter {
     shutdown_calls: AtomicUsize,
     sessions: Mutex<HashMap<RuntimeSessionId, String>>,
     armed: Mutex<HashMap<RunId, Arc<AtomicBool>>>,
+    /// Captured `StartSession.working_directory` values (project-root proof).
+    working_directories: Mutex<Vec<Option<String>>>,
     /// When true, `send_turn` waits until cancel is observed (cancel path).
     hold_for_cancel: AtomicBool,
+    /// When true, `send_turn` holds until `release_send` is set (admission).
+    hold_until_release: AtomicBool,
+    release_send: AtomicBool,
 }
 
 impl InjectedRoutingAdapter {
@@ -44,12 +55,35 @@ impl InjectedRoutingAdapter {
             shutdown_calls: AtomicUsize::new(0),
             sessions: Mutex::new(HashMap::new()),
             armed: Mutex::new(HashMap::new()),
+            working_directories: Mutex::new(Vec::new()),
             hold_for_cancel: AtomicBool::new(false),
+            hold_until_release: AtomicBool::new(false),
+            release_send: AtomicBool::new(false),
         }
     }
 
     fn set_hold_for_cancel(&self, hold: bool) {
         self.hold_for_cancel.store(hold, Ordering::SeqCst);
+    }
+
+    fn set_hold_until_release(&self, hold: bool) {
+        self.hold_until_release.store(hold, Ordering::SeqCst);
+        if hold {
+            self.release_send.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn release_held_send(&self) {
+        self.release_send.store(true, Ordering::SeqCst);
+    }
+
+    fn last_working_directory(&self) -> Option<String> {
+        self.working_directories
+            .lock()
+            .expect("cwd")
+            .last()
+            .cloned()
+            .flatten()
     }
 }
 
@@ -66,6 +100,10 @@ impl AgentRuntimeAdapter for InjectedRoutingAdapter {
 
     fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError> {
         self.session_calls.fetch_add(1, Ordering::SeqCst);
+        self.working_directories
+            .lock()
+            .expect("cwd")
+            .push(request.working_directory.clone());
         let session_id = RuntimeSessionId::new();
         self.sessions
             .lock()
@@ -119,6 +157,16 @@ impl AgentRuntimeAdapter for InjectedRoutingAdapter {
             payload: serde_json::json!({}),
             created_at: Utc::now(),
         })?;
+
+        if self.hold_until_release.load(Ordering::SeqCst) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.release_send.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
 
         if self.hold_for_cancel.load(Ordering::SeqCst) {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -295,4 +343,173 @@ fn injected_adapter_routes_probe_session_turn_and_cancel() {
     assert_eq!(adapter.shutdown_calls.load(Ordering::SeqCst), 1);
     assert!(service.host_is_idle());
     assert_eq!(service.active_run_count(), 0);
+}
+
+#[test]
+fn project_root_propagates_as_canonical_working_directory() {
+    let (_temp, path) = temp_db();
+    let project_id = seed_project(&path, "cwd-prop");
+    let projects = SqliteProjectRepository::open(&path).unwrap();
+    let project = projects.get(project_id).unwrap().expect("project");
+    let expected = PathBuf::from(&project.root_path)
+        .canonicalize()
+        .expect("canonical root");
+
+    let adapter = Arc::new(InjectedRoutingAdapter::new());
+    let service = ConversationService::open_with_adapter(
+        &path,
+        Arc::new(RecordingEmitter::new()) as Arc<_>,
+        Arc::clone(&adapter) as Arc<dyn AgentRuntimeAdapter>,
+        default_host_config(),
+    )
+    .unwrap();
+    let conversation = service
+        .create_conversation(project_id.0.to_string(), Some("cwd".into()))
+        .unwrap();
+
+    service
+        .send_turn(conversation.id, "use project root".into())
+        .unwrap();
+    service.drain(Duration::from_secs(5)).unwrap();
+
+    assert_eq!(adapter.session_calls.load(Ordering::SeqCst), 1);
+    let cwd = adapter
+        .last_working_directory()
+        .expect("working_directory must be set");
+    assert_eq!(Path::new(&cwd), expected.as_path());
+    service.shutdown().unwrap();
+}
+
+#[test]
+fn invalid_project_root_rejects_before_adapter_spawn() {
+    let (_temp, path) = temp_db();
+    let projects = SqliteProjectRepository::open(&path).unwrap();
+    let root = path.parent().unwrap().join("gone-root");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = projects
+        .create(CreateProject {
+            name: "gone".into(),
+            root_path: root.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+    let adapter = Arc::new(InjectedRoutingAdapter::new());
+    let service = ConversationService::open_with_adapter(
+        &path,
+        Arc::new(RecordingEmitter::new()) as Arc<_>,
+        Arc::clone(&adapter) as Arc<dyn AgentRuntimeAdapter>,
+        default_host_config(),
+    )
+    .unwrap();
+    let conversation = service
+        .create_conversation(project.id.0.to_string(), Some("bad-root".into()))
+        .unwrap();
+
+    // Remove the registered root so resolve fails before start_session.
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let err = service
+        .send_turn(conversation.id.clone(), "should not spawn".into())
+        .unwrap_err();
+    assert_eq!(err.code, "invalid_project_root");
+    assert_eq!(
+        adapter.session_calls.load(Ordering::SeqCst),
+        0,
+        "adapter must not start_session when root is invalid"
+    );
+    assert_eq!(adapter.send_calls.load(Ordering::SeqCst), 0);
+
+    // No durable run should have been created either (fail before create_run).
+    let timeline = service.load_timeline(conversation.id).unwrap();
+    assert!(
+        timeline.runs.is_empty(),
+        "invalid root must not admit a Pending run"
+    );
+    service.shutdown().unwrap();
+}
+
+#[test]
+fn non_directory_project_root_rejects_before_adapter_spawn() {
+    let (_temp, path) = temp_db();
+    let projects = SqliteProjectRepository::open(&path).unwrap();
+    let root = path.parent().unwrap().join("file-root");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = projects
+        .create(CreateProject {
+            name: "file-root".into(),
+            root_path: root.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+    let adapter = Arc::new(InjectedRoutingAdapter::new());
+    let service = ConversationService::open_with_adapter(
+        &path,
+        Arc::new(RecordingEmitter::new()) as Arc<_>,
+        Arc::clone(&adapter) as Arc<dyn AgentRuntimeAdapter>,
+        default_host_config(),
+    )
+    .unwrap();
+    let conversation = service
+        .create_conversation(project.id.0.to_string(), None)
+        .unwrap();
+
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, b"not-a-directory").unwrap();
+
+    let err = service
+        .send_turn(conversation.id, "nope".into())
+        .unwrap_err();
+    assert_eq!(err.code, "invalid_project_root");
+    assert_eq!(adapter.session_calls.load(Ordering::SeqCst), 0);
+    service.shutdown().unwrap();
+}
+
+#[test]
+fn one_prompt_admission_matches_production_grok_host_config() {
+    let (_temp, path) = temp_db();
+    let project = seed_project(&path, "one-prompt");
+    let adapter = Arc::new(InjectedRoutingAdapter::new());
+    adapter.set_hold_until_release(true);
+
+    let service = Arc::new(
+        ConversationService::open_with_adapter(
+            &path,
+            Arc::new(RecordingEmitter::new()) as Arc<_>,
+            Arc::clone(&adapter) as Arc<dyn AgentRuntimeAdapter>,
+            production_grok_host_config(),
+        )
+        .unwrap(),
+    );
+    let conversation = service
+        .create_conversation(project.0.to_string(), Some("limit".into()))
+        .unwrap();
+
+    let service_first = Arc::clone(&service);
+    let conversation_id = conversation.id.clone();
+    let first =
+        thread::spawn(move || service_first.send_turn(conversation_id, "first concurrent".into()));
+
+    // Wait until the first turn is armed (slot held).
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while adapter.arm_calls.load(Ordering::SeqCst) < 1 {
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for first arm_turn");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let second_err = service
+        .send_turn(conversation.id.clone(), "second concurrent".into())
+        .unwrap_err();
+    assert!(
+        second_err.code == "runtime_spawn_failed"
+            || second_err.message.contains("concurrency")
+            || second_err.message.contains("Concurrency"),
+        "second prompt must be rejected under one-prompt admission: {second_err:?}"
+    );
+
+    adapter.release_held_send();
+    first.join().expect("first thread").unwrap();
+    service.drain(Duration::from_secs(5)).unwrap();
+    service.shutdown().unwrap();
 }
