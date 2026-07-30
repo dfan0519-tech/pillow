@@ -21,5 +21,5 @@ pub use config::{GrokAcpConfig, PRODUCTION_ACP_ARGV};
 /// Re-export for process-tree cleanup tests (PID liveness without secrets).
 #[doc(hidden)]
 pub fn process_gone_for_tests(pid: u32) -> bool {
-    process::process_gone(pid)
+    process::process_gone(pid).unwrap_or(false)
 }

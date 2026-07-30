@@ -143,11 +143,13 @@ impl JobObject {
     }
 
     /// Force-terminate every process currently in the job.
-    pub fn terminate_tree(&self) {
+    pub fn terminate_tree(&self) -> Result<(), RuntimeError> {
         // SAFETY: handle is a live job object owned by this struct.
-        unsafe {
-            let _ = TerminateJobObject(self.handle, 1);
+        let ok = unsafe { TerminateJobObject(self.handle, 1) };
+        if ok == 0 {
+            return Err(internal("acp_job_terminate_failed"));
         }
+        Ok(())
     }
 }
 

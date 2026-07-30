@@ -76,9 +76,26 @@ pub(crate) fn extract_agent_version(result: &serde_json::Value) -> Option<String
     result
         .pointer("/_meta/agentVersion")
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_agent_version(s))
         .map(str::to_owned)
+}
+
+/// Provider metadata may describe a release, but must never become an identity
+/// or machine-detail channel in the health surface.
+fn is_agent_version(value: &str) -> bool {
+    const MAX_AGENT_VERSION_BYTES: usize = 64;
+
+    if value.is_empty() || value.len() > MAX_AGENT_VERSION_BYTES || !value.is_ascii() {
+        return false;
+    }
+
+    let bytes = value.as_bytes();
+    let starts_like_version = bytes[0].is_ascii_digit()
+        || (bytes[0] == b'v' && bytes.get(1).is_some_and(u8::is_ascii_digit));
+    starts_like_version
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
 }
 
 #[cfg(test)]
@@ -121,5 +138,34 @@ mod tests {
         });
         assert_eq!(extract_agent_version(&v).as_deref(), Some("0.2.112"));
         assert!(extract_agent_version(&json!({})).is_none());
+    }
+
+    #[test]
+    fn agent_version_rejects_identity_and_non_version_metadata() {
+        let too_long = "1".repeat(65);
+        for invalid in [
+            "person@example.com",
+            r"C:\\Users\\person",
+            "../agent",
+            "1.2.3\nsecret",
+            "v",
+            "x1.2.3",
+            too_long.as_str(),
+        ] {
+            assert!(
+                extract_agent_version(&json!({ "_meta": { "agentVersion": invalid } })).is_none(),
+                "must reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_version_accepts_short_ascii_version_values() {
+        for version in ["1", "1.2.3", "v1.2.3", "0.0.0-fake", "1.0.0+build.7"] {
+            assert_eq!(
+                extract_agent_version(&json!({ "_meta": { "agentVersion": version } })).as_deref(),
+                Some(version)
+            );
+        }
     }
 }
