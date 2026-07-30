@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use keeper_agent_protocol::{RunId as ProtocolRunId, SendTurn, StartSession};
+use keeper_agent_protocol::{
+    AgentRuntimeAdapter, RunId as ProtocolRunId, RuntimeProbe, SendTurn, StartSession,
+};
 use keeper_runtime_host::{HostConfig, RuntimeHost, SpawnedTurn};
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
@@ -47,6 +49,26 @@ pub struct ConversationService {
 }
 
 impl ConversationService {
+    /// Production-safe construction: inject a runtime-neutral adapter.
+    ///
+    /// Builds [`RuntimeHost::new`] with the provided `Arc<dyn AgentRuntimeAdapter>`.
+    /// Provider wire types must stay inside the adapter crate and never appear
+    /// on this boundary.
+    pub fn open_with_adapter(
+        path: impl AsRef<Path>,
+        emitter: Arc<dyn RuntimeEventEmitter>,
+        adapter: Arc<dyn AgentRuntimeAdapter>,
+        config: HostConfig,
+    ) -> Result<Self, ConversationCommandError> {
+        let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let host = RuntimeHost::new(adapter, config);
+        Ok(Self::from_parts(repository, host, emitter))
+    }
+
+    /// Deterministic fake runtime for tests and explicit development startup.
+    ///
+    /// Uses [`RuntimeHost::with_fake`]. This is **not** the production Grok
+    /// runtime; production composition must use [`open_with_adapter`].
     pub fn open(
         path: impl AsRef<Path>,
         emitter: Arc<dyn RuntimeEventEmitter>,
@@ -55,7 +77,9 @@ impl ConversationService {
         Self::open_with_config(path, emitter, HostConfig::new(4, honor_fixture_delays, 64))
     }
 
-    /// Test / advanced construction with a custom host config (e.g. cancel barriers).
+    /// Fake-runtime construction with a custom host config (tests / cancel barriers).
+    ///
+    /// Prefer [`open_with_adapter`] when composing a real or injected adapter.
     pub fn open_with_config(
         path: impl AsRef<Path>,
         emitter: Arc<dyn RuntimeEventEmitter>,
@@ -65,23 +89,7 @@ impl ConversationService {
         let host = RuntimeHost::with_fake(config).map_err(|error| {
             ConversationCommandError::new("runtime_host_unavailable", error.to_string())
         })?;
-
-        Ok(Self {
-            repository: Arc::new(repository),
-            host: Arc::new(host),
-            emitter,
-            active: Arc::new(Mutex::new(HashMap::new())),
-            admission: ServiceAdmission::new(),
-            shut_down: AtomicBool::new(false),
-            #[cfg(test)]
-            after_spawn_before_register_pump: None,
-            #[cfg(test)]
-            after_pump_before_registration_wait: None,
-            #[cfg(test)]
-            force_process_error: None,
-            #[cfg(test)]
-            force_terminalization_failure: false,
-        })
+        Ok(Self::from_parts(repository, host, emitter))
     }
 
     /// Like [`open_with_config`], plus test seams for pump registration / fail-closed.
@@ -100,6 +108,36 @@ impl ConversationService {
         service.force_process_error = hooks.force_process_error;
         service.force_terminalization_failure = hooks.force_terminalization_failure;
         Ok(service)
+    }
+
+    fn from_parts(
+        repository: SqliteConversationRepository,
+        host: RuntimeHost,
+        emitter: Arc<dyn RuntimeEventEmitter>,
+    ) -> Self {
+        Self {
+            repository: Arc::new(repository),
+            host: Arc::new(host),
+            emitter,
+            active: Arc::new(Mutex::new(HashMap::new())),
+            admission: ServiceAdmission::new(),
+            shut_down: AtomicBool::new(false),
+            #[cfg(test)]
+            after_spawn_before_register_pump: None,
+            #[cfg(test)]
+            after_pump_before_registration_wait: None,
+            #[cfg(test)]
+            force_process_error: None,
+            #[cfg(test)]
+            force_terminalization_failure: false,
+        }
+    }
+
+    /// Probe the injected runtime adapter through the host (no provider wire).
+    pub fn probe(&self) -> Result<RuntimeProbe, ConversationCommandError> {
+        self.host.probe().map_err(|error| {
+            ConversationCommandError::new("runtime_probe_failed", error.to_string())
+        })
     }
 
     /// Idempotent recovery: non-terminal runs become `Interrupted`.

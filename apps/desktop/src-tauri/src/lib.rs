@@ -60,6 +60,10 @@ pub fn run() {
             let db_path = app_data_dir.join("keeper.db");
             let state = AppState::open(&db_path)?;
             let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
+            // Explicit development / pre-Grok-composition startup: deterministic
+            // fake runtime via RuntimeHost::with_fake. Production composition
+            // injects Arc<dyn AgentRuntimeAdapter> through
+            // ConversationService::open_with_adapter (see B2-2 boundary).
             let conversations = Arc::new(ConversationService::open(
                 &db_path, emitter, /* honor_fixture_delays */ true,
             )?);

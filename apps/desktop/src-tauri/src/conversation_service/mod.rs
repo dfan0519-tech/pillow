@@ -1,4 +1,4 @@
-//! Single owner of conversation repository + deterministic runtime host.
+//! Single owner of conversation repository + runtime host.
 //!
 //! Authoritative order for every runtime event:
 //! 1. validate
@@ -7,6 +7,11 @@
 //! 4. emit to the renderer
 //!
 //! Never emit an event that has not been durably committed.
+//!
+//! Runtime composition: production callers inject `Arc<dyn AgentRuntimeAdapter>`
+//! via [`ConversationService::open_with_adapter`]. The fake constructors
+//! (`open` / `open_with_config`) remain for tests and explicit development
+//! startup only — they are not the production Grok path.
 
 mod ids;
 mod pipeline;
