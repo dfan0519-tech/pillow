@@ -18,9 +18,13 @@ project-scoped conversation service with durable SQLite authority, a
 provider-neutral runtime host, and the deterministic fake adapter path. Every
 runtime event follows `validate -> persist -> commit -> emit`.
 
-**Slice B2 (real Grok ACP adapter) is in progress.** Live provider execution
-behind the accepted B1 protocol boundary is the active wave. B1 must not be
-cited as Grok connectivity evidence.
+**Slice B2 (real Grok ACP adapter) is accepted.** The controlled live gate
+proved plaintext Grok ACP execution, cancellation cleanup, provider-tool
+shutdown, and public-error redaction behind the B1 protocol boundary.
+
+**Wave B3 (governed read tool foundation) is active.** The next product
+boundary is a Keeper-owned, project-scoped read tool gateway. Provider-native
+tools, arbitrary MCP servers, file writes, and shell execution remain disabled.
 
 ## Design Authority
 
