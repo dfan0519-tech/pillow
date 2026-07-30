@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use chrono::Utc;
 use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, process_gone_for_tests};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
@@ -33,6 +34,7 @@ const ENV_EXECUTABLE: &str = "KEEPER_GROK_EXECUTABLE";
 const ENV_ISOLATED_HOME: &str = "KEEPER_GROK_ISOLATED_HOME";
 const ENV_PROJECT_ROOT: &str = "KEEPER_GROK_PROJECT_ROOT";
 const ENV_RESULT: &str = "KEEPER_GROK_ACCEPTANCE_RESULT";
+const MAX_DIAGNOSTIC_TOOL_NAME_CHARS: usize = 32;
 
 const READ_ONLY_PROMPT: &str = "Reply with one short sentence confirming you received this message. \
 Do not use any tools. Do not write, edit, delete, create, move, or execute files. \
@@ -203,6 +205,66 @@ fn terminal_kind_name(kind: RuntimeEventKind) -> &'static str {
     }
 }
 
+fn event_kind_name(kind: RuntimeEventKind) -> &'static str {
+    match kind {
+        RuntimeEventKind::RunStarted => "run_started",
+        RuntimeEventKind::AssistantDelta => "assistant_delta",
+        RuntimeEventKind::ReasoningSummaryDelta => "reasoning_summary_delta",
+        RuntimeEventKind::PlanUpdated => "plan_updated",
+        RuntimeEventKind::ToolCallStarted => "tool_call_started",
+        RuntimeEventKind::ToolCallOutput => "tool_call_output",
+        RuntimeEventKind::ToolCallCompleted => "tool_call_completed",
+        RuntimeEventKind::SubagentStarted => "subagent_started",
+        RuntimeEventKind::SubagentProgress => "subagent_progress",
+        RuntimeEventKind::SubagentCompleted => "subagent_completed",
+        RuntimeEventKind::ArtifactProduced => "artifact_produced",
+        RuntimeEventKind::TurnCompleted => "turn_completed",
+        RuntimeEventKind::TurnFailed => "turn_failed",
+        RuntimeEventKind::RunCancelled => "run_cancelled",
+        RuntimeEventKind::Heartbeat => "heartbeat",
+    }
+}
+
+fn diagnostic_tool_name(name: Option<&str>) -> String {
+    let Some(name) = name else {
+        return "<missing>".into();
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return "<redacted>".into();
+    }
+    if name.chars().count() > MAX_DIAGNOSTIC_TOOL_NAME_CHARS {
+        format!(
+            "{}...",
+            name.chars()
+                .take(MAX_DIAGNOSTIC_TOOL_NAME_CHARS)
+                .collect::<String>()
+        )
+    } else {
+        name.into()
+    }
+}
+
+fn read_only_turn_diagnostic(events: &[RuntimeEvent]) -> String {
+    events
+        .iter()
+        .map(|event| {
+            if event.kind == RuntimeEventKind::ToolCallStarted {
+                let name = diagnostic_tool_name(
+                    event.payload.get("name").and_then(|value| value.as_str()),
+                );
+                format!("tool_call_started(name={name})")
+            } else {
+                event_kind_name(event.kind).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
 fn write_evidence(path: &Path, body: &serde_json::Value) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -309,7 +371,8 @@ fn controlled_live_native_acceptance() {
     assert_eq!(
         read_terminals[0],
         RuntimeEventKind::TurnCompleted,
-        "read-only turn expected TurnCompleted"
+        "read-only turn expected TurnCompleted; diagnostic={}",
+        read_only_turn_diagnostic(&read_sink.events)
     );
     assert_eq!(
         read_sink.kinds().first(),
@@ -446,4 +509,54 @@ fn live_opt_in_gate_rejects_empty_env() {
     assert!(!env_flag_enabled(
         "KEEPER_GROK_ACP_E2E_UNSET_MARKER_THAT_MUST_NOT_EXIST"
     ));
+}
+
+#[test]
+fn diagnostic_tool_name_allows_only_bounded_identifier_names() {
+    assert_eq!(diagnostic_tool_name(Some("read_file")), "read_file");
+    assert_eq!(diagnostic_tool_name(Some("x")), "x");
+    assert_eq!(diagnostic_tool_name(None), "<missing>");
+    assert_eq!(diagnostic_tool_name(Some("")), "<redacted>");
+    assert_eq!(diagnostic_tool_name(Some("C:\\secret\\file")), "<redacted>");
+    assert_eq!(diagnostic_tool_name(Some("tool/name")), "<redacted>");
+    assert_eq!(
+        diagnostic_tool_name(Some(
+            "a_very_long_tool_identifier_that_exceeds_the_diagnostic_limit"
+        )),
+        "a_very_long_tool_identifier_that..."
+    );
+}
+
+#[test]
+fn read_only_turn_diagnostic_excludes_event_payloads() {
+    let run_id = RunId::new();
+    let events = vec![
+        RuntimeEvent {
+            run_id,
+            sequence: 1,
+            kind: RuntimeEventKind::RunStarted,
+            payload: serde_json::json!({ "prompt_preview": "private prompt" }),
+            created_at: Utc::now(),
+        },
+        RuntimeEvent {
+            run_id,
+            sequence: 2,
+            kind: RuntimeEventKind::ToolCallStarted,
+            payload: serde_json::json!({
+                "name": "read_file",
+                "summary": "private payload",
+                "path": "C:\\private\\account",
+            }),
+            created_at: Utc::now(),
+        },
+    ];
+
+    let diagnostic = read_only_turn_diagnostic(&events);
+
+    assert_eq!(
+        diagnostic,
+        "run_started -> tool_call_started(name=read_file)"
+    );
+    assert!(!diagnostic.contains("private"));
+    assert!(!diagnostic.contains("account"));
 }
