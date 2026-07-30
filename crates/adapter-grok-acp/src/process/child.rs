@@ -18,6 +18,9 @@ pub struct ChildHandle {
     pid: u32,
     /// PIDs that must be dead after kill_tree (direct child + known descendants).
     tracked_pids: Vec<u32>,
+    /// Test-only fault injection after real cleanup has been verified.
+    #[cfg(debug_assertions)]
+    test_fail_after_cleanup: bool,
     #[cfg(windows)]
     job: Option<JobObject>,
 }
@@ -76,7 +79,7 @@ impl ChildHandle {
             if child_exited && self.all_tracked_gone()? {
                 #[cfg(windows)]
                 job_termination?;
-                return Ok(());
+                return self.cleanup_verified();
             }
             if Instant::now() >= deadline {
                 // Final escalation.
@@ -89,7 +92,7 @@ impl ChildHandle {
                 if self.all_tracked_gone()? {
                     #[cfg(windows)]
                     job_termination?;
-                    return Ok(());
+                    return self.cleanup_verified();
                 }
                 let alive: Vec<u32> = self
                     .tracked_pids
@@ -114,6 +117,14 @@ impl ChildHandle {
         self.tracked_pids
             .iter()
             .try_fold(true, |all_gone, pid| Ok(all_gone && process_gone(*pid)?))
+    }
+
+    fn cleanup_verified(&self) -> Result<(), RuntimeError> {
+        #[cfg(debug_assertions)]
+        if self.test_fail_after_cleanup {
+            return Err(internal("acp_kill_tree_failed: injected test failure"));
+        }
+        Ok(())
     }
 }
 
@@ -170,6 +181,10 @@ pub fn spawn_child(
         ))
     })?;
     let pid = child.id();
+    #[cfg(debug_assertions)]
+    let test_fail_after_cleanup = env
+        .get("KEEPER_ACP_TEST_FAIL_KILL_TREE")
+        .is_some_and(|value| value == "1");
 
     #[cfg(windows)]
     {
@@ -193,6 +208,8 @@ pub fn spawn_child(
             child,
             pid,
             tracked_pids: vec![pid],
+            #[cfg(debug_assertions)]
+            test_fail_after_cleanup,
             job: Some(job),
         })
     }
@@ -203,6 +220,8 @@ pub fn spawn_child(
             child,
             pid,
             tracked_pids: vec![pid],
+            #[cfg(debug_assertions)]
+            test_fail_after_cleanup,
         })
     }
 }

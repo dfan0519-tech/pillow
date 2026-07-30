@@ -38,6 +38,14 @@ fn config(script: &str) -> GrokAcpConfig {
     config
 }
 
+fn config_with_cleanup_failure(script: &str) -> GrokAcpConfig {
+    let mut config = config(script);
+    config
+        .extra_env
+        .push(("KEEPER_ACP_TEST_FAIL_KILL_TREE".into(), "1".into()));
+    config
+}
+
 fn cwd() -> String {
     std::env::temp_dir().to_string_lossy().into_owned()
 }
@@ -184,5 +192,76 @@ fn ignored_cancel_escalates_within_grace_and_leaves_adapter_unavailable() {
         .arm_turn(run_id)
         .expect("escalation clears active turn");
     adapter.disarm_turn(run_id).unwrap();
+    adapter.shutdown().unwrap();
+}
+
+#[test]
+fn ignored_cancel_cleanup_failure_is_failed_terminal_and_clears_runtime_state() {
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config_with_cleanup_failure("ignore-cancel")).unwrap());
+    let session = start(&adapter);
+    let run_id = RunId::new();
+    adapter.arm_turn(run_id).unwrap();
+    let cancel_adapter = Arc::clone(&adapter);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        cancel_adapter.cancel_turn(run_id)
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut sink = CollectingSink {
+        events: Arc::clone(&events),
+    };
+
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "cancel me".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    canceller.join().unwrap().unwrap();
+
+    let recorded = events.lock().unwrap();
+    let terminals = recorded
+        .iter()
+        .filter(|event| event.kind.is_terminal())
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, RuntimeEventKind::TurnFailed);
+    assert_eq!(
+        terminals[0].payload["code"].as_str(),
+        Some("acp_kill_tree_failed")
+    );
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|event| event.kind == RuntimeEventKind::RunCancelled)
+            .count(),
+        0
+    );
+    drop(recorded);
+    assert_eq!(
+        adapter.probe().unwrap().detail.as_deref(),
+        Some("unavailable")
+    );
+    let next_run_id = RunId::new();
+    adapter
+        .arm_turn(next_run_id)
+        .expect("cleanup clears the active turn");
+    assert!(matches!(
+        adapter.send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id: next_run_id,
+                content: "stale session".into(),
+            },
+            &mut sink,
+        ),
+        Err(RuntimeError::SessionNotFound { .. })
+    ));
+    adapter.disarm_turn(next_run_id).unwrap();
     adapter.shutdown().unwrap();
 }

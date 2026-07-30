@@ -50,6 +50,7 @@ pub(crate) fn run_prompt_loop(
     let deadline = Instant::now() + timeout + Duration::from_secs(2);
     let mut cancel_sent = false;
     let mut cancel_deadline = None;
+    let mut cancel_cleanup_failed = false;
 
     while outcome.is_none() {
         if cancel.load(Ordering::SeqCst) && !cancel_sent {
@@ -60,8 +61,13 @@ pub(crate) fn run_prompt_loop(
         if cancel.load(Ordering::SeqCst)
             && cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
-            terminate_after_cancel(inner);
-            outcome = Some(PromptOutcome::Err(process_exited()));
+            outcome = Some(match terminate_after_cancel(inner) {
+                Ok(()) => PromptOutcome::Err(process_exited()),
+                Err(err) => {
+                    cancel_cleanup_failed = true;
+                    PromptOutcome::Err(err)
+                }
+            });
             continue;
         }
 
@@ -137,7 +143,7 @@ pub(crate) fn run_prompt_loop(
         let mut guard = inner.lock().expect("inner lock");
         let _ = handle_incoming(msg, &mut guard, config, sink, cancel)?;
     }
-    if let Ok(final_res) = done_rx.try_recv() {
+    if !cancel_cleanup_failed && let Ok(final_res) = done_rx.try_recv() {
         match final_res {
             Ok(value) => {
                 let stop = value
@@ -164,7 +170,7 @@ pub(crate) fn run_prompt_loop(
             map_stop_reason(request.run_id, sequence, &reason, cancelled, Utc::now())?
         }
         PromptOutcome::Err(err) => {
-            if cancelled {
+            if cancelled && !cancel_cleanup_failed {
                 map_stop_reason(request.run_id, sequence, "cancelled", true, Utc::now())?
             } else {
                 update_health_after_prompt(&mut guard, "", false, Some(&err));
@@ -184,16 +190,17 @@ pub(crate) fn run_prompt_loop(
 }
 
 /// A provider that ignores `session/cancel` must not retain the sole ACP slot.
-fn terminate_after_cancel(inner: &Mutex<Inner>) {
+fn terminate_after_cancel(inner: &Mutex<Inner>) -> Result<(), RuntimeError> {
     let mut guard = inner.lock().expect("inner lock");
     let Some(mut conn) = guard.connection.take() else {
-        return;
+        return Ok(());
     };
     conn.rpc.close();
-    let _ = conn.child.kill_tree(Duration::from_secs(2));
+    let kill_result = conn.child.kill_tree(Duration::from_secs(2));
     conn.rpc.join_reader();
     guard.sessions.clear();
     guard.probe_state = ProbeState::Unavailable;
+    kill_result
 }
 
 /// Successful prompt establishes healthy; recognized auth failures clear it.
