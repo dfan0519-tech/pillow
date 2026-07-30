@@ -175,11 +175,13 @@ pub(crate) fn run_prompt_loop(
     }
 
     let cancelled = cancel.load(Ordering::SeqCst);
-    if cancelled && matches!(outcome, Some(PromptOutcome::Err(_))) && !cancel_cleanup_performed {
-        if let Err(err) = terminate_after_cancel(inner) {
-            cancel_cleanup_failed = true;
-            outcome = Some(PromptOutcome::Err(err));
-        }
+    if cancelled
+        && matches!(outcome, Some(PromptOutcome::Err(_)))
+        && !cancel_cleanup_performed
+        && let Err(err) = terminate_after_cancel(inner)
+    {
+        cancel_cleanup_failed = true;
+        outcome = Some(PromptOutcome::Err(err));
     }
     let mut guard = inner.lock().expect("inner lock");
     let sequence = guard.turns.active().map(|a| a.sequence).unwrap_or(1) + 1;
