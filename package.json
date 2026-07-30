@@ -12,7 +12,11 @@
     "desktop:smoke": "node scripts/smoke-desktop.mjs --mode release",
     "desktop:smoke:dev": "node scripts/smoke-desktop.mjs --mode dev",
     "desktop:smoke:self-test": "node scripts/smoke-desktop.mjs --self-test",
-    "desktop:cargo:self-test": "node scripts/run-cargo.mjs --self-test"
+    "desktop:cargo:self-test": "node scripts/run-cargo.mjs --self-test",
+    "acceptance:grok-acp": "node scripts/native-acceptance-grok-acp.mjs",
+    "acceptance:grok-acp:dry-run": "node scripts/native-acceptance-grok-acp.mjs --dry-run",
+    "acceptance:grok-acp:self-test": "node scripts/native-acceptance-grok-acp.mjs --self-test",
+    "acceptance:grok-acp:live": "node scripts/native-acceptance-grok-acp.mjs --live"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.1",
