@@ -61,15 +61,19 @@ contents, account identity, raw ACP envelopes, tokens, or auth files.
 
 When opted in, the ignored Rust test exercises:
 
-1. **Probe truth** — `adapter_name == "grok-acp"` (rejects `fake`), healthy when executable present  
-2. **session/new** — `start_session` with project root `working_directory`  
-3. **One read-only response** — text prompt forbidding tools/mutation; exact **one** terminal `turn_completed`  
-4. **Cooperative cancellation** — second turn cancelled; exact **one** terminal `run_cancelled`  
-5. **Shutdown** — adapter shutdown / child tree cleanup  
-6. **No write permission** — fail if write/edit/execute tool activity is observed  
-7. **Process residuals** — Node harness snapshots baseline/final Grok and Keeper PIDs; requires zero new residual PIDs  
+1. **Probe truth (aligned with H1)** — `adapter_name` is always `grok-acp` (rejects `fake`):
+   - before initialize/session: `healthy=false`, detail `unavailable`
+   - after `session/new`: `healthy=false`, detail `transport_ready_auth_unverified`
+   - after the first successful real prompt: `healthy=true`, detail `healthy`
+   - file presence alone never claims healthy
+2. **session/new** — `start_session` with project root `working_directory`
+3. **One read-only response** — text prompt forbidding tools/mutation; exact **one** terminal `turn_completed`
+4. **Cooperative cancellation** — second turn cancelled; exact **one** terminal `run_cancelled`
+5. **Shutdown** — adapter shutdown / child tree cleanup
+6. **No write permission** — fail if write/edit/execute tool activity is observed
+7. **Process residuals** — Node harness snapshots baseline/final Grok and Keeper PIDs; requires zero new residual PIDs
 
-Machine output: `artifacts/native-acceptance-grok-acp/result.json` (gitignored)  
+Machine output: `artifacts/native-acceptance-grok-acp/result.json` (gitignored)
 Human report: `artifacts/native-acceptance-grok-acp/report.md` (gitignored)
 
 ## Human report template (generated)
@@ -128,9 +132,9 @@ live Grok connectivity evidence.
 
 ## What remains for the controller
 
-1. Rebase/merge H1 (probe health truth + Job Object tree ownership) and H2
-   (desktop project wiring) as needed; adjust harness if public probe/config
-   shape changes.
+1. H1 probe states and H2 desktop wiring are the merge base for H4; the live
+   test already asserts the H1 probe ladder (`unavailable` →
+   `transport_ready_auth_unverified` → `healthy`).
 2. Provision an **isolated** Grok profile home (not the interactive user profile).
 3. Set the four opt-in env vars; never commit them or paste auth material.
 4. Run `pnpm acceptance:grok-acp:live` on Windows with a real Grok install.

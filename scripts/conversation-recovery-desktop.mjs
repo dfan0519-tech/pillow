@@ -112,6 +112,9 @@ async function runPhase({
     cwd: repositoryRoot,
     env: {
       ...environment,
+      // B1 deterministic acceptance must not depend on production Grok default.
+      // Explicit fake only — this is not Grok connectivity evidence.
+      KEEPER_IDE_RUNTIME: "fake",
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE: phase,
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_PROMPT: prompt,
       KEEPER_IDE_CONVERSATION_ACCEPTANCE_RESULT: resultPath,

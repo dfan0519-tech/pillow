@@ -185,9 +185,7 @@ fn require_path_env(name: &str) -> PathBuf {
     let value = std::env::var(name).unwrap_or_default();
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        panic!(
-            "missing required non-secret env {name}; refuse PASS without full opt-in"
-        );
+        panic!("missing required non-secret env {name}; refuse PASS without full opt-in");
     }
     // Reject obvious traversal / UNC without printing the path.
     if trimmed.contains("..") || trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
@@ -223,6 +221,16 @@ fn write_evidence(path: &Path, body: &serde_json::Value) {
     fs::write(path, format!("{text}\n")).expect("write evidence");
 }
 
+fn assert_probe_detail_secret_free(detail: Option<&str>) {
+    if let Some(detail) = detail {
+        let d = detail.to_ascii_lowercase();
+        assert!(
+            !d.contains("token") && !d.contains("api_key") && !d.contains("password"),
+            "probe detail must stay secret-free"
+        );
+    }
+}
+
 #[test]
 #[ignore = "live Grok ACP; opt-in via KEEPER_GROK_ACP_E2E=1 and path env vars"]
 fn controlled_live_native_acceptance() {
@@ -236,19 +244,24 @@ fn controlled_live_native_acceptance() {
 
     let adapter = GrokAcpAdapter::new(adapter_cfg).expect("adapter config");
 
-    // 1) Probe truth — industrial name, never fake.
-    let probe = adapter.probe().expect("probe");
-    assert_eq!(probe.adapter_name, "grok-acp", "live gate rejects non-grok-acp");
-    assert_ne!(probe.adapter_name, "fake");
-    assert!(
-        probe.healthy,
-        "probe.healthy must be true when executable is present"
+    // 1) Probe truth before initialize/session — H1: not healthy, detail=unavailable.
+    // Adapter name is always grok-acp (never fake). File presence alone is not healthy.
+    let probe_before = adapter.probe().expect("probe before session");
+    assert_eq!(
+        probe_before.adapter_name, "grok-acp",
+        "live gate rejects non-grok-acp"
     );
-    // Detail must stay secret-free if present.
-    if let Some(detail) = &probe.detail {
-        let d = detail.to_ascii_lowercase();
-        assert!(!d.contains("token") && !d.contains("api_key") && !d.contains("password"));
-    }
+    assert_ne!(probe_before.adapter_name, "fake");
+    assert!(
+        !probe_before.healthy,
+        "probe must not be healthy before initialize/session"
+    );
+    assert_eq!(
+        probe_before.detail.as_deref(),
+        Some("unavailable"),
+        "before session detail must be unavailable"
+    );
+    assert_probe_detail_secret_free(probe_before.detail.as_deref());
 
     // 2) session/new via start_session with project root cwd.
     let session = adapter
@@ -258,7 +271,21 @@ fn controlled_live_native_acceptance() {
         })
         .expect("start_session / session/new");
 
-    // 3) One read-only text turn — single terminal TurnCompleted.
+    // 3) Probe after session/new — H1: transport ready, auth not yet proven.
+    let probe_after_session = adapter.probe().expect("probe after session/new");
+    assert_eq!(probe_after_session.adapter_name, "grok-acp");
+    assert!(
+        !probe_after_session.healthy,
+        "session/new must not claim healthy (auth unverified)"
+    );
+    assert_eq!(
+        probe_after_session.detail.as_deref(),
+        Some("transport_ready_auth_unverified"),
+        "after session/new detail must be transport_ready_auth_unverified"
+    );
+    assert_probe_detail_secret_free(probe_after_session.detail.as_deref());
+
+    // 4) One read-only text turn — single terminal TurnCompleted.
     let read_run = RunId::new();
     adapter.arm_turn(read_run).expect("arm read-only turn");
     let mut read_sink = CollectingSink::new();
@@ -284,9 +311,26 @@ fn controlled_live_native_acceptance() {
         RuntimeEventKind::TurnCompleted,
         "read-only turn expected TurnCompleted"
     );
-    assert_eq!(read_sink.kinds().first(), Some(&RuntimeEventKind::RunStarted));
+    assert_eq!(
+        read_sink.kinds().first(),
+        Some(&RuntimeEventKind::RunStarted)
+    );
 
-    // 4) Cooperative cancellation — single terminal RunCancelled.
+    // 5) Probe after first successful real prompt — H1: healthy.
+    let probe_after_prompt = adapter.probe().expect("probe after successful prompt");
+    assert_eq!(probe_after_prompt.adapter_name, "grok-acp");
+    assert!(
+        probe_after_prompt.healthy,
+        "first successful real prompt must establish healthy"
+    );
+    assert_eq!(
+        probe_after_prompt.detail.as_deref(),
+        Some("healthy"),
+        "after successful prompt detail must be healthy"
+    );
+    assert_probe_detail_secret_free(probe_after_prompt.detail.as_deref());
+
+    // 6) Cooperative cancellation — single terminal RunCancelled.
     let cancel_run = RunId::new();
     adapter.arm_turn(cancel_run).expect("arm cancel turn");
     let adapter_arc = Arc::new(adapter);
@@ -331,7 +375,7 @@ fn controlled_live_native_acceptance() {
         "write/edit/execute tool activity observed; live prompt must stay read-only"
     );
 
-    // 5) Shutdown — kill tree; no further turns.
+    // 7) Shutdown — kill tree; no further turns.
     adapter_arc.shutdown().expect("shutdown");
 
     let evidence = serde_json::json!({
@@ -339,10 +383,23 @@ fn controlled_live_native_acceptance() {
         "status": "passed",
         "adapterName": "grok-acp",
         "probe": {
-            "healthy": probe.healthy,
-            "adapterName": probe.adapter_name,
-            // version is crate version, not account identity.
-            "version": probe.version,
+            "beforeSession": {
+                "healthy": false,
+                "detail": "unavailable",
+                "adapterName": "grok-acp",
+            },
+            "afterSessionNew": {
+                "healthy": false,
+                "detail": "transport_ready_auth_unverified",
+                "adapterName": "grok-acp",
+            },
+            "afterFirstSuccessfulPrompt": {
+                "healthy": true,
+                "detail": "healthy",
+                "adapterName": "grok-acp",
+                // version is crate/agent version, not account identity.
+                "version": probe_after_prompt.version,
+            },
         },
         "sessionNew": true,
         "readOnlyTurn": {
