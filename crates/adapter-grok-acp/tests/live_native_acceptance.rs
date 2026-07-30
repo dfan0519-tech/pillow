@@ -36,9 +36,8 @@ const ENV_PROJECT_ROOT: &str = "KEEPER_GROK_PROJECT_ROOT";
 const ENV_RESULT: &str = "KEEPER_GROK_ACCEPTANCE_RESULT";
 const MAX_DIAGNOSTIC_TOOL_NAME_CHARS: usize = 32;
 
-const READ_ONLY_PROMPT: &str = "Reply with one short sentence confirming you received this message. \
-Do not use any tools. Do not write, edit, delete, create, move, or execute files. \
-Text response only.";
+const READ_ONLY_PROMPT: &str = "Calculate 2 + 2. Reply with exactly one character: 4. \
+Do not use any tools. Do not read, write, edit, delete, create, move, or execute files.";
 
 const CANCEL_PROMPT: &str = "Write a careful multi-paragraph explanation of why software tests must \
 distinguish SKIP from PASS. Use several sentences. Do not use any tools. \
@@ -559,4 +558,13 @@ fn read_only_turn_diagnostic_excludes_event_payloads() {
     );
     assert!(!diagnostic.contains("private"));
     assert!(!diagnostic.contains("account"));
+}
+
+#[test]
+fn read_only_prompt_is_deterministic_and_requires_no_context() {
+    assert_eq!(
+        READ_ONLY_PROMPT,
+        "Calculate 2 + 2. Reply with exactly one character: 4. \
+Do not use any tools. Do not read, write, edit, delete, create, move, or execute files."
+    );
 }
