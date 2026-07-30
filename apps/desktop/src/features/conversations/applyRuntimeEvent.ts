@@ -24,6 +24,7 @@ import {
 } from "./projectRunActivity";
 
 export { closeOpenActivities } from "./normalizeTerminalActivity";
+export const MAX_RETAINED_EVENTS = 512;
 
 export function emptyTimeline(conversationId: string): ConversationTimelineView {
   return {
@@ -31,6 +32,9 @@ export function emptyTimeline(conversationId: string): ConversationTimelineView 
     messages: [],
     events: [],
     seenEventKeys: new Set(),
+    lastSequenceByRunId: {},
+    prunedSequenceByRunId: {},
+    omittedEventCount: 0,
     assistantText: "",
     reasoningText: "",
     plan: null,
@@ -50,12 +54,13 @@ export function applyRuntimeEvent(
     ?? emptyTimeline(event.conversationId);
 
   const key = eventKey(event.runId, event.sequence);
-  if (timeline.seenEventKeys.has(key)) {
+  const prunedSequence = timeline.prunedSequenceByRunId?.[event.runId];
+  if (
+    timeline.seenEventKeys.has(key)
+    || (prunedSequence !== undefined && event.sequence <= prunedSequence)
+  ) {
     return state;
   }
-
-  const seenEventKeys = new Set(timeline.seenEventKeys);
-  seenEventKeys.add(key);
 
   let messages = timeline.messages;
   let activeRunId = timeline.activeRunId ?? event.runId;
@@ -63,7 +68,33 @@ export function applyRuntimeEvent(
     timeline.activitiesByRunId[event.runId]
     ?? emptyRunActivity(event.runId, event.createdAt);
   const retainedEvent = boundEventForRetention(currentActivity, event);
-  const events = [...timeline.events, retainedEvent];
+  const appendedEvents = [...timeline.events, retainedEvent];
+  const prunedEventCount = Math.max(
+    0,
+    appendedEvents.length - MAX_RETAINED_EVENTS,
+  );
+  const events = prunedEventCount > 0
+    ? appendedEvents.slice(prunedEventCount)
+    : appendedEvents;
+  const prunedSequenceByRunId = {
+    ...(timeline.prunedSequenceByRunId ?? {}),
+  };
+  for (const pruned of appendedEvents.slice(0, prunedEventCount)) {
+    prunedSequenceByRunId[pruned.runId] = Math.max(
+      prunedSequenceByRunId[pruned.runId] ?? 0,
+      pruned.sequence,
+    );
+  }
+  const seenEventKeys = new Set(
+    events.map((item) => eventKey(item.runId, item.sequence)),
+  );
+  const lastSequenceByRunId = {
+    ...(timeline.lastSequenceByRunId ?? {}),
+    [event.runId]: Math.max(
+      timeline.lastSequenceByRunId?.[event.runId] ?? 0,
+      event.sequence,
+    ),
+  };
   let activity = projectRunActivity(currentActivity, retainedEvent);
 
   if (event.kind === "run_started") {
@@ -107,6 +138,10 @@ export function applyRuntimeEvent(
         messages,
         events,
         seenEventKeys,
+        lastSequenceByRunId,
+        prunedSequenceByRunId,
+        omittedEventCount:
+          (timeline.omittedEventCount ?? 0) + prunedEventCount,
         assistantText: activeActivity.assistantText,
         reasoningText: activeActivity.reasoningText,
         plan: activeActivity.plan,

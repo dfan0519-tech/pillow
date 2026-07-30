@@ -1,8 +1,15 @@
 /**
  * Workbench presentation and error-path regressions (Slice B1).
  */
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import {
@@ -534,7 +541,7 @@ describe("timeline scale", () => {
         id: `anchor-${index}`,
         role: "user" as const,
         content: `Message ${index}${index % 2 ? "\nextra\nheight" : ""}`,
-        createdAt: `2026-07-30T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+        createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, index)).toISOString(),
       })),
       events: [],
       seenEventKeys: new Set(),
@@ -564,6 +571,97 @@ describe("timeline scale", () => {
     );
 
     await waitFor(() => expect(page.scrollTop).toBe(1_660));
+  });
+
+  it("freezes the exact visible range while live items append away from bottom", () => {
+    const makeTimeline = (count: number): ConversationTimelineView => ({
+      conversationId: "c-live-range",
+      messages: Array.from({ length: count }, (_, index) => ({
+        id: `live-${index}`,
+        role: "user" as const,
+        content: `Live ${index}`,
+        createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, index)).toISOString(),
+      })),
+      events: [],
+      seenEventKeys: new Set(),
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      activitiesByRunId: {},
+      activeRunId: null,
+    });
+    const view = render(
+      <ConversationTimeline run={null} timeline={makeTimeline(100)} />,
+    );
+    const page = screen.getByTestId("timeline-page");
+    Object.defineProperties(page, {
+      clientHeight: { configurable: true, value: 480 },
+      scrollHeight: { configurable: true, value: 2_000 },
+    });
+    page.scrollTop = 200;
+    fireEvent.scroll(page);
+
+    const before = within(page)
+      .getAllByTestId(/timeline-(user|assistant)-message/)
+      .map((item) => item.getAttribute("data-message-id"));
+    view.rerender(
+      <ConversationTimeline run={null} timeline={makeTimeline(101)} />,
+    );
+    const after = within(page)
+      .getAllByTestId(/timeline-(user|assistant)-message/)
+      .map((item) => item.getAttribute("data-message-id"));
+
+    expect(page).toHaveAttribute("data-follow-bottom", "false");
+    expect(after).toEqual(before);
+    expect(within(page).queryByText("Live 100")).not.toBeInTheDocument();
+  });
+
+  it("does not remount or drop the visible range at the 80 to 81 transition", () => {
+    const makeTimeline = (count: number): ConversationTimelineView => ({
+      conversationId: "c-threshold-range",
+      messages: Array.from({ length: count }, (_, index) => ({
+        id: `threshold-${index}`,
+        role: "user" as const,
+        content: `Threshold ${index}`,
+        createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, index)).toISOString(),
+      })),
+      events: [],
+      seenEventKeys: new Set(),
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      activitiesByRunId: {},
+      activeRunId: null,
+    });
+    const view = render(
+      <ConversationTimeline run={null} timeline={makeTimeline(80)} />,
+    );
+    const page = screen.getByTestId("timeline-page");
+    Object.defineProperties(page, {
+      clientHeight: { configurable: true, value: 480 },
+      scrollHeight: { configurable: true, value: 2_000 },
+    });
+    page.scrollTop = 200;
+    fireEvent.scroll(page);
+
+    view.rerender(
+      <ConversationTimeline run={null} timeline={makeTimeline(81)} />,
+    );
+
+    expect(screen.getByTestId("timeline-page")).toBe(page);
+    expect(
+      within(page).getAllByTestId(/timeline-(user|assistant)-message/),
+    ).toHaveLength(80);
+    expect(within(page).getByText("Threshold 0")).toBeVisible();
+    expect(within(page).getByText("Threshold 79")).toBeVisible();
+    expect(within(page).queryByText("Threshold 80")).not.toBeInTheDocument();
+    expect(
+      within(page).getByRole("button", { name: "跳到最新消息" }),
+    ).toBeVisible();
   });
 });
 
@@ -769,5 +867,97 @@ describe("run resource navigation", () => {
     );
     expect(within(pane).getByText("reports/result.md")).toBeVisible();
     expect(within(pane).getByText("内容预览已截断")).toBeVisible();
+  });
+
+  it("never commits a prior project's selected resource under the new project", async () => {
+    const activity: RunActivityView = {
+      runId: "run-project-resource",
+      status: "completed",
+      startedAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:01.000Z",
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      artifacts: [
+        {
+          artifactId: "artifact-a",
+          path: "project-a.txt",
+          kind: "report",
+          createdAt: "2026-07-30T00:00:01.000Z",
+          resource: {
+            resourceId: "resource-project-a",
+            kind: "artifact",
+            label: "Project A report",
+            path: "project-a.txt",
+            contentPreview: "A-only content",
+            truncated: false,
+          },
+        },
+      ],
+    };
+    const timeline: ConversationTimelineView = {
+      conversationId: "c-project-resource",
+      messages: [],
+      events: [],
+      seenEventKeys: new Set(),
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      activitiesByRunId: { [activity.runId]: activity },
+      activeRunId: activity.runId,
+    };
+    const commits: Array<{ project: string | null; staleResource: boolean }> = [];
+    const onRender = () => {
+      commits.push({
+        project: document.querySelector('[data-testid="active-project-name"]')
+          ?.textContent ?? null,
+        staleResource: Boolean(
+          document.querySelector('[data-resource-id="resource-project-a"]'),
+        ),
+      });
+    };
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const projectB = fixtureProject({
+      id: "project-b",
+      name: "Project B",
+      rootPath: "F:\\work\\project-b",
+    });
+    const props = {
+      onCancelRun: () => undefined,
+      onNewProject: () => undefined,
+      onOpenProject: () => undefined,
+      onSendTurn: () => undefined,
+      run: null,
+      timeline,
+    };
+    const view = render(
+      <Profiler id="project-resource" onRender={onRender}>
+        <Workbench {...props} project={projectA} />
+      </Profiler>,
+    );
+    const details = screen.getByTestId("run-activity").querySelector("details")!;
+    details.open = true;
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "打开 Project A report" }),
+    );
+    expect(screen.getByText("A-only content")).toBeVisible();
+
+    commits.length = 0;
+    view.rerender(
+      <Profiler id="project-resource" onRender={onRender}>
+        <Workbench {...props} project={projectB} />
+      </Profiler>,
+    );
+
+    expect(commits.length).toBeGreaterThan(0);
+    expect(
+      commits.some(
+        (commit) => commit.project === "Project B" && commit.staleResource,
+      ),
+    ).toBe(false);
   });
 });

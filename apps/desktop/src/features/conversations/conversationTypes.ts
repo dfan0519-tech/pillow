@@ -33,7 +33,7 @@ export type ResourceReferenceView = {
 export type ReceiptReferenceView = {
   receiptId: string;
   label: string;
-  resource: ResourceReferenceView;
+  resource?: ResourceReferenceView;
 };
 
 export type ToolActivity = {
@@ -84,6 +84,12 @@ export type RunActivityView = {
   tools: ToolActivity[];
   subagents: SubagentActivity[];
   artifacts: ArtifactActivity[];
+  omittedPlanStepCount?: number;
+  omittedToolCount?: number;
+  omittedSubagentCount?: number;
+  omittedArtifactCount?: number;
+  omittedResourceCount?: number;
+  omittedResourcePreviewChars?: number;
 };
 
 export type RunView = {
@@ -99,6 +105,11 @@ export type ConversationTimelineView = {
   events: RuntimeEventDto[];
   /** Idempotent keys: `${runId}:${sequence}`. */
   seenEventKeys: Set<string>;
+  /** Monotonic per-run high-water marks preserve dedupe after event pruning. */
+  lastSequenceByRunId?: Record<string, number>;
+  /** Per-run floor covered by pruned retained events. */
+  prunedSequenceByRunId?: Record<string, number>;
+  omittedEventCount?: number;
   assistantText: string;
   reasoningText: string;
   plan: PlanActivity | null;

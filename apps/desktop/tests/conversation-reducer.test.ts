@@ -392,6 +392,120 @@ describe("event dedupe by (runId, sequence)", () => {
     expect(resource?.truncated).toBe(true);
     expect(retainedPreview).toHaveLength(16_384);
   });
+
+  it("bounds retained event and activity collections with coherent omission counts", () => {
+    let state = createInitialConversationState();
+    let sequence = 1;
+    const apply = (
+      kind: RuntimeEventDto["kind"],
+      payload: RuntimeEventDto["payload"],
+    ) => {
+      state = dispatch(state, {
+        type: "runtime_event",
+        event: baseEvent({
+          eventId: `budget-${sequence}`,
+          runId: "run-budget",
+          sequence: sequence++,
+          kind,
+          payload,
+        } as Parameters<typeof baseEvent>[0]),
+      });
+    };
+
+    apply("run_started", {});
+    apply("plan_updated", {
+      steps: Array.from({ length: 100 }, (_, index) => ({
+        id: `step-${index}`,
+        title: `Step ${index}`,
+        status: "pending",
+      })),
+    });
+    for (let index = 0; index < 80; index += 1) {
+      apply("tool_call_started", {
+        tool_call_id: `tool-${index}`,
+        name: "fs.read",
+        summary: `Read ${index}`,
+      });
+    }
+    for (let index = 0; index < 64; index += 1) {
+      apply("tool_call_completed", {
+        tool_call_id: `tool-${index}`,
+        status: "completed",
+        receipt: {
+          receipt_id: `receipt-${index}`,
+          label: `Receipt ${index}`,
+          resource: {
+            resource_id: `resource-${index}`,
+            kind: "file",
+            label: `Resource ${index}`,
+            path: `src/file-${index}.ts`,
+            content_preview: "x".repeat(1_024),
+          },
+        },
+      });
+    }
+    for (let index = 0; index < 40; index += 1) {
+      apply("subagent_started", {
+        subagent_id: `agent-${index}`,
+        role: `explore-${index}`,
+      });
+    }
+    for (let index = 0; index < 80; index += 1) {
+      apply("artifact_produced", {
+        artifact_id: `artifact-${index}`,
+        path: `reports/${index}.md`,
+        kind: "report",
+      });
+    }
+    for (let index = 0; index < 300; index += 1) {
+      apply("heartbeat", { tick: index });
+    }
+
+    const timeline = state.timelines.c1;
+    const activity = timeline?.activitiesByRunId["run-budget"];
+    const resources = [
+      ...(activity?.tools.flatMap((tool) => tool.resources ?? []) ?? []),
+      ...(activity?.artifacts.flatMap((artifact) =>
+        artifact.resource ? [artifact.resource] : []) ?? []),
+    ];
+    expect(timeline?.events).toHaveLength(512);
+    expect(timeline?.seenEventKeys.size).toBe(512);
+    expect(timeline?.omittedEventCount).toBe(sequence - 1 - 512);
+    expect(timeline?.lastSequenceByRunId?.["run-budget"]).toBe(sequence - 1);
+    expect(activity?.plan?.steps).toHaveLength(64);
+    expect(activity?.tools).toHaveLength(64);
+    expect(activity?.subagents).toHaveLength(32);
+    expect(activity?.artifacts).toHaveLength(64);
+    expect(resources).toHaveLength(64);
+    expect(
+      resources.reduce(
+        (total, resource) => total + (resource.contentPreview?.length ?? 0),
+        0,
+      ),
+    ).toBeLessThanOrEqual(32_768);
+    expect(activity).toMatchObject({
+      omittedPlanStepCount: 36,
+      omittedToolCount: 16,
+      omittedSubagentCount: 8,
+      omittedArtifactCount: 16,
+      omittedResourceCount: 80,
+      omittedResourcePreviewChars: 32_768,
+    });
+
+    const before = activity;
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        eventId: "late-duplicate",
+        runId: "run-budget",
+        sequence: 2,
+        kind: "plan_updated",
+        payload: { steps: [] },
+      }),
+    });
+    expect(state.timelines.c1?.activitiesByRunId["run-budget"]).toBe(before);
+    expect(state.timelines.c1?.events).toHaveLength(512);
+  });
 });
 
 describe("canonical Task 2 fixture projection", () => {

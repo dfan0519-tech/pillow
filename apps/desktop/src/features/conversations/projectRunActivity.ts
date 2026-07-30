@@ -22,6 +22,12 @@ export const MAX_TOOL_OUTPUT_CHARS = 16_384;
 export const MAX_RUN_TOOL_OUTPUT_CHARS = 49_152;
 export const MAX_RUN_TEXT_CHARS = 65_536;
 export const MAX_RESOURCE_PREVIEW_CHARS = 16_384;
+export const MAX_RUN_RESOURCE_PREVIEW_CHARS = 32_768;
+export const MAX_PLAN_STEPS_PER_RUN = 64;
+export const MAX_TOOLS_PER_RUN = 64;
+export const MAX_SUBAGENTS_PER_RUN = 32;
+export const MAX_ARTIFACTS_PER_RUN = 64;
+export const MAX_RESOURCES_PER_RUN = 64;
 const MAX_REFERENCE_PATH_CHARS = 1_024;
 const MAX_LABEL_CHARS = 256;
 const MAX_QUERY_PREVIEW_CHARS = 256;
@@ -46,6 +52,12 @@ export function emptyRunActivity(
     tools: [],
     subagents: [],
     artifacts: [],
+    omittedPlanStepCount: 0,
+    omittedToolCount: 0,
+    omittedSubagentCount: 0,
+    omittedArtifactCount: 0,
+    omittedResourceCount: 0,
+    omittedResourcePreviewChars: 0,
   };
 }
 
@@ -70,6 +82,24 @@ export function boundEventForRetention(
         ...(omitted > 0 ? { omitted_chars: omitted } : {}),
       },
     } as RuntimeEventDto;
+  }
+  if (event.kind === "plan_updated") {
+    const omitted =
+      (event.payload.omitted_steps ?? 0)
+      + Math.max(0, event.payload.steps.length - MAX_PLAN_STEPS_PER_RUN);
+    return {
+      ...event,
+      payload: {
+        steps: event.payload.steps
+          .slice(0, MAX_PLAN_STEPS_PER_RUN)
+          .map((step) => ({
+            id: step.id.slice(0, MAX_LABEL_CHARS),
+            title: boundedSingleLine(step.title, MAX_LABEL_CHARS),
+            status: boundedSingleLine(step.status, 64),
+          })),
+        ...(omitted > 0 ? { omitted_steps: omitted } : {}),
+      },
+    };
   }
   if (event.kind === "tool_call_started") {
     return {
@@ -121,6 +151,24 @@ export function boundEventForRetention(
         resource: event.payload.resource
           ? boundResource(event.payload.resource)
           : undefined,
+      },
+    };
+  }
+  if (event.kind === "subagent_started") {
+    return {
+      ...event,
+      payload: {
+        subagent_id: event.payload.subagent_id.slice(0, MAX_LABEL_CHARS),
+        role: boundedSingleLine(event.payload.role, MAX_LABEL_CHARS),
+      },
+    };
+  }
+  if (event.kind === "subagent_progress") {
+    return {
+      ...event,
+      payload: {
+        subagent_id: event.payload.subagent_id.slice(0, MAX_LABEL_CHARS),
+        summary: event.payload.summary.slice(0, MAX_LABEL_CHARS),
       },
     };
   }
@@ -203,22 +251,33 @@ export function projectRunActivity(
           }),
         ),
       },
+      omittedPlanStepCount: event.payload.omitted_steps ?? 0,
     };
   } else if (event.kind === "tool_call_started") {
+    const nextTool: ToolActivity = {
+      toolCallId: event.payload.tool_call_id,
+      name: event.payload.name,
+      title: event.payload.summary ?? event.payload.name,
+      status: "running",
+      startedAt: event.createdAt,
+      updatedAt: event.createdAt,
+      inputSummary: event.payload.input_summary
+        ? boundInputSummary(event.payload.input_summary)
+        : undefined,
+      resources: [],
+    };
+    const existing = activity.tools.some(
+      (tool) => tool.toolCallId === nextTool.toolCallId,
+    );
     activity = {
       ...activity,
-      tools: upsertTool(activity.tools, {
-        toolCallId: event.payload.tool_call_id,
-        name: event.payload.name,
-        title: event.payload.summary ?? event.payload.name,
-        status: "running",
-        startedAt: event.createdAt,
-        updatedAt: event.createdAt,
-        inputSummary: event.payload.input_summary
-          ? boundInputSummary(event.payload.input_summary)
-          : undefined,
-        resources: [],
-      }),
+      tools:
+        existing || activity.tools.length < MAX_TOOLS_PER_RUN
+          ? upsertTool(activity.tools, nextTool)
+          : activity.tools,
+      omittedToolCount:
+        (activity.omittedToolCount ?? 0)
+        + (!existing && activity.tools.length >= MAX_TOOLS_PER_RUN ? 1 : 0),
     };
   } else if (event.kind === "tool_call_output") {
     const allowed = outputAllowance(
@@ -247,6 +306,12 @@ export function projectRunActivity(
       ),
     };
   } else if (event.kind === "tool_call_completed") {
+    const completingTool = activity.tools.find(
+      (tool) => tool.toolCallId === event.payload.tool_call_id,
+    );
+    const receiptProjection = completingTool
+      ? projectReceipt(activity, completingTool, event.payload.receipt)
+      : null;
     activity = {
       ...activity,
       tools: activity.tools.map((tool) =>
@@ -255,21 +320,41 @@ export function projectRunActivity(
               ...tool,
               status: event.payload.status,
               updatedAt: event.createdAt,
-              ...projectReceipt(event.payload.receipt),
+              ...(receiptProjection?.fields ?? {}),
             }
           : tool,
       ),
+      omittedResourceCount:
+        (activity.omittedResourceCount ?? 0)
+        + (receiptProjection?.omittedResourceCount ?? 0),
+      omittedResourcePreviewChars:
+        (activity.omittedResourcePreviewChars ?? 0)
+        + (receiptProjection?.omittedPreviewChars ?? 0),
     };
   } else if (event.kind === "subagent_started") {
+    const nextSubagent: SubagentActivity = {
+      subagentId: event.payload.subagent_id,
+      title: event.payload.role,
+      status: "running",
+      startedAt: event.createdAt,
+      updatedAt: event.createdAt,
+    };
+    const existing = activity.subagents.some(
+      (item) => item.subagentId === nextSubagent.subagentId,
+    );
     activity = {
       ...activity,
-      subagents: upsertSubagent(activity.subagents, {
-        subagentId: event.payload.subagent_id,
-        title: event.payload.role,
-        status: "running",
-        startedAt: event.createdAt,
-        updatedAt: event.createdAt,
-      }),
+      subagents:
+        existing || activity.subagents.length < MAX_SUBAGENTS_PER_RUN
+          ? upsertSubagent(activity.subagents, nextSubagent)
+          : activity.subagents,
+      omittedSubagentCount:
+        (activity.omittedSubagentCount ?? 0)
+        + (
+          !existing && activity.subagents.length >= MAX_SUBAGENTS_PER_RUN
+            ? 1
+            : 0
+        ),
     };
   } else if (event.kind === "subagent_progress") {
     activity = {
@@ -298,25 +383,59 @@ export function projectRunActivity(
       ),
     };
   } else if (event.kind === "artifact_produced") {
-    const resource = event.payload.resource
-      ? projectResource(event.payload.resource)
-      : {
-          resourceId: `artifact:${event.payload.artifact_id}`,
-          kind: "artifact" as const,
-          label: event.payload.path,
-          path: event.payload.path,
-          truncated: false,
-        };
-    activity = {
-      ...activity,
-      artifacts: upsertArtifact(activity.artifacts, {
-        artifactId: event.payload.artifact_id,
+    const existingArtifact = activity.artifacts.find(
+      (artifact) => artifact.artifactId === event.payload.artifact_id,
+    );
+    const rawResource: ResourceReferenceDto = event.payload.resource
+      ?? {
+        resource_id: `artifact:${event.payload.artifact_id}`,
+        kind: "artifact",
+        label: event.payload.path,
         path: event.payload.path,
-        kind: event.payload.kind,
-        createdAt: event.createdAt,
-        resource,
-      }),
-    };
+      };
+    if (
+      !existingArtifact
+      && activity.artifacts.length >= MAX_ARTIFACTS_PER_RUN
+    ) {
+      activity = {
+        ...activity,
+        omittedArtifactCount: (activity.omittedArtifactCount ?? 0) + 1,
+        omittedResourceCount: (activity.omittedResourceCount ?? 0) + 1,
+      };
+    } else {
+      const withoutExisting = resourceStats(
+        activity,
+        existingArtifact?.resource?.resourceId,
+      );
+      const canRetainResource =
+        withoutExisting.count < MAX_RESOURCES_PER_RUN;
+      const projected = canRetainResource
+        ? projectResource(
+            rawResource,
+            Math.max(
+              0,
+              MAX_RUN_RESOURCE_PREVIEW_CHARS - withoutExisting.previewChars,
+            ),
+          )
+        : null;
+      const resource = projected?.resource;
+      activity = {
+        ...activity,
+        omittedResourceCount:
+          (activity.omittedResourceCount ?? 0)
+          + (canRetainResource ? 0 : 1),
+        omittedResourcePreviewChars:
+          (activity.omittedResourcePreviewChars ?? 0)
+          + (projected?.omittedPreviewChars ?? 0),
+        artifacts: upsertArtifact(activity.artifacts, {
+          artifactId: event.payload.artifact_id,
+          path: event.payload.path,
+          kind: event.payload.kind,
+          createdAt: event.createdAt,
+          resource,
+        }),
+      };
+    }
   }
 
   if (event.kind === "turn_completed") {
@@ -336,6 +455,7 @@ function outputAllowance(
   requested: number,
 ): number {
   const tool = activity.tools.find((item) => item.toolCallId === toolCallId);
+  if (!tool) return 0;
   const toolRemaining = Math.max(
     0,
     MAX_TOOL_OUTPUT_CHARS - (tool?.output?.length ?? 0),
@@ -361,43 +481,102 @@ function runTextAllowance(
 }
 
 function projectReceipt(
+  activity: RunActivityView,
+  currentTool: ToolActivity,
   receipt:
     | Extract<
         RuntimeEventDto,
         { kind: "tool_call_completed" }
       >["payload"]["receipt"]
     | undefined,
-): Pick<ToolActivity, "receipt" | "resources"> | Record<string, never> {
-  if (!receipt) return {};
-  const resource = receipt.resource
-    ? projectResource(receipt.resource)
-    : {
-        resourceId: `receipt:${receipt.receipt_id}`,
-        kind: "receipt" as const,
-        label: receipt.label,
-        truncated: false,
-      };
-  return {
-    receipt: {
-      receiptId: receipt.receipt_id,
+): {
+  fields: Pick<ToolActivity, "receipt" | "resources"> | Record<string, never>;
+  omittedResourceCount: number;
+  omittedPreviewChars: number;
+} {
+  if (!receipt) {
+    return {
+      fields: {},
+      omittedResourceCount: 0,
+      omittedPreviewChars: 0,
+    };
+  }
+  const existingResourceId = currentTool.resources?.[0]?.resourceId;
+  const stats = resourceStats(activity, existingResourceId);
+  if (stats.count >= MAX_RESOURCES_PER_RUN) {
+    return {
+      fields: {
+        receipt: {
+          receiptId: receipt.receipt_id,
+          label: receipt.label,
+        },
+        resources: [],
+      },
+      omittedResourceCount: 1,
+      omittedPreviewChars: receipt.resource?.content_preview?.length ?? 0,
+    };
+  }
+  const rawResource: ResourceReferenceDto = receipt.resource
+    ?? {
+      resource_id: `receipt:${receipt.receipt_id}`,
+      kind: "receipt",
       label: receipt.label,
-      resource,
+    };
+  const projected = projectResource(
+    rawResource,
+    Math.max(0, MAX_RUN_RESOURCE_PREVIEW_CHARS - stats.previewChars),
+  );
+  const resource = projected.resource;
+  return {
+    fields: {
+      receipt: {
+        receiptId: receipt.receipt_id,
+        label: receipt.label,
+        resource,
+      },
+      resources: [resource],
     },
-    resources: [resource],
+    omittedResourceCount: 0,
+    omittedPreviewChars: projected.omittedPreviewChars,
   };
 }
 
 function projectResource(
   resource: ResourceReferenceDto,
-): ResourceReferenceView {
+  aggregateAllowance = MAX_RESOURCE_PREVIEW_CHARS,
+): { resource: ResourceReferenceView; omittedPreviewChars: number } {
   const bounded = boundResource(resource);
+  const preview = bounded.content_preview?.slice(0, aggregateAllowance);
+  const omittedPreviewChars =
+    (bounded.content_preview?.length ?? 0) - (preview?.length ?? 0);
   return {
-    resourceId: bounded.resource_id,
-    kind: bounded.kind,
-    label: bounded.label,
-    path: bounded.path,
-    contentPreview: bounded.content_preview,
-    truncated: bounded.truncated ?? false,
+    resource: {
+      resourceId: bounded.resource_id,
+      kind: bounded.kind,
+      label: bounded.label,
+      path: bounded.path,
+      contentPreview: preview,
+      truncated: (bounded.truncated ?? false) || omittedPreviewChars > 0,
+    },
+    omittedPreviewChars,
+  };
+}
+
+function resourceStats(
+  activity: RunActivityView,
+  excludeResourceId?: string,
+): { count: number; previewChars: number } {
+  const resources = [
+    ...activity.tools.flatMap((tool) => tool.resources ?? []),
+    ...activity.artifacts.flatMap((artifact) =>
+      artifact.resource ? [artifact.resource] : []),
+  ].filter((resource) => resource.resourceId !== excludeResourceId);
+  return {
+    count: resources.length,
+    previewChars: resources.reduce(
+      (total, resource) => total + (resource.contentPreview?.length ?? 0),
+      0,
+    ),
   };
 }
 

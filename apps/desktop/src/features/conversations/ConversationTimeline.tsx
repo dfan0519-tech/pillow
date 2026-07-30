@@ -4,7 +4,6 @@
  */
 
 import {
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -62,27 +61,14 @@ export function ConversationTimeline({
         </div>
       ) : null}
 
-      {usePagination ? (
-        <PaginatedItemList
-          items={items}
-          onOpenResource={onOpenResource}
-          run={run}
-          streaming={streaming}
-          timeline={timeline}
-        />
-      ) : (
-        <div className="conversation-timeline__messages">
-          {items.map((item, index) => (
-            <TimelineItemView
-              item={item}
-              key={itemKey(item, index)}
-              onOpenResource={onOpenResource}
-              run={run}
-              streaming={streaming}
-            />
-          ))}
-        </div>
-      )}
+      <PaginatedItemList
+        items={items}
+        key={timeline.conversationId}
+        onOpenResource={onOpenResource}
+        run={run}
+        streaming={streaming}
+        timeline={timeline}
+      />
     </div>
   );
 }
@@ -174,6 +160,11 @@ function TimelineItemView({
   );
 }
 
+type VisibleRange = {
+  start: number;
+  end: number;
+};
+
 function PaginatedItemList({
   items,
   onOpenResource,
@@ -189,13 +180,17 @@ function PaginatedItemList({
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [followBottom, setFollowBottom] = useState(true);
-  const [visibleCount, setVisibleCount] = useState(TIMELINE_PAGE_SIZE);
+  const [frozenRange, setFrozenRange] = useState<VisibleRange>(() =>
+    latestRange(items.length),
+  );
   const prependHeightRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    setVisibleCount(TIMELINE_PAGE_SIZE);
-    prependHeightRef.current = null;
-  }, [timeline.conversationId]);
+  const visibleRange = followBottom
+    ? latestRange(items.length)
+    : clampRange(frozenRange, items.length);
+  const slice = items.slice(visibleRange.start, visibleRange.end);
+  const hasOlder = visibleRange.start > 0;
+  const hasNewer = visibleRange.end < items.length;
 
   useLayoutEffect(() => {
     const el = scrollerRef.current;
@@ -213,20 +208,18 @@ function PaginatedItemList({
     streaming,
     timeline.assistantText,
     followBottom,
-    visibleCount,
+    visibleRange.start,
+    visibleRange.end,
   ]);
-
-  const startIndex = Math.max(0, items.length - visibleCount);
-  const slice = items.slice(startIndex);
-  const hasOlder = startIndex > 0;
 
   const loadOlder = () => {
     const el = scrollerRef.current;
     prependHeightRef.current = el?.scrollHeight ?? null;
     setFollowBottom(false);
-    setVisibleCount((count) =>
-      Math.min(items.length, count + TIMELINE_PAGE_SIZE),
-    );
+    setFrozenRange({
+      start: Math.max(0, visibleRange.start - TIMELINE_PAGE_SIZE),
+      end: visibleRange.end,
+    });
   };
 
   return (
@@ -238,7 +231,11 @@ function PaginatedItemList({
         const el = event.currentTarget;
         const distanceFromBottom =
           el.scrollHeight - el.scrollTop - el.clientHeight;
-        setFollowBottom(distanceFromBottom <= STICK_BOTTOM_PX);
+        const nextFollowBottom = distanceFromBottom <= STICK_BOTTOM_PX;
+        if (!nextFollowBottom && followBottom) {
+          setFrozenRange(visibleRange);
+        }
+        setFollowBottom(nextFollowBottom);
       }}
       ref={scrollerRef}
       style={{ maxHeight: VIEWPORT_HEIGHT, overflowY: "auto" }}
@@ -255,12 +252,42 @@ function PaginatedItemList({
       {slice.map((item, offset) => (
         <TimelineItemView
           item={item}
-          key={itemKey(item, startIndex + offset)}
+          key={itemKey(item, visibleRange.start + offset)}
           onOpenResource={onOpenResource}
           run={run}
           streaming={streaming}
         />
       ))}
+      {hasNewer ? (
+        <button
+          className="conversation-timeline__load-older"
+          onClick={() => {
+            setFrozenRange(latestRange(items.length));
+            setFollowBottom(true);
+          }}
+          type="button"
+        >
+          跳到最新消息
+        </button>
+      ) : null}
     </div>
   );
+}
+
+function latestRange(length: number): VisibleRange {
+  if (length <= TIMELINE_WINDOW_THRESHOLD) {
+    return { start: 0, end: length };
+  }
+  return {
+    start: Math.max(0, length - TIMELINE_PAGE_SIZE),
+    end: length,
+  };
+}
+
+function clampRange(range: VisibleRange, length: number): VisibleRange {
+  const end = Math.min(range.end, length);
+  return {
+    start: Math.min(range.start, end),
+    end,
+  };
 }

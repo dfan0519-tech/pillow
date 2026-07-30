@@ -52,6 +52,75 @@ const timeline = {
   ],
 };
 
+const validPayloadByKind = {
+  run_started: { prompt_preview: "start" },
+  assistant_delta: { text: "answer" },
+  reasoning_summary_delta: { text: "reasoning" },
+  plan_updated: {
+    steps: [{ id: "step-1", title: "Inspect", status: "active" }],
+  },
+  tool_call_started: {
+    tool_call_id: "tool-1",
+    name: "fs.search",
+    summary: "Search",
+    input_summary: {
+      kind: "fs_search",
+      path: "src",
+      query_preview: "needle",
+      case_sensitive: false,
+      max_results: 20,
+    },
+  },
+  tool_call_output: { tool_call_id: "tool-1", chunk: "result" },
+  tool_call_completed: {
+    tool_call_id: "tool-1",
+    status: "completed",
+    receipt: {
+      receipt_id: "receipt-1",
+      label: "Search receipt",
+      resource: {
+        resource_id: "resource-1",
+        kind: "search_results",
+        label: "Search results",
+        path: "src",
+        content_preview: "src/App.tsx:1",
+        truncated: false,
+      },
+    },
+  },
+  subagent_started: { subagent_id: "agent-1", role: "explore" },
+  subagent_progress: { subagent_id: "agent-1", summary: "working" },
+  subagent_completed: { subagent_id: "agent-1", status: "completed" },
+  artifact_produced: {
+    artifact_id: "artifact-1",
+    path: "reports/result.md",
+    kind: "report",
+    resource: {
+      resource_id: "artifact-resource-1",
+      kind: "artifact",
+      label: "Result",
+      path: "reports/result.md",
+      content_preview: "preview",
+    },
+  },
+  turn_completed: { summary: "done" },
+  turn_failed: { code: "runtime_failed", message: "failed safely" },
+  run_cancelled: { reason: "requested" },
+  heartbeat: { tick: 1 },
+} as const;
+
+function eventFor(
+  kind: keyof typeof validPayloadByKind,
+  payload: unknown = validPayloadByKind[kind],
+) {
+  return {
+    ...runEvent,
+    eventId: `event-${kind}`,
+    kind,
+    payload,
+  };
+}
+
 describe("TauriConversationGateway", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -169,6 +238,164 @@ describe("TauriConversationGateway", () => {
 
     handlers[0]!({ payload: { kind: "not_a_real_kind" } });
     expect(received).toEqual([]);
+  });
+
+  it("validates the discriminated payload for every known runtime event kind", async () => {
+    const handlers: Array<(event: { payload: unknown }) => void> = [];
+    vi.mocked(listen).mockImplementation(async (_event, cb) => {
+      handlers.push(cb as (event: { payload: unknown }) => void);
+      return vi.fn();
+    });
+    const received: unknown[] = [];
+    new TauriConversationGateway().subscribe((event) => received.push(event));
+    await vi.waitFor(() => expect(handlers.length).toBeGreaterThan(0));
+
+    for (const kind of Object.keys(validPayloadByKind) as Array<
+      keyof typeof validPayloadByKind
+    >) {
+      expect(() => handlers[0]!({ payload: eventFor(kind) })).not.toThrow();
+    }
+    expect(received.map((event) => (event as { kind: string }).kind)).toEqual(
+      Object.keys(validPayloadByKind),
+    );
+  });
+
+  it("ignores malformed known-kind and nested payloads without invoking listeners", async () => {
+    const handlers: Array<(event: { payload: unknown }) => void> = [];
+    vi.mocked(listen).mockImplementation(async (_event, cb) => {
+      handlers.push(cb as (event: { payload: unknown }) => void);
+      return vi.fn();
+    });
+    const received: unknown[] = [];
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    new TauriConversationGateway().subscribe((event) => received.push(event));
+    await vi.waitFor(() => expect(handlers.length).toBeGreaterThan(0));
+
+    const malformed = [
+      eventFor("run_started", { prompt_preview: 7 }),
+      eventFor("assistant_delta", { text: 7 }),
+      eventFor("reasoning_summary_delta", { text: null }),
+      eventFor("plan_updated", { steps: [{ id: "s", title: 2, status: "active" }] }),
+      eventFor("tool_call_started", {
+        tool_call_id: "t",
+        name: "fs.list",
+        input_summary: { kind: "fs_list", path: "src", max_results: "many" },
+      }),
+      eventFor("tool_call_output", { tool_call_id: "t", chunk: 4 }),
+      eventFor("tool_call_completed", {
+        tool_call_id: "t",
+        status: "completed",
+        receipt: {
+          receipt_id: "r",
+          label: "receipt",
+          resource: { resource_id: "x", kind: "socket", label: "bad" },
+        },
+      }),
+      eventFor("subagent_started", { subagent_id: 1, role: "explore" }),
+      eventFor("subagent_progress", { subagent_id: "a", summary: false }),
+      eventFor("subagent_completed", { subagent_id: "a", status: "running" }),
+      eventFor("artifact_produced", {
+        artifact_id: "a",
+        path: "result.md",
+        kind: "report",
+        resource: { resource_id: "r", kind: "artifact", label: 9 },
+      }),
+      eventFor("turn_completed", { summary: 1 }),
+      eventFor("turn_failed", { code: "failed", message: 3 }),
+      eventFor("run_cancelled", { reason: [] }),
+      eventFor("heartbeat", { tick: Number.NaN }),
+      eventFor("tool_call_output", {
+        tool_call_id: "t".repeat(257),
+        chunk: "bounded identity",
+      }),
+    ];
+    for (const event of malformed) {
+      expect(() => handlers[0]!({ payload: event })).not.toThrow();
+    }
+
+    expect(received).toEqual([]);
+    expect(consoleError).toHaveBeenCalledTimes(malformed.length);
+    consoleError.mockRestore();
+  });
+
+  it("drops malformed known-kind events during reload before reducer use", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ...timeline,
+      events: [eventFor("tool_call_output", { tool_call_id: "t", chunk: 4 })],
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      new TauriConversationGateway().loadTimeline(conversation.id),
+    ).resolves.toEqual({ ...timeline, events: [] });
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
+  });
+
+  it("bounds validated nested input and resource fields at the Tauri boundary", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ...timeline,
+      events: [
+        eventFor("tool_call_started", {
+          tool_call_id: "tool-bounded",
+          name: "fs.search",
+          input_summary: {
+            kind: "fs_search",
+            path: "p".repeat(2_000),
+            query_preview: "q".repeat(2_000),
+            case_sensitive: false,
+            max_results: 20,
+          },
+        }),
+        eventFor("tool_call_completed", {
+          tool_call_id: "tool-bounded",
+          status: "completed",
+          receipt: {
+            receipt_id: "receipt-bounded",
+            label: "Receipt",
+            resource: {
+              resource_id: "resource-bounded",
+              kind: "search_results",
+              label: "Results",
+              path: "p".repeat(2_000),
+              content_preview: "x".repeat(20_000),
+            },
+          },
+        }),
+      ],
+    });
+
+    const loaded = await new TauriConversationGateway().loadTimeline(
+      conversation.id,
+    );
+    const started = loaded.events[0];
+    const completed = loaded.events[1];
+    expect(
+      started?.kind === "tool_call_started"
+        ? started.payload.input_summary?.path.length
+        : 0,
+    ).toBe(1_024);
+    expect(
+      started?.kind === "tool_call_started"
+        && started.payload.input_summary?.kind === "fs_search"
+        ? started.payload.input_summary.query_preview.length
+        : 0,
+    ).toBe(256);
+    expect(
+      completed?.kind === "tool_call_completed"
+        ? completed.payload.receipt?.resource?.path?.length
+        : 0,
+    ).toBe(1_024);
+    expect(
+      completed?.kind === "tool_call_completed"
+        ? completed.payload.receipt?.resource?.content_preview?.length
+        : 0,
+    ).toBe(16_384);
+    expect(
+      completed?.kind === "tool_call_completed"
+        ? completed.payload.receipt?.resource?.truncated
+        : false,
+    ).toBe(true);
   });
 
   it("does not expose provider or credential command names", async () => {

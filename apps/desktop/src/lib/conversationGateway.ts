@@ -75,6 +75,8 @@ export type ReasoningSummaryDeltaPayload = {
 
 export type PlanUpdatedPayload = {
   steps: PlanStepDto[];
+  /** Renderer projection metadata; transport events normally omit this. */
+  omitted_steps?: number;
 };
 
 export type ToolInputSummaryDto =

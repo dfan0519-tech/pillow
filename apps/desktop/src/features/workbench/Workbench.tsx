@@ -46,9 +46,19 @@ export function Workbench({
   showMockBadge = false,
   mockBadgeLabel = "模拟运行时",
 }: WorkbenchProps) {
-  const [resourcesOpen, setResourcesOpen] = useState(false);
-  const [selectedResource, setSelectedResource] =
-    useState<ResourceReferenceView | null>(null);
+  const projectId = project?.id ?? null;
+  const [resourcePaneScope, setResourcePaneScope] =
+    useState<{ projectId: string | null } | null>(null);
+  const [resourceSelection, setResourceSelection] =
+    useState<{
+      projectId: string;
+      resource: ResourceReferenceView;
+    } | null>(null);
+  const resourcesOpen = resourcePaneScope?.projectId === projectId;
+  const selectedResource =
+    resourceSelection?.projectId === projectId
+      ? resourceSelection.resource
+      : null;
   const hasTimeline = Boolean(
     timeline
     && (
@@ -59,9 +69,13 @@ export function Workbench({
   const canCancel = isRunActive(run);
 
   useEffect(() => {
-    setSelectedResource(null);
-    setResourcesOpen(false);
-  }, [project?.id]);
+    if (resourceSelection && resourceSelection.projectId !== projectId) {
+      setResourceSelection(null);
+    }
+    if (resourcePaneScope && resourcePaneScope.projectId !== projectId) {
+      setResourcePaneScope(null);
+    }
+  }, [projectId, resourcePaneScope?.projectId, resourceSelection?.projectId]);
 
   return (
     <main
@@ -89,7 +103,10 @@ export function Workbench({
                   : "chrome-btn"
               }
               data-testid="resource-toggle"
-              onClick={() => setResourcesOpen((value) => !value)}
+              onClick={() =>
+                setResourcePaneScope((scope) =>
+                  scope?.projectId === projectId ? null : { projectId },
+                )}
               type="button"
             >
               <IconPanelRight size={16} />
@@ -102,8 +119,9 @@ export function Workbench({
             <ConversationTimeline
               mockBadgeLabel={mockBadgeLabel}
               onOpenResource={(resource) => {
-                setSelectedResource(resource);
-                setResourcesOpen(true);
+                if (!project) return;
+                setResourceSelection({ projectId: project.id, resource });
+                setResourcePaneScope({ projectId: project.id });
               }}
               run={run}
               showMockBadge={showMockBadge}
@@ -144,7 +162,7 @@ export function Workbench({
       </section>
       <ResourcePane
         hasProject={Boolean(project)}
-        onClose={() => setResourcesOpen(false)}
+        onClose={() => setResourcePaneScope(null)}
         open={resourcesOpen}
         resource={selectedResource}
       />

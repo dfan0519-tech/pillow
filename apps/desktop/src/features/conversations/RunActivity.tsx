@@ -113,6 +113,15 @@ export function RunActivity({
         </summary>
 
         <div className="run-activity__content">
+          {omittedActivitySummary(activity) ? (
+            <p
+              className="run-activity__truncation"
+              data-testid="run-activity-items-omitted"
+            >
+              {omittedActivitySummary(activity)}
+            </p>
+          ) : null}
+
           {activity.assistantTextTruncated ? (
             <p
               className="run-activity__truncation"
@@ -309,6 +318,8 @@ function activitySummaryParts(activity: RunActivityView): string[] {
   const parts: string[] = [];
   if (activity.assistantTextTruncated) parts.push("回复已截断");
   if (activity.reasoningTextTruncated) parts.push("推理已截断");
+  const omittedCount = totalOmittedActivityItems(activity);
+  if (omittedCount > 0) parts.push(`省略 ${omittedCount} 项`);
   if (activity.plan) parts.push(`${activity.plan.steps.length} 步`);
   if (activity.tools.length > 0) parts.push(`${activity.tools.length} 工具`);
   if (activity.subagents.length > 0) {
@@ -318,6 +329,30 @@ function activitySummaryParts(activity: RunActivityView): string[] {
     parts.push(`${activity.artifacts.length} 产物`);
   }
   return parts;
+}
+
+function omittedActivitySummary(activity: RunActivityView): string | null {
+  const entries: Array<[string, number | undefined]> = [
+    ["计划步骤", activity.omittedPlanStepCount],
+    ["工具", activity.omittedToolCount],
+    ["子代理", activity.omittedSubagentCount],
+    ["产物", activity.omittedArtifactCount],
+    ["资源", activity.omittedResourceCount],
+  ];
+  const parts = entries
+    .filter((item): item is [string, number] => (item[1] ?? 0) > 0)
+    .map(([label, count]) => `${label} ${count}`);
+  return parts.length > 0 ? `已省略 ${parts.join("、")}` : null;
+}
+
+function totalOmittedActivityItems(activity: RunActivityView): number {
+  return (
+    (activity.omittedPlanStepCount ?? 0)
+    + (activity.omittedToolCount ?? 0)
+    + (activity.omittedSubagentCount ?? 0)
+    + (activity.omittedArtifactCount ?? 0)
+    + (activity.omittedResourceCount ?? 0)
+  );
 }
 
 function formatActivityTime(value: string): string {
