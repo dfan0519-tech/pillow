@@ -14,11 +14,11 @@ pub use adapter::{AgentRuntimeAdapter, EventSink};
 pub use error::RuntimeError;
 pub use tool::{
     ArgumentsDigest, FsListArguments, FsListEntry, FsListOutput, FsReadArguments, FsReadOutput,
-    FsSearchArguments, FsSearchMatch, FsSearchOutput, ToolArgumentSpec, ToolArgumentType,
-    ToolArguments, ToolContentKind, ToolEntryKind, ToolExecutionLimits, ToolExecutionState, ToolId,
-    ToolManifest, ToolProposal, ToolProtocolError, ToolProtocolErrorCode, ToolPublicError,
-    ToolPublicErrorCode, ToolResult, ValidatedToolProposal, canonical_arguments_digest,
-    fixed_tool_manifests,
+    FsSearchArguments, FsSearchMatch, FsSearchOutput, ToolActiveContext, ToolArgumentSpec,
+    ToolArgumentType, ToolArguments, ToolContentKind, ToolEntryKind, ToolExecutionLimits,
+    ToolExecutionState, ToolId, ToolManifest, ToolProposal, ToolProposalFingerprint,
+    ToolProtocolError, ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult,
+    ValidatedToolProposal, canonical_arguments_digest, fixed_tool_manifests,
 };
 pub use types::{
     ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PlanStep, PlanUpdatedPayload,

@@ -6,9 +6,7 @@
   "tool_id": "fs.read",
   "tool_version": 1,
   "arguments": {
-    "path": "src/lib.rs",
-    "offset_bytes": 0,
-    "max_bytes": 4096
+    "path": "src/lib.rs"
   },
-  "arguments_digest": "sha256:39d1d5468d2801975f58ad7bb568647f4dbf73581bf34a3af040cae092805cdb"
+  "arguments_digest": "sha256:54928b277e37c7b2ff55a04677fec352eff5db41a3ed25ab38229783076b04e6"
 }

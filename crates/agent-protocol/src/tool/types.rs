@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 
+use super::public_error::ToolPublicError;
 use crate::RunId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -143,11 +144,123 @@ pub struct ToolProposal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolActiveContext {
+    pub(super) project_id: String,
+    pub(super) conversation_id: String,
+    pub(super) run_id: RunId,
+}
+
+impl ToolActiveContext {
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    pub fn run_id(&self) -> RunId {
+        self.run_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ToolProposalFingerprint(String);
+
+impl ToolProposalFingerprint {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(super) fn from_digest(value: &ArgumentsDigest) -> Self {
+        Self(value.as_str().to_owned())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// A proposal that passed strict context, schema, digest, and identity validation.
+///
+/// Its fields are intentionally opaque so callers cannot forge validation.
+///
+/// ```compile_fail
+/// use keeper_agent_protocol::ValidatedToolProposal;
+///
+/// let value: ValidatedToolProposal = todo!();
+/// let ValidatedToolProposal {
+///     proposal,
+///     manifest,
+///     arguments,
+///     canonical_arguments,
+///     ..
+/// } = value;
+/// ```
 pub struct ValidatedToolProposal {
-    pub proposal: ToolProposal,
-    pub manifest: ToolManifest,
-    pub arguments: ToolArguments,
-    pub canonical_arguments: Value,
+    pub(super) proposal: ToolProposal,
+    pub(super) context: ToolActiveContext,
+    pub(super) manifest: ToolManifest,
+    pub(super) arguments: ToolArguments,
+    pub(super) canonical_arguments: Value,
+    pub(super) normalized_arguments_digest: ArgumentsDigest,
+    pub(super) fingerprint: ToolProposalFingerprint,
+}
+
+impl ValidatedToolProposal {
+    pub fn proposal(&self) -> &ToolProposal {
+        &self.proposal
+    }
+
+    pub fn context(&self) -> &ToolActiveContext {
+        &self.context
+    }
+
+    pub fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    pub fn arguments(&self) -> &ToolArguments {
+        &self.arguments
+    }
+
+    pub fn canonical_arguments(&self) -> &Value {
+        &self.canonical_arguments
+    }
+
+    pub fn normalized_arguments_digest(&self) -> &ArgumentsDigest {
+        &self.normalized_arguments_digest
+    }
+
+    /// Stable reservation key for this validated proposal.
+    ///
+    /// The caller must atomically reserve this fingerprint before execution.
+    /// This crate intentionally does not implement reservation persistence.
+    pub fn fingerprint(&self) -> &ToolProposalFingerprint {
+        &self.fingerprint
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.proposal.project_id
+    }
+
+    pub fn conversation_id(&self) -> &str {
+        &self.proposal.conversation_id
+    }
+
+    pub fn run_id(&self) -> RunId {
+        self.proposal.run_id
+    }
+
+    pub fn call_id(&self) -> &str {
+        &self.proposal.call_id
+    }
+
+    pub fn tool_id(&self) -> &str {
+        &self.proposal.tool_id
+    }
+
+    pub fn tool_version(&self) -> u16 {
+        self.proposal.tool_version
+    }
 }
 
 fn default_list_results() -> u32 {
@@ -280,58 +393,6 @@ pub struct FsSearchOutput {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolPublicErrorCode {
-    InvalidProposal,
-    ProjectMismatch,
-    PathRejected,
-    Cancelled,
-    DeadlineExceeded,
-    OutputLimitExceeded,
-    InternalError,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolPublicError {
-    pub code: ToolPublicErrorCode,
-    pub message: String,
-    pub retryable: bool,
-}
-
-impl ToolPublicError {
-    pub fn canonical(code: ToolPublicErrorCode) -> Self {
-        let (message, retryable) = match code {
-            ToolPublicErrorCode::InvalidProposal => (
-                "The tool request was rejected. Correct the arguments and try again.",
-                true,
-            ),
-            ToolPublicErrorCode::ProjectMismatch => (
-                "The tool request does not belong to the active project.",
-                false,
-            ),
-            ToolPublicErrorCode::PathRejected => {
-                ("The requested project-relative path was rejected.", true)
-            }
-            ToolPublicErrorCode::Cancelled => ("The tool call was cancelled.", true),
-            ToolPublicErrorCode::DeadlineExceeded => {
-                ("The tool call exceeded its time limit.", true)
-            }
-            ToolPublicErrorCode::OutputLimitExceeded => (
-                "The tool output exceeded its configured limit. Narrow the request and try again.",
-                true,
-            ),
-            ToolPublicErrorCode::InternalError => ("The tool call failed inside Keeper.", true),
-        };
-        Self {
-            code,
-            message: message.into(),
-            retryable,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResult {
@@ -352,7 +413,7 @@ pub enum ToolProtocolErrorCode {
     InvalidEnvelope,
     UnknownTool,
     UnsupportedToolVersion,
-    ProjectMismatch,
+    ActiveContextMismatch,
     InvalidArguments,
     ArgumentsDigestMismatch,
     InvalidResult,

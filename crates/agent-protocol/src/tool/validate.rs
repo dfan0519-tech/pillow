@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::digest::canonical_arguments_digest;
 use super::manifest::{
@@ -8,22 +8,44 @@ use super::manifest::{
 };
 use super::types::{
     FsListArguments, FsListOutput, FsReadArguments, FsReadOutput, FsSearchArguments,
-    FsSearchOutput, ToolArguments, ToolContentKind, ToolExecutionState, ToolId, ToolProposal,
-    ToolProtocolError, ToolProtocolErrorCode, ToolPublicError, ToolResult, ValidatedToolProposal,
+    FsSearchOutput, ToolActiveContext, ToolArguments, ToolContentKind, ToolExecutionState, ToolId,
+    ToolProposal, ToolProposalFingerprint, ToolProtocolError, ToolProtocolErrorCode, ToolResult,
+    ValidatedToolProposal,
 };
 
+impl ToolActiveContext {
+    pub fn new(
+        project_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        run_id: crate::RunId,
+    ) -> Result<Self, ToolProtocolError> {
+        let project_id = project_id.into();
+        let conversation_id = conversation_id.into();
+        validate_identity("project_id", &project_id)?;
+        validate_identity("conversation_id", &conversation_id)?;
+        Ok(Self {
+            project_id,
+            conversation_id,
+            run_id,
+        })
+    }
+}
+
 impl ToolProposal {
-    pub fn validate_for_project(
+    pub fn validate_for_context(
         &self,
-        expected_project_id: &str,
+        expected: &ToolActiveContext,
     ) -> Result<ValidatedToolProposal, ToolProtocolError> {
         validate_identity("project_id", &self.project_id)?;
         validate_identity("conversation_id", &self.conversation_id)?;
         validate_identity("call_id", &self.call_id)?;
-        if self.project_id != expected_project_id {
+        if self.project_id != expected.project_id
+            || self.conversation_id != expected.conversation_id
+            || self.run_id != expected.run_id
+        {
             return Err(error(
-                ToolProtocolErrorCode::ProjectMismatch,
-                "tool proposal is not bound to the expected project",
+                ToolProtocolErrorCode::ActiveContextMismatch,
+                "tool proposal is not bound to the expected active context",
             ));
         }
 
@@ -41,50 +63,57 @@ impl ToolProposal {
         }
 
         let (arguments, canonical_arguments) = decode_arguments(tool_id, &self.arguments)?;
-        let actual_digest = canonical_arguments_digest(&self.arguments)?;
-        if actual_digest != self.arguments_digest {
+        let normalized_arguments_digest = canonical_arguments_digest(&canonical_arguments)?;
+        if normalized_arguments_digest != self.arguments_digest {
             return Err(error(
                 ToolProtocolErrorCode::ArgumentsDigestMismatch,
-                "arguments_digest does not match the canonical structured arguments",
+                "arguments_digest does not match the normalized typed canonical arguments",
             ));
         }
+        let fingerprint = proposal_fingerprint(self, &normalized_arguments_digest)?;
 
         Ok(ValidatedToolProposal {
             proposal: self.clone(),
+            context: expected.clone(),
             manifest: manifest_for(tool_id),
             arguments,
             canonical_arguments,
+            normalized_arguments_digest,
+            fingerprint,
         })
     }
 }
 
 impl ToolResult {
-    pub fn validate_for_project(
+    pub fn validate_for_proposal(
         &self,
-        expected_project_id: &str,
+        expected: &ToolActiveContext,
+        proposal: &ValidatedToolProposal,
     ) -> Result<Self, ToolProtocolError> {
+        if proposal.context != *expected {
+            return Err(error(
+                ToolProtocolErrorCode::ActiveContextMismatch,
+                "validated proposal is not bound to the expected active context",
+            ));
+        }
         validate_identity("project_id", &self.project_id)?;
         validate_identity("conversation_id", &self.conversation_id)?;
         validate_identity("call_id", &self.call_id)?;
-        if self.project_id != expected_project_id {
-            return Err(error(
-                ToolProtocolErrorCode::ProjectMismatch,
-                "tool result is not bound to the expected project",
+        if self.project_id != proposal.project_id()
+            || self.conversation_id != proposal.conversation_id()
+            || self.run_id != proposal.run_id()
+            || self.call_id != proposal.call_id()
+            || self.tool_id != proposal.tool_id()
+            || self.tool_version != proposal.tool_version()
+        {
+            return Err(invalid_result(
+                "tool result identity does not match the validated proposal",
             ));
         }
 
         let tool_id = ToolId::parse(&self.tool_id).ok_or_else(|| {
-            error(
-                ToolProtocolErrorCode::UnknownTool,
-                "tool_id is not in the fixed Keeper manifest catalog",
-            )
+            invalid_result("validated tool_id is not in the fixed Keeper manifest catalog")
         })?;
-        if self.tool_version != 1 {
-            return Err(error(
-                ToolProtocolErrorCode::UnsupportedToolVersion,
-                "only tool_version 1 is accepted for the fixed read tools",
-            ));
-        }
 
         let mut validated = self.clone();
         match self.state {
@@ -113,11 +142,9 @@ impl ToolResult {
                 if self.output.is_some() {
                     return Err(invalid_result("a failed tool result cannot carry output"));
                 }
-                validate_public_error(
-                    self.error
-                        .as_ref()
-                        .ok_or_else(|| invalid_result("a failed tool result requires an error"))?,
-                )?;
+                self.error
+                    .as_ref()
+                    .ok_or_else(|| invalid_result("a failed tool result requires an error"))?;
             }
             ToolExecutionState::Cancelled => {
                 if self.output.is_some() || self.error.is_some() {
@@ -129,6 +156,23 @@ impl ToolResult {
         }
         Ok(validated)
     }
+}
+
+fn proposal_fingerprint(
+    proposal: &ToolProposal,
+    normalized_arguments_digest: &super::types::ArgumentsDigest,
+) -> Result<ToolProposalFingerprint, ToolProtocolError> {
+    let value = json!({
+        "project_id": proposal.project_id,
+        "conversation_id": proposal.conversation_id,
+        "run_id": proposal.run_id,
+        "call_id": proposal.call_id,
+        "tool_id": proposal.tool_id,
+        "tool_version": proposal.tool_version,
+        "arguments_digest": normalized_arguments_digest,
+    });
+    let digest = canonical_arguments_digest(&value)?;
+    Ok(ToolProposalFingerprint::from_digest(&digest))
 }
 
 fn decode_arguments(
@@ -290,25 +334,47 @@ fn validate_project_path_inner(path: &str) -> Result<(), &'static str> {
     {
         return Err("path must use portable relative slash-separated syntax");
     }
-    if path
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err("path contains an empty, dot, or parent segment");
-    }
-    if path.chars().any(char::is_control) {
-        return Err("path contains control characters");
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err("path contains an empty, dot, or parent segment");
+        }
+        if component.len() > 255 {
+            return Err("path component exceeds the portable 255-byte cap");
+        }
+        if component.ends_with('.') || component.ends_with(' ') {
+            return Err("path component has a trailing dot or space alias");
+        }
+        if component.chars().any(|character| {
+            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+        }) {
+            return Err("path component contains non-portable characters");
+        }
+        if is_windows_device_component(component) {
+            return Err("path component is a reserved Windows device name");
+        }
     }
     Ok(())
 }
 
-fn validate_public_error(value: &ToolPublicError) -> Result<(), ToolProtocolError> {
-    if value != &ToolPublicError::canonical(value.code) {
-        return Err(invalid_result(
-            "public tool errors must use the fixed secret-safe message for their code",
-        ));
+fn is_windows_device_component(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
     }
-    Ok(())
+    let bytes = stem.as_bytes();
+    (bytes.len() == 4 && matches!(&bytes[..3], b"COM" | b"LPT") && matches!(bytes[3], b'1'..=b'9'))
+        || matches!(
+            stem.as_str(),
+            "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+        )
 }
 
 fn decode<T>(raw: &Value, code: ToolProtocolErrorCode) -> Result<T, ToolProtocolError>

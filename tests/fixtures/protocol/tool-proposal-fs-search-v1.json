@@ -6,10 +6,7 @@
   "tool_id": "fs.search",
   "tool_version": 1,
   "arguments": {
-    "path": "src",
-    "query": "ToolProposal",
-    "case_sensitive": false,
-    "max_results": 50
+    "query": "ToolProposal"
   },
-  "arguments_digest": "sha256:16dd197ea1d666e80dde03eab5597595adc9f22ac5d103a736a1230af8fba431"
+  "arguments_digest": "sha256:de70e972e42c36c1df5d453bce807c4461afbe7498b4bcb034e84402125c4ebd"
 }

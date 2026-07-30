@@ -6,8 +6,7 @@
   "tool_id": "fs.list",
   "tool_version": 1,
   "arguments": {
-    "path": "src",
-    "max_results": 25
+    "path": "src"
   },
-  "arguments_digest": "sha256:a6d6252899905eedc0ac7b9e23185ed7231ad0b56bd37496429c0251f37511cd"
+  "arguments_digest": "sha256:7af098a8c350f42d85880c89fa2506caf77b35da030d368dbb17c0c596f54c9f"
 }

@@ -2,10 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use keeper_agent_protocol::{
-    ArgumentsDigest, ToolExecutionState, ToolProposal, ToolProtocolErrorCode, ToolPublicError,
-    ToolPublicErrorCode, ToolResult, canonical_arguments_digest, fixed_tool_manifests,
+    ArgumentsDigest, RunId, ToolActiveContext, ToolExecutionState, ToolProposal,
+    ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult,
+    canonical_arguments_digest, fixed_tool_manifests,
 };
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -20,6 +22,10 @@ fn read_fixture(name: &str) -> String {
 fn proposal_fixture() -> ToolProposal {
     serde_json::from_str(&read_fixture("tool-proposal-fs-read-v1.json"))
         .expect("strict proposal fixture")
+}
+
+fn active_context() -> ToolActiveContext {
+    ToolActiveContext::new("VK-013", "VK-013-C116", RunId(Uuid::nil())).unwrap()
 }
 
 #[test]
@@ -57,16 +63,28 @@ fn canonical_digest_rejects_non_integer_numbers_fail_closed() {
 
 #[test]
 fn valid_read_proposal_fixture_normalizes_to_typed_arguments() {
-    let validated = proposal_fixture().validate_for_project("VK-013").unwrap();
-    assert_eq!(validated.manifest.tool_id.as_str(), "fs.read");
-    assert_eq!(validated.manifest.tool_version, 1);
+    let proposal = proposal_fixture();
+    let raw_digest = canonical_arguments_digest(&proposal.arguments).unwrap();
+    let validated = proposal.validate_for_context(&active_context()).unwrap();
+
+    assert_ne!(raw_digest, proposal.arguments_digest);
+    assert_eq!(validated.manifest().tool_id.as_str(), "fs.read");
+    assert_eq!(validated.manifest().tool_version, 1);
     assert_eq!(
-        validated.canonical_arguments,
-        json!({
+        validated.canonical_arguments(),
+        &json!({
             "path": "src/lib.rs",
             "offset_bytes": 0,
-            "max_bytes": 4096
+            "max_bytes": 65536
         })
+    );
+    assert_eq!(
+        validated.normalized_arguments_digest().as_str(),
+        "sha256:54928b277e37c7b2ff55a04677fec352eff5db41a3ed25ab38229783076b04e6"
+    );
+    assert_eq!(
+        validated.fingerprint().as_str(),
+        "sha256:1c723ae1033107c5f8431372811e9a203b23f69e4401127cc0db5e8ed9dd5975"
     );
 }
 
@@ -104,7 +122,9 @@ fn proposal_arguments_deny_unknown_fields_even_with_a_matching_digest() {
         .insert("cwd".into(), json!("C:/escape"));
     proposal.arguments_digest = canonical_arguments_digest(&proposal.arguments).unwrap();
 
-    let error = proposal.validate_for_project("VK-013").unwrap_err();
+    let error = proposal
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
 }
 
@@ -112,29 +132,59 @@ fn proposal_arguments_deny_unknown_fields_even_with_a_matching_digest() {
 fn proposal_rejects_unknown_tool_and_version() {
     let mut unknown_tool = proposal_fixture();
     unknown_tool.tool_id = "fs.execute".into();
-    let error = unknown_tool.validate_for_project("VK-013").unwrap_err();
+    let error = unknown_tool
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::UnknownTool);
 
     let mut unknown_version = proposal_fixture();
     unknown_version.tool_version = 2;
-    let error = unknown_version.validate_for_project("VK-013").unwrap_err();
+    let error = unknown_version
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::UnsupportedToolVersion);
 }
 
 #[test]
-fn proposal_rejects_project_mismatch_and_digest_mismatch() {
-    let error = proposal_fixture()
-        .validate_for_project("VK-999")
-        .unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::ProjectMismatch);
+fn proposal_rejects_active_context_mismatches_and_digest_mismatch() {
+    let contexts = [
+        ToolActiveContext::new("VK-999", "VK-013-C116", RunId(Uuid::nil())).unwrap(),
+        ToolActiveContext::new("VK-013", "VK-013-C999", RunId(Uuid::nil())).unwrap(),
+        ToolActiveContext::new("VK-013", "VK-013-C116", RunId(Uuid::from_u128(1))).unwrap(),
+    ];
+    for context in contexts {
+        let error = proposal_fixture()
+            .validate_for_context(&context)
+            .unwrap_err();
+        assert_eq!(error.code, ToolProtocolErrorCode::ActiveContextMismatch);
+    }
 
     let mut proposal = proposal_fixture();
     proposal.arguments_digest = ArgumentsDigest::parse(
         "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     )
     .unwrap();
-    let error = proposal.validate_for_project("VK-013").unwrap_err();
+    let error = proposal
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::ArgumentsDigestMismatch);
+}
+
+#[test]
+fn call_id_is_validated_and_part_of_the_stable_fingerprint() {
+    let original = proposal_fixture()
+        .validate_for_context(&active_context())
+        .unwrap();
+
+    let mut changed = proposal_fixture();
+    changed.call_id = "call-read-2".into();
+    let changed = changed.validate_for_context(&active_context()).unwrap();
+    assert_ne!(original.fingerprint(), changed.fingerprint());
+
+    let mut invalid = proposal_fixture();
+    invalid.call_id = "call/read/1".into();
+    let error = invalid.validate_for_context(&active_context()).unwrap_err();
+    assert_eq!(error.code, ToolProtocolErrorCode::InvalidEnvelope);
 }
 
 #[test]
@@ -146,7 +196,7 @@ fn proposal_rejects_path_escape_and_manifest_limit_overrides() {
         "max_bytes": 4096
     });
     escaped.arguments_digest = canonical_arguments_digest(&escaped.arguments).unwrap();
-    let error = escaped.validate_for_project("VK-013").unwrap_err();
+    let error = escaped.validate_for_context(&active_context()).unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
 
     let mut oversized = proposal_fixture();
@@ -156,7 +206,9 @@ fn proposal_rejects_path_escape_and_manifest_limit_overrides() {
         "max_bytes": 1_048_577
     });
     oversized.arguments_digest = canonical_arguments_digest(&oversized.arguments).unwrap();
-    let error = oversized.validate_for_project("VK-013").unwrap_err();
+    let error = oversized
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
 }
 
@@ -172,7 +224,9 @@ fn search_rejects_whitespace_only_queries() {
     });
     proposal.arguments_digest = canonical_arguments_digest(&proposal.arguments).unwrap();
 
-    let error = proposal.validate_for_project("VK-013").unwrap_err();
+    let error = proposal
+        .validate_for_context(&active_context())
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidArguments);
 }
 
@@ -197,9 +251,11 @@ fn tool_state_vocabulary_is_fixed_and_ordered() {
 
 #[test]
 fn successful_result_fixture_is_strict_and_valid() {
+    let context = active_context();
+    let proposal = proposal_fixture().validate_for_context(&context).unwrap();
     let result: ToolResult =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
-    let validated = result.validate_for_project("VK-013").unwrap();
+    let validated = result.validate_for_proposal(&context, &proposal).unwrap();
     assert_eq!(validated.state, ToolExecutionState::Succeeded);
     assert_eq!(
         validated.output.unwrap()["content_kind"],
@@ -209,22 +265,25 @@ fn successful_result_fixture_is_strict_and_valid() {
 
 #[test]
 fn every_fixed_tool_has_a_valid_proposal_and_result_fixture() {
+    let context = active_context();
     for tool in ["fs-list", "fs-read", "fs-search"] {
         let proposal: ToolProposal =
             serde_json::from_str(&read_fixture(&format!("tool-proposal-{tool}-v1.json"))).unwrap();
         let result: ToolResult =
             serde_json::from_str(&read_fixture(&format!("tool-result-{tool}-v1.json"))).unwrap();
 
-        let proposal = proposal.validate_for_project("VK-013").unwrap();
-        let result = result.validate_for_project("VK-013").unwrap();
-        assert_eq!(proposal.proposal.tool_id, result.tool_id);
-        assert_eq!(proposal.proposal.call_id, result.call_id);
+        let proposal = proposal.validate_for_context(&context).unwrap();
+        let result = result.validate_for_proposal(&context, &proposal).unwrap();
+        assert_eq!(proposal.tool_id(), result.tool_id);
+        assert_eq!(proposal.call_id(), result.call_id);
         assert_eq!(result.state, ToolExecutionState::Succeeded);
     }
 }
 
 #[test]
 fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
+    let context = active_context();
+    let proposal = proposal_fixture().validate_for_context(&context).unwrap();
     let mut unknown: Value =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     unknown
@@ -239,35 +298,141 @@ fn result_rejects_unknown_fields_output_mismatch_and_invalid_state_shape() {
         "entries": [],
         "truncated": false
     }));
-    let error = wrong_output.validate_for_project("VK-013").unwrap_err();
+    let error = wrong_output
+        .validate_for_proposal(&context, &proposal)
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
 
     let mut executing: ToolResult =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     executing.state = ToolExecutionState::Executing;
-    let error = executing.validate_for_project("VK-013").unwrap_err();
+    let error = executing
+        .validate_for_proposal(&context, &proposal)
+        .unwrap_err();
     assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
 }
 
 #[test]
-fn failed_result_rejects_noncanonical_public_error_text() {
+fn result_rejects_every_proposal_and_context_identity_mismatch() {
+    let context = active_context();
+    let proposal = proposal_fixture().validate_for_context(&context).unwrap();
+    let base: ToolResult =
+        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+
+    let mut mismatches = Vec::new();
+    let mut value = base.clone();
+    value.project_id = "VK-999".into();
+    mismatches.push(value);
+    let mut value = base.clone();
+    value.conversation_id = "VK-013-C999".into();
+    mismatches.push(value);
+    let mut value = base.clone();
+    value.run_id = RunId(Uuid::from_u128(1));
+    mismatches.push(value);
+    let mut value = base.clone();
+    value.call_id = "call-read-2".into();
+    mismatches.push(value);
+    let mut value = base.clone();
+    value.tool_id = "fs.list".into();
+    mismatches.push(value);
+    let mut value = base.clone();
+    value.tool_version = 2;
+    mismatches.push(value);
+
+    for mismatch in mismatches {
+        let error = mismatch
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err();
+        assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
+    }
+
+    let other_context =
+        ToolActiveContext::new("VK-013", "VK-013-C999", RunId(Uuid::nil())).unwrap();
+    let error = base
+        .validate_for_proposal(&other_context, &proposal)
+        .unwrap_err();
+    assert_eq!(error.code, ToolProtocolErrorCode::ActiveContextMismatch);
+}
+
+#[test]
+fn public_errors_are_secret_safe_by_construction_and_serialization() {
+    let unsafe_error = json!({
+        "code": "internal_error",
+        "message": "operation failed with token abc123",
+        "retryable": true
+    });
+    assert!(serde_json::from_value::<ToolPublicError>(unsafe_error).is_err());
+
+    let safe_error = ToolPublicError::canonical(ToolPublicErrorCode::InternalError);
+    assert_eq!(
+        serde_json::to_value(safe_error).unwrap(),
+        json!({
+            "code": "internal_error",
+            "message": "The tool call failed inside Keeper.",
+            "retryable": true
+        })
+    );
+
+    let context = active_context();
+    let proposal = proposal_fixture().validate_for_context(&context).unwrap();
     let mut result: ToolResult =
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     result.state = ToolExecutionState::Failed;
     result.output = None;
-    result.error = Some(ToolPublicError {
-        code: ToolPublicErrorCode::InternalError,
-        message: "operation failed with token abc123".into(),
-        retryable: true,
-    });
+    result.error = Some(safe_error);
+    assert!(result.validate_for_proposal(&context, &proposal).is_ok());
+}
 
-    let error = result.validate_for_project("VK-013").unwrap_err();
-    assert_eq!(error.code, ToolProtocolErrorCode::InvalidResult);
+#[test]
+fn protocol_paths_reject_windows_devices_and_non_portable_aliases() {
+    let context = active_context();
+    let valid = proposal_fixture().validate_for_context(&context).unwrap();
+    let base_result: ToolResult =
+        serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
+    let mut paths = vec![
+        "CON".to_string(),
+        "con.txt".to_string(),
+        "CON .txt".to_string(),
+        "src/AUX.rs".to_string(),
+        "NUL".to_string(),
+        "COM1".to_string(),
+        "com9.log".to_string(),
+        "COM1 .log".to_string(),
+        "LPT1".to_string(),
+        "src/lpt9.txt".to_string(),
+        "CLOCK$".to_string(),
+        "CONIN$".to_string(),
+        "CONOUT$".to_string(),
+        "src/name.".to_string(),
+        "src/name ".to_string(),
+        "src/bad<name".to_string(),
+        "src/bad>name".to_string(),
+        "src/bad\"name".to_string(),
+        "src/bad|name".to_string(),
+        "src/bad?name".to_string(),
+        "src/bad*name".to_string(),
+    ];
+    paths.push(format!("src/{}", "a".repeat(256)));
 
-    result.error = Some(ToolPublicError::canonical(
-        ToolPublicErrorCode::InternalError,
-    ));
-    assert!(result.validate_for_project("VK-013").is_ok());
+    for path in paths {
+        let mut proposal = proposal_fixture();
+        proposal.arguments = json!({"path": path});
+        let error = proposal.validate_for_context(&context).unwrap_err();
+        assert_eq!(
+            error.code,
+            ToolProtocolErrorCode::InvalidArguments,
+            "proposal path should be rejected: {path}"
+        );
+
+        let mut result = base_result.clone();
+        result.output.as_mut().unwrap()["path"] = json!(path);
+        let error = result.validate_for_proposal(&context, &valid).unwrap_err();
+        assert_eq!(
+            error.code,
+            ToolProtocolErrorCode::InvalidResult,
+            "result path should be rejected: {path}"
+        );
+    }
 }
 
 #[test]
