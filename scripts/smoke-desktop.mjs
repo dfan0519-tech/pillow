@@ -59,7 +59,7 @@ function devLoopbackEnvironment(environment) {
 }
 
 async function smoke(mode) {
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), `keeper-ide-${mode}-`));
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), `pillow-${mode}-`));
   const appDataDir = path.join(temporaryRoot, "app-data");
   const webviewProfileDir = path.join(temporaryRoot, "webview-profile");
   const readinessPath = path.join(appDataDir, "desktop-ready.json");
@@ -79,7 +79,7 @@ async function smoke(mode) {
         packageManager,
         packageManagerArgs([
           "--filter",
-          "@keeper-ide/desktop",
+          "@pillow/desktop",
           "tauri",
           "build",
           "--no-bundle",
@@ -89,11 +89,11 @@ async function smoke(mode) {
     }
 
     const command = mode === "release"
-      ? path.join(repositoryRoot, "target", "release", "keeper-ide.exe")
+      ? path.join(repositoryRoot, "target", "release", "pillow.exe")
       : packageManager;
     const args = mode === "release"
       ? []
-      : packageManagerArgs(["--filter", "@keeper-ide/desktop", "tauri", "dev"]);
+      : packageManagerArgs(["--filter", "@pillow/desktop", "tauri", "dev"]);
     const baseline = captureDesktopBaseline();
     assertDesktopBaselineClean(baseline);
     const nonce = randomUUID();
@@ -103,9 +103,9 @@ async function smoke(mode) {
       cwd: repositoryRoot,
       env: {
         ...(mode === "dev" ? devLoopbackEnvironment(environment) : environment),
-        KEEPER_IDE_APP_DATA_DIR: appDataDir,
-        KEEPER_IDE_LAUNCH_NONCE: nonce,
-        KEEPER_IDE_STARTED_AT: String(launchLowerBound),
+        PILLOW_APP_DATA_DIR: appDataDir,
+        PILLOW_LAUNCH_NONCE: nonce,
+        PILLOW_STARTED_AT: String(launchLowerBound),
         WEBVIEW2_USER_DATA_FOLDER: webviewProfileDir,
       },
     });

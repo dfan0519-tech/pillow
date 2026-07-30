@@ -51,7 +51,7 @@ tools. Project-aware code tools require a later sandboxed Keeper tool gateway.
 | `git diff --check` | PASS for the final integration worktree |
 | `cargo fmt --all -- --check` | PASS |
 | `cargo test -p keeper-adapter-grok-acp --locked` | PASS: 80 active tests; one explicit live test ignored by default |
-| `cargo test -p keeper-ide-desktop --lib` | PASS: 47 tests |
+| `cargo test -p pillow-desktop --lib` | PASS: 47 tests |
 | `pnpm acceptance:grok-acp:self-test` | PASS: 12 harness checks |
 | `pnpm acceptance:grok-acp:dry-run` | PASS: result is `skipped`, never `passed` |
 | `pnpm check` | PASS: structure, typecheck, 80 frontend tests, all Rust tests, and clippy with warnings denied |
@@ -113,7 +113,7 @@ The final run completed in 34,323 ms.
 ## Security and Product Boundaries
 
 - Production launch argv remains fixed as `agent --no-leader stdio`.
-- Session creation and load both inject the same Keeper-owned profile.
+- Session creation and load both inject the same Pillow-owned profile.
 - The profile has `tools=[]`, a defensive disallowed-tool list, and
   `mcpServers=[]`.
 - Client capabilities declare no terminal and no filesystem read/write.
@@ -159,7 +159,7 @@ The independent re-review at `d2ab0a5` reported:
 - B2 is a single-provider, single-prompt plaintext runtime. It is not yet a
   multi-provider router or process pool.
 - B2 deliberately has no code-reading or code-writing tools. Those require a
-  sandboxed Keeper-owned tool gateway with project-root enforcement.
+  sandboxed Pillow-owned tool gateway with project-root enforcement.
 - ACP session identifiers are not yet restored across desktop restarts.
 - Authentication classification still depends on sanitized provider error
   patterns.

@@ -8,14 +8,14 @@ use tauri::{State, WebviewWindow};
 
 use crate::app_state::{AppState, CommandError};
 
-const APP_DATA_OVERRIDE: &str = "KEEPER_IDE_APP_DATA_DIR";
-const LAUNCH_NONCE: &str = "KEEPER_IDE_LAUNCH_NONCE";
-const STARTED_AT: &str = "KEEPER_IDE_STARTED_AT";
+const APP_DATA_OVERRIDE: &str = "PILLOW_APP_DATA_DIR";
+const LAUNCH_NONCE: &str = "PILLOW_LAUNCH_NONCE";
+const STARTED_AT: &str = "PILLOW_STARTED_AT";
 const WEBVIEW_PROFILE_DIR: &str = "WEBVIEW2_USER_DATA_FOLDER";
-const ACCEPTANCE_PHASE: &str = "KEEPER_IDE_ACCEPTANCE_PHASE";
-const ACCEPTANCE_RESULT: &str = "KEEPER_IDE_ACCEPTANCE_RESULT";
-const ACCEPTANCE_PROJECT_NAME: &str = "KEEPER_IDE_ACCEPTANCE_PROJECT_NAME";
-const ACCEPTANCE_PROJECT_ROOT: &str = "KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT";
+const ACCEPTANCE_PHASE: &str = "PILLOW_ACCEPTANCE_PHASE";
+const ACCEPTANCE_RESULT: &str = "PILLOW_ACCEPTANCE_RESULT";
+const ACCEPTANCE_PROJECT_NAME: &str = "PILLOW_ACCEPTANCE_PROJECT_NAME";
+const ACCEPTANCE_PROJECT_ROOT: &str = "PILLOW_ACCEPTANCE_PROJECT_ROOT";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,7 +265,7 @@ fn lifecycle_error() -> LifecycleCommandError {
 }
 
 fn log_lifecycle_error(error: impl std::fmt::Display) -> LifecycleCommandError {
-    eprintln!("Keeper IDE desktop lifecycle error: {error}");
+    eprintln!("Pillow desktop lifecycle error: {error}");
     lifecycle_error()
 }
 
@@ -293,10 +293,10 @@ pub fn conversation_exit_decision<E: std::fmt::Display>(
 /// Write the acceptance shutdown-success marker **only** after
 /// `ConversationService::shutdown` returns `Ok`.
 ///
-/// Path is taken from `KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER` when set
+/// Path is taken from `PILLOW_CONVERSATION_SHUTDOWN_MARKER` when set
 /// (native E2E). Silent no-op when unset so normal desktop runs are unchanged.
 pub fn write_conversation_shutdown_success_marker() {
-    let Some(raw) = std::env::var_os("KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER") else {
+    let Some(raw) = std::env::var_os("PILLOW_CONVERSATION_SHUTDOWN_MARKER") else {
         return;
     };
     if raw.is_empty() {
@@ -310,17 +310,17 @@ pub fn write_conversation_shutdown_success_marker() {
         "completedAtUnixMs": unix_time_ms(),
     });
     let Ok(bytes) = serde_json::to_vec_pretty(&payload) else {
-        eprintln!("Keeper IDE: failed to serialize conversation shutdown marker");
+        eprintln!("Pillow: failed to serialize conversation shutdown marker");
         return;
     };
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     if let Err(error) = fs::write(&temporary, &bytes) {
-        eprintln!("Keeper IDE: failed to write conversation shutdown marker: {error}");
+        eprintln!("Pillow: failed to write conversation shutdown marker: {error}");
         return;
     }
     let _ = fs::remove_file(&path);
     if let Err(error) = fs::rename(&temporary, &path) {
-        eprintln!("Keeper IDE: failed to publish conversation shutdown marker: {error}");
+        eprintln!("Pillow: failed to publish conversation shutdown marker: {error}");
     }
 }
 

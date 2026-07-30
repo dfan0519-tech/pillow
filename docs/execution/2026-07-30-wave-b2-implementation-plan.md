@@ -119,7 +119,7 @@ Deliver:
 - no forbidden provider fields in normalized events
 - no secrets in tracked files, logs, SQLite, or renderer payloads
 - live gate identifies `grok-acp`, never `fake`
-- zero residual Keeper IDE and Grok child processes after live acceptance
+- zero residual Pillow and Grok child processes after live acceptance
 
 ## HOLD Conditions
 

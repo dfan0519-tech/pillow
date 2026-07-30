@@ -9,8 +9,8 @@ import "./styles/workbench.css";
 
 const sample: ProjectDto = {
   id: "screenshot-project",
-  name: "Keeper IDE",
-  rootPath: "F:\\work\\keeper-ide",
+  name: "Pillow",
+  rootPath: "F:\\work\\pillow",
   trust: "trusted",
   createdAt: "2026-07-29T00:00:00.000Z",
   updatedAt: "2026-07-29T00:00:00.000Z",

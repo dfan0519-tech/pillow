@@ -22,9 +22,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 function fixtureProject(overrides: Partial<ProjectDto> = {}): ProjectDto {
   return {
-    id: "keeper-ide",
-    name: "Keeper IDE",
-    rootPath: "<workspace>/VaultSystem\\keeper-ide",
+    id: "pillow",
+    name: "Pillow",
+    rootPath: "<workspace>/VaultSystem\\pillow",
     trust: "trusted",
     createdAt: "2026-07-29T00:00:00.000Z",
     updatedAt: "2026-07-29T00:00:00.000Z",
@@ -184,9 +184,9 @@ describe("project workbench shell", () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Keeper IDE" }));
+    await user.click(await screen.findByRole("button", { name: "Pillow" }));
 
-    expect(screen.getByTestId("active-project-name")).toHaveTextContent("Keeper IDE");
+    expect(screen.getByTestId("active-project-name")).toHaveTextContent("Pillow");
     expect(screen.getByTestId("project-conversations")).toBeVisible();
     expect(screen.getByRole("group", { name: "项目对话" })).toBeVisible();
   });
@@ -195,7 +195,7 @@ describe("project workbench shell", () => {
     const user = userEvent.setup();
     render(<App gateway={fixtureGateway()} />);
 
-    await user.click(await screen.findByLabelText("Keeper IDE"));
+    await user.click(await screen.findByLabelText("Pillow"));
     await screen.findByRole("region", { name: "对话工作台" });
 
     expect(screen.queryByText(/routeCode|lease|slotId|Grok|SuperGrok/i)).not.toBeInTheDocument();
@@ -203,13 +203,13 @@ describe("project workbench shell", () => {
 
   it("keeps a long project name constrained at the 1024px minimum width", async () => {
     const user = userEvent.setup();
-    const longName = "Keeper IDE project with a deliberately very long name ".repeat(8);
+    const longName = "Pillow project with a deliberately very long name ".repeat(8);
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
     window.dispatchEvent(new Event("resize"));
     render(<App gateway={fixtureGateway([fixtureProject({ name: longName })])} />);
 
     await user.click(await screen.findByRole("button", {
-      name: /Keeper IDE project with a deliberately very long name/,
+      name: /Pillow project with a deliberately very long name/,
     }));
 
     const heading = await screen.findByTestId("active-project-name");

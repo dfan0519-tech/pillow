@@ -386,7 +386,7 @@ async function runSelfTest() {
   {
     const c = classifyProcessIds([
       { pid: 5, name: "grok.exe" },
-      { pid: 6, name: "keeper-ide.exe" },
+      { pid: 6, name: "pillow.exe" },
       { pid: 7, name: "chrome.exe" },
     ]);
     assert.deepEqual(c.grokPids, [5]);

@@ -1,4 +1,4 @@
-//! Grok Build ACP adapter for Keeper IDE.
+//! Grok Build ACP adapter for Pillow.
 //!
 //! Translates NDJSON JSON-RPC 2.0 over stdio into provider-neutral
 //! `AgentRuntimeAdapter` events. ACP session ids, raw envelopes, process ids,

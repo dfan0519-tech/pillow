@@ -4,5 +4,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    keeper_ide_desktop::run();
+    pillow_desktop::run();
 }

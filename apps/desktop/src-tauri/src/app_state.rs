@@ -325,7 +325,7 @@ fn map_path_scope_error(error: path_scope::PathScopeError) -> CommandError {
 }
 
 fn map_store_error(error: ProjectStoreError) -> CommandError {
-    eprintln!("Keeper IDE project store error: {error}");
+    eprintln!("Pillow project store error: {error}");
     match error {
         ProjectStoreError::DuplicateRoot => command_error(
             "project_root_exists",

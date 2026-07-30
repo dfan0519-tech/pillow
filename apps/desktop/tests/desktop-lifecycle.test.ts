@@ -12,8 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const project: ProjectDto = {
   id: "00000000-0000-0000-0000-000000000001",
-  name: "Keeper IDE Native Acceptance",
-  rootPath: "C:\\Temp\\keeper-ide-native\\project",
+  name: "Pillow Native Acceptance",
+  rootPath: "C:\\Temp\\pillow-native\\project",
   trust: "untrusted",
   createdAt: "2026-07-29T00:00:00Z",
   updatedAt: "2026-07-29T00:00:00Z",

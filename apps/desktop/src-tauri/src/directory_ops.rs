@@ -55,7 +55,7 @@ pub fn create_child_directory(parent: &Path, name: &str) -> Result<PathBuf, Comm
     }
 
     fs::create_dir(&child).map_err(|source| {
-        eprintln!("Keeper IDE failed to create project directory: {source}");
+        eprintln!("Pillow failed to create project directory: {source}");
         command_error(
             "project_directory_create_failed",
             "Could not create the project folder.",
@@ -83,7 +83,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "keeper-ide-dir-ops-{label}-{}-{nonce}",
+            "pillow-dir-ops-{label}-{}-{nonce}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("temp root");

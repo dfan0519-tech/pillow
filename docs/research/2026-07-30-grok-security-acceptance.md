@@ -6,7 +6,7 @@ Status: Research only (read-only analysis; no product code)
 
 Owner: Keeper B2 security and acceptance designer
 
-Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\wave-b2-security`
+Worktree: `<repo>-worktrees\wave-b2-security`
 
 ## 0. Purpose And Non-Claims
 
@@ -18,7 +18,7 @@ It is grounded in:
 
 - product order and gates in `AGENTS.md`;
 - Stage 1 design security, adapter contract, and Slice B scope in
-  `docs/superpowers/specs/2026-07-29-keeper-ide-first-design.md`;
+  `docs/superpowers/specs/2026-07-29-pillow-first-design.md`;
 - B1 conversation-kernel acceptance truth and process cleanup evidence in
   `docs/verification/2026-07-30-slice-b1-acceptance.md`;
 - native process supervision patterns in `scripts/lib/desktop-process.mjs` and
@@ -317,7 +317,7 @@ Port legacy runner + desktop acceptance patterns:
    - no tracked descendant PIDs alive;
    - no unexpected Grok CLI / keeper residual owned by the run (define name
      match allow-list for the supervised binary);
-   - for native desktop acceptance: no leftover `keeper-ide.exe` outside
+   - for native desktop acceptance: no leftover `pillow.exe` outside
      baseline and no inherited port listeners (existing `ProcessSupervisor`).
 5. stdin end + stdout detach occur even when kill fails, so the ACP client
    settles pending RPCs with a closed-connection error.
@@ -559,7 +559,7 @@ environments**. CI without the binary reports **SKIP** (not PASS).
 | N2 | Probe unhealthy when binary removed / misconfigured | `healthy=false`, safe detail code |
 | N3 | Start session + one read-only turn | Stream commits to SQLite; UI timeline restores after restart |
 | N4 | Cancel live turn | Kill-tree complete; residual process snapshot clean; one terminal |
-| N5 | App graceful exit during/after live turn | Shutdown marker + exit 0 + no `keeper-ide.exe` residual + port clean |
+| N5 | App graceful exit during/after live turn | Shutdown marker + exit 0 + no `pillow.exe` residual + port clean |
 | N6 | Isolated profile | Child cannot see interactive user Grok profile (prove via env unit + optional live check without dumping secrets) |
 
 Live scripts should extend the B1 `ProcessSupervisor` model: baseline clean,
@@ -707,7 +707,7 @@ B2 may be called industrial only when **all** are true:
 | Requirement area | Primary sources |
 | --- | --- |
 | Product order / gates | `AGENTS.md` |
-| Permissions, secrets, adapter contract, Slice B | `docs/superpowers/specs/2026-07-29-keeper-ide-first-design.md` |
+| Permissions, secrets, adapter contract, Slice B | `docs/superpowers/specs/2026-07-29-pillow-first-design.md` |
 | B1 truth, shutdown, residuals, B2 non-claim | `docs/verification/2026-07-30-slice-b1-acceptance.md` |
 | Process snapshot / kill / graceful proof | `scripts/lib/desktop-process.mjs`, `scripts/conversation-recovery-desktop.mjs` |
 | Queue, concurrency, cancel, protocol guard | `crates/runtime-host/src/**` |

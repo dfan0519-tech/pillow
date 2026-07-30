@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn initialize_declares_no_fs_or_terminal() {
-        let p = initialize_params("Keeper IDE", "0.1.0");
+        let p = initialize_params("Pillow", "0.1.0");
         assert_eq!(p["clientCapabilities"]["terminal"], false);
         assert_eq!(p["clientCapabilities"]["fs"]["writeTextFile"], false);
         assert_eq!(p["clientCapabilities"]["fs"]["readTextFile"], false);

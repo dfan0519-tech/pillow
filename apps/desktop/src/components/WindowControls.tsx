@@ -21,7 +21,7 @@ async function getCurrentDesktopWindow(): Promise<DesktopWindowApi> {
 }
 
 function reportWindowFailure(context: string, error: unknown) {
-  console.error(`[Keeper IDE] ${context}`, error);
+  console.error(`[Pillow] ${context}`, error);
 }
 
 /**

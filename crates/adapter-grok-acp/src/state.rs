@@ -89,7 +89,7 @@ pub(crate) fn initialize_if_needed(inner: &mut Inner) -> Result<(), RuntimeError
     let rpc = Arc::clone(&conn.rpc);
     let result = rpc.request(
         "initialize",
-        initialize_params("Keeper IDE", env!("CARGO_PKG_VERSION")),
+        initialize_params("Pillow", env!("CARGO_PKG_VERSION")),
     )?;
     let conn = inner.connection.as_mut().expect("connection");
     conn.load_session = result

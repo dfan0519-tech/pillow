@@ -625,7 +625,7 @@ B2 adapter work is architecturally sound when:
 **Successor (this worktree):**
 
 - `AGENTS.md`
-- `docs/superpowers/specs/2026-07-29-keeper-ide-first-design.md`
+- `docs/superpowers/specs/2026-07-29-pillow-first-design.md`
 - `docs/superpowers/plans/2026-07-30-slice-b1-conversation-kernel.md`
 - `docs/verification/2026-07-30-slice-b1-acceptance.md`
 - `crates/agent-protocol/src/**`

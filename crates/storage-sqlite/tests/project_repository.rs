@@ -4,12 +4,12 @@ use keeper_storage_sqlite::{ProjectStoreError, SqliteProjectRepository};
 #[test]
 fn creates_and_lists_a_project() {
     let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("keeper-ide");
+    let project_root = temp.path().join("pillow");
     std::fs::create_dir(&project_root).unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     let created = repo
         .create(CreateProject {
-            name: "Keeper IDE".into(),
+            name: "Pillow".into(),
             root_path: project_root.to_string_lossy().into_owned(),
         })
         .unwrap();
@@ -21,18 +21,18 @@ fn creates_and_lists_a_project() {
 #[test]
 fn rejects_the_same_canonical_root_twice() {
     let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("keeper-ide");
+    let project_root = temp.path().join("pillow");
     std::fs::create_dir(&project_root).unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     repo.create(CreateProject {
-        name: "Keeper IDE".into(),
+        name: "Pillow".into(),
         root_path: project_root.to_string_lossy().into_owned(),
     })
     .unwrap();
 
     let error = repo
         .create(CreateProject {
-            name: "Keeper IDE alias".into(),
+            name: "Pillow alias".into(),
             root_path: project_root.join(".").to_string_lossy().into_owned(),
         })
         .unwrap_err();
@@ -43,12 +43,12 @@ fn rejects_the_same_canonical_root_twice() {
 #[test]
 fn finds_an_existing_project_by_canonical_root() {
     let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("keeper-ide");
+    let project_root = temp.path().join("pillow");
     std::fs::create_dir(&project_root).unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     let created = repo
         .create(CreateProject {
-            name: "Keeper IDE".into(),
+            name: "Pillow".into(),
             root_path: project_root.to_string_lossy().into_owned(),
         })
         .unwrap();

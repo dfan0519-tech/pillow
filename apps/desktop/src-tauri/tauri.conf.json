@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Keeper IDE",
+  "productName": "Pillow",
   "version": "0.1.0",
-  "identifier": "com.keeperide.desktop",
+  "identifier": "com.pillow.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Keeper IDE",
+        "title": "Pillow",
         "width": 1440,
         "height": 960,
         "minWidth": 1024,

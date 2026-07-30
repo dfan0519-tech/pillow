@@ -1,4 +1,4 @@
-//! Runtime-neutral conversation, run and event domain for Keeper IDE.
+//! Runtime-neutral conversation, run and event domain for Pillow.
 //!
 //! This crate defines durable session vocabulary and pure lifecycle rules.
 //! Persistence lives in `keeper-storage-sqlite`. No provider, process, secret

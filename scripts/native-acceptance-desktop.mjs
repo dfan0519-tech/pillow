@@ -34,7 +34,7 @@ const executable = path.join(
   repositoryRoot,
   "target",
   "debug",
-  process.platform === "win32" ? "keeper-ide.exe" : "keeper-ide",
+  process.platform === "win32" ? "pillow.exe" : "pillow",
 );
 
 function validateEvidence(value, expected) {
@@ -66,13 +66,13 @@ async function runPhase({
     cwd: repositoryRoot,
     env: {
       ...environment,
-      KEEPER_IDE_ACCEPTANCE_PHASE: phase,
-      KEEPER_IDE_ACCEPTANCE_PROJECT_NAME: projectName,
-      KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT: projectRoot,
-      KEEPER_IDE_ACCEPTANCE_RESULT: resultPath,
-      KEEPER_IDE_APP_DATA_DIR: appDataDir,
-      KEEPER_IDE_LAUNCH_NONCE: nonce,
-      KEEPER_IDE_STARTED_AT: String(launchLowerBound),
+      PILLOW_ACCEPTANCE_PHASE: phase,
+      PILLOW_ACCEPTANCE_PROJECT_NAME: projectName,
+      PILLOW_ACCEPTANCE_PROJECT_ROOT: projectRoot,
+      PILLOW_ACCEPTANCE_RESULT: resultPath,
+      PILLOW_APP_DATA_DIR: appDataDir,
+      PILLOW_LAUNCH_NONCE: nonce,
+      PILLOW_STARTED_AT: String(launchLowerBound),
       WEBVIEW2_USER_DATA_FOLDER: webviewProfileDir,
     },
   });
@@ -121,11 +121,11 @@ async function runPhase({
   }
 }
 
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "keeper-ide-native-"));
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "pillow-native-"));
 const appDataDir = path.join(temporaryRoot, "app-data");
 const webviewProfileDir = path.join(temporaryRoot, "webview-profile");
 const projectRoot = path.join(temporaryRoot, "project");
-const projectName = "Keeper IDE Native Acceptance";
+const projectName = "Pillow Native Acceptance";
 const realProfile = defaultWebViewProfilePath();
 const realProfileBefore = await snapshotPath(realProfile);
 const startedAt = performance.now();
@@ -140,7 +140,7 @@ try {
     packageManager,
     packageManagerArgs([
       "--filter",
-      "@keeper-ide/desktop",
+      "@pillow/desktop",
       "tauri",
       "build",
       "--debug",

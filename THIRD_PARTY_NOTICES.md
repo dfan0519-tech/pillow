@@ -10,11 +10,11 @@ License source: `LICENSE` at the fixed commit above.
 
 ### Shell prototype adaptations
 
-The following Keeper IDE files adapt **specific** layout, control grammar, or
+The following Pillow files adapt **specific** layout, control grammar, or
 host patterns from Grok App at the inspected commit. Claims are limited to the
 structures listed; they do not assert a full component-for-component port.
 
-| Keeper IDE path | Upstream source (exact) | What was reused |
+| Pillow path | Upstream source (exact) | What was reused |
 | --- | --- | --- |
 | `apps/desktop/src/App.tsx` | `src/App.tsx` | Always-on shell regions (sidebar + main stage); no launcher full-screen |
 | `apps/desktop/src/components/WindowControls.tsx` | `src/components/WindowControls.tsx` | Custom titlebar minimize / maximize / close control grammar |
@@ -34,7 +34,7 @@ wallpaper, voice, automation, relay surfaces, ResourceViewer file previews,
 ComposerEditor editor engine, or a dual project+conversation column layout.
 
 Keeper product copy, SQLite project authority, open/register/create flows, and
-visual-contract tests are original to Keeper IDE.
+visual-contract tests are original to Pillow.
 
 ### MIT License
 

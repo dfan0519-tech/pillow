@@ -29,7 +29,7 @@ Copying a whole upstream application or hiding provenance is prohibited.
 
 ## Grok App UI Baseline
 
-The first Keeper IDE shell deliberately follows Grok App rather than inventing
+The first Pillow shell deliberately follows Grok App rather than inventing
 a new visual language:
 
 - compact project and session navigation;

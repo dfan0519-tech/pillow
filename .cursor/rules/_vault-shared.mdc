@@ -1,0 +1,15 @@
+---
+description: 共享知识仓库规则（来自 <workspace>/VaultSystem\vault\AGENTS.md）
+globs: "**/*"
+alwaysApply: true
+---
+
+本项目的所有工作遵循 <workspace>/VaultSystem\vault\AGENTS.md 中的共享知识仓库规则。
+
+关键约定：
+1. 开始任务前查询 vault（QUERY）
+2. 完成任务后摄入经验（INGEST）
+3. 每周执行健康检查（LINT）
+4. 每月归档过期知识（ARCHIVE）
+
+详见：<workspace>/VaultSystem\vault\AGENTS.md

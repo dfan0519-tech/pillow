@@ -9,8 +9,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const project = {
   id: "00000000-0000-0000-0000-000000000001",
-  name: "Keeper IDE",
-  rootPath: "<workspace>/VaultSystem\\keeper-ide",
+  name: "Pillow",
+  rootPath: "<workspace>/VaultSystem\\pillow",
   trust: "untrusted" as const,
   createdAt: "2026-07-29T00:00:00Z",
   updatedAt: "2026-07-29T00:00:00Z",
@@ -92,7 +92,7 @@ describe("TauriProjectGateway", () => {
     await expect(result).rejects.toMatchObject({
       name: "ProjectGatewayError",
       code: "invalid_project_response",
-      message: "Keeper IDE received an invalid project response.",
+      message: "Pillow received an invalid project response.",
     });
   });
 

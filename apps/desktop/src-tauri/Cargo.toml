@@ -1,15 +1,15 @@
 [package]
-name = "keeper-ide-desktop"
+name = "pillow-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "keeper_ide_desktop"
+name = "pillow_desktop"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "keeper-ide"
+name = "pillow"
 path = "src/main.rs"
 
 [build-dependencies]

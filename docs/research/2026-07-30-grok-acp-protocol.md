@@ -4,7 +4,7 @@ Date: 2026-07-30
 Status: Live probe complete  
 Scope: Read-only product research for Keeper Slice B2 Rust ACP adapter  
 CLI binary: `%USERPROFILE%\.grok\bin\grok.exe`  
-Host worktree: this Keeper IDE worktree (paths redacted as `<worktree>`)
+Host worktree: this Pillow worktree (paths redacted as `<worktree>`)
 
 ## 1. Summary
 
@@ -522,7 +522,7 @@ Thought and message chunks may arrive as many tiny tokens or fewer larger pieces
       "type": "content",
       "content": {
         "type": "text",
-        "text": "1→# Keeper IDE Agent Rules\n…"
+        "text": "1→# Pillow Agent Rules\n…"
       }
     }
   ],

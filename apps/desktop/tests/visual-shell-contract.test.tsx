@@ -28,9 +28,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 function fixtureGateway(): ProjectGateway {
   const project: ProjectDto = {
-    id: "keeper-ide",
-    name: "Keeper IDE",
-    rootPath: "F:\\work\\keeper-ide",
+    id: "pillow",
+    name: "Pillow",
+    rootPath: "F:\\work\\pillow",
     trust: "trusted",
     createdAt: "2026-07-29T00:00:00.000Z",
     updatedAt: "2026-07-29T00:00:00.000Z",

@@ -7,8 +7,8 @@ const environment = await getMsvcEnvironment();
 const child = spawn(
   process.platform === "win32" ? "cmd.exe" : "pnpm",
   process.platform === "win32"
-    ? ["/d", "/s", "/c", "pnpm", "--filter", "@keeper-ide/desktop", "tauri", "build", "--no-bundle"]
-    : ["--filter", "@keeper-ide/desktop", "tauri", "build", "--no-bundle"],
+    ? ["/d", "/s", "/c", "pnpm", "--filter", "@pillow/desktop", "tauri", "build", "--no-bundle"]
+    : ["--filter", "@pillow/desktop", "tauri", "build", "--no-bundle"],
   {
     cwd: repositoryRoot,
     env: environment,

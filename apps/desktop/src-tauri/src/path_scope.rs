@@ -632,7 +632,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "keeper-ide-path-scope-{label}-{}-{nonce}",
+            "pillow-path-scope-{label}-{}-{nonce}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("temp");

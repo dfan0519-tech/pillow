@@ -32,7 +32,7 @@ createRoot(root).render(
 
 void runNativeAcceptanceIfRequested(projectGateway, desktopLifecycle).catch(
   (cause: unknown) => {
-    console.error("Keeper IDE native acceptance failed.", cause);
+    console.error("Pillow native acceptance failed.", cause);
   },
 );
 
@@ -40,7 +40,7 @@ void runConversationAcceptanceIfRequested(
   projectGateway,
   conversationGateway,
 ).catch((cause: unknown) => {
-  console.error("Keeper IDE conversation acceptance failed.", cause);
+  console.error("Pillow conversation acceptance failed.", cause);
 });
 
 type ConversationAcceptanceScenario = {
@@ -78,7 +78,7 @@ function parseConversationScenario(
     || value.projectRoot.trim().length === 0
     || typeof value.prompt !== "string"
   ) {
-    throw new Error("Keeper IDE received an invalid conversation acceptance scenario.");
+    throw new Error("Pillow received an invalid conversation acceptance scenario.");
   }
   return {
     phase: value.phase,
@@ -100,7 +100,7 @@ async function requestGracefulAppExit(): Promise<void> {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     await getCurrentWindow().close();
   } catch (error) {
-    console.error("Keeper IDE graceful exit request failed.", error);
+    console.error("Pillow graceful exit request failed.", error);
   }
 }
 

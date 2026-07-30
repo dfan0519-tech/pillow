@@ -94,7 +94,7 @@ export function App({
     if (!shellReady || readinessSent.current || !onProjectLauncherReady) return;
     readinessSent.current = true;
     void onProjectLauncherReady().catch((cause: unknown) => {
-      console.error("Keeper IDE readiness command failed.", cause);
+      console.error("Pillow readiness command failed.", cause);
     });
   }, [shellReady, onProjectLauncherReady]);
 
@@ -370,7 +370,7 @@ export function App({
     <div className="app-shell">
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
-          Keeper IDE
+          Pillow
         </div>
         <WindowControls />
       </header>

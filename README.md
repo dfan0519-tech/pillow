@@ -1,6 +1,6 @@
-# Keeper IDE
+# Pillow
 
-Keeper IDE is a local-first, project-scoped AI development environment.
+Pillow is a local-first, project-scoped AI development environment.
 
 The product roadmap is intentionally ordered:
 
@@ -8,8 +8,11 @@ The product roadmap is intentionally ordered:
 2. connect the IDE to a governed Obsidian knowledge layer;
 3. extend the project model into a one-person-company operating system.
 
-The legacy Keeper repository at `<workspace>/VaultSystem\keeper` is a read-only
-migration source. New product code belongs in this repository.
+The legacy Keeper repository at `<workspace>/VaultSystem\keeper` remains an
+independent resource manager for shared knowledge, credentials, project
+registration, and Agent coordination. Pillow consumes those capabilities only
+through explicit interfaces; all new IDE product code belongs in this
+repository.
 
 ## Current Status
 
@@ -22,13 +25,15 @@ runtime event follows `validate -> persist -> commit -> emit`.
 proved plaintext Grok ACP execution, cancellation cleanup, provider-tool
 shutdown, and public-error redaction behind the B1 protocol boundary.
 
-**Wave B3 (governed read tool foundation) is active.** The next product
-boundary is a Keeper-owned, project-scoped read tool gateway. Provider-native
-tools, arbitrary MCP servers, file writes, and shell execution remain disabled.
+**Wave B3 foundations are accepted; executor work is active.** Pillow now has
+project-scoped path authority, strict read-tool contracts, and bounded run
+activity projection. The next boundary is the Pillow-owned read-only executor
+and durable receipt path. Provider-native tools, arbitrary MCP servers, file
+writes, and shell execution remain disabled.
 
 ## Design Authority
 
-- `docs/superpowers/specs/2026-07-29-keeper-ide-first-design.md`
+- `docs/superpowers/specs/2026-07-29-pillow-first-design.md`
 - `docs/migration/legacy-capability-inventory.md`
 - `docs/references/upstream-baseline.md`
 - `docs/decisions/ADR-0001-clean-successor.md`

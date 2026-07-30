@@ -32,10 +32,10 @@ read tools:
 
 ## Explicit Non-Claims
 
-This acceptance does not claim that Keeper can execute the three read tools.
+This acceptance does not claim that Pillow can execute the three read tools.
 The following still belong to the next B3 implementation package:
 
-- a Keeper-owned read-only executor;
+- a Pillow-owned read-only executor;
 - atomic durable call reservation and replay lookup;
 - execution-time filesystem object revalidation;
 - cancellation, timeout, and byte/count enforcement against real files;
@@ -114,7 +114,7 @@ Accepted commits:
 
 ## Integrated Verification
 
-Executed from `<workspace>/VaultSystem\keeper-ide` after all branches were merged:
+Executed from `<repo>` after all branches were merged:
 
 - `git diff --check`: passed
 - `cargo fmt --all -- --check`: passed
@@ -123,8 +123,8 @@ Executed from `<workspace>/VaultSystem\keeper-ide` after all branches were merge
   - Rust workspace: all non-opt-in tests passed
   - live Grok ACP test: one expected opt-in ignore
   - Clippy workspace with `-D warnings`: passed
-- `pnpm --filter @keeper-ide/desktop build:ui`: passed
-- `pnpm --filter @keeper-ide/desktop test:e2e`: 5 of 5 passed serially
+- `pnpm --filter @pillow/desktop build:ui`: passed
+- `pnpm --filter @pillow/desktop test:e2e`: 5 of 5 passed serially
   - persistence-before-emit, cancellation, and interrupted recovery
   - real Tauri restart and SQLite timeline restore
   - native project create/select/restore

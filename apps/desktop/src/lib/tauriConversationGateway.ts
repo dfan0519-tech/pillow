@@ -116,7 +116,7 @@ function boundedSingleLine(value: string, maxChars: number): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, maxChars);
 }
 
-function invalidResponse(message = "Keeper IDE received an invalid conversation response."): Error {
+function invalidResponse(message = "Pillow received an invalid conversation response."): Error {
   return new Error(message);
 }
 
@@ -401,7 +401,7 @@ function tryParseRuntimeEventDto(value: unknown): RuntimeEventDto | null {
   try {
     return parseRuntimeEventDto(value);
   } catch (cause) {
-    console.error("Keeper IDE ignored invalid runtime event payload.", cause);
+    console.error("Pillow ignored invalid runtime event payload.", cause);
     return null;
   }
 }
@@ -763,7 +763,7 @@ export class TauriConversationGateway implements ConversationGateway {
       }
       unlisten = fn;
     }).catch((cause: unknown) => {
-      console.error("Keeper IDE failed to subscribe to runtime events.", cause);
+      console.error("Pillow failed to subscribe to runtime events.", cause);
     });
 
     return () => {

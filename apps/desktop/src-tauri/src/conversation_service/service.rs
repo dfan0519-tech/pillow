@@ -571,7 +571,7 @@ impl ConversationService {
                     remove_active_run(&active, run_id);
                 } else {
                     eprintln!(
-                        "Keeper IDE conversation pump left residual active run {} \
+                        "Pillow conversation pump left residual active run {} \
                          (non-terminal after pump failure)",
                         run_id.0
                     );
@@ -583,7 +583,7 @@ impl ConversationService {
 
 fn open_projects(path: &Path) -> Result<SqliteProjectRepository, ConversationCommandError> {
     SqliteProjectRepository::open(path).map_err(|error| {
-        eprintln!("Keeper IDE project store open error: {error}");
+        eprintln!("Pillow project store open error: {error}");
         ConversationCommandError::new(
             "project_store_unavailable",
             "Project storage is temporarily unavailable.",

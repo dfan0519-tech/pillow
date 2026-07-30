@@ -418,8 +418,8 @@ describe("conversation workbench UI", () => {
     expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
 
     const withProject = new MockConversationGateway({ stepDelayMs: 0 });
-    renderApp(withProject, [fixtureProject({ name: "Keeper IDE", id: "keeper-ide" })]);
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Keeper IDE" }));
+    renderApp(withProject, [fixtureProject({ name: "Pillow", id: "pillow" })]);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Pillow" }));
 
     expect(await screen.findByTestId("selected-workbench")).toBeVisible();
     expect(screen.getByTestId("project-conversations")).toBeVisible();

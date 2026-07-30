@@ -20,13 +20,13 @@ without adding product features:
 1. Native acceptance and smoke set `WEBVIEW2_USER_DATA_FOLDER` to a unique
    temporary directory. The harness verifies that the temporary profile is
    populated and that the complete baseline manifest of the real
-   `%LOCALAPPDATA%\com.keeperide.desktop\EBWebView` profile is unchanged.
+   `%LOCALAPPDATA%\com.pillow.desktop\EBWebView` profile is unchanged.
 2. Readiness is emitted only after `listProjects()` succeeds and the renderer's
    lifecycle command successfully writes the host marker. Schema 2 evidence
    contains a unique nonce, host PID, `startedAt`, app-data path, database path,
    WebView profile path, and `readyAtUnixMs`.
 3. A Windows process supervisor records the launch root, captured descendants,
-   `keeper-ide.exe` processes, and port 1420 owners. Cleanup still runs when the
+   `pillow.exe` processes, and port 1420 owners. Cleanup still runs when the
    root has exited, checks `taskkill` results, and returns only after a fresh
    process/port snapshot proves zero known or desktop residuals.
 4. `run-cargo.mjs` handles `SIGINT` and `SIGTERM`, forwards the signal, waits
@@ -44,7 +44,7 @@ was introduced. `<workspace>/VaultSystem\keeper` remained read-only.
 | Layer | Coverage | Result |
 | --- | --- | --- |
 | Renderer | Project launcher behavior and readiness success/failure gate | 5 files, 30 tests passed |
-| Native acceptance | Two real debug `keeper-ide.exe` launches through WebView2 renderer `invoke`, registered Tauri commands, and temporary SQLite | Passed; one project restored after one full process restart |
+| Native acceptance | Two real debug `pillow.exe` launches through WebView2 renderer `invoke`, registered Tauri commands, and temporary SQLite | Passed; one project restored after one full process restart |
 | Release smoke | Release Tauri binary, schema 2 marker, temporary DB/profile, post-marker survival, 2500 ms budget | Passed; marker startup 2477 ms |
 | Dev smoke | Tauri CLI, Vite, debug desktop, schema 2 marker, temporary DB/profile, post-marker survival | Passed; marker startup 44165 ms |
 | Process self-test | success, thrown failure, E2E-wrapper timeout, parent-exited, port owner, known descendants | Passed |
@@ -113,12 +113,12 @@ The acceptance distinguishes three independent data surfaces:
 
 | Surface | Test location | Assertion |
 | --- | --- | --- |
-| Application data | `%TEMP%\keeper-ide-*\app-data` | `KEEPER_IDE_APP_DATA_DIR` resolves inside the unique temporary root |
+| Application data | `%TEMP%\pillow-*\app-data` | `PILLOW_APP_DATA_DIR` resolves inside the unique temporary root |
 | SQLite database | `<temporary app-data>\keeper.db` | Real file, 16384 bytes, reused only between the two native phases |
-| WebView2 profile | `%TEMP%\keeper-ide-*\webview-profile` | `WEBVIEW2_USER_DATA_FOLDER` is set before launch and the profile is populated |
+| WebView2 profile | `%TEMP%\pillow-*\webview-profile` | `WEBVIEW2_USER_DATA_FOLDER` is set before launch and the profile is populated |
 
 The user's real WebView2 profile baseline is
-`%LOCALAPPDATA%\com.keeperide.desktop\EBWebView`. Before launch and after full
+`%LOCALAPPDATA%\com.pillow.desktop\EBWebView`. Before launch and after full
 process cleanup, the harness recursively snapshots every relative path, entry
 kind, byte size, and modification time. Native acceptance, release smoke, dev
 smoke, and the smoke self-test require exact before/after equality.
@@ -145,14 +145,14 @@ The supervisor captures:
 
 - launch root PID;
 - recursive descendants while readiness/output is polled;
-- every `keeper-ide.exe` PID;
+- every `pillow.exe` PID;
 - every TCP listener owner on port 1420.
 
 On every success, failure, or timeout path it refreshes the process snapshot,
 issues one checked `taskkill /T /F` request for all live known PIDs, refreshes
 again, and repeats only if a survivor exists. A non-zero `taskkill` result is
 accepted only when all requested PIDs are already dead. Returning from cleanup
-means a fresh snapshot found no live known PID, no `keeper-ide.exe`, and no
+means a fresh snapshot found no live known PID, no `pillow.exe`, and no
 port 1420 listener.
 
 The executable smoke self-test proves:
@@ -183,21 +183,21 @@ main smoke launcher at 193 lines, and the smoke self-test at 184 lines.
 
 ## Fresh Verification
 
-All commands ran from `<workspace>/VaultSystem\keeper-ide`.
+All commands ran from `<repo>`.
 
 | Exact command | Result |
 | --- | --- |
 | `pnpm check` | PASS, exit 0, 91.6 s; workspace check, typecheck, 30 renderer tests, 6 Rust tests, Clippy zero warnings |
-| `pnpm --filter @keeper-ide/desktop test:e2e` | PASS, exit 0, 3/3, 94.566 s |
+| `pnpm --filter @pillow/desktop test:e2e` | PASS, exit 0, 3/3, 94.566 s |
 | `node scripts/native-acceptance-desktop.mjs` | PASS, exit 0; one restart, one restored project, 16384-byte DB, 240 WebView profile entries |
 | `pnpm desktop:smoke` | PASS, exit 0; marker startup 2477 ms, observed 3573 ms, 238 WebView profile entries |
 | `pnpm desktop:smoke:dev` | PASS, exit 0; marker startup 44165 ms, observed 44807 ms, 279 WebView profile entries |
 | `pnpm desktop:smoke:self-test` | PASS, exit 0; six evidence fields passed |
 | `pnpm desktop:cargo:self-test` | PASS, exit 0; exit code, signal cleanup, and MSVC passed |
-| `pnpm --filter @keeper-ide/desktop build:ui` | PASS, exit 0; 46 modules, Vite 2.30 s |
+| `pnpm --filter @pillow/desktop build:ui` | PASS, exit 0; 46 modules, Vite 2.30 s |
 | `node scripts/run-cargo.mjs fmt --all -- --check` | PASS, exit 0 |
 | `git diff --check` | PASS, exit 0 |
-| Process/port query | PASS; zero `keeper-ide.exe`, zero port 1420 listeners |
+| Process/port query | PASS; zero `pillow.exe`, zero port 1420 listeners |
 
 The final release build completed in 1 minute 9 seconds. Build time is excluded
 from startup timing.

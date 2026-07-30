@@ -1,4 +1,4 @@
-# Keeper IDE Slice A Desktop Foundation Implementation Plan
+# Pillow Slice A Desktop Foundation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Repository root is `<workspace>/VaultSystem\keeper-ide`.
+- Repository root is `<repo>`.
 - The legacy repository `<workspace>/VaultSystem\keeper` is read-only.
 - Stage 1 is an industrial AI IDE; Obsidian and company orchestration are out of scope.
 - SQLite is the only operational authority.
@@ -31,7 +31,7 @@
 Cargo.toml                              Rust workspace boundary
 package.json                            JavaScript command entrypoints
 pnpm-workspace.yaml                     JavaScript workspace boundary
-LICENSE                                 Keeper IDE Apache-2.0 license
+LICENSE                                 Pillow Apache-2.0 license
 THIRD_PARTY_NOTICES.md                  Imported/adapted source notices
 scripts/check-workspace.mjs             Deterministic scaffold check
 crates/kernel-project/                  Project domain contracts
@@ -67,7 +67,7 @@ apps/desktop/tests/                     Renderer behavior tests
 
 **Interfaces:**
 - Consumes: none.
-- Produces: a compilable Tauri composition root; `keeper_ide_desktop::run()`; root commands `pnpm check`, `pnpm typecheck`, `pnpm test`, and `pnpm desktop:dev`.
+- Produces: a compilable Tauri composition root; `pillow_desktop::run()`; root commands `pnpm check`, `pnpm typecheck`, `pnpm test`, and `pnpm desktop:dev`.
 
 - [ ] **Step 1: Write the deterministic scaffold check**
 
@@ -132,7 +132,7 @@ The Tauri entrypoint must contain no domain logic:
 
 ```rust
 fn main() {
-    keeper_ide_desktop::run();
+    pillow_desktop::run();
 }
 ```
 
@@ -147,7 +147,7 @@ Run:
 node scripts/check-workspace.mjs
 pnpm install --frozen-lockfile=false
 pnpm typecheck
-cargo check -p keeper-ide-desktop
+cargo check -p pillow-desktop
 ```
 
 Expected: all commands exit `0`.
@@ -156,7 +156,7 @@ Expected: all commands exit `0`.
 
 ```powershell
 git add Cargo.toml package.json pnpm-workspace.yaml LICENSE THIRD_PARTY_NOTICES.md scripts apps/desktop
-git commit -m "build: scaffold Keeper IDE desktop workspace"
+git commit -m "build: scaffold Pillow desktop workspace"
 ```
 
 ## Task 2: Project Kernel And SQLite Authority
@@ -190,8 +190,8 @@ fn creates_and_lists_a_project() {
     let temp = tempfile::tempdir().unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     let created = repo.create(CreateProject {
-        name: "Keeper IDE".into(),
-        root_path: r"<workspace>/VaultSystem\keeper-ide".into(),
+        name: "Pillow".into(),
+        root_path: r"<repo>".into(),
     }).unwrap();
 
     let projects = repo.list().unwrap();
@@ -203,8 +203,8 @@ fn rejects_the_same_canonical_root_twice() {
     let temp = tempfile::tempdir().unwrap();
     let repo = SqliteProjectRepository::open(temp.path().join("keeper.db")).unwrap();
     let input = CreateProject {
-        name: "Keeper IDE".into(),
-        root_path: r"<workspace>/VaultSystem\keeper-ide".into(),
+        name: "Pillow".into(),
+        root_path: r"<repo>".into(),
     };
     repo.create(input.clone()).unwrap();
     let error = repo.create(input).unwrap_err();
@@ -306,7 +306,7 @@ fn selection_is_not_persisted_as_global_project_status() {
 
 - [ ] **Step 2: Run tests and verify RED**
 
-Run: `cargo test -p keeper-ide-desktop --test project_commands`
+Run: `cargo test -p pillow-desktop --test project_commands`
 
 Expected: compile failure because `AppState` and command service do not exist.
 
@@ -331,9 +331,9 @@ diagnostic details remain in host logs.
 Run:
 
 ```powershell
-cargo test -p keeper-ide-desktop --test project_commands
-cargo test -p keeper-ide-desktop
-cargo clippy -p keeper-ide-desktop -- -D warnings
+cargo test -p pillow-desktop --test project_commands
+cargo test -p pillow-desktop
+cargo clippy -p pillow-desktop -- -D warnings
 ```
 
 Expected: all commands exit `0`.
@@ -373,8 +373,8 @@ git commit -m "feat: expose typed project desktop commands"
 ```tsx
 it("keeps the selected project visible above its conversations", async () => {
   render(<App gateway={fixtureGateway()} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Keeper IDE" }));
-  expect(screen.getByTestId("active-project-name")).toHaveTextContent("Keeper IDE");
+  await userEvent.click(await screen.findByRole("button", { name: "Pillow" }));
+  expect(screen.getByTestId("active-project-name")).toHaveTextContent("Pillow");
   expect(screen.getByRole("navigation", { name: "项目对话" })).toBeVisible();
 });
 
@@ -386,7 +386,7 @@ it("does not render provider internals in the empty workbench", async () => {
 
 - [ ] **Step 2: Run tests and verify RED**
 
-Run: `pnpm --filter @keeper-ide/desktop test -- project-workbench.test.tsx`
+Run: `pnpm --filter @pillow/desktop test -- project-workbench.test.tsx`
 
 Expected: failure because the renderer components do not exist.
 
@@ -428,9 +428,9 @@ export interface ProjectGateway {
 Run:
 
 ```powershell
-pnpm --filter @keeper-ide/desktop typecheck
-pnpm --filter @keeper-ide/desktop test
-pnpm --filter @keeper-ide/desktop build:ui
+pnpm --filter @pillow/desktop typecheck
+pnpm --filter @pillow/desktop test
+pnpm --filter @pillow/desktop build:ui
 ```
 
 Expected: all commands exit `0`.
@@ -463,18 +463,18 @@ git commit -m "feat: add Grok App-based project workbench"
 ```ts
 test("creates, selects, and restores a project", async ({ page }) => {
   await page.getByRole("button", { name: "新建项目" }).click();
-  await page.getByLabel("项目名称").fill("Keeper IDE");
-  await page.getByLabel("项目目录").fill("<workspace>/VaultSystem\\keeper-ide");
+  await page.getByLabel("项目名称").fill("Pillow");
+  await page.getByLabel("项目目录").fill("<workspace>/VaultSystem\\pillow");
   await page.getByRole("button", { name: "创建" }).click();
-  await expect(page.getByTestId("active-project-name")).toHaveText("Keeper IDE");
+  await expect(page.getByTestId("active-project-name")).toHaveText("Pillow");
   await page.reload();
-  await expect(page.getByTestId("active-project-name")).toHaveText("Keeper IDE");
+  await expect(page.getByTestId("active-project-name")).toHaveText("Pillow");
 });
 ```
 
 - [ ] **Step 2: Run and verify RED**
 
-Run: `pnpm --filter @keeper-ide/desktop test:e2e`
+Run: `pnpm --filter @pillow/desktop test:e2e`
 
 Expected: failure because the E2E harness and persistence wiring are incomplete.
 
@@ -501,10 +501,10 @@ Run:
 
 ```powershell
 pnpm check
-pnpm --filter @keeper-ide/desktop build:ui
-pnpm --filter @keeper-ide/desktop test:e2e
+pnpm --filter @pillow/desktop build:ui
+pnpm --filter @pillow/desktop test:e2e
 pnpm desktop:smoke
-cargo build -p keeper-ide-desktop
+cargo build -p pillow-desktop
 ```
 
 Expected: every command exits `0`; the acceptance report records commands,
@@ -514,6 +514,6 @@ counts, startup time, screenshot paths, residuals, and upstream provenance.
 
 ```powershell
 git add package.json apps/desktop scripts docs/verification
-git commit -m "test: close Keeper IDE desktop foundation slice"
+git commit -m "test: close Pillow desktop foundation slice"
 ```
 

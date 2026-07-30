@@ -7,7 +7,7 @@
 import { snapshotWindowsProcesses } from "./desktop-process.mjs";
 
 const GROK_NAMES = new Set(["grok.exe", "grok"]);
-const KEEPER_NAMES = new Set(["keeper-ide.exe", "keeper-ide"]);
+const KEEPER_NAMES = new Set(["pillow.exe", "pillow"]);
 
 function normalizeName(name) {
   return String(name ?? "").trim().toLowerCase();

@@ -83,7 +83,7 @@ describe("WindowControls", () => {
 
     await waitFor(() => {
       expect(report).toHaveBeenCalledWith(
-        "[Keeper IDE] Window action failed: minimize",
+        "[Pillow] Window action failed: minimize",
         failure,
       );
     });

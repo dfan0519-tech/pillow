@@ -141,7 +141,7 @@ export function Workbench({
           ) : (
             <div className="stage-empty" data-testid="empty-workbench">
               <IconKeeperMark size={40} title="Keeper" />
-              <h2>Keeper IDE</h2>
+              <h2>Pillow</h2>
               <p>打开现有项目文件夹以开始本地工作。</p>
             </div>
           )}

@@ -11,7 +11,7 @@ Upstream remote: `https://gitee.com/hwblack_admin/zbbody.git`
 Declared license: Apache-2.0
 
 Decision: use as a read-only interaction and lifecycle reference, not as the
-Keeper IDE application or security foundation.
+Pillow application or security foundation.
 
 ## Executive Decision
 
@@ -19,14 +19,14 @@ The repository is a large AionUi-derived Electron application. It contains
 useful, mature examples for conversation navigation, workspace panes, preview
 dispatch, agent activity, runtime reconnect, and broad desktop testing.
 
-Keeper IDE must retain its existing Tauri/Rust boundaries:
+Pillow must retain its existing Tauri/Rust boundaries:
 
 - projects are durable domain objects rather than workspace strings attached
   to conversations;
 - SQLite is the only operational authority;
 - renderer access remains a narrow typed Tauri command and event surface;
 - providers propose work but never grant themselves authority;
-- tool execution, policy, approval, and receipts remain Keeper-owned.
+- tool execution, policy, approval, and receipts remain Pillow-owned.
 
 No source file will be copied from this repository unless a later brief names
 the exact source path, commit, license obligation, adaptation boundary, and
@@ -78,7 +78,7 @@ project or conversation.
   native provider tools or MCP servers.
 - The next slice begins with a project-bound path capability, not with an
   arbitrary MCP client or shell.
-- The first real tools are Keeper-owned, read-only filesystem operations.
+- The first real tools are Pillow-owned, read-only filesystem operations.
 - Tool and approval events are durable before the renderer sees them.
 - Existing activity UI will be evolved to preserve per-run history instead of
   replacing the previous run's structured activity.
@@ -86,6 +86,6 @@ project or conversation.
 ## Local Repository Handling
 
 `<workspace>/zbbody` is a reference repository under Keeper governance. Its
-pre-existing worktree changes are not part of Keeper IDE and must not be
+pre-existing worktree changes are not part of Pillow and must not be
 cleaned, staged, committed, or reused implicitly.
 

@@ -16,10 +16,10 @@ use crate::conversation_service::{ConversationCommandError, ConversationService}
 ///
 /// - unset / `grok` / `grok-acp` → real Grok ACP (production default)
 /// - `fake` → deterministic fake (explicit development / test only)
-pub const ENV_RUNTIME_SELECTION: &str = "KEEPER_IDE_RUNTIME";
+pub const ENV_RUNTIME_SELECTION: &str = "PILLOW_RUNTIME";
 
 /// Non-secret path to the Grok CLI executable.
-pub const ENV_GROK_EXECUTABLE: &str = "KEEPER_IDE_GROK_EXECUTABLE";
+pub const ENV_GROK_EXECUTABLE: &str = "PILLOW_GROK_EXECUTABLE";
 
 /// Process home for the Grok child (`HOME` / `USERPROFILE` override).
 /// Path only — never open or inspect auth file contents or account identity.
@@ -27,7 +27,7 @@ pub const ENV_GROK_EXECUTABLE: &str = "KEEPER_IDE_GROK_EXECUTABLE";
 /// When unset, the current-user home is resolved from `USERPROFILE` (Windows)
 /// or `HOME` (other platforms). A missing home fails startup with
 /// `runtime_profile_missing` — never silent Fake fallback.
-pub const ENV_GROK_PROFILE: &str = "KEEPER_IDE_GROK_PROFILE";
+pub const ENV_GROK_PROFILE: &str = "PILLOW_GROK_PROFILE";
 
 /// First industrial Grok connection: one concurrent prompt, no fixture delays.
 pub fn production_grok_host_config() -> HostConfig {
@@ -83,7 +83,7 @@ impl RuntimeSelection {
 /// Open the conversation service for process startup.
 ///
 /// Production path composes `GrokAcpAdapter`. Fake requires
-/// `KEEPER_IDE_RUNTIME=fake` (or equivalent explicit selection).
+/// `PILLOW_RUNTIME=fake` (or equivalent explicit selection).
 pub fn open_conversation_service(
     db_path: impl AsRef<Path>,
     emitter: Arc<dyn RuntimeEventEmitter>,
@@ -126,11 +126,11 @@ pub fn open_conversation_service_with_selection(
 /// Discover non-secret Grok launch configuration.
 ///
 /// Sources (in order for the executable):
-/// 1. `KEEPER_IDE_GROK_EXECUTABLE` when set
+/// 1. `PILLOW_GROK_EXECUTABLE` when set
 /// 2. Stable default: `grok` / `grok.exe` on `PATH`
 ///
 /// Profile home (always required for real Grok; path only):
-/// 1. `KEEPER_IDE_GROK_PROFILE` when set to an existing directory
+/// 1. `PILLOW_GROK_PROFILE` when set to an existing directory
 /// 2. Else current-user home from `USERPROFILE` (Windows) or `HOME` (other)
 /// 3. Else fail with `runtime_profile_missing` (never Fake)
 ///
@@ -190,7 +190,7 @@ fn resolve_grok_executable() -> Result<PathBuf, ConversationCommandError> {
 
 /// Resolve the process home path passed to the Grok child.
 ///
-/// Priority: explicit `KEEPER_IDE_GROK_PROFILE` → platform current-user home.
+/// Priority: explicit `PILLOW_GROK_PROFILE` → platform current-user home.
 /// Existence check only — never open auth files or inspect account identity.
 fn resolve_grok_profile() -> Result<PathBuf, ConversationCommandError> {
     match std::env::var(ENV_GROK_PROFILE) {
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(
             config.honor_isolated_home.as_deref(),
             Some(explicit.as_path()),
-            "KEEPER_IDE_GROK_PROFILE must win over platform home"
+            "PILLOW_GROK_PROFILE must win over platform home"
         );
         unsafe {
             std::env::remove_var(ENV_GROK_EXECUTABLE);

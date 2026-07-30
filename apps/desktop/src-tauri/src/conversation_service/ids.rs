@@ -27,7 +27,7 @@ pub(super) fn parse_run_id(value: &str) -> Result<RunId, ConversationCommandErro
 }
 
 pub(super) fn map_session_error(error: SessionError) -> ConversationCommandError {
-    eprintln!("Keeper IDE conversation store error: {error}");
+    eprintln!("Pillow conversation store error: {error}");
     match error {
         SessionError::ProjectNotFound(_) => {
             ConversationCommandError::new("project_not_found", "Project not found.")

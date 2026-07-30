@@ -1,4 +1,4 @@
-# Keeper IDE Stage 1 Plan Comparison
+# Pillow Stage 1 Plan Comparison
 
 Date: 2026-07-30
 
@@ -6,7 +6,7 @@ Status: Controller-approved execution baseline
 
 ## Product Goal
 
-Keeper IDE first becomes an industrial, local-first AI IDE. Obsidian
+Pillow first becomes an industrial, local-first AI IDE. Obsidian
 integration begins only after the IDE passes Stage 1 acceptance. One-person
 company orchestration remains the third stage.
 

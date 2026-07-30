@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use keeper_ide_desktop::app_state::AppState;
-use keeper_ide_desktop::directory_ops::project_name_from_path;
+use pillow_desktop::app_state::AppState;
+use pillow_desktop::directory_ops::project_name_from_path;
 
 fn test_state() -> (AppState, PathBuf) {
     let nonce = SystemTime::now()
@@ -11,7 +11,7 @@ fn test_state() -> (AppState, PathBuf) {
         .expect("system clock should be after the Unix epoch")
         .as_nanos();
     let temp_root = std::env::temp_dir().join(format!(
-        "keeper-ide-project-commands-{}-{nonce}",
+        "pillow-project-commands-{}-{nonce}",
         std::process::id()
     ));
     fs::create_dir_all(&temp_root).expect("test root should be created");

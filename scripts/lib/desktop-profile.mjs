@@ -5,7 +5,7 @@ import path from "node:path";
 export function defaultWebViewProfilePath() {
   const localAppData = process.env.LOCALAPPDATA;
   if (!localAppData) throw new Error("LOCALAPPDATA is required on Windows.");
-  return path.join(localAppData, "com.keeperide.desktop", "EBWebView");
+  return path.join(localAppData, "com.pillow.desktop", "EBWebView");
 }
 
 export async function snapshotPath(root) {

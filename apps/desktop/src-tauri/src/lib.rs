@@ -63,14 +63,14 @@ pub fn run() {
             let state = AppState::open(&db_path)?;
             let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
             // Production default: GrokAcpAdapter. Fake only when
-            // KEEPER_IDE_RUNTIME=fake (explicit development / test selection).
+            // PILLOW_RUNTIME=fake (explicit development / test selection).
             // Never silent-fallback from a missing Grok install to Fake.
             let (conversations, selection) = open_conversation_service(&db_path, emitter)?;
-            eprintln!("Keeper IDE runtime selection: {}", selection.as_str());
+            eprintln!("Pillow runtime selection: {}", selection.as_str());
             let conversations = Arc::new(conversations);
             let recovered = conversations.recover_inflight()?;
             if recovered > 0 {
-                eprintln!("Keeper IDE recovered {recovered} interrupted run(s) as Interrupted");
+                eprintln!("Pillow recovered {recovered} interrupted run(s) as Interrupted");
             }
             app.manage(state);
             app.manage(conversations);
@@ -78,7 +78,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Keeper IDE");
+        .expect("error while building Pillow");
 
     app.run(|app_handle, event| {
         // Graceful ConversationService drain on app exit (window close / acceptance exit).
@@ -103,7 +103,7 @@ pub fn run() {
                         }
                         ConversationExitDecision::PreventExit { reason } => {
                             eprintln!(
-                                "Keeper IDE conversation shutdown failed; preventing exit: {reason}"
+                                "Pillow conversation shutdown failed; preventing exit: {reason}"
                             );
                             api.prevent_exit();
                         }
@@ -118,7 +118,7 @@ pub fn run() {
                     match service.shutdown() {
                         Ok(()) => write_conversation_shutdown_success_marker(),
                         Err(error) => {
-                            eprintln!("Keeper IDE conversation shutdown on Exit: {error}");
+                            eprintln!("Pillow conversation shutdown on Exit: {error}");
                         }
                     }
                 }

@@ -61,7 +61,7 @@ pub(super) fn pump_turn(
                 if let Some(force) = seams.force_process_error.as_ref()
                     && let Err(error) = force()
                 {
-                    eprintln!("Keeper IDE conversation pump error: {error}");
+                    eprintln!("Pillow conversation pump error: {error}");
                     authoritative_failure = true;
                     break;
                 }
@@ -73,7 +73,7 @@ pub(super) fn pump_turn(
                         }
                     }
                     Err(error) => {
-                        eprintln!("Keeper IDE conversation pump error: {error}");
+                        eprintln!("Pillow conversation pump error: {error}");
                         authoritative_failure = true;
                         break;
                     }
@@ -86,7 +86,7 @@ pub(super) fn pump_turn(
                         if let Some(force) = seams.force_process_error.as_ref()
                             && let Err(error) = force()
                         {
-                            eprintln!("Keeper IDE conversation pump error: {error}");
+                            eprintln!("Pillow conversation pump error: {error}");
                             authoritative_failure = true;
                             break;
                         }
@@ -96,7 +96,7 @@ pub(super) fn pump_turn(
                             conversation_id,
                             &event,
                         ) {
-                            eprintln!("Keeper IDE conversation pump error: {error}");
+                            eprintln!("Pillow conversation pump error: {error}");
                             authoritative_failure = true;
                             break;
                         }
@@ -112,7 +112,7 @@ pub(super) fn pump_turn(
                 }
             }
             Err(error) => {
-                eprintln!("Keeper IDE conversation delivery error: {error}");
+                eprintln!("Pillow conversation delivery error: {error}");
                 authoritative_failure = true;
                 break;
             }
@@ -180,7 +180,7 @@ pub(crate) fn process_runtime_event(
     let dto = runtime_event_dto(&recorded, conversation_id)
         .map_err(|error| format!("recorded payload parse: {error}"))?;
     if let Err(error) = emitter.emit_runtime_event(&dto) {
-        eprintln!("Keeper IDE conversation emit error (non-authoritative): {error}");
+        eprintln!("Pillow conversation emit error (non-authoritative): {error}");
     }
     Ok(())
 }
@@ -201,7 +201,7 @@ pub(crate) fn ensure_durable_terminal(
         }
         Err(error) => {
             eprintln!(
-                "Keeper IDE conversation terminalization failed for run {}: {error}",
+                "Pillow conversation terminalization failed for run {}: {error}",
                 run_id.0
             );
             PumpOutcome::ResidualNonTerminal

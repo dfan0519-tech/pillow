@@ -31,7 +31,7 @@ function parseScenario(value: unknown): NativeAcceptanceScenario | null {
     || typeof value.projectRoot !== "string"
     || value.projectRoot.trim().length === 0
   ) {
-    throw new Error("Keeper IDE received an invalid native acceptance scenario.");
+    throw new Error("Pillow received an invalid native acceptance scenario.");
   }
   return {
     phase: value.phase,

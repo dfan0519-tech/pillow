@@ -130,19 +130,19 @@ pub fn get_conversation_acceptance_scenario<R: tauri::Runtime>(
     state: State<'_, AppState>,
     window: WebviewWindow<R>,
 ) -> Result<Option<ConversationAcceptanceScenario>, CommandError> {
-    let Ok(phase) = std::env::var("KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE") else {
+    let Ok(phase) = std::env::var("PILLOW_CONVERSATION_ACCEPTANCE_PHASE") else {
         return Ok(None);
     };
     if !matches!(phase.as_str(), "create_stream" | "restore") {
         return Ok(None);
     }
-    let Ok(project_name) = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_NAME") else {
+    let Ok(project_name) = std::env::var("PILLOW_ACCEPTANCE_PROJECT_NAME") else {
         return Ok(None);
     };
-    let Ok(mut project_root) = std::env::var("KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT") else {
+    let Ok(mut project_root) = std::env::var("PILLOW_ACCEPTANCE_PROJECT_ROOT") else {
         return Ok(None);
     };
-    let prompt = std::env::var("KEEPER_IDE_CONVERSATION_ACCEPTANCE_PROMPT")
+    let prompt = std::env::var("PILLOW_CONVERSATION_ACCEPTANCE_PROMPT")
         .unwrap_or_else(|_| "summarize the workspace".to_owned());
     if project_name.trim().is_empty() || project_root.trim().is_empty() {
         return Ok(None);
@@ -183,7 +183,7 @@ pub fn complete_conversation_acceptance(
     result: ConversationAcceptanceResult,
 ) -> Result<(), CommandError> {
     let result_path =
-        std::env::var_os("KEEPER_IDE_CONVERSATION_ACCEPTANCE_RESULT").ok_or_else(|| {
+        std::env::var_os("PILLOW_CONVERSATION_ACCEPTANCE_RESULT").ok_or_else(|| {
             CommandError {
                 code: "conversation_acceptance_unavailable",
                 message: "Conversation acceptance is not configured.".into(),

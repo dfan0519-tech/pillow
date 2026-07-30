@@ -103,7 +103,7 @@ fn display_path(path: &Path) -> String {
 }
 
 fn map_project_store_error(error: ProjectStoreError) -> ConversationCommandError {
-    eprintln!("Keeper IDE project store error while resolving cwd: {error}");
+    eprintln!("Pillow project store error while resolving cwd: {error}");
     match error {
         ProjectStoreError::Canonicalize { .. } => ConversationCommandError::new(
             "invalid_project_root",
@@ -134,7 +134,7 @@ mod tests {
     fn rejects_missing_root() {
         let err = canonicalize_existing_project_root(
             std::env::temp_dir()
-                .join("keeper-ide-missing-root-does-not-exist")
+                .join("pillow-missing-root-does-not-exist")
                 .to_string_lossy()
                 .as_ref(),
         )

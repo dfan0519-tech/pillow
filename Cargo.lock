@@ -1936,26 +1936,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keeper-ide-desktop"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "keeper-adapter-grok-acp",
- "keeper-agent-protocol",
- "keeper-project",
- "keeper-runtime-host",
- "keeper-session",
- "keeper-storage-sqlite",
- "rfd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
- "uuid",
-]
-
-[[package]]
 name = "keeper-project"
 version = "0.1.0"
 dependencies = [
@@ -2586,6 +2566,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pillow-desktop"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-adapter-grok-acp",
+ "keeper-agent-protocol",
+ "keeper-project",
+ "keeper-runtime-host",
+ "keeper-session",
+ "keeper-storage-sqlite",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

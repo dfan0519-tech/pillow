@@ -11,7 +11,7 @@
  * - Rust shutdown-success marker is published (only after ConversationService
  *   shutdown returns Ok);
  * - child exit status === 0 and signal === null;
- * - a fresh process snapshot has no keeper-ide.exe;
+ * - a fresh process snapshot has no pillow.exe;
  * - no inherited port listener remains.
  *
  * gracefulExit is true only when marker + exit code + snapshot all pass.
@@ -52,7 +52,7 @@ const executable = path.join(
   repositoryRoot,
   "target",
   "debug",
-  process.platform === "win32" ? "keeper-ide.exe" : "keeper-ide",
+  process.platform === "win32" ? "pillow.exe" : "pillow",
 );
 
 function validateConversationEvidence(value, expected) {
@@ -114,16 +114,16 @@ async function runPhase({
       ...environment,
       // B1 deterministic acceptance must not depend on production Grok default.
       // Explicit fake only — this is not Grok connectivity evidence.
-      KEEPER_IDE_RUNTIME: "fake",
-      KEEPER_IDE_CONVERSATION_ACCEPTANCE_PHASE: phase,
-      KEEPER_IDE_CONVERSATION_ACCEPTANCE_PROMPT: prompt,
-      KEEPER_IDE_CONVERSATION_ACCEPTANCE_RESULT: resultPath,
-      KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER: shutdownMarkerPath,
-      KEEPER_IDE_ACCEPTANCE_PROJECT_NAME: projectName,
-      KEEPER_IDE_ACCEPTANCE_PROJECT_ROOT: projectRoot,
-      KEEPER_IDE_APP_DATA_DIR: appDataDir,
-      KEEPER_IDE_LAUNCH_NONCE: nonce,
-      KEEPER_IDE_STARTED_AT: String(launchLowerBound),
+      PILLOW_RUNTIME: "fake",
+      PILLOW_CONVERSATION_ACCEPTANCE_PHASE: phase,
+      PILLOW_CONVERSATION_ACCEPTANCE_PROMPT: prompt,
+      PILLOW_CONVERSATION_ACCEPTANCE_RESULT: resultPath,
+      PILLOW_CONVERSATION_SHUTDOWN_MARKER: shutdownMarkerPath,
+      PILLOW_ACCEPTANCE_PROJECT_NAME: projectName,
+      PILLOW_ACCEPTANCE_PROJECT_ROOT: projectRoot,
+      PILLOW_APP_DATA_DIR: appDataDir,
+      PILLOW_LAUNCH_NONCE: nonce,
+      PILLOW_STARTED_AT: String(launchLowerBound),
       WEBVIEW2_USER_DATA_FOLDER: webviewProfileDir,
     },
   });
@@ -242,11 +242,11 @@ async function runPhase({
   }
 }
 
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "keeper-ide-conv-"));
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "pillow-conv-"));
 const appDataDir = path.join(temporaryRoot, "app-data");
 const webviewProfileDir = path.join(temporaryRoot, "webview-profile");
 const projectRoot = path.join(temporaryRoot, "project");
-const projectName = "Keeper IDE Conversation Recovery";
+const projectName = "Pillow Conversation Recovery";
 const prompt = "summarize the workspace";
 const realProfile = defaultWebViewProfilePath();
 const realProfileBefore = await snapshotPath(realProfile);
@@ -262,7 +262,7 @@ try {
     packageManager,
     packageManagerArgs([
       "--filter",
-      "@keeper-ide/desktop",
+      "@pillow/desktop",
       "tauri",
       "build",
       "--debug",

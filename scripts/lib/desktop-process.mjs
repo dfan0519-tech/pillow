@@ -84,7 +84,7 @@ export function listenerPidsForPort(port = 1420) {
 
 function keeperProcessPids(processes) {
   return processes
-    .filter((entry) => entry.name.toLowerCase() === "keeper-ide.exe")
+    .filter((entry) => entry.name.toLowerCase() === "pillow.exe")
     .map((entry) => entry.pid);
 }
 
@@ -101,7 +101,7 @@ export function assertDesktopBaselineClean(baseline) {
   assert.deepEqual(
     baseline.keeperPids,
     [],
-    `Pre-existing keeper-ide.exe processes: ${baseline.keeperPids.join(", ")}`,
+    `Pre-existing pillow.exe processes: ${baseline.keeperPids.join(", ")}`,
   );
   assert.deepEqual(
     baseline.listenerPids,
@@ -146,7 +146,7 @@ function terminateWindowsPids(pids) {
   }
 }
 
-/** True when no keeper-ide.exe and no supervised port listeners remain. */
+/** True when no pillow.exe and no supervised port listeners remain. */
 export function isDesktopProcessSnapshotClean(port = 1420) {
   if (process.platform !== "win32") return true;
   const keepers = keeperProcessPids(snapshotWindowsProcesses());
@@ -155,7 +155,7 @@ export function isDesktopProcessSnapshotClean(port = 1420) {
 }
 
 /**
- * Poll a fresh Windows process snapshot until keeper-ide.exe and the desktop
+ * Poll a fresh Windows process snapshot until pillow.exe and the desktop
  * port listener are gone. Not a fixed sleep: returns as soon as the snapshot is clean.
  */
 export async function waitForDesktopProcessSnapshotClean({
@@ -176,7 +176,7 @@ export async function waitForDesktopProcessSnapshotClean({
   }
   throw new Error(
     `${label} still dirty after ${timeoutMs} ms: `
-    + `keeper-ide.exe=[${lastKeepers.join(",")}] listeners=[${lastListeners.join(",")}]`,
+    + `pillow.exe=[${lastKeepers.join(",")}] listeners=[${lastListeners.join(",")}]`,
   );
 }
 
@@ -215,7 +215,7 @@ export class ProcessSupervisor {
   /**
    * Terminate known PIDs and do not return until:
    * - every known PID fails isProcessAlive, AND
-   * - a fresh process snapshot has no keeper-ide.exe and no port listener
+   * - a fresh process snapshot has no pillow.exe and no port listener
    *   (when enforceDesktopClean is set).
    *
    * isProcessAlive alone is insufficient: Windows can drop the kill check

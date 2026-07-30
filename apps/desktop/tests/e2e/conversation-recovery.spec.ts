@@ -29,7 +29,7 @@ test("conversation service proves persistence-before-emit, cancel, and Interrupt
   const result = await runCargo([
     "test",
     "-p",
-    "keeper-ide-desktop",
+    "pillow-desktop",
     "conversation_service::tests",
     "--",
     "--nocapture",

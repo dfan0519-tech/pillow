@@ -1,4 +1,4 @@
-# ADR-0001: Build Keeper IDE As A Clean Successor
+# ADR-0001: Build Pillow As A Clean Successor
 
 Date: 2026-07-29
 
@@ -15,9 +15,9 @@ Continuing to patch that implementation would preserve the wrong boundaries.
 
 ## Decision
 
-Create `<workspace>/VaultSystem\keeper-ide` as an independent Git repository.
+Create `<repo>` as an independent Git repository.
 
-The legacy repository is frozen as a read-only migration source. Keeper IDE
+The legacy repository is frozen as a read-only migration source. Pillow
 will reimplement accepted behavior behind typed boundaries and use selected
 legacy tests as conformance evidence.
 

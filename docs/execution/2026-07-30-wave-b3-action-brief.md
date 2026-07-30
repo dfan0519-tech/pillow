@@ -10,7 +10,7 @@ Baseline: `782e220`
 
 ## Objective
 
-Give Keeper IDE the first project-aware code-reading capability without
+Give Pillow the first project-aware code-reading capability without
 allowing a provider, renderer, or arbitrary MCP server to obtain filesystem
 authority.
 
@@ -18,11 +18,11 @@ The accepted flow is:
 
 ```text
 provider tool proposal
-  -> Keeper validates a fixed tool manifest
-  -> Keeper resolves the durable project capability
-  -> Keeper executes a bounded read operation
-  -> Keeper persists normalized activity and receipt
-  -> Keeper returns bounded output to the provider
+  -> Pillow validates a fixed tool manifest
+  -> Pillow resolves the durable project capability
+  -> Pillow executes a bounded read operation
+  -> Pillow persists normalized activity and receipt
+  -> Pillow returns bounded output to the provider
   -> renderer projects the committed activity
 ```
 
@@ -73,7 +73,7 @@ Acceptance:
 
 ## Work Package B3-1: Read Tool Contract And Executor
 
-Add a provider-neutral Keeper-owned tool boundary.
+Add a provider-neutral Pillow-owned tool boundary.
 
 Minimum proposal fields:
 
@@ -149,7 +149,7 @@ Acceptance:
 - `validate -> persist -> commit -> emit` remains unchanged.
 - SQLite remains the only operational authority.
 - Provider-native `tools=[]` and `mcpServers=[]` remain in force until the
-  Keeper-owned gateway proves its acceptance suite.
+  Pillow-owned gateway proves its acceptance suite.
 - No worker may modify the legacy Keeper repository or the reference
   `<workspace>/zbbody` repository.
 - Scope expansion requires a revised brief before implementation.

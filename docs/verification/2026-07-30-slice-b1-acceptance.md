@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 
-Worktree: `<workspace>/VaultSystem\keeper-ide-worktrees\integration-slice-b1`
+Worktree: `<repo>-worktrees\integration-slice-b1`
 
 Branch: `integration/slice-b1`
 
@@ -318,9 +318,9 @@ rather than inferring readiness from host worker idleness alone.
   1. evidence JSON;
   2. Rust shutdown-success marker written **only** after
      `ConversationService::shutdown` returns `Ok` (env
-     `KEEPER_IDE_CONVERSATION_SHUTDOWN_MARKER`);
+     `PILLOW_CONVERSATION_SHUTDOWN_MARKER`);
   3. child `exit.status === 0` and `signal === null`;
-  4. fresh process snapshot with no `keeper-ide.exe`;
+  4. fresh process snapshot with no `pillow.exe`;
   5. no inherited port listener;
   then returns from each phase.
 - `gracefulExit: true` is reported only when marker + exit code + snapshot all
@@ -328,7 +328,7 @@ rather than inferring readiness from host worker idleness alone.
   `restoreGracefulExit`). Forced cleanup remains a safety net and cannot
   satisfy graceful proof.
 - `ProcessSupervisor.cleanup()` does not return until known PIDs are dead **and**
-  (when enforcing desktop clean) a fresh CIM snapshot has no `keeper-ide.exe`
+  (when enforcing desktop clean) a fresh CIM snapshot has no `pillow.exe`
   and no port listener — not `isProcessAlive` alone.
 - E2E file order is recovery then project-launcher with
   `--test-concurrency=1` so recovery cannot poison process-baseline tests.
@@ -350,11 +350,11 @@ rather than inferring readiness from host worker idleness alone.
 | --- | --- | --- |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — **80** tests |
-| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Desktop build | `pnpm --filter @pillow/desktop build` | PASS |
 | Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
 | Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `pillow.exe`; port 1420 clean after each run |
 | Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1265` within 2500 ms budget |
 | Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
 | Line budget | changed sources in `main...HEAD` ≤ 500 lines | PASS |
@@ -385,11 +385,11 @@ KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1278,"startupBudgetMs":
 | --- | --- | --- |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — **80** tests |
-| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Desktop build | `pnpm --filter @pillow/desktop build` | PASS |
 | Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
 | Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `pillow.exe`; port 1420 clean after each run |
 | Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1340` within 2500 ms budget |
 | Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
 | Line budget | changed sources in `main...HEAD` ≤ 500 lines | PASS |
@@ -417,11 +417,11 @@ KEEPER_DESKTOP_SMOKE {"mode":"release","observedReadyMs":1374,"startupBudgetMs":
 | --- | --- | --- |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — **80** tests |
-| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Desktop build | `pnpm --filter @pillow/desktop build` | PASS |
 | Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
 | Workspace Rust tests | `cargo test --workspace` ×2 | PASS both (default parallel) |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `keeper-ide.exe`; port 1420 clean after each run |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — **5/5** tests; no leftover `pillow.exe`; port 1420 clean after each run |
 | Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1357` within 2500 ms budget |
 | Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
 | Worktree | `git status --short` | clean after Fix 3 code + docs commits |
@@ -459,7 +459,7 @@ Focused Fix 3 regressions:
 | Gate | Command | Result |
 | --- | --- | --- |
 | Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
-| Desktop Rust tests | `cargo test -p keeper-ide-desktop` | PASS — 22 lib + 7 integration + 0 doctests |
+| Desktop Rust tests | `cargo test -p pillow-desktop` | PASS — 22 lib + 7 integration + 0 doctests |
 | Workspace Rust tests | `cargo test --workspace` ×2 | PASS both runs (default parallel; path_scope unit tests serialized only among themselves) |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
@@ -479,7 +479,7 @@ Conversation-service focused evidence under Closeout A:
 | Gate | Command | Result |
 | --- | --- | --- |
 | Rust fmt | `node scripts/run-cargo.mjs fmt --all -- --check` | PASS |
-| Desktop Rust tests | `node scripts/run-cargo.mjs test -p keeper-ide-desktop` | PASS — 20 lib + 7 integration |
+| Desktop Rust tests | `node scripts/run-cargo.mjs test -p pillow-desktop` | PASS — 20 lib + 7 integration |
 | Workspace Rust tests | `node scripts/run-cargo.mjs test --workspace` | PASS (serial reconfirm noted a pre-existing parallel flake in `path_scope` unit tests under full suite load; fixed in Engineering Closeout A via test-only mutex) |
 | Clippy | `node scripts/run-cargo.mjs clippy --workspace --all-targets -- -D warnings` | PASS |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
@@ -499,11 +499,11 @@ Conversation-service focused evidence under Fix 2:
 | --- | --- | --- |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — 80 tests |
-| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Desktop build | `pnpm --filter @pillow/desktop build` | PASS |
 | Rust fmt | `cargo fmt --all -- --check` (via `scripts/run-cargo.mjs`) | PASS |
 | Rust tests | `cargo test --workspace` (via `scripts/run-cargo.mjs`) | PASS |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — 5/5 tests; no leftover `keeper-ide.exe` after each run |
+| E2E (×2) | `pnpm desktop:test:e2e` | PASS twice — 5/5 tests; no leftover `pillow.exe` after each run |
 | Release smoke | `pnpm desktop:smoke` | PASS — `startupMs: 1424` within 2500 ms budget |
 | Diff hygiene | `git diff --check main...HEAD` | PASS (run at commit time) |
 | Worktree | `git status --short` | clean after commits |
@@ -553,7 +553,7 @@ only the stylesheet split restores the ≤500-line source-size invariant.
 | --- | --- | --- |
 | Typecheck | `pnpm typecheck` | PASS (`tsc --noEmit`) |
 | Unit tests (JS) | `pnpm test` | PASS — **80** tests |
-| Desktop build | `pnpm --filter @keeper-ide/desktop build` | PASS |
+| Desktop build | `pnpm --filter @pillow/desktop build` | PASS |
 | Diff hygiene | `git diff --check` | PASS |
 | Line counts | both split CSS files ≤ 500 | PASS (418 / 264) |
 

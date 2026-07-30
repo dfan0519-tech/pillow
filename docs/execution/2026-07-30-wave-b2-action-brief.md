@@ -1,4 +1,4 @@
-# Keeper IDE Wave B2 Action Brief
+# Pillow Wave B2 Action Brief
 
 Date: 2026-07-30
 

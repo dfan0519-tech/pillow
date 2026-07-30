@@ -1,4 +1,4 @@
-# Keeper IDE-First Clean Successor Design
+# Pillow-First Clean Successor Design
 
 Date: 2026-07-29
 
@@ -40,7 +40,7 @@ company roles, or the legacy Keeper service.
 ## 2. Primary User Journey
 
 ```text
-launch Keeper IDE
+launch Pillow
   -> open or create a project workspace
   -> choose or resume an Agent conversation
   -> ask for work
@@ -213,7 +213,7 @@ Keeper domain.
 ### 6.2 Repository Shape
 
 ```text
-keeper-ide/
+pillow/
   apps/
     desktop/                 Tauri application and React renderer
   crates/

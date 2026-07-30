@@ -7,7 +7,7 @@ import {
   type ProjectGateway,
 } from "./projectGateway";
 
-const INVALID_RESPONSE_MESSAGE = "Keeper IDE received an invalid project response.";
+const INVALID_RESPONSE_MESSAGE = "Pillow received an invalid project response.";
 
 function invalidProjectResponse(): ProjectGatewayError {
   return new ProjectGatewayError("invalid_project_response", INVALID_RESPONSE_MESSAGE);

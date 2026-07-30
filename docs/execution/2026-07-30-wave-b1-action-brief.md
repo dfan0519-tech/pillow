@@ -1,4 +1,4 @@
-# Keeper IDE Wave B1 Action Brief
+# Pillow Wave B1 Action Brief
 
 Date: 2026-07-30
 
@@ -36,7 +36,7 @@ conversation UI. This wave does not claim real Grok connectivity.
 - see assistant streaming plus plan, tool and sub-agent activity;
 - cancel the active run;
 - switch conversations while background work continues;
-- restart Keeper IDE and recover the timeline.
+- restart Pillow and recover the timeline.
 
 The UI displays `模拟运行时` so this wave cannot be confused with Slice B2
 real Grok ACP.
