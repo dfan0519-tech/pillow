@@ -85,6 +85,7 @@ function makeLongTimeline(count: number): ConversationTimelineView {
     plan: null,
     tools: [],
     subagents: [],
+    activitiesByRunId: {},
     activeRunId: null,
   };
 }

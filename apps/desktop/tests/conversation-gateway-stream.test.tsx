@@ -140,7 +140,10 @@ describe("conversation workbench stream UI", () => {
     expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
     expect(screen.getByTestId("timeline-user-message")).toHaveTextContent("请分析仓库");
     expect(screen.getByTestId("timeline-assistant-message")).toBeVisible();
-    expect(screen.getByTestId("run-activity")).toBeVisible();
+    const activity = screen.getByTestId("run-activity");
+    expect(activity).toBeVisible();
+    expect(activity.querySelector("details")).not.toHaveAttribute("open");
+    await user.click(activity.querySelector("summary")!);
     expect(screen.getByTestId("run-activity-plan")).toBeVisible();
     expect(screen.getAllByTestId("run-activity-plan-step").length).toBeGreaterThan(0);
     expect(screen.getByTestId("run-activity-tool")).toHaveTextContent(/crates|apps/);

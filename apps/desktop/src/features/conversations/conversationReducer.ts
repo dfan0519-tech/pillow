@@ -17,11 +17,13 @@ import type {
 } from "./conversationTypes";
 
 export type {
+  ArtifactActivity,
   ConversationAction,
   ConversationTimelineView,
   ConversationUiState,
   PlanActivity,
   PlanStepView,
+  RunActivityView,
   RunView,
   SubagentActivity,
   ToolActivity,

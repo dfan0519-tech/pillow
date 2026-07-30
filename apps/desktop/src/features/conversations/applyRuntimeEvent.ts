@@ -14,15 +14,13 @@ import {
 import type {
   ConversationTimelineView,
   ConversationUiState,
-  PlanStepView,
   RunView,
-  SubagentActivity,
-  ToolActivity,
 } from "./conversationTypes";
+import { normalizeTimelineActivitiesForRuns } from "./normalizeTerminalActivity";
 import {
-  closeOpenActivities,
-  normalizeTimelineActivitiesForRuns,
-} from "./normalizeTerminalActivity";
+  emptyRunActivity,
+  projectRunActivity,
+} from "./projectRunActivity";
 
 export { closeOpenActivities } from "./normalizeTerminalActivity";
 
@@ -37,6 +35,7 @@ export function emptyTimeline(conversationId: string): ConversationTimelineView 
     plan: null,
     tools: [],
     subagents: [],
+    activitiesByRunId: {},
     activeRunId: null,
   };
 }
@@ -59,150 +58,36 @@ export function applyRuntimeEvent(
   const events = [...timeline.events, event];
 
   let messages = timeline.messages;
-  let assistantText = timeline.assistantText;
-  let reasoningText = timeline.reasoningText;
-  let plan = timeline.plan;
-  let tools = timeline.tools;
-  let subagents = timeline.subagents;
   let activeRunId = timeline.activeRunId ?? event.runId;
+  const currentActivity =
+    timeline.activitiesByRunId[event.runId]
+    ?? emptyRunActivity(event.runId, event.createdAt);
+  let activity = projectRunActivity(currentActivity, event);
 
   if (event.kind === "run_started") {
     activeRunId = event.runId;
-    // New run: do not carry previous assistant stream or activity into this turn.
-    assistantText = "";
-    reasoningText = "";
-    plan = null;
-    tools = [];
-    subagents = [];
   }
 
   if (event.kind === "assistant_delta") {
-    assistantText += event.payload.text;
     messages = upsertAssistantMessage(
       messages,
-      assistantText,
+      activity.assistantText,
       event.createdAt,
       event.runId,
     );
   }
 
-  if (event.kind === "reasoning_summary_delta") {
-    reasoningText += event.payload.text;
-  }
-
-  if (event.kind === "plan_updated") {
-    plan = {
-      steps: event.payload.steps.map(
-        (step): PlanStepView => ({
-          id: step.id,
-          title: step.title,
-          status: step.status,
-        }),
-      ),
-    };
-  }
-
-  if (event.kind === "tool_call_started") {
-    tools = upsertTool(tools, {
-      toolCallId: event.payload.tool_call_id,
-      name: event.payload.name,
-      title: event.payload.summary ?? event.payload.name,
-      status: "running",
-    });
-  }
-
-  if (event.kind === "tool_call_output") {
-    const toolCallId = event.payload.tool_call_id;
-    tools = tools.map((tool) =>
-      tool.toolCallId === toolCallId
-        ? {
-            ...tool,
-            output: `${tool.output ?? ""}${event.payload.chunk}`,
-          }
-        : tool,
-    );
-  }
-
-  if (event.kind === "tool_call_completed") {
-    const toolCallId = event.payload.tool_call_id;
-    tools = tools.map((tool) =>
-      tool.toolCallId === toolCallId
-        ? {
-            ...tool,
-            status:
-              event.payload.status === "failed"
-                ? "failed"
-                : event.payload.status === "cancelled"
-                  ? "cancelled"
-                  : "completed",
-          }
-        : tool,
-    );
-  }
-
-  if (event.kind === "subagent_started") {
-    subagents = upsertSubagent(subagents, {
-      subagentId: event.payload.subagent_id,
-      title: event.payload.role,
-      status: "running",
-    });
-  }
-
-  if (event.kind === "subagent_progress") {
-    const subagentId = event.payload.subagent_id;
-    subagents = subagents.map((item) =>
-      item.subagentId === subagentId
-        ? { ...item, progress: event.payload.summary }
-        : item,
-    );
-  }
-
-  if (event.kind === "subagent_completed") {
-    const subagentId = event.payload.subagent_id;
-    subagents = subagents.map((item) =>
-      item.subagentId === subagentId
-        ? {
-            ...item,
-            status:
-              event.payload.status === "failed"
-                ? "failed"
-                : event.payload.status === "cancelled"
-                  ? "cancelled"
-                  : "completed",
-          }
-        : item,
-    );
-  }
-
-  // Terminal runs must never leave plan steps / tools / sub-agents as "running".
-  if (event.kind === "turn_completed") {
-    ({ plan, tools, subagents } = closeOpenActivities(
-      plan,
-      tools,
-      subagents,
-      "completed",
-    ));
-  } else if (event.kind === "turn_failed") {
-    ({ plan, tools, subagents } = closeOpenActivities(
-      plan,
-      tools,
-      subagents,
-      "failed",
-    ));
-  } else if (event.kind === "run_cancelled") {
-    ({ plan, tools, subagents } = closeOpenActivities(
-      plan,
-      tools,
-      subagents,
-      "cancelled",
-    ));
-  }
-
   const previousRun = state.runs[event.runId];
   const runStatus = statusFromEvent(event.kind, previousRun?.status);
+  activity = { ...activity, status: runStatus };
   const terminalKind = isTerminalKind(event.kind)
     ? event.kind
     : previousRun?.terminalKind ?? null;
+  const activitiesByRunId = {
+    ...timeline.activitiesByRunId,
+    [event.runId]: activity,
+  };
+  const activeActivity = activitiesByRunId[activeRunId] ?? activity;
 
   const conversationsByProject = updateConversationTimestamp(
     state.conversationsByProject,
@@ -220,11 +105,12 @@ export function applyRuntimeEvent(
         messages,
         events,
         seenEventKeys,
-        assistantText,
-        reasoningText,
-        plan,
-        tools,
-        subagents,
+        assistantText: activeActivity.assistantText,
+        reasoningText: activeActivity.reasoningText,
+        plan: activeActivity.plan,
+        tools: activeActivity.tools,
+        subagents: activeActivity.subagents,
+        activitiesByRunId,
         activeRunId,
       },
     },
@@ -396,25 +282,6 @@ function upsertAssistantMessage(
       createdAt,
     },
   ];
-}
-
-function upsertTool(tools: ToolActivity[], next: ToolActivity): ToolActivity[] {
-  const index = tools.findIndex((tool) => tool.toolCallId === next.toolCallId);
-  if (index < 0) return [...tools, next];
-  const copy = [...tools];
-  copy[index] = { ...copy[index]!, ...next };
-  return copy;
-}
-
-function upsertSubagent(
-  items: SubagentActivity[],
-  next: SubagentActivity,
-): SubagentActivity[] {
-  const index = items.findIndex((item) => item.subagentId === next.subagentId);
-  if (index < 0) return [...items, next];
-  const copy = [...items];
-  copy[index] = { ...copy[index]!, ...next };
-  return copy;
 }
 
 function statusFromEvent(kind: RuntimeEventKind, previous?: RunStatus): RunStatus {

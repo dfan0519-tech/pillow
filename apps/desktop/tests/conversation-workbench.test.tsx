@@ -9,11 +9,18 @@ import {
   ConversationTimeline,
   TIMELINE_WINDOW_THRESHOLD,
 } from "../src/features/conversations/ConversationTimeline";
-import type { ConversationTimelineView } from "../src/features/conversations/conversationReducer";
+import {
+  conversationReducer,
+  createInitialConversationState,
+  type ConversationTimelineView,
+  type RunActivityView,
+} from "../src/features/conversations/conversationReducer";
+import { RunActivity } from "../src/features/conversations/RunActivity";
 import {
   MockConversationGateway,
   MOCK_RUNTIME_BADGE,
 } from "../src/lib/mockConversationGateway";
+import { materializeCanonicalEvents } from "../src/lib/canonicalTurnFixture";
 import { Composer } from "../src/features/workbench/Composer";
 import {
   drainMock,
@@ -99,6 +106,59 @@ describe("conversation workbench UI", () => {
       expect(screen.queryByText("A chat")).not.toBeInTheDocument();
     });
     expect(screen.getByTestId("selected-workbench")).toBeVisible();
+  });
+
+  it("never renders one project's run activity after switching projects", async () => {
+    const projectA = fixtureProject({ id: "project-a", name: "Project A" });
+    const projectB = fixtureProject({
+      id: "project-b",
+      name: "Project B",
+      rootPath: "F:\\work\\project-b",
+    });
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const chatA = await conversationGateway.createConversation(
+      "project-a",
+      "A activity",
+    );
+    const chatB = await conversationGateway.createConversation(
+      "project-b",
+      "B activity",
+    );
+    const eventsA = materializeCanonicalEvents("c-a", "run-a").map((event) =>
+      event.kind === "reasoning_summary_delta"
+        ? { ...event, conversationId: chatA.id, payload: { text: "A-only detail" } }
+        : { ...event, conversationId: chatA.id },
+    );
+    const eventsB = materializeCanonicalEvents("c-b", "run-b").map((event) =>
+      event.kind === "reasoning_summary_delta"
+        ? { ...event, conversationId: chatB.id, payload: { text: "B-only detail" } }
+        : { ...event, conversationId: chatB.id },
+    );
+    conversationGateway.seedTimeline(chatA.id, {
+      events: eventsA,
+      runs: [
+        { runId: "run-a", conversationId: chatA.id, status: "completed" },
+      ],
+    });
+    conversationGateway.seedTimeline(chatB.id, {
+      events: eventsB,
+      runs: [
+        { runId: "run-b", conversationId: chatB.id, status: "completed" },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderApp(conversationGateway, [projectA, projectB]);
+
+    await user.click(await screen.findByRole("button", { name: "Project A" }));
+    await user.click(await screen.findByRole("button", { name: "A activity" }));
+    expect(await screen.findByText("A-only detail")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Project B" }));
+    await user.click(await screen.findByRole("button", { name: "B activity" }));
+    expect(await screen.findByText("B-only detail")).toBeInTheDocument();
+    expect(screen.queryByText("A-only detail")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("run-activity")).toHaveLength(1);
   });
 
   it("clears conversation scope when opening a registered project", async () => {
@@ -236,6 +296,65 @@ describe("conversation workbench UI", () => {
     ]);
   });
 
+  it("renders one concise expandable activity row for each owning run", async () => {
+    let state = createInitialConversationState();
+    state = conversationReducer(state, {
+      type: "user_message_appended",
+      conversationId: "c1",
+      message: {
+        id: "u1",
+        role: "user",
+        content: "first",
+        createdAt: "2026-07-30T12:00:00.000Z",
+      },
+    });
+    for (const event of materializeCanonicalEvents(
+      "c1",
+      "run-1",
+      "2026-07-30T12:00:01.000Z",
+    )) {
+      state = conversationReducer(state, { type: "runtime_event", event });
+    }
+    state = conversationReducer(state, {
+      type: "user_message_appended",
+      conversationId: "c1",
+      message: {
+        id: "u2",
+        role: "user",
+        content: "second",
+        createdAt: "2026-07-30T12:00:30.000Z",
+      },
+    });
+    for (const event of materializeCanonicalEvents(
+      "c1",
+      "run-2",
+      "2026-07-30T12:00:31.000Z",
+    )) {
+      state = conversationReducer(state, { type: "runtime_event", event });
+    }
+
+    render(
+      <ConversationTimeline
+        run={state.runs["run-2"] ?? null}
+        timeline={state.timelines.c1!}
+      />,
+    );
+
+    const activities = screen.getAllByTestId("run-activity");
+    expect(activities).toHaveLength(2);
+    expect(activities.map((node) => node.getAttribute("data-run-id"))).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+
+    const firstDisclosure = activities[0]!.querySelector("details");
+    expect(firstDisclosure).not.toBeNull();
+    expect(firstDisclosure).not.toHaveAttribute("open");
+    await userEvent.setup().click(firstDisclosure!.querySelector("summary")!);
+    expect(firstDisclosure).toHaveAttribute("open");
+    expect(within(activities[0]!).getByText(/crates\//)).toBeVisible();
+  });
+
   it("preserves Slice A empty and selected empty-conversation surfaces", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     renderApp(conversationGateway, []);
@@ -316,6 +435,7 @@ describe("timeline scale", () => {
       plan: null,
       tools: [],
       subagents: [],
+      activitiesByRunId: {},
       activeRunId: null,
     };
 
@@ -331,5 +451,39 @@ describe("timeline scale", () => {
     expect(mounted.length).toBeLessThan(count);
     expect(mounted.length).toBeLessThanOrEqual(60);
     expect(screen.getByTestId("timeline-window")).toBeInTheDocument();
+  });
+});
+
+describe("run activity disclosure", () => {
+  it("collapses once when a live run becomes terminal and remains expandable", async () => {
+    const running: RunActivityView = {
+      runId: "run-live",
+      status: "running",
+      startedAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:01.000Z",
+      assistantText: "",
+      reasoningText: "",
+      plan: null,
+      tools: [],
+      subagents: [],
+      artifacts: [],
+    };
+    const view = render(<RunActivity activity={running} />);
+    const details = screen.getByTestId("run-activity").querySelector("details")!;
+    await waitFor(() => expect(details).toHaveAttribute("open"));
+
+    view.rerender(
+      <RunActivity
+        activity={{
+          ...running,
+          status: "completed",
+          updatedAt: "2026-07-30T00:00:02.000Z",
+        }}
+      />,
+    );
+    await waitFor(() => expect(details).not.toHaveAttribute("open"));
+
+    await userEvent.setup().click(details.querySelector("summary")!);
+    expect(details).toHaveAttribute("open");
   });
 });

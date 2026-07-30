@@ -5,6 +5,8 @@
 
 import type {
   ConversationTimelineView,
+  PlanActivity,
+  RunActivityView,
   RunView,
   SubagentActivity,
   ToolActivity,
@@ -17,12 +19,12 @@ export type TerminalActivityMode = "completed" | "failed" | "cancelled";
  * (or interrupted) run never renders alongside "running" child activity.
  */
 export function closeOpenActivities(
-  plan: ConversationTimelineView["plan"],
+  plan: PlanActivity | null,
   tools: ToolActivity[],
   subagents: SubagentActivity[],
   mode: TerminalActivityMode,
 ): {
-  plan: ConversationTimelineView["plan"];
+  plan: PlanActivity | null;
   tools: ToolActivity[];
   subagents: SubagentActivity[];
 } {
@@ -56,26 +58,52 @@ export function normalizeTimelineActivitiesForRuns(
   view: ConversationTimelineView,
   runs: Record<string, RunView>,
 ): ConversationTimelineView {
-  const activeRun = view.activeRunId ? runs[view.activeRunId] : null;
-  if (!activeRun) return view;
-
-  let mode: TerminalActivityMode | null = null;
-  if (activeRun.status === "completed") mode = "completed";
-  else if (activeRun.status === "failed") mode = "failed";
-  else if (
-    activeRun.status === "cancelled"
-    || activeRun.status === "interrupted"
-  ) {
-    mode = "cancelled";
+  const activitiesByRunId: Record<string, RunActivityView> = {};
+  for (const [runId, activity] of Object.entries(view.activitiesByRunId)) {
+    const run = runs[runId];
+    if (!run) {
+      activitiesByRunId[runId] = activity;
+      continue;
+    }
+    const mode = terminalModeForStatus(run.status);
+    const normalized = mode
+      ? closeOpenActivities(
+          activity.plan,
+          activity.tools,
+          activity.subagents,
+          mode,
+        )
+      : {
+          plan: activity.plan,
+          tools: activity.tools,
+          subagents: activity.subagents,
+        };
+    activitiesByRunId[runId] = {
+      ...activity,
+      ...normalized,
+      status: run.status,
+    };
   }
 
-  if (!mode) return view;
-
-  const closed = closeOpenActivities(view.plan, view.tools, view.subagents, mode);
+  const activeActivity = view.activeRunId
+    ? activitiesByRunId[view.activeRunId]
+    : null;
   return {
     ...view,
-    plan: closed.plan,
-    tools: closed.tools,
-    subagents: closed.subagents,
+    activitiesByRunId,
+    assistantText: activeActivity?.assistantText ?? "",
+    reasoningText: activeActivity?.reasoningText ?? "",
+    plan: activeActivity?.plan ?? null,
+    tools: activeActivity?.tools ?? [],
+    subagents: activeActivity?.subagents ?? [],
   };
+}
+
+function terminalModeForStatus(
+  status: RunView["status"],
+): TerminalActivityMode | null {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "cancelled" || status === "interrupted") return "cancelled";
+  return null;
 }

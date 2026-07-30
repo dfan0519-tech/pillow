@@ -120,6 +120,46 @@ describe("event dedupe by (runId, sequence)", () => {
     expect(assistants[0]?.content).toBe("Answer A");
     expect(assistants[1]?.content).toBe("Answer B");
   });
+
+  it("does not append duplicate tool output within a retained run", () => {
+    let state = createInitialConversationState();
+    const events = [
+      baseEvent({
+        eventId: "r1-start",
+        runId: "run-a",
+        sequence: 1,
+        kind: "run_started",
+        payload: {},
+      }),
+      baseEvent({
+        eventId: "r1-tool",
+        runId: "run-a",
+        sequence: 2,
+        kind: "tool_call_started",
+        payload: { tool_call_id: "tool-a", name: "fs.read", summary: "Read notes" },
+        createdAt: "2026-07-30T00:00:02.000Z",
+      }),
+      baseEvent({
+        eventId: "r1-output",
+        runId: "run-a",
+        sequence: 3,
+        kind: "tool_call_output",
+        payload: { tool_call_id: "tool-a", chunk: "bounded result" },
+        createdAt: "2026-07-30T00:00:03.000Z",
+      }),
+    ];
+
+    for (const event of [...events, events[2]!]) {
+      state = dispatch(state, { type: "runtime_event", event });
+    }
+
+    const timeline = state.timelines.c1 as unknown as {
+      activitiesByRunId?: Record<string, { tools: Array<{ output?: string }> }>;
+    };
+    expect(timeline.activitiesByRunId?.["run-a"]?.tools[0]?.output).toBe(
+      "bounded result",
+    );
+  });
 });
 
 describe("canonical Task 2 fixture projection", () => {
@@ -228,6 +268,51 @@ describe("timeline load merge and run restoration", () => {
     expect(state.runs["r-pending"]?.status).toBe("pending");
     expect(state.runs["r-cancelling"]?.status).toBe("cancelling");
     expect(state.runs["r-interrupted"]?.status).toBe("interrupted");
+  });
+
+  it("rebuilds structured activity for every run in a multi-turn snapshot", () => {
+    const firstEvents = materializeCanonicalEvents(
+      "c1",
+      "run-first",
+      "2026-07-30T01:00:00.000Z",
+    );
+    const secondEvents = materializeCanonicalEvents(
+      "c1",
+      "run-second",
+      "2026-07-30T02:00:00.000Z",
+    );
+    const state = dispatch(createInitialConversationState(), {
+      type: "timeline_loaded",
+      timeline: {
+        conversationId: "c1",
+        messages: [],
+        events: [...firstEvents, ...secondEvents],
+        runs: [
+          {
+            runId: "run-first",
+            conversationId: "c1",
+            status: "completed",
+          },
+          {
+            runId: "run-second",
+            conversationId: "c1",
+            status: "completed",
+          },
+        ],
+      },
+    });
+
+    const timeline = state.timelines.c1;
+    expect(Object.keys(timeline?.activitiesByRunId ?? {})).toEqual([
+      "run-first",
+      "run-second",
+    ]);
+    expect(
+      timeline?.activitiesByRunId["run-first"]?.artifacts[0]?.artifactId,
+    ).toBe("art-summary");
+    expect(
+      timeline?.activitiesByRunId["run-second"]?.tools[0]?.output,
+    ).toContain("crates/");
   });
 });
 
@@ -377,6 +462,12 @@ describe("terminal activity normalization", () => {
     });
 
     expect(state.runs["r-int"]?.status).toBe("interrupted");
+    expect(state.timelines.c1?.activitiesByRunId["r-int"]?.status).toBe(
+      "interrupted",
+    );
+    expect(
+      state.timelines.c1?.activitiesByRunId["r-int"]?.tools[0]?.status,
+    ).toBe("cancelled");
     expect(state.timelines.c1?.tools[0]?.status).toBe("cancelled");
     expect(state.timelines.c1?.plan?.steps[0]?.status).toBe("cancelled");
     expect(state.timelines.c1?.tools.some((t) => t.status === "running")).toBe(
@@ -457,5 +548,69 @@ describe("multi-turn chronological messages", () => {
       "assistant:Second answer",
     ]);
     expect(state.timelines.c1?.assistantText).toBe("Second answer");
+  });
+
+  it("retains the first run's structured activity when a second run starts", () => {
+    let state = createInitialConversationState();
+    const firstRun = materializeCanonicalEvents("c1", "run-1");
+    for (const event of firstRun) {
+      state = dispatch(state, { type: "runtime_event", event });
+    }
+
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        eventId: "run-2-start",
+        runId: "run-2",
+        sequence: 1,
+        kind: "run_started",
+        payload: { prompt_preview: "second turn" },
+        createdAt: "2026-07-30T12:01:00.000Z",
+      }),
+    });
+    state = dispatch(state, {
+      type: "runtime_event",
+      event: baseEvent({
+        eventId: "run-2-plan",
+        runId: "run-2",
+        sequence: 2,
+        kind: "plan_updated",
+        payload: {
+          steps: [{ id: "second", title: "Handle follow-up", status: "active" }],
+        },
+        createdAt: "2026-07-30T12:01:01.000Z",
+      }),
+    });
+
+    const timeline = state.timelines.c1 as unknown as {
+      activitiesByRunId?: Record<
+        string,
+        {
+          plan: { steps: Array<{ title: string }> } | null;
+          tools: Array<{ toolCallId: string }>;
+          subagents: Array<{ subagentId: string }>;
+          artifacts: Array<{ artifactId: string }>;
+        }
+      >;
+    };
+    expect(Object.keys(timeline.activitiesByRunId ?? {})).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+    expect(timeline.activitiesByRunId?.["run-1"]?.plan?.steps[0]?.title).toBe(
+      "Scan files",
+    );
+    expect(timeline.activitiesByRunId?.["run-1"]?.tools[0]?.toolCallId).toBe(
+      "tc-list",
+    );
+    expect(
+      timeline.activitiesByRunId?.["run-1"]?.subagents[0]?.subagentId,
+    ).toBe("sa-explore");
+    expect(timeline.activitiesByRunId?.["run-1"]?.artifacts[0]?.artifactId).toBe(
+      "art-summary",
+    );
+    expect(timeline.activitiesByRunId?.["run-2"]?.plan?.steps[0]?.title).toBe(
+      "Handle follow-up",
+    );
   });
 });

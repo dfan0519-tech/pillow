@@ -25,6 +25,8 @@ export type ToolActivity = {
   name: string;
   title: string;
   status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  updatedAt: string;
   output?: string;
 };
 
@@ -32,7 +34,30 @@ export type SubagentActivity = {
   subagentId: string;
   title: string;
   status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  updatedAt: string;
   progress?: string;
+};
+
+export type ArtifactActivity = {
+  artifactId: string;
+  path: string;
+  kind: string;
+  createdAt: string;
+};
+
+export type RunActivityView = {
+  runId: string;
+  status: RunStatus;
+  startedAt: string;
+  updatedAt: string;
+  promptPreview?: string;
+  assistantText: string;
+  reasoningText: string;
+  plan: PlanActivity | null;
+  tools: ToolActivity[];
+  subagents: SubagentActivity[];
+  artifacts: ArtifactActivity[];
 };
 
 export type RunView = {
@@ -53,6 +78,7 @@ export type ConversationTimelineView = {
   plan: PlanActivity | null;
   tools: ToolActivity[];
   subagents: SubagentActivity[];
+  activitiesByRunId: Record<string, RunActivityView>;
   activeRunId: string | null;
 };
 

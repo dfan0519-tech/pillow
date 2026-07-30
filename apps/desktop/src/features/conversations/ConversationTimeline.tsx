@@ -14,6 +14,7 @@ import {
 import { RunActivity } from "./RunActivity";
 import type {
   ConversationTimelineView,
+  RunActivityView,
   RunView,
 } from "./conversationReducer";
 import { isRunActive } from "./conversationReducer";
@@ -37,7 +38,7 @@ const VIEWPORT_HEIGHT = 480;
 
 type TimelineItem =
   | { type: "message"; message: TimelineMessageDto }
-  | { type: "activity" };
+  | { type: "activity"; activity: RunActivityView };
 
 export function ConversationTimeline({
   timeline,
@@ -86,43 +87,33 @@ export function ConversationTimeline({
 }
 
 function buildChronologicalItems(timeline: ConversationTimelineView): TimelineItem[] {
-  const items: TimelineItem[] = [];
-  for (const message of timeline.messages) {
-    if (message.role === "system") continue;
-    items.push({ type: "message", message });
-  }
-  // Activity block after the latest user message when present; else at end.
-  if (
-    timeline.plan
-    || timeline.tools.length > 0
-    || timeline.subagents.length > 0
-    || timeline.reasoningText
-    || timeline.activeRunId
-  ) {
-    const lastUserIndex = [...items]
-      .map((item, index) => ({ item, index }))
-      .reverse()
-      .find(({ item }) => item.type === "message" && item.message.role === "user")
-      ?.index;
-    const insertAt =
-      lastUserIndex === undefined ? items.length : lastUserIndex + 1;
-    let at = insertAt;
-    while (
-      at < items.length
-      && items[at]?.type === "message"
-      && (items[at] as { type: "message"; message: TimelineMessageDto }).message.role
-        === "assistant"
-    ) {
-      break;
-    }
-    items.splice(at, 0, { type: "activity" });
-  }
-  return items;
+  const messages: TimelineItem[] = timeline.messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({ type: "message", message }));
+  const activities: TimelineItem[] = Object.values(timeline.activitiesByRunId)
+    .map((activity) => ({ type: "activity", activity }));
+
+  return [...messages, ...activities].sort((left, right) => {
+    const byTime = itemTimestamp(left).localeCompare(itemTimestamp(right));
+    if (byTime !== 0) return byTime;
+    return itemPriority(left) - itemPriority(right);
+  });
 }
 
 function itemKey(item: TimelineItem, index: number): string {
-  if (item.type === "activity") return `activity-${index}`;
+  if (item.type === "activity") return `activity-${item.activity.runId}`;
   return item.message.id;
+}
+
+function itemTimestamp(item: TimelineItem): string {
+  return item.type === "activity"
+    ? item.activity.startedAt
+    : item.message.createdAt;
+}
+
+function itemPriority(item: TimelineItem): number {
+  if (item.type === "activity") return 1;
+  return item.message.role === "user" ? 0 : 2;
 }
 
 function TimelineItemView({
@@ -137,7 +128,7 @@ function TimelineItemView({
   streaming: boolean;
 }) {
   if (item.type === "activity") {
-    return <RunActivity run={run} timeline={timeline} />;
+    return <RunActivity activity={item.activity} />;
   }
 
   const { message } = item;
