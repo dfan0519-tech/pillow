@@ -1911,6 +1911,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-adapter-grok-acp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-agent-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "keeper-agent-protocol"
 version = "0.1.0"
 dependencies = [

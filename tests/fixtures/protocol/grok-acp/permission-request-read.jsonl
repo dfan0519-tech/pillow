@@ -1,0 +1,3 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fake-session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-read-1","kind":"read","title":"read_file"}}}
+{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"fake-session-1","toolCall":{"toolCallId":"tc-read-1","kind":"read"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}}
+{"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}

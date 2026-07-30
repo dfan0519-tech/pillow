@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fake-session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-write-1","kind":"edit","title":"write"}}}
+{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"fake-session-1","toolCall":{"toolCallId":"tc-write-1","kind":"edit"},"options":[{"optionId":"allow-always","kind":"allow_always"},{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}}
+{"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"selected","optionId":"reject-once"}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled","_meta":{"cancellationCategory":"PermissionRejected"}}}

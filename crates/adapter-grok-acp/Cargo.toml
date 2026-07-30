@@ -1,0 +1,22 @@
+[package]
+name = "keeper-adapter-grok-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded Grok Build ACP adapter over NDJSON JSON-RPC stdio"
+
+[[bin]]
+name = "fake_acp_agent"
+path = "src/bin/fake_acp_agent/main.rs"
+required-features = []
+
+[dependencies]
+chrono.workspace = true
+keeper-agent-protocol = { path = "../agent-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+keeper-agent-protocol = { path = "../agent-protocol" }
