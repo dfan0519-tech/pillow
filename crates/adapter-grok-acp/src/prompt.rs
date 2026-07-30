@@ -50,6 +50,7 @@ pub(crate) fn run_prompt_loop(
     let deadline = Instant::now() + timeout + Duration::from_secs(2);
     let mut cancel_sent = false;
     let mut cancel_deadline = None;
+    let mut cancel_cleanup_performed = false;
     let mut cancel_cleanup_failed = false;
 
     while outcome.is_none() {
@@ -61,6 +62,7 @@ pub(crate) fn run_prompt_loop(
         if cancel.load(Ordering::SeqCst)
             && cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
+            cancel_cleanup_performed = true;
             outcome = Some(match terminate_after_cancel(inner) {
                 Ok(()) => PromptOutcome::Err(process_exited()),
                 Err(err) => {
@@ -135,6 +137,17 @@ pub(crate) fn run_prompt_loop(
         }
     }
 
+    if cancel.load(Ordering::SeqCst)
+        && matches!(outcome, Some(PromptOutcome::Err(_)))
+        && !cancel_cleanup_performed
+    {
+        cancel_cleanup_performed = true;
+        if let Err(err) = terminate_after_cancel(inner) {
+            cancel_cleanup_failed = true;
+            outcome = Some(PromptOutcome::Err(err));
+        }
+    }
+
     let _ = req_thread.join();
     while let Ok(msg) = rx.try_recv() {
         if matches!(msg, Incoming::Response { .. }) {
@@ -162,6 +175,12 @@ pub(crate) fn run_prompt_loop(
     }
 
     let cancelled = cancel.load(Ordering::SeqCst);
+    if cancelled && matches!(outcome, Some(PromptOutcome::Err(_))) && !cancel_cleanup_performed {
+        if let Err(err) = terminate_after_cancel(inner) {
+            cancel_cleanup_failed = true;
+            outcome = Some(PromptOutcome::Err(err));
+        }
+    }
     let mut guard = inner.lock().expect("inner lock");
     let sequence = guard.turns.active().map(|a| a.sequence).unwrap_or(1) + 1;
     let terminal = match outcome.unwrap_or(PromptOutcome::Err(process_exited())) {
@@ -189,15 +208,17 @@ pub(crate) fn run_prompt_loop(
     Ok(())
 }
 
-/// A provider that ignores `session/cancel` must not retain the sole ACP slot.
+/// A cancelled prompt without a cooperative stop must not retain the ACP slot.
 fn terminate_after_cancel(inner: &Mutex<Inner>) -> Result<(), RuntimeError> {
     let mut guard = inner.lock().expect("inner lock");
-    let Some(mut conn) = guard.connection.take() else {
-        return Ok(());
+    let kill_result = if let Some(mut conn) = guard.connection.take() {
+        conn.rpc.close();
+        let result = conn.child.kill_tree(Duration::from_secs(2));
+        conn.rpc.join_reader();
+        result
+    } else {
+        Ok(())
     };
-    conn.rpc.close();
-    let kill_result = conn.child.kill_tree(Duration::from_secs(2));
-    conn.rpc.join_reader();
     guard.sessions.clear();
     guard.probe_state = ProbeState::Unavailable;
     kill_result

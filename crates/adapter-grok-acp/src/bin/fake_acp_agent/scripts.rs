@@ -112,6 +112,23 @@ pub(crate) fn run_prompt_script(
         "ignore-cancel" => loop {
             let _ = rx.recv_timeout(Duration::from_millis(20));
         },
+        "error-after-cancel" => loop {
+            pump(rx, &cancelled);
+            if cancelled.load(Ordering::SeqCst) {
+                write_error(
+                    stdout,
+                    id,
+                    -32001,
+                    "prompt transport closed after cancellation",
+                );
+                loop {
+                    let _ = rx.recv_timeout(Duration::from_millis(20));
+                }
+            }
+            if let Ok(InMsg::Line(line)) = rx.recv_timeout(Duration::from_millis(20)) {
+                note_cancel_line(&line, &cancelled);
+            }
+        },
         "permission-read" | "permission-read-parent" => {
             let target = if script == "permission-read-parent" {
                 ".."

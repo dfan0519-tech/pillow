@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
+use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, process_gone_for_tests};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
@@ -46,6 +46,44 @@ fn config_with_cleanup_failure(script: &str) -> GrokAcpConfig {
     config
 }
 
+fn config_with_parent_pid(script: &str, parent_pid_path: &std::path::Path) -> GrokAcpConfig {
+    let mut config = config(script);
+    config.extra_env.push((
+        "KEEPER_FAKE_ACP_PARENT_PID_FILE".into(),
+        parent_pid_path.to_string_lossy().into_owned(),
+    ));
+    config
+}
+
+fn unique_pid_path(label: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "keeper-h7-{label}-{}-{stamp}.pid",
+        std::process::id()
+    ))
+}
+
+fn wait_for_pid_file(path: &std::path::Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<u32>()
+            && pid > 0
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for pid file {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn cwd() -> String {
     std::env::temp_dir().to_string_lossy().into_owned()
 }
@@ -72,6 +110,23 @@ fn wait_for_text(events: &Arc<Mutex<Vec<RuntimeEvent>>>, text: &str) {
         }
         assert!(Instant::now() < deadline, "timed out waiting for {text}");
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_single_terminal(
+    events: &Arc<Mutex<Vec<RuntimeEvent>>>,
+    expected_kind: RuntimeEventKind,
+    expected_code: Option<&str>,
+) {
+    let recorded = events.lock().unwrap();
+    let terminals = recorded
+        .iter()
+        .filter(|event| event.kind.is_terminal())
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, expected_kind);
+    if let Some(code) = expected_code {
+        assert_eq!(terminals[0].payload["code"].as_str(), Some(code));
     }
 }
 
@@ -264,4 +319,178 @@ fn ignored_cancel_cleanup_failure_is_failed_terminal_and_clears_runtime_state() 
     ));
     adapter.disarm_turn(next_run_id).unwrap();
     adapter.shutdown().unwrap();
+}
+
+#[test]
+fn rpc_error_after_cancel_terminates_provider_before_cancelled_terminal() {
+    let parent_pid_path = unique_pid_path("rpc-error-cleanup");
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(config_with_parent_pid(
+            "error-after-cancel",
+            &parent_pid_path,
+        ))
+        .unwrap(),
+    );
+    let session = start(&adapter);
+    let parent_pid = wait_for_pid_file(&parent_pid_path);
+    let run_id = RunId::new();
+    adapter.arm_turn(run_id).unwrap();
+    let cancel_adapter = Arc::clone(&adapter);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        cancel_adapter.cancel_turn(run_id)
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut sink = CollectingSink {
+        events: Arc::clone(&events),
+    };
+
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "cancel then close transport".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    canceller.join().unwrap().unwrap();
+
+    assert_single_terminal(&events, RuntimeEventKind::RunCancelled, None);
+    assert!(
+        process_gone_for_tests(parent_pid),
+        "cancelled RPC error left provider pid {parent_pid} alive"
+    );
+    assert_eq!(
+        adapter.probe().unwrap().detail.as_deref(),
+        Some("unavailable")
+    );
+    let next_run_id = RunId::new();
+    adapter
+        .arm_turn(next_run_id)
+        .expect("cleanup clears the active turn");
+    assert!(matches!(
+        adapter.send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id: next_run_id,
+                content: "stale session".into(),
+            },
+            &mut sink,
+        ),
+        Err(RuntimeError::SessionNotFound { .. })
+    ));
+    adapter.disarm_turn(next_run_id).unwrap();
+    adapter.shutdown().unwrap();
+    let _ = std::fs::remove_file(parent_pid_path);
+}
+
+#[test]
+fn rpc_error_after_cancel_cleanup_failure_is_failed_terminal_and_clears_state() {
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config_with_cleanup_failure("error-after-cancel")).unwrap());
+    let session = start(&adapter);
+    let run_id = RunId::new();
+    adapter.arm_turn(run_id).unwrap();
+    let cancel_adapter = Arc::clone(&adapter);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        cancel_adapter.cancel_turn(run_id)
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut sink = CollectingSink {
+        events: Arc::clone(&events),
+    };
+
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "cancel then cleanup fails".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    canceller.join().unwrap().unwrap();
+
+    assert_single_terminal(
+        &events,
+        RuntimeEventKind::TurnFailed,
+        Some("acp_kill_tree_failed"),
+    );
+    assert_eq!(
+        adapter.probe().unwrap().detail.as_deref(),
+        Some("unavailable")
+    );
+    let next_run_id = RunId::new();
+    adapter
+        .arm_turn(next_run_id)
+        .expect("failed cleanup still clears the active turn");
+    assert!(matches!(
+        adapter.send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id: next_run_id,
+                content: "stale session".into(),
+            },
+            &mut sink,
+        ),
+        Err(RuntimeError::SessionNotFound { .. })
+    ));
+    adapter.disarm_turn(next_run_id).unwrap();
+    adapter.shutdown().unwrap();
+}
+
+#[test]
+fn cooperative_cancel_keeps_reusable_provider_process_alive() {
+    let parent_pid_path = unique_pid_path("cooperative-cancel");
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(config_with_parent_pid(
+            "hang-until-cancel",
+            &parent_pid_path,
+        ))
+        .unwrap(),
+    );
+    let session = start(&adapter);
+    let parent_pid = wait_for_pid_file(&parent_pid_path);
+    let run_id = RunId::new();
+    adapter.arm_turn(run_id).unwrap();
+    let cancel_adapter = Arc::clone(&adapter);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        cancel_adapter.cancel_turn(run_id)
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut sink = CollectingSink {
+        events: Arc::clone(&events),
+    };
+
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "cooperative cancel".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    canceller.join().unwrap().unwrap();
+
+    assert_single_terminal(&events, RuntimeEventKind::RunCancelled, None);
+    assert!(
+        !process_gone_for_tests(parent_pid),
+        "cooperative cancellation killed reusable provider pid {parent_pid}"
+    );
+    start(&adapter);
+    assert!(
+        !process_gone_for_tests(parent_pid),
+        "starting another session replaced the cooperative provider process"
+    );
+
+    adapter.shutdown().unwrap();
+    assert!(process_gone_for_tests(parent_pid));
+    let _ = std::fs::remove_file(parent_pid_path);
 }
