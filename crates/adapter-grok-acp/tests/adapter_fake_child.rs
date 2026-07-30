@@ -242,6 +242,26 @@ fn permission_read_allows_and_completes() {
 }
 
 #[test]
+fn permission_read_parent_target_is_rejected() {
+    let adapter = adapter_with_script("permission-read-parent");
+    let session = start(&adapter);
+    let run_id = RunId::new();
+    let mut sink = CollectingSink::new();
+    adapter
+        .send_turn(
+            SendTurn {
+                session_id: session.session_id,
+                run_id,
+                content: "read parent".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(sink.kinds().last(), Some(&RuntimeEventKind::RunCancelled));
+    adapter.shutdown().unwrap();
+}
+
+#[test]
 fn permission_write_rejected_is_cancelled_terminal() {
     let adapter = adapter_with_script("permission-write");
     let session = start(&adapter);

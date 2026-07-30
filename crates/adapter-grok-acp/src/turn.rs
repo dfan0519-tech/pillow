@@ -93,6 +93,7 @@ impl TurnRegistry {
         &mut self,
         run_id: RunId,
         acp_session_id: String,
+        project_root: String,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), RuntimeError> {
         if self.active.is_some() {
@@ -104,7 +105,7 @@ impl TurnRegistry {
             run_id,
             acp_session_id: acp_session_id.clone(),
             cancel,
-            tools: ToolRegistry::new(acp_session_id),
+            tools: ToolRegistry::new(acp_session_id, project_root),
             assistant_chars: 0,
             sequence: 0,
             terminal_emitted: false,

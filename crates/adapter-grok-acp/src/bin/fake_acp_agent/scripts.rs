@@ -87,8 +87,13 @@ pub(crate) fn run_prompt_script(
                 }
             }
         }
-        "permission-read" => {
-            emit_tool_read(stdout, session_id);
+        "permission-read" | "permission-read-parent" => {
+            let target = if script == "permission-read-parent" {
+                ".."
+            } else {
+                "."
+            };
+            emit_tool_read(stdout, session_id, target);
             write_json(
                 stdout,
                 &json!({
@@ -109,7 +114,20 @@ pub(crate) fn run_prompt_script(
                     }
                 }),
             );
-            wait_ms(rx, &cancelled, 80 + delay_ms);
+            if permission_was_rejected(rx, &cancelled, 80 + delay_ms) {
+                write_json(
+                    stdout,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "stopReason": "cancelled",
+                            "_meta": { "cancellationCategory": "PermissionRejected" }
+                        }
+                    }),
+                );
+                return;
+            }
             emit_update(
                 stdout,
                 session_id,
@@ -198,7 +216,7 @@ pub(crate) fn run_prompt_script(
         }
         "with-tools" => {
             wait_ms(rx, &cancelled, delay_ms);
-            emit_tool_read(stdout, session_id);
+            emit_tool_read(stdout, session_id, ".");
             emit_update(
                 stdout,
                 session_id,
@@ -322,6 +340,26 @@ fn wait_ms(rx: &Receiver<InMsg>, cancelled: &AtomicBool, ms: u64) {
     }
 }
 
+fn permission_was_rejected(rx: &Receiver<InMsg>, cancelled: &AtomicBool, ms: u64) -> bool {
+    let steps = (ms / 20).max(1);
+    for _ in 0..steps {
+        while let Ok(msg) = rx.try_recv() {
+            if let InMsg::Line(line) = msg {
+                note_cancel_line(&line, cancelled);
+                if let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && value.get("id") == Some(&Value::from(0))
+                {
+                    return value["result"]["outcome"]["optionId"]
+                        .as_str()
+                        .is_some_and(|option| option.starts_with("reject"));
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
 fn note_cancel_line(line: &str, cancelled: &AtomicBool) {
     if let Ok(v) = serde_json::from_str::<Value>(line)
         && v.get("method").and_then(|m| m.as_str()) == Some("session/cancel")
@@ -330,7 +368,7 @@ fn note_cancel_line(line: &str, cancelled: &AtomicBool) {
     }
 }
 
-fn emit_tool_read(stdout: &mut impl Write, session_id: &str) {
+fn emit_tool_read(stdout: &mut impl Write, session_id: &str, target: &str) {
     emit_update(
         stdout,
         session_id,
@@ -338,7 +376,7 @@ fn emit_tool_read(stdout: &mut impl Write, session_id: &str) {
             "sessionUpdate": "tool_call",
             "toolCallId": "tc-read-1",
             "title": "read_file",
-            "rawInput": { "target_file": "Agents.md" },
+            "rawInput": { "target": target },
             "_meta": { "x.ai/tool": { "name": "read_file", "kind": "read", "read_only": true } }
         }),
     );

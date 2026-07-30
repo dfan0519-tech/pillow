@@ -1,5 +1,6 @@
 //! `GrokAcpAdapter`: `AgentRuntimeAdapter` over a supervised ACP child.
 
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -58,10 +59,12 @@ impl GrokAcpAdapter {
         acp_session_id: &str,
     ) -> Result<RuntimeSession, RuntimeError> {
         self.ensure_alive()?;
-        let cwd = request
-            .working_directory
-            .clone()
-            .ok_or_else(|| internal("working_directory is required for session/load"))?;
+        let cwd = canonical_project_root(
+            request
+                .working_directory
+                .clone()
+                .ok_or_else(|| internal("working_directory is required for session/load"))?,
+        )?;
         let mut inner = self.inner.lock().expect("inner lock");
         ensure_connection(&mut inner, &self.config)?;
         initialize_if_needed(&mut inner)?;
@@ -133,10 +136,12 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
 
     fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError> {
         self.ensure_alive()?;
-        let cwd = request
-            .working_directory
-            .clone()
-            .ok_or_else(|| internal("working_directory is required for Grok ACP sessions"))?;
+        let cwd = canonical_project_root(
+            request
+                .working_directory
+                .clone()
+                .ok_or_else(|| internal("working_directory is required for Grok ACP sessions"))?,
+        )?;
         let mut inner = self.inner.lock().expect("inner lock");
         ensure_connection(&mut inner, &self.config)?;
         initialize_if_needed(&mut inner)?;
@@ -207,6 +212,7 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
             inner.turns.begin_prompt(
                 request.run_id,
                 record.acp_session_id.clone(),
+                record.working_directory.clone(),
                 Arc::clone(&cancel),
             )?;
             {
@@ -278,4 +284,18 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
         }
         kill_result
     }
+}
+
+fn canonical_project_root(path: String) -> Result<String, RuntimeError> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|_| internal("working_directory must be an existing project directory"))?;
+    if !canonical.is_dir() {
+        return Err(internal(
+            "working_directory must be an existing project directory",
+        ));
+    }
+    canonical
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| internal("working_directory is not valid UTF-8"))
 }

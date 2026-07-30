@@ -33,6 +33,8 @@ const SENSITIVE_ENV_NAME: &[&str] = &[
     "MIMO",
 ];
 
+const PROFILE_ENV_NAMES: &[&str] = &["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"];
+
 /// Build a new environment map for the ACP child.
 ///
 /// Does **not** inherit the parent wholesale. HOME/USERPROFILE are set only
@@ -53,7 +55,7 @@ pub fn build_child_env(config: &GrokAcpConfig) -> Result<HashMap<String, String>
         if !ALLOWED_ENV_NAMES.iter().any(|a| *a == upper) {
             continue;
         }
-        if is_sensitive_name(&upper) {
+        if PROFILE_ENV_NAMES.contains(&upper.as_str()) || is_sensitive_name(&upper) {
             continue;
         }
         env.insert(name, value);
@@ -65,7 +67,7 @@ pub fn build_child_env(config: &GrokAcpConfig) -> Result<HashMap<String, String>
 
     for (name, value) in &config.extra_env {
         let upper = name.to_ascii_uppercase();
-        if is_sensitive_name(&upper) {
+        if PROFILE_ENV_NAMES.contains(&upper.as_str()) || is_sensitive_name(&upper) {
             return Err(internal(format!(
                 "refusing sensitive extra env name `{name}`"
             )));
@@ -157,5 +159,20 @@ mod tests {
         let mut cfg = GrokAcpConfig::new("grok");
         cfg.extra_env.push(("MY_SECRET_TOKEN".into(), "x".into()));
         assert!(build_child_env(&cfg).is_err());
+    }
+
+    #[test]
+    fn rejects_profile_extra_env() {
+        for name in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "MY_CREDENTIAL",
+        ] {
+            let mut cfg = GrokAcpConfig::new("grok");
+            cfg.extra_env.push((name.into(), "C:\\escape".into()));
+            assert!(build_child_env(&cfg).is_err(), "{name} must be rejected");
+        }
     }
 }

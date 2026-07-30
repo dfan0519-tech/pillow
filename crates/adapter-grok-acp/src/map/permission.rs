@@ -1,6 +1,7 @@
 //! B2 read-only permission policy for `session/request_permission`.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -27,21 +28,29 @@ const KNOWN_KINDS: &[&str] = &[
 struct CallState {
     kind: String,
     recognized: bool,
+    tool_inputs: Vec<Value>,
+    target_observation_overflowed: bool,
 }
 
 /// Session-local tool observation registry (never exported upward).
 #[derive(Debug)]
 pub struct ToolRegistry {
     session_id: String,
+    project_root: Option<PathBuf>,
     calls: HashMap<String, CallState>,
     activity_count: usize,
     pub overflowed: bool,
 }
 
 impl ToolRegistry {
-    pub fn new(session_id: impl Into<String>) -> Self {
+    pub fn new(session_id: impl Into<String>, project_root: impl AsRef<Path>) -> Self {
         Self {
             session_id: session_id.into(),
+            project_root: project_root
+                .as_ref()
+                .canonicalize()
+                .ok()
+                .filter(|path| path.is_dir()),
             calls: HashMap::new(),
             activity_count: 0,
             overflowed: false,
@@ -84,10 +93,19 @@ pub fn observe_tool_update(registry: &mut ToolRegistry, update: &Value) {
     let entry = registry.calls.entry(tool_call_id).or_insert(CallState {
         kind: kind.clone(),
         recognized,
+        tool_inputs: Vec::new(),
+        target_observation_overflowed: false,
     });
     if recognized || session_update == "tool_call" {
         entry.kind = kind;
         entry.recognized = recognized || is_known_kind(&entry.kind);
+    }
+    if contains_target_field(update) {
+        if entry.tool_inputs.len() >= 4 {
+            entry.target_observation_overflowed = true;
+        } else {
+            entry.tool_inputs.push(update.clone());
+        }
     }
     bump_activity(registry);
 }
@@ -140,8 +158,19 @@ pub fn decide_permission(
     let reject = option_id_by_kinds(options, &["reject_once", "reject_always"]);
 
     let read_only = recognized && READ_ONLY_KINDS.contains(&kind.as_str());
+    let target_is_in_project = registry
+        .filter(|_| same_session)
+        .and_then(|reg| reg.calls.get(&tool_call_id).map(|call| (reg, call)))
+        .is_some_and(|(reg, call)| {
+            !call.target_observation_overflowed
+                && reg
+                    .project_root
+                    .as_deref()
+                    .is_some_and(|root| all_targets_are_inside(root, &call.tool_inputs, &tool_call))
+        });
     if same_session
         && read_only
+        && target_is_in_project
         && let Some(option_id) = allow_once
     {
         return PermissionDecision {
@@ -155,6 +184,113 @@ pub fn decide_permission(
         result: permission_result(reject),
         allowed: false,
     }
+}
+
+fn contains_target_field(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| is_target_field(key) || contains_target_field(value)),
+        Value::Array(values) => values.iter().any(contains_target_field),
+        _ => false,
+    }
+}
+
+fn all_targets_are_inside(root: &Path, observed: &[Value], permission_call: &Value) -> bool {
+    let mut targets = Vec::new();
+    let mut saw_target = false;
+    let mut ambiguous = false;
+    for value in observed.iter().chain(std::iter::once(permission_call)) {
+        collect_targets(value, &mut targets, &mut saw_target, &mut ambiguous);
+    }
+    saw_target
+        && !ambiguous
+        && !targets.is_empty()
+        && targets
+            .iter()
+            .all(|target| target_is_inside_project(root, target))
+}
+
+fn collect_targets(
+    value: &Value,
+    targets: &mut Vec<String>,
+    saw_target: &mut bool,
+    ambiguous: &mut bool,
+) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if is_target_field(key) {
+                    *saw_target = true;
+                    collect_target_value(value, targets, ambiguous);
+                }
+                collect_targets(value, targets, saw_target, ambiguous);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_targets(value, targets, saw_target, ambiguous);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_target_value(value: &Value, targets: &mut Vec<String>, ambiguous: &mut bool) {
+    match value {
+        Value::String(target) if !target.trim().is_empty() => targets.push(target.clone()),
+        Value::Array(values) if !values.is_empty() => {
+            for value in values {
+                match value {
+                    Value::String(target) if !target.trim().is_empty() => {
+                        targets.push(target.clone())
+                    }
+                    _ => *ambiguous = true,
+                }
+            }
+        }
+        _ => *ambiguous = true,
+    }
+}
+
+fn is_target_field(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "target" | "path" | "cwd" | "root" | "location"
+    )
+}
+
+fn target_is_inside_project(root: &Path, target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() || has_disallowed_windows_path_syntax(target) {
+        return false;
+    }
+    let path = Path::new(target);
+    if has_windows_drive_prefix(target) && !path.is_absolute() {
+        return false;
+    }
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    resolved
+        .canonicalize()
+        .is_ok_and(|canonical| canonical.starts_with(root))
+}
+
+fn has_disallowed_windows_path_syntax(target: &str) -> bool {
+    target.starts_with("\\\\")
+        || target.starts_with("\\\\?\\")
+        || target.starts_with("\\\\.\\")
+        || target.starts_with("\\??\\")
+        || target.starts_with('\\')
+        || target.starts_with('/')
+}
+
+fn has_windows_drive_prefix(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn extract_kind(obj: &Value) -> String {
@@ -252,16 +388,21 @@ mod tests {
         ])
     }
 
+    fn test_root() -> PathBuf {
+        std::env::temp_dir().canonicalize().expect("temp directory")
+    }
+
     #[test]
     fn allows_read_once_for_same_session() {
-        let mut reg = ToolRegistry::new("sess-1");
+        let mut reg = ToolRegistry::new("sess-1", test_root());
         observe_tool_update(
             &mut reg,
             &json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "tc-1",
                 "kind": "read",
-                "title": "read_file"
+                "title": "read_file",
+                "rawInput": { "target": "." }
             }),
         );
         let decision = decide_permission(
@@ -278,8 +419,145 @@ mod tests {
     }
 
     #[test]
+    fn denies_read_without_a_structured_target() {
+        let mut reg = ToolRegistry::new("sess-1", test_root());
+        observe_tool_update(
+            &mut reg,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc-missing-target",
+                "kind": "read"
+            }),
+        );
+        let decision = decide_permission(
+            Some(&reg),
+            &json!({
+                "sessionId": "sess-1",
+                "toolCall": { "toolCallId": "tc-missing-target", "kind": "read" },
+                "options": read_options()
+            }),
+            false,
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.result["outcome"]["optionId"], json!("reject-once"));
+    }
+
+    #[test]
+    fn denies_read_with_an_explicit_parent_target() {
+        let mut reg = ToolRegistry::new("sess-1", test_root());
+        observe_tool_update(
+            &mut reg,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc-parent-target",
+                "kind": "read",
+                "rawInput": { "target": "../outside.txt" }
+            }),
+        );
+        let decision = decide_permission(
+            Some(&reg),
+            &json!({
+                "sessionId": "sess-1",
+                "toolCall": { "toolCallId": "tc-parent-target", "kind": "read" },
+                "options": read_options()
+            }),
+            false,
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.result["outcome"]["optionId"], json!("reject-once"));
+    }
+
+    #[test]
+    fn allows_every_named_target_field_inside_the_project_root() {
+        let mut reg = ToolRegistry::new("sess-1", test_root());
+        observe_tool_update(
+            &mut reg,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc-all-fields",
+                "kind": "search",
+                "rawInput": {
+                    "target": ".",
+                    "path": ".",
+                    "cwd": ".",
+                    "root": ".",
+                    "location": "."
+                }
+            }),
+        );
+        let decision = decide_permission(
+            Some(&reg),
+            &json!({
+                "sessionId": "sess-1",
+                "toolCall": { "toolCallId": "tc-all-fields", "kind": "search" },
+                "options": read_options()
+            }),
+            false,
+        );
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn denies_any_ambiguous_or_outside_target() {
+        let root = test_root();
+        let outside = root.parent().expect("temp parent").to_string_lossy();
+        for (case, target) in [
+            ("missing", json!("not-a-real-target")),
+            ("absolute", json!(outside)),
+            ("unc", json!(r"\\server\share\file")),
+            ("device", json!(r"\\?\C:\device\file")),
+            ("ambiguous", json!({ "path": "." })),
+        ] {
+            let mut reg = ToolRegistry::new("sess-1", &root);
+            observe_tool_update(
+                &mut reg,
+                &json!({
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": format!("tc-{case}"),
+                    "kind": "read",
+                    "rawInput": { "target": target }
+                }),
+            );
+            let decision = decide_permission(
+                Some(&reg),
+                &json!({
+                    "sessionId": "sess-1",
+                    "toolCall": { "toolCallId": format!("tc-{case}"), "kind": "read" },
+                    "options": read_options()
+                }),
+                false,
+            );
+            assert!(!decision.allowed, "{case} target must be rejected");
+        }
+    }
+
+    #[test]
+    fn denies_read_when_any_discovered_target_leaves_the_project_root() {
+        let mut reg = ToolRegistry::new("sess-1", test_root());
+        observe_tool_update(
+            &mut reg,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc-mixed-targets",
+                "kind": "read",
+                "rawInput": { "target": ".", "location": ".." }
+            }),
+        );
+        let decision = decide_permission(
+            Some(&reg),
+            &json!({
+                "sessionId": "sess-1",
+                "toolCall": { "toolCallId": "tc-mixed-targets", "kind": "read" },
+                "options": read_options()
+            }),
+            false,
+        );
+        assert!(!decision.allowed);
+    }
+
+    #[test]
     fn denies_write_even_with_allow_always() {
-        let mut reg = ToolRegistry::new("sess-1");
+        let mut reg = ToolRegistry::new("sess-1", test_root());
         observe_tool_update(
             &mut reg,
             &json!({
@@ -308,7 +586,7 @@ mod tests {
 
     #[test]
     fn denies_unknown_and_foreign_session() {
-        let reg = ToolRegistry::new("sess-1");
+        let reg = ToolRegistry::new("sess-1", test_root());
         let decision = decide_permission(
             Some(&reg),
             &json!({
