@@ -1,0 +1,527 @@
+/**
+ * Isolated C4 execution primitives.
+ * Not mounted from product entry — Task 11 wires global/product CSS later.
+ * Conversation remains the visual centre; one compact row + one approval bar.
+ */
+
+/* —— Command activity row (timeline) —— */
+
+.command-activity-row {
+  margin: 8px 0;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.command-activity-row__details {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elevated, #1a1a1a);
+}
+
+.command-activity-row__details--concise {
+  border-color: transparent;
+  background: transparent;
+}
+
+.command-activity-row__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.command-activity-row__summary::-webkit-details-marker {
+  display: none;
+}
+
+.command-activity-row__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary, rgba(255, 255, 255, 0.35));
+  flex-shrink: 0;
+}
+
+.command-activity-row__dot--live {
+  background: var(--accent, #8aa4ff);
+}
+
+.command-activity-row__dot--risk {
+  background: var(--warning, #f0993d);
+}
+
+.command-activity-row__origin {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.command-activity-row__status {
+  font-size: 12px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.command-activity-row__program,
+.command-activity-row__argv {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-activity-row__meta {
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.command-activity-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 10px;
+  min-width: 0;
+}
+
+.command-activity-row__tail {
+  margin: 0;
+  max-height: 12rem;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-code, #0a0a0a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  tab-size: 2;
+}
+
+.command-activity-row__tail:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.command-activity-row__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #f0993d);
+}
+
+.command-activity-row__open {
+  align-self: flex-start;
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.command-activity-row__open:hover {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.command-activity-row__open:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+/* —— Command approval bar —— */
+
+.command-approval-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 16px;
+  width: 100%;
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-elevated, #1a1a1a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.command-approval-bar__meta {
+  min-width: 0;
+  flex: 1 1 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.command-approval-bar__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.command-approval-bar__command {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 4px;
+}
+
+.command-approval-bar__command code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 13px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-approval-bar__details,
+.command-approval-bar__summary,
+.command-approval-bar__risk-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.command-approval-bar__risk-note {
+  color: var(--warning, #f0993d);
+}
+
+.command-approval-bar__details code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+}
+
+.command-approval-bar__sep {
+  margin: 0 6px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.command-approval-bar__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.command-approval-bar__btn {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.command-approval-bar__btn:hover:not(:disabled) {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.command-approval-bar__btn:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.command-approval-bar__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.command-approval-bar__btn--primary {
+  border-color: transparent;
+  background: var(--accent, #8aa4ff);
+  color: var(--accent-fg, #0d0d0d);
+}
+
+.command-approval-bar__btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover, #a0b6ff);
+}
+
+/* —— Terminal output view —— */
+
+.terminal-output-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.terminal-output-view__header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.terminal-output-view__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.terminal-output-view__command {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 4px;
+}
+
+.terminal-output-view__command code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 13px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-output-view__meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.terminal-output-view__sep {
+  margin: 0 6px;
+}
+
+.terminal-output-view__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #f0993d);
+}
+
+.terminal-output-view__body {
+  margin: 0;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-code, #0a0a0a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  tab-size: 2;
+}
+
+.terminal-output-view__body:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+/* —— Git Changes view —— */
+
+.git-changes-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.git-changes-view__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.git-changes-view__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.git-changes-view__identity {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.git-changes-view__identity code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.git-changes-view__sep {
+  margin: 0 6px;
+}
+
+.git-changes-view__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #f0993d);
+}
+
+.git-changes-view__refresh {
+  align-self: flex-start;
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.git-changes-view__refresh:hover {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.git-changes-view__refresh:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.git-changes-view__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.git-changes-view__entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px);
+  min-width: 0;
+}
+
+.git-changes-view__entry--button {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.git-changes-view__entry--button:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.git-changes-view__entry--button:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.git-changes-view__kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  min-width: 3.5rem;
+}
+
+.git-changes-view__path {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-changes-view__rename {
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  min-width: 0;
+}
+
+.git-changes-view__rename code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+}
+
+.git-changes-view__binary-badge {
+  font-size: 11px;
+  color: var(--warning, #f0993d);
+}
+
+.git-changes-view__diff {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.git-changes-view__diff-path {
+  margin: 0;
+  min-width: 0;
+}
+
+.git-changes-view__diff-path code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.git-changes-view__diff-body {
+  margin: 0;
+  max-height: min(40vh, 360px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-code, #0a0a0a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.git-changes-view__diff-body:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}

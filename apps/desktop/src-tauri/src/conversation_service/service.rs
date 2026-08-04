@@ -16,7 +16,9 @@ use keeper_runtime_host::{HostConfig, RuntimeHost, SpawnedTurn};
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
 };
-use keeper_storage_sqlite::{SqliteConversationRepository, SqliteProjectRepository};
+use keeper_storage_sqlite::{
+    SqliteConversationRepository, SqliteProjectRepository, SqliteToolCallRepository,
+};
 
 use crate::conversation_events::{
     ConversationDto, RuntimeEventEmitter, SendTurnResult, TimelineDto, timeline_dto,
@@ -25,6 +27,7 @@ use crate::conversation_events::{
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
 use super::pipeline::{PumpFailSeams, PumpOutcome, pump_turn};
 use super::project_cwd::resolve_working_directory;
+use super::reconciliation::reconcile_terminal_tool_receipts;
 #[cfg(test)]
 use super::types::PumpRegistrationHooks;
 use super::types::{
@@ -34,6 +37,7 @@ use super::types::{
 
 pub struct ConversationService {
     repository: Arc<SqliteConversationRepository>,
+    tool_calls: Arc<SqliteToolCallRepository>,
     projects: Arc<SqliteProjectRepository>,
     host: Arc<RuntimeHost>,
     emitter: Arc<dyn RuntimeEventEmitter>,
@@ -54,7 +58,7 @@ pub struct ConversationService {
 impl ConversationService {
     /// Production-safe construction: inject a runtime-neutral adapter.
     ///
-    /// Builds [`RuntimeHost::new`] with the provided `Arc<dyn AgentRuntimeAdapter>`.
+    /// Builds a runtime host with the accepted governed-read gateway.
     /// Provider wire types must stay inside the adapter crate and never appear
     /// on this boundary.
     pub fn open_with_adapter(
@@ -65,9 +69,15 @@ impl ConversationService {
     ) -> Result<Self, ConversationCommandError> {
         let path = path.as_ref();
         let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let tool_calls = open_tool_calls(path)?;
         let projects = open_projects(path)?;
-        let host = RuntimeHost::new(adapter, config);
-        Ok(Self::from_parts(repository, projects, host, emitter))
+        let host =
+            RuntimeHost::new_with_governed_reads(adapter, config, path).map_err(|error| {
+                ConversationCommandError::new("governed_read_unavailable", error.to_string())
+            })?;
+        Ok(Self::from_parts(
+            repository, tool_calls, projects, host, emitter,
+        ))
     }
 
     /// Deterministic fake runtime for tests and **explicit** development startup.
@@ -93,11 +103,14 @@ impl ConversationService {
     ) -> Result<Self, ConversationCommandError> {
         let path = path.as_ref();
         let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let tool_calls = open_tool_calls(path)?;
         let projects = open_projects(path)?;
         let host = RuntimeHost::with_fake(config).map_err(|error| {
             ConversationCommandError::new("runtime_host_unavailable", error.to_string())
         })?;
-        Ok(Self::from_parts(repository, projects, host, emitter))
+        Ok(Self::from_parts(
+            repository, tool_calls, projects, host, emitter,
+        ))
     }
 
     /// Like [`open_with_config`], plus test seams for pump registration / fail-closed.
@@ -120,12 +133,14 @@ impl ConversationService {
 
     fn from_parts(
         repository: SqliteConversationRepository,
+        tool_calls: SqliteToolCallRepository,
         projects: SqliteProjectRepository,
         host: RuntimeHost,
         emitter: Arc<dyn RuntimeEventEmitter>,
     ) -> Self {
         Self {
             repository: Arc::new(repository),
+            tool_calls: Arc::new(tool_calls),
             projects: Arc::new(projects),
             host: Arc::new(host),
             emitter,
@@ -152,9 +167,16 @@ impl ConversationService {
 
     /// Idempotent recovery: non-terminal runs become `Interrupted`.
     pub fn recover_inflight(&self) -> Result<usize, ConversationCommandError> {
-        self.repository
+        let recovered = self
+            .repository
             .mark_inflight_interrupted()
-            .map_err(map_session_error)
+            .map_err(map_session_error)?;
+        reconcile_terminal_tool_receipts(&self.repository, &self.tool_calls).map_err(|error| {
+            ConversationCommandError::new("tool_receipt_reconciliation_failed", error)
+        })?;
+        // Write proposals: pending/approved → interrupted; no live grants/diffs.
+        let _ = self.recover_write_proposals_on_startup()?;
+        Ok(recovered)
     }
 
     /// Observable size of the production active-run registry (tests / diagnostics).
@@ -165,6 +187,21 @@ impl ConversationService {
     /// Host worker registry size (tests / diagnostics).
     pub fn worker_registry_len(&self) -> usize {
         self.host.worker_registry_len()
+    }
+
+    /// The host instance that owns this service's governed-write façade.
+    pub(super) fn runtime_host(&self) -> &RuntimeHost {
+        &self.host
+    }
+
+    /// Resolve a durable project root path for restart write recovery.
+    pub(super) fn project_root_path(&self, project_id: &str) -> Option<std::path::PathBuf> {
+        let id = parse_project_id(project_id).ok()?;
+        self.projects
+            .get(id)
+            .ok()
+            .flatten()
+            .map(|project| std::path::PathBuf::from(project.root_path))
     }
 
     pub fn list_conversations(
@@ -265,6 +302,12 @@ impl ConversationService {
         // roots never reach the provider process.
         let working_directory =
             resolve_working_directory(&self.repository, &self.projects, conversation_id)?;
+        let project_id = self
+            .repository
+            .load_timeline(conversation_id)
+            .map_err(map_session_error)?
+            .conversation
+            .project_id;
 
         let run = self
             .repository
@@ -273,6 +316,19 @@ impl ConversationService {
                 user_message: trimmed.clone(),
             })
             .map_err(map_session_error)?;
+        let protocol_run_id = ProtocolRunId(run.id.0);
+        if let Err(error) = self.host.register_governed_read_run(
+            protocol_run_id,
+            project_id.0.to_string(),
+            conversation_id.0.to_string(),
+            &working_directory,
+        ) {
+            self.fail_admitted_run(run.id, RunStatus::Failed);
+            return Err(ConversationCommandError::new(
+                "governed_read_unavailable",
+                error.to_string(),
+            ));
+        }
 
         let session = match self.host.start_session(StartSession {
             conversation_key: conversation_id.0.to_string(),
@@ -281,6 +337,7 @@ impl ConversationService {
             Ok(session) => session,
             Err(error) => {
                 // Admitted but session failed: durable run must not stay Pending.
+                self.host.release_governed_read_run(protocol_run_id);
                 self.fail_admitted_run(run.id, RunStatus::Failed);
                 return Err(ConversationCommandError::new(
                     "runtime_session_failed",
@@ -288,8 +345,6 @@ impl ConversationService {
                 ));
             }
         };
-
-        let protocol_run_id = ProtocolRunId(run.id.0);
 
         // Publish the run before spawn so cancel can target it as soon as the
         // host worker is registered (including during after_worker_registered).
@@ -317,6 +372,7 @@ impl ConversationService {
             Ok(spawned) => spawned,
             Err(error) => {
                 // Spawn failure: remove only this exact run entry; terminal truth.
+                self.host.release_governed_read_run(protocol_run_id);
                 remove_active_run(&self.active, run.id);
                 self.fail_admitted_run(run.id, RunStatus::Failed);
                 return Err(ConversationCommandError::new(
@@ -545,6 +601,7 @@ impl ConversationService {
         let repository = Arc::clone(&self.repository);
         let emitter = Arc::clone(&self.emitter);
         let active = Arc::clone(&self.active);
+        let host = Arc::clone(&self.host);
         #[cfg(test)]
         let after_pump = self.after_pump_before_registration_wait.clone();
         #[cfg(test)]
@@ -560,6 +617,7 @@ impl ConversationService {
             .spawn(move || {
                 let outcome =
                     pump_turn(repository, emitter, conversation_id, run_id, spawned, seams);
+                host.release_governed_read_run(ProtocolRunId(run_id.0));
                 // Test seam: post-pump_turn, pre-registration-wait.
                 #[cfg(test)]
                 if let Some(hook) = after_pump.as_ref() {
@@ -587,6 +645,16 @@ fn open_projects(path: &Path) -> Result<SqliteProjectRepository, ConversationCom
         ConversationCommandError::new(
             "project_store_unavailable",
             "Project storage is temporarily unavailable.",
+        )
+    })
+}
+
+fn open_tool_calls(path: &Path) -> Result<SqliteToolCallRepository, ConversationCommandError> {
+    SqliteToolCallRepository::open(path).map_err(|error| {
+        eprintln!("Pillow tool call store open error: {error}");
+        ConversationCommandError::new(
+            "tool_call_store_unavailable",
+            "Tool call storage is temporarily unavailable.",
         )
     })
 }

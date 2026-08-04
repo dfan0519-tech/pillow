@@ -129,7 +129,7 @@ async function runPhase({
   });
   const supervisor = new ProcessSupervisor({
     baseline,
-    rootPid: processRun.child.pid,
+    child: processRun.child,
   });
   let gracefulProof = {
     markerOk: false,

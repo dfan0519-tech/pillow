@@ -4,11 +4,19 @@
 //! `text-only` (default), `with-tools`, `permission-read`, `permission-write`,
 //! `hang-until-cancel`, `exit-early`, `malformed`, `oversized-line`,
 //! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
-//! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`.
+//! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`,
+//! `governed-write-create`, `governed-write-modify`, `governed-write-conflict`,
+//! `governed-write-desktop`.
+//!
+//! When the parent process does not forward `KEEPER_FAKE_ACP_SCRIPT` (production
+//! Grok ACP env allow-list), a sibling file `keeper_fake_acp_script.txt` next to
+//! this executable is accepted so desktop acceptance can select a scenario
+//! without product env-policy changes.
 
 mod scripts;
 
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,15 +25,38 @@ use std::thread;
 
 use serde_json::{Value, json};
 
-use scripts::{run_prompt_script, write_error, write_json};
+use scripts::{PromptScriptContext, run_prompt_script, write_error, write_json};
 
 pub(crate) enum InMsg {
     Line(String),
     Eof,
 }
 
+/// Resolve script name: env first, then sibling file beside this binary.
+fn resolve_script_name() -> String {
+    if let Ok(value) = std::env::var("KEEPER_FAKE_ACP_SCRIPT") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe
+            .parent()
+            .map(|dir| dir.join("keeper_fake_acp_script.txt"))
+            .unwrap_or_else(|| PathBuf::from("keeper_fake_acp_script.txt"));
+        if let Ok(raw) = std::fs::read_to_string(sibling) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "text-only".into()
+}
+
 fn main() {
-    let script = std::env::var("KEEPER_FAKE_ACP_SCRIPT").unwrap_or_else(|_| "text-only".into());
+    let script = resolve_script_name();
     let delay_ms: u64 = std::env::var("KEEPER_FAKE_ACP_DELAY_MS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -77,6 +108,7 @@ fn main() {
     });
 
     let mut session_id = String::from("fake-session-1");
+    let mut session_root = String::new();
     let mut initialized = false;
     let mut stdout = io::stdout();
 
@@ -151,6 +183,11 @@ fn main() {
                     continue;
                 }
                 session_id = format!("fake-session-{}", simple_id());
+                session_root = params
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 write_json(
                     &mut stdout,
                     &json!({
@@ -238,14 +275,19 @@ fn main() {
                     write_error(&mut stdout, id, -32000, "unauthenticated: login required");
                     continue;
                 }
+                let prompt_text = extract_prompt_text(&params);
                 run_prompt_script(
                     &mut stdout,
                     &rx,
-                    &script,
-                    &sid,
-                    id,
-                    delay_ms,
-                    Arc::clone(&cancelled),
+                    PromptScriptContext {
+                        script: &script,
+                        session_id: &sid,
+                        session_root: &session_root,
+                        id,
+                        delay_ms,
+                        cancelled: Arc::clone(&cancelled),
+                        prompt_text: prompt_text.as_str(),
+                    },
                 );
             }
             _ => write_error(&mut stdout, id, -32601, "Method not found"),
@@ -254,6 +296,26 @@ fn main() {
 
     // Keep descendant handle alive until we exit so the OS job tree can kill it.
     drop(descendant);
+}
+
+/// Concatenate text blocks from ACP `session/prompt` params.
+fn extract_prompt_text(params: &Value) -> String {
+    let Some(blocks) = params.get("prompt").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(text) = block.get("text").and_then(Value::as_str) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(text);
+        }
+    }
+    out
 }
 
 fn has_safe_plaintext_session_params(params: &Value) -> bool {

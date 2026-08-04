@@ -1,12 +1,19 @@
 use serde_json::Value;
 
-use super::types::{ToolArgumentSpec, ToolArgumentType, ToolExecutionLimits, ToolId, ToolManifest};
+use super::types::{
+    ToolArgumentSpec, ToolArgumentType, ToolExecutionLimits, ToolId, ToolManifest,
+    WRITE_CONTENT_BYTE_CAP,
+};
 
 pub(crate) const LIST_OUTPUT_BYTE_CAP: u64 = 262_144;
 pub(crate) const LIST_RESULT_COUNT_CAP: u32 = 1_000;
 pub(crate) const READ_OUTPUT_BYTE_CAP: u64 = 1_048_576;
 pub(crate) const SEARCH_OUTPUT_BYTE_CAP: u64 = 524_288;
 pub(crate) const SEARCH_RESULT_COUNT_CAP: u32 = 500;
+pub(crate) const WRITE_OUTPUT_BYTE_CAP: u64 = WRITE_CONTENT_BYTE_CAP;
+/// Metadata-only process result cap; also bounds reported `captured_bytes`.
+pub(crate) const PROCESS_OUTPUT_BYTE_CAP: u64 = 262_144;
+pub(crate) const PROCESS_TIMEOUT_MS: u64 = 60_000;
 
 pub fn fixed_tool_manifests() -> Vec<ToolManifest> {
     vec![
@@ -79,6 +86,40 @@ pub fn fixed_tool_manifests() -> Vec<ToolManifest> {
                 ),
             ],
             limits: limits(SEARCH_OUTPUT_BYTE_CAP, Some(SEARCH_RESULT_COUNT_CAP), 5_000),
+        },
+        ToolManifest {
+            tool_id: ToolId::FsWrite,
+            tool_version: 1,
+            description:
+                "Propose creation or modification of one bounded UTF-8 project-relative file."
+                    .into(),
+            arguments: vec![
+                argument(
+                    "path",
+                    ToolArgumentType::ProjectRelativePath,
+                    true,
+                    Value::Null,
+                ),
+                argument("mode", ToolArgumentType::String, true, Value::Null),
+                argument("content", ToolArgumentType::String, true, Value::Null),
+            ],
+            limits: limits(WRITE_OUTPUT_BYTE_CAP, None, 5_000),
+        },
+        ToolManifest {
+            tool_id: ToolId::ProcessRun,
+            tool_version: 1,
+            description: "Propose one approve-once structured process run with a host registry program label, literal argv, and optional portable project-relative cwd. Metadata-only results; no shell string or environment map.".into(),
+            arguments: vec![
+                argument("program", ToolArgumentType::String, true, Value::Null),
+                argument("argv", ToolArgumentType::StringArray, true, Value::Null),
+                argument(
+                    "cwd",
+                    ToolArgumentType::ProjectRelativePath,
+                    false,
+                    Value::Null,
+                ),
+            ],
+            limits: limits(PROCESS_OUTPUT_BYTE_CAP, None, PROCESS_TIMEOUT_MS),
         },
     ]
 }

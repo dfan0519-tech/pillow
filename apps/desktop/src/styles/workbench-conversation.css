@@ -8,7 +8,7 @@
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-width: 0;
-  min-height: calc(100vh - var(--titlebar-height));
+  min-height: 100vh;
   background: var(--bg-main);
 }
 
@@ -18,7 +18,8 @@
   justify-content: space-between;
   gap: 12px;
   height: 40px;
-  padding: 0 14px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   user-select: none;
 }
@@ -35,7 +36,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  font-weight: 550;
+  font-weight: 500;
   color: var(--text-secondary);
 }
 
@@ -44,6 +45,7 @@
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  margin-right: var(--window-controls-inset);
 }
 
 .stage-body {
@@ -89,20 +91,6 @@
   gap: 14px;
 }
 
-.mock-runtime-badge {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-hover);
-  color: var(--text-tertiary);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-}
-
 .timeline-msg {
   display: flex;
   flex-direction: column;
@@ -111,7 +99,7 @@
 }
 
 .timeline-msg header {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-tertiary);
   letter-spacing: 0.02em;
@@ -119,21 +107,35 @@
 
 .timeline-msg p {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.62;
   color: var(--text-primary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .timeline-msg--user p {
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--bg-hover);
+  max-width: min(80%, 34rem);
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--bg-user-bubble);
 }
 
-.stage-empty .mock-runtime-badge {
-  margin-bottom: 8px;
+.stage-top__separator {
+  margin: 0 7px;
+  color: var(--text-tertiary);
+}
+
+.stage-top__conversation {
+  color: var(--text-primary);
+}
+
+.timeline-msg--user {
+  align-items: flex-end;
+}
+
+.timeline-msg--user header {
+  display: none;
 }
 
 .conversation-timeline__messages--paginated {
@@ -176,22 +178,20 @@
 }
 
 .run-activity {
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--bg-elevated);
+  border: 0;
+  background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
-  overflow: clip;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .run-activity summary {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 6px 10px;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 5px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   list-style: none;
   user-select: none;
@@ -206,12 +206,18 @@
 }
 
 .run-activity summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }
 
-.run-activity details[open] summary {
-  border-bottom: 1px solid var(--border-subtle);
+.run-activity__chevron {
+  display: inline-flex;
+  color: var(--text-tertiary);
+  transition: transform 120ms ease;
+}
+
+.run-activity details[open] .run-activity__chevron {
+  transform: rotate(90deg);
 }
 
 .run-activity__status {
@@ -242,6 +248,11 @@
   white-space: nowrap;
 }
 
+.run-activity details:not([open]) .run-activity__summary,
+.run-activity details:not([open]) .run-activity__time {
+  display: none;
+}
+
 .run-activity__summary span + span {
   padding-left: 8px;
   border-left: 1px solid var(--border-subtle);
@@ -256,12 +267,14 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 10px;
+  margin: 4px 0 0 11px;
+  padding: 8px 0 8px 14px;
+  border-left: 1px solid var(--border-subtle);
 }
 
 .run-activity__block h3 {
   margin: 0 0 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   color: var(--text-secondary);
   letter-spacing: 0.02em;
@@ -302,7 +315,7 @@
   justify-content: flex-end;
   gap: 8px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -327,7 +340,7 @@
 .run-activity__truncation {
   grid-column: 1 / -1;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .run-activity__resource {
@@ -342,7 +355,7 @@
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -358,9 +371,9 @@
 
 .stage-empty h2 {
   margin: 4px 0 0;
-  font-size: 28px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--text-primary);
 }
 
@@ -368,5 +381,5 @@
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }

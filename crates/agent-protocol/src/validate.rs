@@ -12,10 +12,12 @@ use serde_json::Value;
 use crate::error::RuntimeError;
 use crate::types::{
     ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PlanUpdatedPayload,
-    ReasoningSummaryDeltaPayload, RunCancelledPayload, RunStartedPayload, RuntimeEventKind,
-    SubagentCompletedPayload, SubagentProgressPayload, SubagentStartedPayload,
-    ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload, TurnCompletedPayload,
-    TurnFailedPayload,
+    ProcessProposalDecidedPayload, ProcessProposalRequestedPayload, ProcessStartedPayload,
+    ProcessTerminalOutcomePayload, ReasoningSummaryDeltaPayload, RunCancelledPayload,
+    RunStartedPayload, RuntimeEventKind, SubagentCompletedPayload, SubagentProgressPayload,
+    SubagentStartedPayload, ToolCallCompletedPayload, ToolCallOutputPayload,
+    ToolCallStartedPayload, TurnCompletedPayload, TurnFailedPayload, WriteProposalRequestedPayload,
+    WriteProposalResolvedPayload,
 };
 
 /// Forbidden payload object keys (case-insensitive) that must never appear at
@@ -58,6 +60,20 @@ pub fn validate_payload(kind: RuntimeEventKind, payload: &Value) -> Result<Value
         RuntimeEventKind::SubagentProgress => decode::<SubagentProgressPayload>(payload),
         RuntimeEventKind::SubagentCompleted => decode::<SubagentCompletedPayload>(payload),
         RuntimeEventKind::ArtifactProduced => decode::<ArtifactProducedPayload>(payload),
+        RuntimeEventKind::WriteProposalRequested => {
+            decode::<WriteProposalRequestedPayload>(payload)
+        }
+        RuntimeEventKind::WriteProposalResolved => decode::<WriteProposalResolvedPayload>(payload),
+        RuntimeEventKind::ProcessProposalRequested => {
+            decode::<ProcessProposalRequestedPayload>(payload)
+        }
+        RuntimeEventKind::ProcessProposalDecided => {
+            decode::<ProcessProposalDecidedPayload>(payload)
+        }
+        RuntimeEventKind::ProcessStarted => decode::<ProcessStartedPayload>(payload),
+        RuntimeEventKind::ProcessTerminalOutcome => {
+            decode::<ProcessTerminalOutcomePayload>(payload)
+        }
         RuntimeEventKind::TurnCompleted => decode::<TurnCompletedPayload>(payload),
         RuntimeEventKind::TurnFailed => decode::<TurnFailedPayload>(payload),
         RuntimeEventKind::RunCancelled => decode::<RunCancelledPayload>(payload),

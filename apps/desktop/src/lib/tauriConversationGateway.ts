@@ -43,11 +43,39 @@ const EVENT_KINDS: RuntimeEventKind[] = [
   "subagent_progress",
   "subagent_completed",
   "artifact_produced",
+  "write_proposal_requested",
+  "write_proposal_resolved",
   "turn_completed",
   "turn_failed",
   "run_cancelled",
   "heartbeat",
 ];
+
+const WRITE_MODES = ["create", "modify"] as const;
+const WRITE_STATES = [
+  "pending_approval",
+  "approved",
+  "applying",
+  "succeeded",
+  "rejected",
+  "expired",
+  "cancelled",
+  "interrupted",
+  "failed",
+] as const;
+
+/** Closed C3 public error codes on write_proposal_resolved events. */
+const WRITE_PUBLIC_ERROR_CODES = [
+  "approval_required",
+  "approval_rejected",
+  "approval_expired",
+  "base_changed",
+  "write_conflict",
+  "path_rejected",
+  "write_failed",
+  "cancelled",
+  "interrupted",
+] as const;
 
 const MAX_ID_CHARS = 256;
 const MAX_LABEL_CHARS = 256;
@@ -333,6 +361,18 @@ function parseRuntimeEventDto(value: unknown): RuntimeEventDto {
         ...base,
         kind: value.kind,
         payload: parseArtifactProduced(payload),
+      };
+    case "write_proposal_requested":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseWriteProposalRequested(payload),
+      };
+    case "write_proposal_resolved":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseWriteProposalResolved(payload),
       };
     case "turn_completed":
       if (
@@ -647,6 +687,122 @@ function parseArtifactProduced(
     resource: payload.resource === undefined
       ? undefined
       : parseResource(payload.resource),
+  };
+}
+
+function isWriteMode(
+  value: unknown,
+): value is (typeof WRITE_MODES)[number] {
+  return typeof value === "string"
+    && (WRITE_MODES as readonly string[]).includes(value);
+}
+
+function isWriteState(
+  value: unknown,
+): value is (typeof WRITE_STATES)[number] {
+  return typeof value === "string"
+    && (WRITE_STATES as readonly string[]).includes(value);
+}
+
+function isWritePublicErrorCode(
+  value: unknown,
+): value is (typeof WRITE_PUBLIC_ERROR_CODES)[number] {
+  return typeof value === "string"
+    && (WRITE_PUBLIC_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * Portable relative path grammar for write events — never absolute/native.
+ * Matches the write-approval Tauri boundary (slash-separated components).
+ */
+function isPortableRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_PATH_CHARS) {
+    return false;
+  }
+  if (
+    value.startsWith("/")
+    || value.startsWith("\\")
+    || value.includes("\\")
+    || value.includes(":")
+    || value.includes("..")
+  ) {
+    return false;
+  }
+  return value.split("/").every((component) => {
+    if (component.length === 0 || component === "." || component === "..") {
+      return false;
+    }
+    if (component.length > 255) return false;
+    return !/[<>:"|?*\u0000-\u001f]/.test(component);
+  });
+}
+
+function isFiniteTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+    return false;
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
+function parseWriteProposalRequested(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "write_proposal_requested" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, [
+      "proposal_id",
+      "path",
+      "mode",
+      "summary",
+      "expires_at",
+    ])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isPortableRelativePath(payload.path)
+    || !isWriteMode(payload.mode)
+    || typeof payload.summary !== "string"
+    || payload.summary.length > MAX_SUMMARY_CHARS
+    || !isFiniteTimestamp(payload.expires_at)
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    path: payload.path,
+    mode: payload.mode,
+    summary: payload.summary,
+    expires_at: payload.expires_at,
+  };
+}
+
+function parseWriteProposalResolved(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "write_proposal_resolved" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, [
+      "proposal_id",
+      "path",
+      "mode",
+      "state",
+      "error_code",
+    ])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isPortableRelativePath(payload.path)
+    || !isWriteMode(payload.mode)
+    || !isWriteState(payload.state)
+    || (
+      payload.error_code !== undefined
+      && !isWritePublicErrorCode(payload.error_code)
+    )
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    path: payload.path,
+    mode: payload.mode,
+    state: payload.state,
+    error_code: payload.error_code === undefined
+      ? undefined
+      : payload.error_code,
   };
 }
 

@@ -32,7 +32,7 @@ pub fn initialize_params(client_name: &str, client_version: &str) -> Value {
     json!({
         "protocolVersion": 1,
         "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
+            "fs": { "readTextFile": true, "writeTextFile": false },
             "terminal": false
         },
         "clientInfo": {
@@ -101,11 +101,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_declares_no_fs_or_terminal() {
+    fn initialize_declares_read_only_fs_and_no_terminal() {
         let p = initialize_params("Pillow", "0.1.0");
         assert_eq!(p["clientCapabilities"]["terminal"], false);
         assert_eq!(p["clientCapabilities"]["fs"]["writeTextFile"], false);
-        assert_eq!(p["clientCapabilities"]["fs"]["readTextFile"], false);
+        assert_eq!(p["clientCapabilities"]["fs"]["readTextFile"], true);
     }
 
     #[test]

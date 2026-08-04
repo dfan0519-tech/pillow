@@ -2,9 +2,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use keeper_agent_protocol::{
-    ArgumentsDigest, RunId, ToolActiveContext, ToolExecutionState, ToolProposal,
-    ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult,
-    canonical_arguments_digest, fixed_tool_manifests,
+    ArgumentsDigest, FsWriteArguments, PROCESS_ARGV_BYTE_CAP, PROCESS_ARGV_COUNT_CAP,
+    ProcessRunArguments, ProcessRunOutput, RunId, ToolActiveContext, ToolArguments,
+    ToolExecutionState, ToolId, ToolProposal, ToolProtocolErrorCode, ToolPublicError,
+    ToolPublicErrorCode, ToolResult, WRITE_CONTENT_BYTE_CAP, WriteMode, canonical_arguments_digest,
+    fixed_tool_manifests,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -33,7 +35,93 @@ fn fixed_manifests_match_the_deterministic_v1_fixture() {
     let actual = serde_json::to_value(fixed_tool_manifests()).expect("serialize manifests");
     let expected: Value =
         serde_json::from_str(&read_fixture("tool-manifests-v1.json")).expect("manifest fixture");
-    assert_eq!(actual, expected);
+    // Historical read-tool fixtures remain authoritative; fs.write@1 and
+    // process.run@1 are additive.
+    assert_eq!(
+        &actual.as_array().unwrap()[..3],
+        expected.as_array().unwrap()
+    );
+    assert_eq!(actual.as_array().unwrap().len(), 5);
+    assert_eq!(actual[3]["tool_id"], json!("fs.write"));
+    assert_eq!(actual[3]["tool_version"], json!(1));
+    assert_eq!(
+        actual[3]["arguments"],
+        json!([
+            {
+                "name": "path",
+                "value_type": "project_relative_path",
+                "required": true,
+                "default": null
+            },
+            {
+                "name": "mode",
+                "value_type": "string",
+                "required": true,
+                "default": null
+            },
+            {
+                "name": "content",
+                "value_type": "string",
+                "required": true,
+                "default": null
+            }
+        ])
+    );
+    assert_eq!(actual[3]["limits"]["output_byte_cap"], json!(262_144));
+    assert_eq!(actual[4]["tool_id"], json!("process.run"));
+    assert_eq!(actual[4]["tool_version"], json!(1));
+    assert_eq!(actual[4]["limits"]["timeout_ms"], json!(60_000));
+    assert_eq!(actual[4]["limits"]["output_byte_cap"], json!(262_144));
+    assert_eq!(
+        actual[4]["arguments"],
+        json!([
+            {
+                "name": "program",
+                "value_type": "string",
+                "required": true,
+                "default": null
+            },
+            {
+                "name": "argv",
+                "value_type": "string_array",
+                "required": true,
+                "default": null
+            },
+            {
+                "name": "cwd",
+                "value_type": "project_relative_path",
+                "required": false,
+                "default": null
+            }
+        ])
+    );
+}
+
+#[test]
+fn process_run_contract_types_and_caps_are_public_at_the_crate_root() {
+    let arguments = ProcessRunArguments {
+        program: "cargo".into(),
+        argv: vec!["test".into()],
+        cwd: Some("crates/agent-protocol".into()),
+    };
+    let output = ProcessRunOutput {
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_sha256: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .into(),
+        stderr_sha256: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .into(),
+        captured_bytes: 0,
+        truncated: false,
+        encoding_lossy: false,
+        cancelled: false,
+        timed_out: false,
+    };
+
+    assert_eq!(arguments.argv, ["test"]);
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(PROCESS_ARGV_COUNT_CAP, 64);
+    assert_eq!(PROCESS_ARGV_BYTE_CAP, 32_768);
 }
 
 #[test]
@@ -454,4 +542,725 @@ fn protocol_fixtures_are_provider_neutral_and_secret_free() {
             assert!(!lower.contains(forbidden), "{name} contains {forbidden}");
         }
     }
+}
+
+fn write_proposal_value(path: &str, mode: &str, content: &str) -> ToolProposal {
+    let arguments = json!({
+        "path": path,
+        "mode": mode,
+        "content": content,
+    });
+    // Prefer a real digest when the payload is within the digest budget; fall
+    // back to a well-formed placeholder so oversize argument cases can still
+    // exercise schema validation without panicking in the fixture helper.
+    let arguments_digest = canonical_arguments_digest(&arguments).unwrap_or_else(|_| {
+        ArgumentsDigest::parse(
+            "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        )
+        .unwrap()
+    });
+    ToolProposal {
+        project_id: "VK-013".into(),
+        conversation_id: "VK-013-C116".into(),
+        run_id: RunId(Uuid::nil()),
+        call_id: "call-write-1".into(),
+        tool_id: "fs.write".into(),
+        tool_version: 1,
+        arguments,
+        arguments_digest,
+    }
+}
+
+fn known_write_content_digest() -> &'static str {
+    // sha256 of UTF-8 bytes for "export const answer = 42;\n"
+    "sha256:a2098bd92b10bf8b816d24b7556b1ce8c49a879d130489065ef1051c17e042f6"
+}
+
+#[test]
+fn write_tool_is_in_the_fixed_catalog_as_version_one() {
+    assert!(ToolId::all().contains(&ToolId::FsWrite));
+    assert_eq!(ToolId::FsWrite.as_str(), "fs.write");
+    let manifests = fixed_tool_manifests();
+    let write = manifests
+        .iter()
+        .find(|manifest| manifest.tool_id == ToolId::FsWrite)
+        .expect("fs.write manifest");
+    assert_eq!(write.tool_version, 1);
+    assert_eq!(WRITE_CONTENT_BYTE_CAP, 262_144);
+}
+
+#[test]
+fn valid_write_create_proposal_normalizes_to_typed_arguments() {
+    let proposal = write_proposal_value("src/example.ts", "create", "export const n = 1;\n");
+    let validated = proposal.validate_for_context(&active_context()).unwrap();
+    assert_eq!(validated.tool_id(), "fs.write");
+    assert_eq!(validated.tool_version(), 1);
+    assert_eq!(
+        validated.arguments(),
+        &ToolArguments::FsWrite(FsWriteArguments {
+            path: "src/example.ts".into(),
+            mode: WriteMode::Create,
+            content: "export const n = 1;\n".into(),
+        })
+    );
+    assert_eq!(
+        validated.canonical_arguments(),
+        &json!({
+            "path": "src/example.ts",
+            "mode": "create",
+            "content": "export const n = 1;\n",
+        })
+    );
+}
+
+#[test]
+fn valid_write_modify_proposal_accepts_exact_schema() {
+    let proposal = write_proposal_value("src/lib.rs", "modify", "fn main() {}\n");
+    let validated = proposal.validate_for_context(&active_context()).unwrap();
+    match validated.arguments() {
+        ToolArguments::FsWrite(arguments) => {
+            assert_eq!(arguments.mode, WriteMode::Modify);
+            assert_eq!(arguments.path, "src/lib.rs");
+            assert_eq!(arguments.content, "fn main() {}\n");
+        }
+        other => panic!("expected FsWrite, got {other:?}"),
+    }
+}
+
+#[test]
+fn write_arguments_deny_unknown_fields_and_wrong_mode() {
+    let mut unknown = write_proposal_value("src/a.ts", "create", "ok");
+    unknown
+        .arguments
+        .as_object_mut()
+        .unwrap()
+        .insert("base_digest".into(), json!("sha256:deadbeef"));
+    unknown.arguments_digest = canonical_arguments_digest(&unknown.arguments).unwrap();
+    assert_eq!(
+        unknown
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+
+    let mut bad_mode = write_proposal_value("src/a.ts", "append", "ok");
+    // Force digest of the bad payload so rejection is schema-level.
+    bad_mode.arguments_digest = canonical_arguments_digest(&bad_mode.arguments).unwrap();
+    assert_eq!(
+        bad_mode
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+}
+
+#[test]
+fn write_content_rejects_empty_nul_and_oversize() {
+    let empty = write_proposal_value("src/a.ts", "create", "");
+    assert_eq!(
+        empty
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+
+    let with_nul = write_proposal_value("src/a.ts", "create", "a\0b");
+    assert_eq!(
+        with_nul
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+
+    let oversize = write_proposal_value(
+        "src/a.ts",
+        "create",
+        &"x".repeat((WRITE_CONTENT_BYTE_CAP as usize) + 1),
+    );
+    assert_eq!(
+        oversize
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+
+    let at_cap = write_proposal_value(
+        "src/a.ts",
+        "create",
+        &"y".repeat(WRITE_CONTENT_BYTE_CAP as usize),
+    );
+    assert!(at_cap.validate_for_context(&active_context()).is_ok());
+
+    // Worst-case JSON escaping: each non-NUL control byte becomes `\u00XX`.
+    let control_at_cap = write_proposal_value(
+        "src/a.ts",
+        "create",
+        &"\u{1}".repeat(WRITE_CONTENT_BYTE_CAP as usize),
+    );
+    assert!(
+        control_at_cap
+            .validate_for_context(&active_context())
+            .is_ok()
+    );
+}
+
+#[test]
+fn write_reuses_portable_path_grammar() {
+    for path in [
+        "../escape.ts",
+        "/abs.ts",
+        r"src\win.ts",
+        "C:drive.ts",
+        "src/../lib.ts",
+        "CON",
+        "src/name.",
+        ".",
+    ] {
+        let proposal = write_proposal_value(path, "create", "body");
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "path should be rejected: {path}"
+        );
+    }
+}
+
+#[test]
+fn write_version_and_digest_mismatch_are_rejected() {
+    let mut version = write_proposal_value("src/a.ts", "create", "body");
+    version.tool_version = 2;
+    assert_eq!(
+        version
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::UnsupportedToolVersion
+    );
+
+    let mut digest = write_proposal_value("src/a.ts", "create", "body");
+    digest.arguments_digest = ArgumentsDigest::parse(
+        "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    )
+    .unwrap();
+    assert_eq!(
+        digest
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::ArgumentsDigestMismatch
+    );
+}
+
+#[test]
+fn successful_write_result_binds_path_mode_bytes_and_content_digest() {
+    let context = active_context();
+    let content = "export const answer = 42;\n";
+    let proposal = write_proposal_value("src/answer.ts", "create", content)
+        .validate_for_context(&context)
+        .unwrap();
+    let digest = known_write_content_digest();
+    let mut result = ToolResult {
+        project_id: proposal.project_id().into(),
+        conversation_id: proposal.conversation_id().into(),
+        run_id: proposal.run_id(),
+        call_id: proposal.call_id().into(),
+        tool_id: proposal.tool_id().into(),
+        tool_version: proposal.tool_version(),
+        proposal_fingerprint: proposal.fingerprint().clone(),
+        arguments_digest: proposal.normalized_arguments_digest().clone(),
+        state: ToolExecutionState::Succeeded,
+        output: Some(json!({
+            "path": "src/answer.ts",
+            "mode": "create",
+            "bytes_written": content.len() as u64,
+            "content_digest": digest,
+        })),
+        error: None,
+    };
+    let validated = result.validate_for_proposal(&context, &proposal).unwrap();
+    assert_eq!(validated.state(), ToolExecutionState::Succeeded);
+    assert_eq!(validated.output().unwrap()["content_digest"], json!(digest));
+
+    result.output.as_mut().unwrap()["bytes_written"] = json!(1);
+    assert_eq!(
+        result
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidResult
+    );
+
+    result.output.as_mut().unwrap()["bytes_written"] = json!(content.len() as u64);
+    result.output.as_mut().unwrap()["mode"] = json!("modify");
+    assert_eq!(
+        result
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidResult
+    );
+
+    result.output.as_mut().unwrap()["mode"] = json!("create");
+    result.output.as_mut().unwrap()["content_digest"] =
+        json!("sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    assert_eq!(
+        result
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidResult
+    );
+}
+
+#[test]
+fn write_public_errors_are_canonical_and_reject_arbitrary_messages() {
+    for code in [
+        ToolPublicErrorCode::ApprovalRequired,
+        ToolPublicErrorCode::ApprovalRejected,
+        ToolPublicErrorCode::ApprovalExpired,
+        ToolPublicErrorCode::BaseChanged,
+        ToolPublicErrorCode::WriteConflict,
+        ToolPublicErrorCode::PathRejected,
+        ToolPublicErrorCode::WriteFailed,
+    ] {
+        let error = ToolPublicError::canonical(code);
+        let wire = serde_json::to_value(error).unwrap();
+        let parsed: ToolPublicError = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.code(), code);
+        assert!(!error.message().is_empty());
+        assert!(!error.message().contains('\\'));
+        assert!(!error.message().contains('/'));
+
+        let mut custom = wire.clone();
+        custom["message"] = json!("leaked path C:\\secret\\file.env");
+        assert!(
+            serde_json::from_value::<ToolPublicError>(custom).is_err(),
+            "custom message must be rejected for {code:?}"
+        );
+    }
+}
+
+// --- process.run@1 -----------------------------------------------------------
+
+fn process_run_proposal(program: &str, argv: &[&str], cwd: Option<&str>) -> ToolProposal {
+    let mut arguments = json!({
+        "program": program,
+        "argv": argv,
+    });
+    if let Some(cwd) = cwd {
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .insert("cwd".into(), json!(cwd));
+    }
+    let arguments_digest = canonical_arguments_digest(&arguments).unwrap_or_else(|_| {
+        ArgumentsDigest::parse(
+            "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        )
+        .unwrap()
+    });
+    ToolProposal {
+        project_id: "VK-013".into(),
+        conversation_id: "VK-013-C116".into(),
+        run_id: RunId(Uuid::nil()),
+        call_id: "call-process-1".into(),
+        tool_id: "process.run".into(),
+        tool_version: 1,
+        arguments,
+        arguments_digest,
+    }
+}
+
+/// Fixture options for `process.run` result output JSON (avoids too-many-args).
+struct ProcessRunOutputFixture {
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    stdout_sha256: &'static str,
+    stderr_sha256: &'static str,
+    captured_bytes: u64,
+    truncated: bool,
+    encoding_lossy: bool,
+    cancelled: bool,
+    timed_out: bool,
+}
+
+fn process_run_output_json(fixture: ProcessRunOutputFixture) -> Value {
+    json!({
+        "exit_code": fixture.exit_code,
+        "duration_ms": fixture.duration_ms,
+        "stdout_sha256": fixture.stdout_sha256,
+        "stderr_sha256": fixture.stderr_sha256,
+        "captured_bytes": fixture.captured_bytes,
+        "truncated": fixture.truncated,
+        "encoding_lossy": fixture.encoding_lossy,
+        "cancelled": fixture.cancelled,
+        "timed_out": fixture.timed_out,
+    })
+}
+
+const EMPTY_STREAM_DIGEST: &str =
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[test]
+fn process_run_tool_is_in_the_fixed_catalog_as_version_one() {
+    assert!(ToolId::all().contains(&ToolId::ProcessRun));
+    assert_eq!(ToolId::ProcessRun.as_str(), "process.run");
+    let manifests = fixed_tool_manifests();
+    let process = manifests
+        .iter()
+        .find(|manifest| manifest.tool_id == ToolId::ProcessRun)
+        .expect("process.run manifest");
+    assert_eq!(process.tool_version, 1);
+    assert_eq!(process.limits.timeout_ms, 60_000);
+    assert_eq!(process.limits.output_byte_cap, 262_144);
+    assert!(process.limits.cancellation_checks_required);
+}
+
+#[test]
+fn valid_process_run_proposal_accepts_exact_program_argv_cwd_schema() {
+    let proposal =
+        process_run_proposal("cargo", &["test", "-p", "keeper-tool-executor"], Some("."));
+    let validated = proposal.validate_for_context(&active_context()).unwrap();
+    assert_eq!(validated.tool_id(), "process.run");
+    assert_eq!(validated.tool_version(), 1);
+    match validated.arguments() {
+        ToolArguments::ProcessRun(arguments) => {
+            assert_eq!(arguments.program, "cargo");
+            assert_eq!(
+                arguments.argv,
+                vec![
+                    "test".to_string(),
+                    "-p".to_string(),
+                    "keeper-tool-executor".to_string()
+                ]
+            );
+            assert_eq!(arguments.cwd.as_deref(), Some("."));
+        }
+        other => panic!("expected ProcessRun, got {other:?}"),
+    }
+    assert_eq!(
+        validated.canonical_arguments(),
+        &json!({
+            "program": "cargo",
+            "argv": ["test", "-p", "keeper-tool-executor"],
+            "cwd": ".",
+        })
+    );
+}
+
+#[test]
+fn valid_process_run_proposal_allows_omitted_cwd() {
+    let proposal = process_run_proposal("rustc", &["--version"], None);
+    let validated = proposal.validate_for_context(&active_context()).unwrap();
+    match validated.arguments() {
+        ToolArguments::ProcessRun(arguments) => {
+            assert_eq!(arguments.program, "rustc");
+            assert_eq!(arguments.argv, vec!["--version".to_string()]);
+            assert_eq!(arguments.cwd, None);
+        }
+        other => panic!("expected ProcessRun, got {other:?}"),
+    }
+}
+
+#[test]
+fn process_run_arguments_deny_unknown_fields() {
+    let mut proposal = process_run_proposal("cargo", &["test"], Some("."));
+    proposal
+        .arguments
+        .as_object_mut()
+        .unwrap()
+        .insert("environment".into(), json!({"PATH": "/evil"}));
+    proposal.arguments_digest = canonical_arguments_digest(&proposal.arguments).unwrap();
+    assert_eq!(
+        proposal
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+
+    let mut executable = process_run_proposal("cargo", &["test"], Some("."));
+    executable
+        .arguments
+        .as_object_mut()
+        .unwrap()
+        .insert("executable".into(), json!("C:/Windows/System32/cmd.exe"));
+    executable.arguments_digest = canonical_arguments_digest(&executable.arguments).unwrap();
+    assert_eq!(
+        executable
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+}
+
+#[test]
+fn process_run_program_label_must_match_fixed_grammar() {
+    let too_long = "a".repeat(33);
+    let rejected = [
+        "",
+        "Cargo",
+        "1cargo",
+        "-cargo",
+        "cargo.exe",
+        "cargo/bin",
+        "cargo\\bin",
+        "c:\\cargo",
+        "cargo ",
+        " cargo",
+        too_long.as_str(),
+        "node\0",
+        "py\n",
+    ];
+    for program in rejected {
+        let proposal = process_run_proposal(program, &[], None);
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "program should be rejected: {program:?}"
+        );
+    }
+
+    // Last is exactly 32 chars: a-z (26) + 012345 (6).
+    for program in [
+        "a",
+        "cargo",
+        "python3",
+        "rustc",
+        "node",
+        "a_b-c0",
+        "abcdefghijklmnopqrstuvwxyz012345",
+    ] {
+        let proposal = process_run_proposal(program, &["--help"], None);
+        assert!(
+            proposal.validate_for_context(&active_context()).is_ok(),
+            "program should be accepted: {program}"
+        );
+    }
+}
+
+#[test]
+fn process_run_rejects_nul_and_controls_in_argv() {
+    for argv in [["ok\0"], ["line\nbreak"], ["tab\there"], ["\u{1}"]] {
+        let proposal = process_run_proposal("cargo", &argv, None);
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "argv should be rejected: {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn process_run_argv_count_boundary_is_sixty_four() {
+    let at_cap: Vec<String> = (0..PROCESS_ARGV_COUNT_CAP)
+        .map(|i| format!("a{i}"))
+        .collect();
+    let at_refs: Vec<&str> = at_cap.iter().map(String::as_str).collect();
+    assert!(
+        process_run_proposal("cargo", &at_refs, None)
+            .validate_for_context(&active_context())
+            .is_ok()
+    );
+
+    let over: Vec<String> = (0..PROCESS_ARGV_COUNT_CAP + 1)
+        .map(|i| format!("a{i}"))
+        .collect();
+    let over_refs: Vec<&str> = over.iter().map(String::as_str).collect();
+    assert_eq!(
+        process_run_proposal("cargo", &over_refs, None)
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+}
+
+#[test]
+fn process_run_combined_program_argv_byte_boundary_is_32kib() {
+    // program "cargo" = 5 bytes; fill argv to exact remaining budget with one entry.
+    let program = "cargo";
+    let remaining = PROCESS_ARGV_BYTE_CAP - program.len();
+    let at_cap = "x".repeat(remaining);
+    assert!(
+        process_run_proposal(program, &[at_cap.as_str()], None)
+            .validate_for_context(&active_context())
+            .is_ok()
+    );
+
+    let over = "x".repeat(remaining + 1);
+    assert_eq!(
+        process_run_proposal(program, &[over.as_str()], None)
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments
+    );
+}
+
+#[test]
+fn process_run_reuses_portable_cwd_grammar() {
+    for cwd in [
+        "../escape",
+        "/abs",
+        r"src\win",
+        "C:drive",
+        "src/../lib",
+        "CON",
+        "src/name.",
+        "",
+        "path\0",
+    ] {
+        let proposal = process_run_proposal("cargo", &["test"], Some(cwd));
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "cwd should be rejected: {cwd:?}"
+        );
+    }
+
+    for cwd in [".", "crates", "crates/agent-protocol", "src/lib"] {
+        let proposal = process_run_proposal("cargo", &["test"], Some(cwd));
+        assert!(
+            proposal.validate_for_context(&active_context()).is_ok(),
+            "cwd should be accepted: {cwd}"
+        );
+    }
+}
+
+#[test]
+fn process_run_version_and_digest_mismatch_are_rejected() {
+    let mut version = process_run_proposal("cargo", &["test"], Some("."));
+    version.tool_version = 2;
+    assert_eq!(
+        version
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::UnsupportedToolVersion
+    );
+
+    let mut digest = process_run_proposal("cargo", &["test"], Some("."));
+    digest.arguments_digest = ArgumentsDigest::parse(
+        "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    )
+    .unwrap();
+    assert_eq!(
+        digest
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::ArgumentsDigestMismatch
+    );
+}
+
+#[test]
+fn successful_process_run_result_requires_exact_metadata_fields() {
+    let context = active_context();
+    let proposal = process_run_proposal("cargo", &["test"], Some("."))
+        .validate_for_context(&context)
+        .unwrap();
+    let mut result = ToolResult {
+        project_id: proposal.project_id().into(),
+        conversation_id: proposal.conversation_id().into(),
+        run_id: proposal.run_id(),
+        call_id: proposal.call_id().into(),
+        tool_id: proposal.tool_id().into(),
+        tool_version: proposal.tool_version(),
+        proposal_fingerprint: proposal.fingerprint().clone(),
+        arguments_digest: proposal.normalized_arguments_digest().clone(),
+        state: ToolExecutionState::Succeeded,
+        output: Some(process_run_output_json(ProcessRunOutputFixture {
+            exit_code: Some(0),
+            duration_ms: 12,
+            stdout_sha256: EMPTY_STREAM_DIGEST,
+            stderr_sha256: EMPTY_STREAM_DIGEST,
+            captured_bytes: 0,
+            truncated: false,
+            encoding_lossy: false,
+            cancelled: false,
+            timed_out: false,
+        })),
+        error: None,
+    };
+    let validated = result.validate_for_proposal(&context, &proposal).unwrap();
+    assert_eq!(validated.state(), ToolExecutionState::Succeeded);
+    let output = validated.output().unwrap();
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["duration_ms"], json!(12));
+    assert_eq!(output["stdout_sha256"], json!(EMPTY_STREAM_DIGEST));
+    assert_eq!(output["stderr_sha256"], json!(EMPTY_STREAM_DIGEST));
+    assert_eq!(output["captured_bytes"], json!(0));
+    assert_eq!(output["truncated"], json!(false));
+    assert_eq!(output["encoding_lossy"], json!(false));
+    assert_eq!(output["cancelled"], json!(false));
+    assert_eq!(output["timed_out"], json!(false));
+
+    // Unknown output field fails closed.
+    result
+        .output
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("stdout".into(), json!("raw transcript must not appear"));
+    assert_eq!(
+        result
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidResult
+    );
+
+    // Restore and reject non-canonical digest shape.
+    result.output = Some(process_run_output_json(ProcessRunOutputFixture {
+        exit_code: Some(0),
+        duration_ms: 12,
+        stdout_sha256: "not-a-digest",
+        stderr_sha256: EMPTY_STREAM_DIGEST,
+        captured_bytes: 0,
+        truncated: false,
+        encoding_lossy: false,
+        cancelled: false,
+        timed_out: false,
+    }));
+    assert_eq!(
+        result
+            .validate_for_proposal(&context, &proposal)
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidResult
+    );
+
+    // Null exit code is allowed (timeout/cancel/signal without code).
+    result.output = Some(process_run_output_json(ProcessRunOutputFixture {
+        exit_code: None,
+        duration_ms: 60_000,
+        stdout_sha256: EMPTY_STREAM_DIGEST,
+        stderr_sha256: EMPTY_STREAM_DIGEST,
+        captured_bytes: 100,
+        truncated: true,
+        encoding_lossy: true,
+        cancelled: false,
+        timed_out: true,
+    }));
+    assert!(result.validate_for_proposal(&context, &proposal).is_ok());
 }

@@ -6,7 +6,7 @@ import {
   IconChevronRight,
   IconCircleDot,
   IconFolder,
-  IconKeeperMark,
+  IconPillowMark,
   IconNewChat,
   IconSearch,
 } from "../../components/icons";
@@ -46,14 +46,10 @@ export function AppSidebar({
 
   return (
     <nav aria-label="导航" className="app-sidebar" data-testid="app-sidebar">
-      <div className="sidebar-chrome" data-tauri-drag-region>
-        <div className="sidebar-chrome__drag" data-tauri-drag-region />
-      </div>
-
-      <div className="sidebar-brand-row">
-        <div className="sidebar-brand-row__left">
-          <IconKeeperMark size={20} title="Keeper" />
-          <span>Keeper</span>
+      <div className="sidebar-brand-row" data-tauri-drag-region>
+        <div className="sidebar-brand-row__left" data-tauri-drag-region>
+          <IconPillowMark size={20} />
+          <span>Pillow</span>
         </div>
         <button
           aria-label="搜索"
@@ -127,7 +123,7 @@ export function AppSidebar({
                       }
                       disabled={busy}
                       onClick={() => onSelect(project.id)}
-                      title={project.rootPath}
+                      title={project.name}
                       type="button"
                     >
                       <span className="project-row__icon">
@@ -151,6 +147,7 @@ export function AppSidebar({
                             const selected = conversation.id === selectedConversationId;
                             return (
                               <button
+                                aria-current={selected ? "page" : undefined}
                                 className={
                                   selected
                                     ? "session-row session-row--active"
@@ -182,7 +179,7 @@ export function AppSidebar({
       <footer className="sidebar-footer">
         <span className="sidebar-footer__status">
           <IconCircleDot size={14} />
-          <span>本地 · 就绪</span>
+          <span>本地工作台 · 就绪</span>
         </span>
       </footer>
     </nav>

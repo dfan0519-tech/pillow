@@ -1,8 +1,8 @@
-> **已接入共享知识仓库 <workspace>/VaultSystem\vault\**
+> **已接入共享知识仓库 <workspace>\VaultSystem\vault\**
 > 项目：pillow
-> 开始任何任务前，先执行 QUERY 工作流：读 `<workspace>/VaultSystem\vault\hot.md` (近期上下文) -> `<workspace>/VaultSystem\vault\index.md` (知识索引) -> 按需检索 wiki 页面和 skills。
-> 完成非平凡任务后，执行 INGEST 工作流回填经验到 `<workspace>/VaultSystem\vault\wiki\projects\`。
-> 完整规则见 `<workspace>/VaultSystem\vault\AGENTS.md`。
+> 开始任何任务前，先执行 QUERY 工作流：读 `<workspace>\VaultSystem\vault\hot.md` (近期上下文) -> `<workspace>\VaultSystem\vault\index.md` (知识索引) -> 按需检索 wiki 页面和 skills。
+> 完成非平凡任务后，执行 INGEST 工作流回填经验到 `<workspace>\VaultSystem\vault\wiki\projects\`。
+> 完整规则见 `<workspace>\VaultSystem\vault\AGENTS.md`。
 > Keeper Bridge boot: POST http://127.0.0.1:7890/api/agent-bridge/boot with {"project":"pillow","task":"<task>","agentName":"<agent>","agentRole":"controller"}.
 
 ---
@@ -22,7 +22,7 @@ design change.
 
 ## Repository Boundary
 
-- Treat `<workspace>/VaultSystem\keeper` as read-only reference material.
+- Treat `<workspace>\VaultSystem\keeper` as read-only reference material.
 - Do not copy legacy files wholesale.
 - Port behavior through typed contracts and focused tests.
 - Do not modify shared vault rules, keys, credentials, or project metadata.
@@ -40,6 +40,22 @@ design change.
   design system supersedes it.
 - Upstream code reuse must retain required license and attribution notices.
 - New modules require focused tests and must remain independently replaceable.
+
+## Grok CLI Slot Isolation
+
+- Claim Grok capacity through Keeper before every worker launch and release the
+  exact lease when the worker finishes or fails to start.
+- `grok1` uses the default profile at `%USERPROFILE%\.grok`. Registered
+  slots `grok2`, `grok3`, and `grok4` must use their Keeper wrapper semantics;
+  their effective Grok profile is `<slot-home>\.grok`.
+- Never launch slots 2-4 by setting only `GROK_HOME=<slot-home>`. That resolves
+  `<slot-home>\auth.json`, creates a parallel credential store, and can falsely
+  report the registered Keeper slot as signed out.
+- Treat an outer `<slot-home>\auth.json` for slots 2-4 as routing contamination,
+  not as the registered slot identity. Do not create, copy, or reuse it.
+- Verify slot routing through Keeper runtime metadata and the resolved config
+  source before interpreting login, quota, or worker results. Never print raw
+  authentication files or token-bearing fields.
 
 ## Required Gates
 

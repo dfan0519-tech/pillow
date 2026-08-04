@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS run_events (
             'subagent_progress',
             'subagent_completed',
             'artifact_produced',
+            'write_proposal_requested',
+            'write_proposal_resolved',
             'turn_completed',
             'turn_failed',
             'run_cancelled',

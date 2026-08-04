@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::config::GrokAcpConfig;
 use crate::error::internal;
 use keeper_agent_protocol::RuntimeError;
+use keeper_process_executor::sensitive_name;
 
 const ALLOWED_ENV_NAMES: &[&str] = &[
     "SYSTEMROOT",
@@ -15,22 +16,6 @@ const ALLOWED_ENV_NAMES: &[&str] = &[
     "PATH",
     "TEMP",
     "TMP",
-];
-
-/// Sensitive name patterns (case-insensitive substring). Never copy these.
-const SENSITIVE_ENV_NAME: &[&str] = &[
-    "KEY",
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "CREDENTIAL",
-    "AUTH",
-    "OPENAI",
-    "ANTHROPIC",
-    "XAI",
-    "VOLC",
-    "MINIMAX",
-    "MIMO",
 ];
 
 const PROFILE_ENV_NAMES: &[&str] = &["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"];
@@ -68,9 +53,7 @@ pub fn build_child_env(config: &GrokAcpConfig) -> Result<HashMap<String, String>
     for (name, value) in &config.extra_env {
         let upper = name.to_ascii_uppercase();
         if PROFILE_ENV_NAMES.contains(&upper.as_str()) || is_sensitive_name(&upper) {
-            return Err(internal(format!(
-                "refusing sensitive extra env name `{name}`"
-            )));
+            return Err(internal("acp_extra_env_rejected"));
         }
         env.insert(name.clone(), value.clone());
     }
@@ -101,7 +84,7 @@ fn path_to_string(path: &Path) -> Result<String, RuntimeError> {
 }
 
 fn is_sensitive_name(upper: &str) -> bool {
-    SENSITIVE_ENV_NAME.iter().any(|s| upper.contains(s))
+    sensitive_name(std::ffi::OsStr::new(upper))
 }
 
 #[cfg(test)]

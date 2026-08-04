@@ -1,0 +1,245 @@
+/**
+ * Collapsible project resource context panel (C2-C1).
+ * Class prefix ctx-resource-* avoids collision with conversation ResourcePane chrome.
+ * Compact rows only — no cards, counters, or dashboard chrome.
+ */
+
+.ctx-resource-pane {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: var(--text-sm, 13px);
+  line-height: 1.45;
+}
+
+.ctx-resource-pane__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elevated, #1a1a1a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ctx-resource-pane__toggle:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.ctx-resource-pane__toggle:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.ctx-resource-pane__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  padding: var(--space-2, 8px) 0;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+/* Workbench host embeds browser without the inner disclosure toggle. */
+.ctx-resource-pane[data-open="true"]:not(:has(.ctx-resource-pane__toggle))
+  .ctx-resource-pane__body {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.ctx-resource-pane__search {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ctx-resource-pane__search-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ctx-resource-pane__search-input {
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-input, #121212);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 13px;
+}
+
+.ctx-resource-pane__search-input:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 1px;
+  border-color: var(--border-strong, rgba(255, 255, 255, 0.12));
+}
+
+.ctx-resource-pane__section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ctx-resource-pane__heading {
+  margin: 0;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ctx-resource-pane__status {
+  margin: 0;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  font-size: 12px;
+}
+
+.ctx-resource-pane__status--error {
+  color: var(--danger, #f07178);
+}
+
+.ctx-resource-pane__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ctx-resource-pane__row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ctx-resource-pane__row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.ctx-resource-pane__row:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 1px;
+}
+
+.ctx-resource-pane__row-path {
+  overflow: hidden;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-resource-pane__row-meta {
+  flex-shrink: 0;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.ctx-resource-pane__row-preview {
+  overflow: hidden;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tree */
+
+.ctx-resource-tree {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ctx-resource-tree__item {
+  min-width: 0;
+}
+
+.ctx-resource-tree__row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ctx-resource-tree__row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.ctx-resource-tree__row:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 1px;
+}
+
+.ctx-resource-tree__chevron,
+.ctx-resource-tree__chevron-spacer {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.ctx-resource-tree__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-resource-tree__path-hint {
+  overflow: hidden;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-resource-tree__status {
+  margin: 0;
+  padding: 2px 6px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+  font-size: 12px;
+}
+
+.ctx-resource-tree__status--error {
+  color: var(--danger, #f07178);
+}

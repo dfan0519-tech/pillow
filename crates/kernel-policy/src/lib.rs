@@ -1,0 +1,17 @@
+//! Pure approval policy for Pillow write (C3) and process (C4) proposals.
+//!
+//! This crate owns only the approval lifecycle vocabulary and transition rules.
+//! It has no filesystem, SQLite, renderer, adapter, or OS process dependencies.
+//! Write and process state machines use separate enums and error types.
+
+mod process;
+mod write;
+
+pub use process::{
+    EXEC_PROPOSAL_TTL_SECS, ExecDecision, ExecPolicyError, ExecProposalState, apply_exec_decision,
+    is_exec_expired, is_exec_terminal, validate_exec_transition,
+};
+pub use write::{
+    PolicyError, WRITE_PROPOSAL_TTL_SECS, WriteDecision, WriteProposalState, apply_write_decision,
+    is_expired, is_terminal, validate_write_transition,
+};

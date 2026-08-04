@@ -239,7 +239,7 @@ describe("accepted send vs timeline refresh", () => {
 
     // Stream still applies; one accepted run only.
     await waitFor(() => {
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成|completed/i);
+      expect(screen.getByTestId("agent-activity-summary")).toHaveTextContent(/已完成/);
     });
   });
 
@@ -376,9 +376,9 @@ describe("cancelled run activity UI", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已取消|cancelled/i);
+      expect(screen.getByTestId("agent-activity-summary")).toHaveTextContent(/已取消/);
     });
-    const activity = screen.getByTestId("run-activity");
+    const activity = screen.getByTestId("agent-activity-disclosure");
     expect(activity).not.toHaveTextContent(/^running$/i);
     expect(within(activity).queryByText("running")).not.toBeInTheDocument();
     expect(within(activity).queryByText("进行中")).not.toBeInTheDocument();

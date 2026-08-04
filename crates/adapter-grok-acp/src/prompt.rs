@@ -7,7 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use keeper_agent_protocol::{EventSink, RuntimeError, RuntimeEventKind, SendTurn};
+use keeper_agent_protocol::{
+    EventSink, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
+    WriteProposalRequestedPayload, WriteProposalState, WritePublicErrorCode,
+};
 
 use crate::config::GrokAcpConfig;
 use crate::error::{internal, process_exited, response_too_large};
@@ -16,8 +19,20 @@ use crate::map::{
     MappedEvent, decide_permission, map_session_update, map_stop_reason, observe_tool_update,
     terminal_for_error,
 };
+use crate::provider_tools::{
+    ProviderToolRequestError, normalize_provider_tool, normalized_result_events, provider_response,
+    provider_transport_id,
+};
+use crate::provider_writes::{
+    ProviderWriteRequestError, normalize_provider_write, provider_write_response,
+};
 use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_params};
 use crate::state::{Inner, PromptOutcome};
+use crate::turn::ProviderRequestIdentityError;
+use keeper_runtime_host::{
+    GovernedReadBridgeError, GovernedReadDelivery, GovernedWriteBridgeError, GovernedWriteDelivery,
+    GovernedWriteReceipt, execute_governed_read, execute_governed_write,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_prompt_loop(
@@ -75,22 +90,21 @@ pub(crate) fn run_prompt_loop(
 
         match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(msg) => {
-                if !matches!(&msg, Incoming::Response { .. }) {
-                    let mut guard = inner.lock().expect("inner lock");
-                    if let Some(o) = handle_incoming(msg, &mut guard, config, sink, cancel)? {
-                        match o {
-                            PromptOutcome::Err(e) => {
-                                if !cancel_sent {
-                                    cancel_sent = true;
-                                    let _ = rpc.notify(
-                                        "session/cancel",
-                                        session_cancel_params(acp_session_id),
-                                    );
-                                }
-                                outcome = Some(PromptOutcome::Err(e));
+                if !matches!(&msg, Incoming::Response { .. })
+                    && let Some(o) = handle_incoming(msg, inner, config, sink, cancel)?
+                {
+                    match o {
+                        PromptOutcome::Err(e) => {
+                            if !cancel_sent {
+                                cancel_sent = true;
+                                let _ = rpc.notify(
+                                    "session/cancel",
+                                    session_cancel_params(acp_session_id),
+                                );
                             }
-                            PromptOutcome::Stop(s) => outcome = Some(PromptOutcome::Stop(s)),
+                            outcome = Some(PromptOutcome::Err(e));
                         }
+                        PromptOutcome::Stop(s) => outcome = Some(PromptOutcome::Stop(s)),
                     }
                 }
             }
@@ -106,8 +120,7 @@ pub(crate) fn run_prompt_loop(
                     if matches!(msg, Incoming::Response { .. }) {
                         continue;
                     }
-                    let mut guard = inner.lock().expect("inner lock");
-                    let _ = handle_incoming(msg, &mut guard, config, sink, cancel)?;
+                    let _ = handle_incoming(msg, inner, config, sink, cancel)?;
                 }
                 let stop = value
                     .get("stopReason")
@@ -125,8 +138,7 @@ pub(crate) fn run_prompt_loop(
             Err(mpsc::TryRecvError::Disconnected) => {
                 if outcome.is_none() {
                     if let Ok(msg) = rx.try_recv() {
-                        let mut guard = inner.lock().expect("inner lock");
-                        if let Some(o) = handle_incoming(msg, &mut guard, config, sink, cancel)? {
+                        if let Some(o) = handle_incoming(msg, inner, config, sink, cancel)? {
                             outcome = Some(o);
                         }
                     } else {
@@ -153,8 +165,7 @@ pub(crate) fn run_prompt_loop(
         if matches!(msg, Incoming::Response { .. }) {
             continue;
         }
-        let mut guard = inner.lock().expect("inner lock");
-        let _ = handle_incoming(msg, &mut guard, config, sink, cancel)?;
+        let _ = handle_incoming(msg, inner, config, sink, cancel)?;
     }
     if !cancel_cleanup_failed && let Ok(final_res) = done_rx.try_recv() {
         match final_res {
@@ -202,7 +213,20 @@ pub(crate) fn run_prompt_loop(
     if let Some(active) = guard.turns.active_mut() {
         active.terminal_emitted = true;
     }
-    sink.emit(terminal)?;
+    // Host post-cancel arbitration may already have forced `run_cancelled` and
+    // return `RuntimeError::Cancelled` for a duplicate terminal emit. Still
+    // finish adapter cleanup so the next same-process turn is not `acp_busy`.
+    match sink.emit(terminal) {
+        Ok(()) => {}
+        Err(RuntimeError::Cancelled) if cancelled => {}
+        Err(e) => {
+            guard.turns.end_prompt();
+            if let Some(conn) = guard.connection.as_ref() {
+                conn.rpc.set_event_sink(None);
+            }
+            return Err(e);
+        }
+    }
     guard.turns.end_prompt();
     if let Some(conn) = guard.connection.as_ref() {
         conn.rpc.set_event_sink(None);
@@ -252,7 +276,7 @@ fn update_health_after_prompt(
 
 fn handle_incoming(
     incoming: Incoming,
-    inner: &mut Inner,
+    inner: &Mutex<Inner>,
     config: &GrokAcpConfig,
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
@@ -270,25 +294,333 @@ fn handle_incoming(
             Err(e) => Ok(Some(PromptOutcome::Err(e))),
         },
         Incoming::ServerRequest { id, method, params } => {
-            if method == "session/request_permission" {
-                let cancelled = cancel.load(Ordering::SeqCst);
-                let decision = {
-                    let tools = inner.turns.active().map(|a| &a.tools);
-                    decide_permission(tools, &params, cancelled)
-                };
-                if let Some(conn) = inner.connection.as_ref() {
-                    conn.rpc.respond(id, decision.result)?;
-                }
-            }
+            handle_server_request(inner, sink, cancel, id, &method, &params)?;
             Ok(None)
         }
         Incoming::Notification { method, params } => {
             if method.starts_with("_x.ai/") || method != "session/update" {
                 return Ok(None);
             }
-            on_session_update(inner, config, sink, &params, cancel)
+            let mut guard = inner.lock().expect("inner lock");
+            on_session_update(&mut guard, config, sink, &params, cancel)
         }
     }
+}
+
+fn handle_server_request(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    cancel: &AtomicBool,
+    id: serde_json::Value,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    if method == "session/request_permission" {
+        let (decision, rpc) = {
+            let guard = inner.lock().expect("inner lock");
+            let tools = guard.turns.active().map(|active| &active.tools);
+            let decision = decide_permission(tools, params, cancel.load(Ordering::SeqCst));
+            let rpc = guard
+                .connection
+                .as_ref()
+                .map(|connection| Arc::clone(&connection.rpc));
+            (decision, rpc)
+        };
+        if let Some(rpc) = rpc {
+            rpc.respond(id, decision.result)?;
+        }
+        return Ok(());
+    }
+
+    // Strict write entrypoint — never routed through the read normalizer.
+    if method == "pillow/write_tool" {
+        return handle_write_tool(inner, sink, cancel, id, params);
+    }
+
+    let (run_id, session_id, project_root, rpc) = {
+        let guard = inner.lock().expect("inner lock");
+        let Some(active) = guard.turns.active().filter(|active| active.live) else {
+            if let Some(connection) = guard.connection.as_ref() {
+                connection
+                    .rpc
+                    .respond_error(id, -32000, "governed_read_unavailable")?;
+            }
+            return Ok(());
+        };
+        let Some(connection) = guard.connection.as_ref() else {
+            return Ok(());
+        };
+        (
+            active.run_id,
+            active.acp_session_id.clone(),
+            active.project_root.clone(),
+            Arc::clone(&connection.rpc),
+        )
+    };
+
+    let mut normalized = match normalize_provider_tool(method, params, &session_id, &project_root) {
+        Ok(normalized) => normalized,
+        Err(ProviderToolRequestError::MethodNotFound) => {
+            rpc.respond_error(id, -32601, "method_not_found")?;
+            return Ok(());
+        }
+        Err(ProviderToolRequestError::InvalidParams) => {
+            rpc.respond_error(id, -32602, "invalid_governed_read_request")?;
+            return Ok(());
+        }
+    };
+    if normalized.is_native_acp_read() {
+        let transport_id = match provider_transport_id(&id) {
+            Ok(transport_id) => transport_id,
+            Err(ProviderToolRequestError::MethodNotFound) => unreachable!(),
+            Err(ProviderToolRequestError::InvalidParams) => {
+                rpc.respond_error(id, -32602, "invalid_governed_read_request")?;
+                return Ok(());
+            }
+        };
+        let canonical_request =
+            normalized
+                .canonical_request_identity()
+                .map_err(|_| RuntimeError::Internal {
+                    message: "provider_request_canonicalization_failed".into(),
+                })?;
+        let call_id = {
+            let mut guard = inner.lock().expect("inner lock");
+            let Some(active) = guard
+                .turns
+                .active_mut()
+                .filter(|active| active.run_id == run_id && active.live)
+            else {
+                rpc.respond_error(id, -32000, "governed_read_unavailable")?;
+                return Ok(());
+            };
+            active
+                .provider_requests
+                .resolve(run_id, transport_id, canonical_request)
+        };
+        match call_id {
+            Ok(call_id) => normalized.proposal.call_id = call_id,
+            Err(ProviderRequestIdentityError::Conflict) => {
+                rpc.respond_error(id, -32030, "provider_request_id_reused")?;
+                return Ok(());
+            }
+            Err(ProviderRequestIdentityError::Exhausted) => {
+                rpc.respond_error(id, -32000, "governed_read_unavailable")?;
+                return Ok(());
+            }
+        }
+    }
+    let receipt = match execute_governed_read(run_id, normalized.proposal, cancel) {
+        Ok(receipt) => receipt,
+        Err(
+            GovernedReadBridgeError::InvalidProposal | GovernedReadBridgeError::ReservationConflict,
+        ) => {
+            rpc.respond_error(id, -32602, "invalid_governed_read_request")?;
+            return Ok(());
+        }
+        Err(GovernedReadBridgeError::InProgress) => {
+            rpc.respond_error(id, -32010, "governed_read_in_progress")?;
+            return Ok(());
+        }
+        Err(
+            GovernedReadBridgeError::RunNotRegistered
+            | GovernedReadBridgeError::InvalidContext
+            | GovernedReadBridgeError::Gateway,
+        ) => {
+            rpc.respond_error(id, -32000, "governed_read_unavailable")?;
+            return Ok(());
+        }
+    };
+    let response = provider_response(&receipt, normalized.response_kind);
+
+    if receipt.delivery == GovernedReadDelivery::Executed {
+        let first_sequence = {
+            let mut guard = inner.lock().expect("inner lock");
+            let Some(active) = guard
+                .turns
+                .active_mut()
+                .filter(|active| active.run_id == run_id && active.live)
+            else {
+                rpc.respond_error(id, -32000, "governed_read_unavailable")?;
+                return Ok(());
+            };
+            let first = active.sequence.saturating_add(1);
+            active.sequence = active.sequence.saturating_add(3);
+            first
+        };
+        for event in normalized_result_events(run_id, first_sequence, &receipt)? {
+            sink.emit(event)?;
+        }
+    }
+    match response {
+        Ok(response) => rpc.respond(id, response),
+        Err(error) => {
+            let (code, message) = error.rpc_error();
+            rpc.respond_error(id, code, message)
+        }
+    }
+}
+
+fn handle_write_tool(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    cancel: &AtomicBool,
+    id: serde_json::Value,
+    params: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let (run_id, session_id, rpc) = {
+        let guard = inner.lock().expect("inner lock");
+        let Some(active) = guard.turns.active().filter(|active| active.live) else {
+            if let Some(connection) = guard.connection.as_ref() {
+                connection
+                    .rpc
+                    .respond_error(id, -32000, "governed_write_unavailable")?;
+            }
+            return Ok(());
+        };
+        let Some(connection) = guard.connection.as_ref() else {
+            return Ok(());
+        };
+        (
+            active.run_id,
+            active.acp_session_id.clone(),
+            Arc::clone(&connection.rpc),
+        )
+    };
+
+    let normalized = match normalize_provider_write("pillow/write_tool", params, &session_id) {
+        Ok(normalized) => normalized,
+        Err(ProviderWriteRequestError::MethodNotFound) => {
+            rpc.respond_error(id, -32601, "method_not_found")?;
+            return Ok(());
+        }
+        Err(ProviderWriteRequestError::InvalidParams) => {
+            rpc.respond_error(id, -32602, "invalid_governed_write_request")?;
+            return Ok(());
+        }
+    };
+
+    let mut requested_sequence = None;
+    let receipt = match execute_governed_write(
+        run_id,
+        normalized.proposal,
+        cancel,
+        |requested: &WriteProposalRequestedPayload| {
+            let sequence = {
+                let mut guard = inner.lock().expect("inner lock");
+                let Some(active) = guard
+                    .turns
+                    .active_mut()
+                    .filter(|active| active.run_id == run_id && active.live)
+                else {
+                    return Err(GovernedWriteBridgeError::RunNotRegistered);
+                };
+                active.sequence = active.sequence.saturating_add(1);
+                active.sequence
+            };
+            requested_sequence = Some(sequence);
+            let event = RuntimeEvent::new(
+                run_id,
+                sequence,
+                RuntimeEventKind::WriteProposalRequested,
+                requested.clone(),
+                Utc::now(),
+            )
+            .map_err(|_| GovernedWriteBridgeError::Gateway)?;
+            sink.emit(event)
+                .map_err(|_| GovernedWriteBridgeError::Gateway)?;
+            Ok(())
+        },
+    ) {
+        Ok(receipt) => receipt,
+        Err(
+            GovernedWriteBridgeError::InvalidProposal
+            | GovernedWriteBridgeError::ReservationConflict,
+        ) => {
+            rpc.respond_error(id, -32602, "invalid_governed_write_request")?;
+            return Ok(());
+        }
+        Err(GovernedWriteBridgeError::Busy) => {
+            rpc.respond_error(id, -32010, "governed_write_in_progress")?;
+            return Ok(());
+        }
+        Err(
+            GovernedWriteBridgeError::RunNotRegistered
+            | GovernedWriteBridgeError::InvalidContext
+            | GovernedWriteBridgeError::Gateway
+            | GovernedWriteBridgeError::ShutDown
+            | GovernedWriteBridgeError::NotLive
+            | GovernedWriteBridgeError::OwnershipMismatch
+            | GovernedWriteBridgeError::InvalidGrant
+            | GovernedWriteBridgeError::DecisionDenied
+            | GovernedWriteBridgeError::Expired
+            | GovernedWriteBridgeError::Cancelled
+            | GovernedWriteBridgeError::Interrupted,
+        ) => {
+            rpc.respond_error(id, -32000, "governed_write_unavailable")?;
+            return Ok(());
+        }
+    };
+
+    // Emit resolved event after terminal durable transition (when executed).
+    if receipt.delivery == GovernedWriteDelivery::Executed {
+        let sequence = {
+            let mut guard = inner.lock().expect("inner lock");
+            let Some(active) = guard
+                .turns
+                .active_mut()
+                .filter(|active| active.run_id == run_id && active.live)
+            else {
+                rpc.respond_error(id, -32000, "governed_write_unavailable")?;
+                return Ok(());
+            };
+            active.sequence = active.sequence.saturating_add(1);
+            active.sequence
+        };
+        let _ = requested_sequence;
+        let event = RuntimeEvent::new(
+            run_id,
+            sequence,
+            RuntimeEventKind::WriteProposalResolved,
+            receipt.resolved.clone(),
+            Utc::now(),
+        )?;
+        match sink.emit(event) {
+            Ok(()) => {}
+            // Host cancel arbitration commits the safe write resolution, forces
+            // `run_cancelled`, then returns `Cancelled` to the emitter. That is
+            // an already-committed success for the resolution slot — still
+            // complete the original `pillow/write_tool` with a fixed error.
+            Err(RuntimeError::Cancelled)
+                if cancel.load(Ordering::SeqCst) && is_safe_post_cancel_write_receipt(&receipt) => {
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    match provider_write_response(&receipt) {
+        Ok(response) => rpc.respond(id, response),
+        Err(error) => {
+            let (code, message) = error.rpc_error();
+            rpc.respond_error(id, code, message)
+        }
+    }
+}
+
+/// Narrow post-cancel write receipt: host may already have committed this
+/// `write_proposal_resolved` and forced `run_cancelled`. Only these pairs are
+/// treated as safe to continue provider completion after `RuntimeError::Cancelled`.
+fn is_safe_post_cancel_write_receipt(receipt: &GovernedWriteReceipt) -> bool {
+    matches!(
+        (receipt.resolved.state, receipt.resolved.error_code),
+        (
+            WriteProposalState::Cancelled,
+            Some(WritePublicErrorCode::Cancelled)
+        ) | (
+            WriteProposalState::Interrupted,
+            Some(WritePublicErrorCode::Interrupted)
+        )
+    )
 }
 
 fn on_session_update(

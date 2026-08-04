@@ -27,14 +27,16 @@ import {
 import { validateReadinessEvidence } from "./desktop-readiness.mjs";
 
 function nestedProcessScript({ exitParent = false, listen = false } = {}) {
-  const childSource = "setInterval(() => {}, 1000)";
+  const childSource = exitParent
+    ? "setTimeout(() => process.exit(0), 5000)"
+    : "setInterval(() => {}, 1000)";
   return [
     'const { spawn } = require("node:child_process");',
     listen ? 'require("node:net").createServer(() => {}).listen(1420);' : "",
     `const child = spawn(process.execPath, ["-e", ${JSON.stringify(childSource)}],`,
     `{ detached: ${exitParent}, stdio: "ignore", windowsHide: true });`,
     'console.log(`TREE_CHILD=${child.pid}`);',
-    exitParent ? "setTimeout(() => process.exit(0), 75);" : "setInterval(() => {}, 1000);",
+    exitParent ? "setTimeout(() => process.exit(0), 500);" : "setInterval(() => {}, 1000);",
   ].join("");
 }
 
@@ -48,7 +50,7 @@ async function cleanupCase({ action, exitParent = false, listen = false }) {
   const parentPid = processRun.child.pid;
   const supervisor = new ProcessSupervisor({
     baseline,
-    rootPid: parentPid,
+    child: processRun.child,
   });
   let childPid;
   let actionError;
@@ -94,8 +96,8 @@ export async function runDesktopSmokeSelfTest() {
     );
     readinessSupervisor = new ProcessSupervisor({
       baseline: captureDesktopBaseline(),
+      child: readinessProcess.child,
       enforceDesktopClean: false,
-      rootPid: readinessProcess.child.pid,
     });
     const marker = {
       appDataDir,

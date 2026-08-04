@@ -12,18 +12,24 @@ import {
 import { AppSidebar } from "./features/projects/AppSidebar";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
-import { MockConversationGateway, MOCK_RUNTIME_BADGE } from "./lib/mockConversationGateway";
+import { MockConversationGateway } from "./lib/mockConversationGateway";
 import {
   normalizeProjectGatewayError,
   type CommandError,
   type ProjectDto,
   type ProjectGateway,
 } from "./lib/projectGateway";
+import type { ResourceGateway } from "./lib/resourceGateway";
+import type { WriteApprovalGateway } from "./lib/writeApprovalGateway";
 
 type AppProps = {
   gateway: ProjectGateway;
   /** Defaults to the deterministic mock gateway (Task 3). Task 4 swaps Tauri. */
   conversationGateway?: ConversationGateway;
+  /** Optional project-scoped resource gateway (Wave C2-D workbench mount). */
+  resourceGateway?: ResourceGateway;
+  /** Optional conversation-owned write approval gateway (Wave C3-E). */
+  writeApprovalGateway?: WriteApprovalGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
@@ -38,6 +44,8 @@ type AppProps = {
 export function App({
   gateway,
   conversationGateway: conversationGatewayProp,
+  resourceGateway,
+  writeApprovalGateway,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
@@ -56,6 +64,11 @@ export function App({
   const [sendError, setSendError] = useState<string | null>(null);
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [error, setError] = useState<CommandError | null>(null);
+  /**
+   * Bumped only on accepted write_proposal_* events for the selected
+   * conversation — drives Workbench re-list without polling.
+   */
+  const [writeProposalRefreshToken, setWriteProposalRefreshToken] = useState(0);
   const [conversationState, dispatchConversation] = useReducer(
     conversationReducer,
     undefined,
@@ -67,6 +80,11 @@ export function App({
   conversationStateRef.current = conversationState;
   /** Bumps on every project-scope clear so in-flight create/send cannot select stale results. */
   const projectScopeGenRef = useRef(0);
+  /**
+   * Independent activation generation: last-request-wins for select/open.
+   * Only the current generation may commit project, error, or busy from async select.
+   */
+  const projectActivationGenRef = useRef(0);
   const activeProjectIdRef = useRef<string | null>(null);
   activeProjectIdRef.current = activeProject?.id ?? null;
 
@@ -114,6 +132,23 @@ export function App({
   useEffect(() => {
     return conversationGateway.subscribe((event) => {
       dispatchConversation({ type: "runtime_event", event });
+      // Event-driven write re-list only; never interval polling.
+      // Only the conversation owned by the currently active project may bump.
+      if (
+        (
+          event.kind === "write_proposal_requested"
+          || event.kind === "write_proposal_resolved"
+        )
+        && event.conversationId
+          === conversationStateRef.current.selectedConversationId
+        && conversationBelongsToProject(
+          conversationStateRef.current,
+          event.conversationId,
+          activeProjectIdRef.current,
+        )
+      ) {
+        setWriteProposalRefreshToken((token) => token + 1);
+      }
     });
   }, [conversationGateway]);
 
@@ -169,40 +204,69 @@ export function App({
     );
   }
 
-  async function activateProject(project: ProjectDto) {
+  /**
+   * Final activation for an already-resolved project DTO.
+   * When `generation` is supplied (open/register path), reuse that capture —
+   * do not allocate a newer generation after the async gateway work.
+   */
+  async function activateProject(project: ProjectDto, generation?: number) {
+    const gen = generation ?? ++projectActivationGenRef.current;
+    if (gen !== projectActivationGenRef.current) return;
     clearConversationScope();
-    const selected = await gateway.selectProject(project.id);
-    upsertProject(selected);
-    setActiveProject(selected);
-    setError(null);
+    try {
+      const selected = await gateway.selectProject(project.id);
+      if (gen !== projectActivationGenRef.current) return;
+      upsertProject(selected);
+      setActiveProject(selected);
+      setError(null);
+    } catch (cause) {
+      // Stale failure: swallow so openProject cannot paint a superseded error.
+      if (gen !== projectActivationGenRef.current) return;
+      throw cause;
+    }
   }
 
   async function selectProject(projectId: string) {
+    const generation = ++projectActivationGenRef.current;
     setBusy(true);
     try {
       clearConversationScope();
       const project = await gateway.selectProject(projectId);
+      if (generation !== projectActivationGenRef.current) return;
       upsertProject(project);
       setActiveProject(project);
       setError(null);
     } catch (cause) {
+      if (generation !== projectActivationGenRef.current) return;
       setError(normalizeProjectGatewayError(cause));
     } finally {
-      setBusy(false);
+      if (generation === projectActivationGenRef.current) {
+        setBusy(false);
+      }
     }
   }
 
   async function openProject() {
+    // Capture before pickDirectory / openOrRegister — those are not authority.
+    const generation = ++projectActivationGenRef.current;
     setBusy(true);
     try {
       const path = await gateway.pickDirectory();
+      // Cancel: preserve active project. Stale or current, no further work.
       if (!path) return;
+      // Stale after picker: do not register — registration is a durable mutation.
+      // Keep the separate post-open/register check below for in-flight register races.
+      if (generation !== projectActivationGenRef.current) return;
       const project = await gateway.openOrRegisterProject(path);
-      await activateProject(project);
+      if (generation !== projectActivationGenRef.current) return;
+      await activateProject(project, generation);
     } catch (cause) {
+      if (generation !== projectActivationGenRef.current) return;
       setError(normalizeProjectGatewayError(cause));
     } finally {
-      setBusy(false);
+      if (generation === projectActivationGenRef.current) {
+        setBusy(false);
+      }
     }
   }
 
@@ -237,11 +301,36 @@ export function App({
   }
 
   async function selectConversation(conversationId: string) {
+    // Reject foreign selection at the command boundary — only conversations
+    // that belong to the currently active project may become selected.
+    if (
+      !conversationBelongsToProject(
+        conversationStateRef.current,
+        conversationId,
+        activeProjectIdRef.current,
+      )
+    ) {
+      return;
+    }
+    const projectIdAtSelect = activeProjectIdRef.current;
     dispatchConversation({ type: "conversation_selected", conversationId });
     try {
       // Authority snapshot; in-flight events continue via subscribe and merge
       // by (runId, sequence) so background streams are not lost.
       const timeline = await conversationGateway.loadTimeline(conversationId);
+      // Drop late timeline commits if the user left the project mid-load.
+      if (activeProjectIdRef.current !== projectIdAtSelect) {
+        return;
+      }
+      if (
+        !conversationBelongsToProject(
+          conversationStateRef.current,
+          conversationId,
+          activeProjectIdRef.current,
+        )
+      ) {
+        return;
+      }
       dispatchConversation({ type: "timeline_loaded", timeline });
     } catch (cause) {
       console.error("Failed to load timeline.", cause);
@@ -312,18 +401,37 @@ export function App({
       }
 
       // Accepted send: run id means the turn is durable on the gateway.
-      // Timeline refresh failures must not look like send failures.
+      // Refresh both durable projections. The gateway may rename a persisted
+      // "新对话" from the first turn, so the rail and stage title must follow.
       await conversationGateway.sendTurn(conversationId, content);
 
-      try {
-        const timeline = await conversationGateway.loadTimeline(conversationId);
-        if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+      const [timelineResult, conversationsResult] = await Promise.allSettled([
+        conversationGateway.loadTimeline(conversationId),
+        conversationGateway.listConversations(projectIdAtStart),
+      ]);
+      if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+        if (timelineResult.status === "fulfilled") {
+          const timeline = timelineResult.value;
           dispatchConversation({ type: "timeline_loaded", timeline });
-        }
-      } catch (cause) {
-        console.error("Failed to refresh timeline after accepted send.", cause);
-        if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+        } else {
+          console.error(
+            "Failed to refresh timeline after accepted send.",
+            timelineResult.reason,
+          );
           setRefreshWarning("消息已发送，但时间线刷新失败。流式更新仍会继续。");
+        }
+
+        if (conversationsResult.status === "fulfilled") {
+          dispatchConversation({
+            type: "conversations_loaded",
+            projectId: projectIdAtStart,
+            conversations: conversationsResult.value,
+          });
+        } else {
+          console.error(
+            "Failed to refresh conversation titles after accepted send.",
+            conversationsResult.reason,
+          );
         }
       }
     } catch (cause) {
@@ -356,24 +464,38 @@ export function App({
     conversationState,
     activeProject?.id ?? null,
   );
-  const activeTimeline = selectActiveTimeline(conversationState);
-  const activeRun = selectActiveRun(conversationState);
-  // Mock badge is visible whenever the mock gateway is active and a project is selected,
-  // including before the first send — it must not imply real Grok connectivity.
-  const showMockBadge = Boolean(isMockRuntime && activeProject);
-
+  /**
+   * Render-time ownership proof: Workbench may only receive a conversation,
+   * timeline, run, or write surface when the selected conversation belongs to
+   * the currently active project. Raw global selectedConversationId alone is
+   * not authority — a stale/late A selection under B must not paint.
+   */
+  const selectionOwnedByActiveProject = conversationBelongsToProject(
+    conversationState,
+    conversationState.selectedConversationId,
+    activeProject?.id ?? null,
+  );
+  const ownedConversationId = selectionOwnedByActiveProject
+    ? conversationState.selectedConversationId
+    : null;
+  const activeConversation = ownedConversationId
+    ? projectConversations.find(
+      (conversation) => conversation.id === ownedConversationId,
+    ) ?? null
+    : null;
+  const activeTimeline = selectionOwnedByActiveProject
+    ? selectActiveTimeline(conversationState)
+    : null;
+  const activeRun = selectionOwnedByActiveProject
+    ? selectActiveRun(conversationState)
+    : null;
   if (loading) {
     return <main className="app-loading">正在加载工作台…</main>;
   }
 
   return (
     <div className="app-shell">
-      <header className="titlebar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region>
-          Pillow
-        </div>
-        <WindowControls />
-      </header>
+      <WindowControls />
       {error ? (
         <p className="app-error" role="alert">
           <span>{error.message}</span>
@@ -390,21 +512,25 @@ export function App({
           onSelect={(id) => void selectProject(id)}
           onSelectConversation={(id) => void selectConversation(id)}
           projects={projects}
-          selectedConversationId={conversationState.selectedConversationId}
+          selectedConversationId={ownedConversationId}
         />
         <Workbench
           busy={busy}
-          mockBadgeLabel={MOCK_RUNTIME_BADGE}
           onCancelRun={() => void cancelActiveRun()}
           onOpenProject={() => void openProject()}
           onSendTurn={sendTurn}
           project={activeProject}
+          conversationId={ownedConversationId}
+          conversationTitle={activeConversation?.title ?? null}
           refreshWarning={refreshWarning}
           run={activeRun}
           sendError={sendError}
           sending={sending}
-          showMockBadge={showMockBadge}
+          isMockRuntime={isMockRuntime}
           timeline={activeTimeline}
+          resourceGateway={resourceGateway}
+          writeApprovalGateway={writeApprovalGateway}
+          writeProposalRefreshToken={writeProposalRefreshToken}
         />
       </div>
     </div>

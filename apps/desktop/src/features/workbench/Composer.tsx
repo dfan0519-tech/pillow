@@ -2,12 +2,15 @@ import { useState, type FormEvent, type KeyboardEvent } from "react";
 import {
   IconClose,
   IconFolder,
+  IconLock,
   IconSend,
+  IconTerminal,
 } from "../../components/icons";
 
 type ComposerProps = {
   disabled?: boolean;
   projectName?: string | null;
+  runtimeLabel?: string;
   busy?: boolean;
   sending?: boolean;
   canCancel?: boolean;
@@ -29,6 +32,7 @@ type ComposerProps = {
 export function Composer({
   disabled = false,
   projectName = null,
+  runtimeLabel = "本地",
   busy = false,
   sending = false,
   canCancel = false,
@@ -114,15 +118,20 @@ export function Composer({
           </p>
         ) : null}
         <div className="composer__footer">
-          <div className="composer__context">
+          <div aria-label="执行上下文" className="composer__context">
             {projectName ? (
-              <span className="composer-chip" title={projectName}>
+              <span
+                aria-label={`项目：${projectName}`}
+                className="composer-context__item"
+                title={projectName}
+              >
                 <IconFolder size={14} />
-                <span>{projectName}</span>
+                <span className="composer-context__label">项目</span>
+                <span className="composer-context__value">{projectName}</span>
               </span>
             ) : (
               <button
-                className="composer-chip composer-chip--action"
+                className="composer-context__item composer-context__action"
                 disabled={busy}
                 onClick={onOpenProject}
                 type="button"
@@ -131,6 +140,22 @@ export function Composer({
                 <span>打开项目</span>
               </button>
             )}
+            <span
+              aria-label={`运行时：${runtimeLabel}`}
+              className="composer-context__item"
+            >
+              <IconTerminal size={14} />
+              <span className="composer-context__label">运行时</span>
+              <span className="composer-context__value">{runtimeLabel}</span>
+            </span>
+            <span
+              aria-label="权限：按需批准"
+              className="composer-context__item"
+            >
+              <IconLock size={14} />
+              <span className="composer-context__label">权限</span>
+              <span className="composer-context__value">按需批准</span>
+            </span>
           </div>
           <div className="composer__actions">
             {canCancel ? (

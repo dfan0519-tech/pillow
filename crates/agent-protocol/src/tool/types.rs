@@ -58,6 +58,15 @@ impl<'de> Deserialize<'de> for ArgumentsDigest {
     }
 }
 
+/// Maximum UTF-8 byte length for `fs.write@1` content (C3.0).
+pub const WRITE_CONTENT_BYTE_CAP: u64 = 262_144;
+
+/// Maximum number of argv entries for `process.run@1` (C4.0).
+pub const PROCESS_ARGV_COUNT_CAP: usize = 64;
+
+/// Maximum combined UTF-8 byte length of program label plus all argv entries.
+pub const PROCESS_ARGV_BYTE_CAP: usize = 32_768;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolId {
     #[serde(rename = "fs.list")]
@@ -66,11 +75,21 @@ pub enum ToolId {
     FsRead,
     #[serde(rename = "fs.search")]
     FsSearch,
+    #[serde(rename = "fs.write")]
+    FsWrite,
+    #[serde(rename = "process.run")]
+    ProcessRun,
 }
 
 impl ToolId {
     pub const fn all() -> &'static [Self] {
-        &[Self::FsList, Self::FsRead, Self::FsSearch]
+        &[
+            Self::FsList,
+            Self::FsRead,
+            Self::FsSearch,
+            Self::FsWrite,
+            Self::ProcessRun,
+        ]
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -78,6 +97,8 @@ impl ToolId {
             Self::FsList => "fs.list",
             Self::FsRead => "fs.read",
             Self::FsSearch => "fs.search",
+            Self::FsWrite => "fs.write",
+            Self::ProcessRun => "process.run",
         }
     }
 
@@ -86,9 +107,18 @@ impl ToolId {
             "fs.list" => Some(Self::FsList),
             "fs.read" => Some(Self::FsRead),
             "fs.search" => Some(Self::FsSearch),
+            "fs.write" => Some(Self::FsWrite),
+            "process.run" => Some(Self::ProcessRun),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode {
+    Create,
+    Modify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +126,7 @@ impl ToolId {
 pub enum ToolArgumentType {
     ProjectRelativePath,
     String,
+    StringArray,
     Bool,
     U32,
     U64,
@@ -305,11 +336,30 @@ pub struct FsSearchArguments {
     pub max_results: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsWriteArguments {
+    pub path: String,
+    pub mode: WriteMode,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRunArguments {
+    pub program: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolArguments {
     FsList(FsListArguments),
     FsRead(FsReadArguments),
     FsSearch(FsSearchArguments),
+    FsWrite(FsWriteArguments),
+    ProcessRun(ProcessRunArguments),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -391,6 +441,29 @@ pub struct FsSearchMatch {
 pub struct FsSearchOutput {
     pub matches: Vec<FsSearchMatch>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsWriteOutput {
+    pub path: String,
+    pub mode: WriteMode,
+    pub bytes_written: u64,
+    pub content_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRunOutput {
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub captured_bytes: u64,
+    pub truncated: bool,
+    pub encoding_lossy: bool,
+    pub cancelled: bool,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

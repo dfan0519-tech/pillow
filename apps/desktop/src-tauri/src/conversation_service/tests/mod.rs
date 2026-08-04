@@ -3,5 +3,7 @@
 mod composition;
 mod control;
 mod core;
+mod governed_read;
+mod reconciliation;
 mod registration;
 mod support;

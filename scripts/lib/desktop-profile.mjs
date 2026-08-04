@@ -36,6 +36,16 @@ export async function snapshotPath(root) {
   return entries;
 }
 
+export async function assertPathUnchangedSince({ root, before, label }) {
+  assert.ok(
+    Array.isArray(before),
+    "before snapshot must be an array returned by snapshotPath.",
+  );
+  const after = await snapshotPath(root);
+  assert.deepEqual(after, before, `${label} changed during isolated acceptance.`);
+  return after;
+}
+
 export function assertPathSnapshotUnchanged(before, after, label) {
   assert.deepEqual(after, before, `${label} changed during isolated acceptance.`);
 }

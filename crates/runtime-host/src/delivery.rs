@@ -7,7 +7,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use keeper_agent_protocol::{RuntimeError, RuntimeEvent, RuntimeEventKind};
+use keeper_agent_protocol::{
+    RuntimeError, RuntimeEvent, RuntimeEventKind, WriteProposalResolvedPayload,
+    WritePublicErrorCode, validate_payload,
+};
+use keeper_policy::WriteProposalState;
 
 /// Default per-turn event queue capacity (host-owned delivery).
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 64;
@@ -19,8 +23,51 @@ struct Inner {
     closed: bool,
     /// Host cancel requested: non-cancel terminals must not commit.
     cancelled: bool,
+    /// After cancel, at most one safe `write_proposal_resolved` may still commit.
+    post_cancel_write_resolution_committed: bool,
     /// True while a producer is blocked waiting for capacity (test/observability).
     producer_blocked: bool,
+}
+
+/// Narrow post-cancel write terminal: `cancelled`/`cancelled` or
+/// `interrupted`/`interrupted` only. Shared by delivery commit arbitration and
+/// the protocol guard.
+pub(crate) fn is_safe_post_cancel_write_resolution(event: &RuntimeEvent) -> bool {
+    if event.kind != RuntimeEventKind::WriteProposalResolved {
+        return false;
+    }
+    let Ok(payload) = validate_payload(event.kind, &event.payload) else {
+        return false;
+    };
+    let Ok(resolved) = serde_json::from_value::<WriteProposalResolvedPayload>(payload) else {
+        return false;
+    };
+    matches!(
+        (resolved.state, resolved.error_code),
+        (
+            WriteProposalState::Cancelled,
+            Some(WritePublicErrorCode::Cancelled)
+        ) | (
+            WriteProposalState::Interrupted,
+            Some(WritePublicErrorCode::Interrupted)
+        )
+    )
+}
+
+/// Whether this event may still enqueue after host cancel won arbitration.
+///
+/// Permits the host-forced `run_cancelled` terminal and at most one narrowly
+/// validated `write_proposal_resolved` so the UI can refresh pending proposals
+/// before the run closes. All other kinds remain rejected.
+fn may_commit_after_cancel(inner: &Inner, event: &RuntimeEvent) -> bool {
+    match event.kind {
+        RuntimeEventKind::RunCancelled => true,
+        RuntimeEventKind::WriteProposalResolved => {
+            !inner.post_cancel_write_resolution_committed
+                && is_safe_post_cancel_write_resolution(event)
+        }
+        _ => false,
+    }
 }
 
 /// Bounded, multi-consumer-snapshot queue with blocking push backpressure.
@@ -40,6 +87,7 @@ impl BoundedDelivery {
                 capacity,
                 closed: false,
                 cancelled: false,
+                post_cancel_write_resolution_committed: false,
                 producer_blocked: false,
             }),
             not_full: Condvar::new(),
@@ -66,14 +114,15 @@ impl BoundedDelivery {
     /// Push an event, blocking when full until space is available, closed, or
     /// cancel wins the commit arbitration.
     ///
-    /// After cancel, only `run_cancelled` may commit (host-forced terminal).
-    /// A previously validated but blocked `turn_completed` cannot win.
+    /// After cancel, only `run_cancelled` and at most one
+    /// `write_proposal_resolved` may commit. A previously validated but blocked
+    /// `turn_completed` cannot win.
     pub fn push_blocking(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
         let is_cancel_terminal = event.kind == RuntimeEventKind::RunCancelled;
         let mut guard = self.inner.lock().expect("delivery");
         loop {
             // Cancel beats a non-cancel terminal that was blocked on enqueue.
-            if guard.cancelled && !is_cancel_terminal {
+            if guard.cancelled && !may_commit_after_cancel(&guard, &event) {
                 guard.producer_blocked = false;
                 return Err(RuntimeError::Cancelled);
             }
@@ -95,11 +144,14 @@ impl BoundedDelivery {
         }
         guard.producer_blocked = false;
         // Re-check after wait: cancel may have landed while blocked.
-        if guard.cancelled && !is_cancel_terminal {
+        if guard.cancelled && !may_commit_after_cancel(&guard, &event) {
             return Err(RuntimeError::Cancelled);
         }
         if guard.closed && !is_cancel_terminal {
             return Err(RuntimeError::ShutDown);
+        }
+        if guard.cancelled && event.kind == RuntimeEventKind::WriteProposalResolved {
+            guard.post_cancel_write_resolution_committed = true;
         }
         guard.queue.push_back(event);
         self.not_empty.notify_one();
@@ -109,7 +161,7 @@ impl BoundedDelivery {
     /// Non-blocking push used when fail-fast backpressure is preferred.
     pub fn try_push(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
         let mut guard = self.inner.lock().expect("delivery");
-        if guard.cancelled && event.kind != RuntimeEventKind::RunCancelled {
+        if guard.cancelled && !may_commit_after_cancel(&guard, &event) {
             return Err(RuntimeError::Cancelled);
         }
         if guard.closed {
@@ -119,6 +171,9 @@ impl BoundedDelivery {
             return Err(RuntimeError::EventQueueFull {
                 capacity: guard.capacity,
             });
+        }
+        if guard.cancelled && event.kind == RuntimeEventKind::WriteProposalResolved {
+            guard.post_cancel_write_resolution_committed = true;
         }
         guard.queue.push_back(event);
         self.not_empty.notify_one();
@@ -281,5 +336,76 @@ mod tests {
         d.try_push(sample_event(1)).unwrap();
         let err = d.try_push(sample_event(2)).unwrap_err();
         assert!(matches!(err, RuntimeError::EventQueueFull { capacity: 1 }));
+    }
+
+    fn write_resolved_event(seq: u64) -> RuntimeEvent {
+        RuntimeEvent::new(
+            RunId::new(),
+            seq,
+            RuntimeEventKind::WriteProposalResolved,
+            serde_json::json!({
+                "proposal_id": "wp-1",
+                "path": "note.txt",
+                "mode": "create",
+                "state": "cancelled",
+                "error_code": "cancelled"
+            }),
+            Utc::now(),
+        )
+        .unwrap()
+    }
+
+    fn cancel_terminal_event(seq: u64) -> RuntimeEvent {
+        RuntimeEvent::new(
+            RunId::new(),
+            seq,
+            RuntimeEventKind::RunCancelled,
+            serde_json::json!({"reason": "host"}),
+            Utc::now(),
+        )
+        .unwrap()
+    }
+
+    /// C3-F: after cancel, one write_proposal_resolved may still commit before
+    /// the host-forced run_cancelled (payload pairing is enforced by the sink).
+    #[test]
+    fn after_cancel_one_write_resolution_then_run_cancelled_may_commit() {
+        let d = BoundedDelivery::new(8);
+        d.push_blocking(sample_event(1)).unwrap();
+        d.request_cancel();
+        d.push_blocking(write_resolved_event(2))
+            .expect("first post-cancel write_proposal_resolved must commit");
+        d.push_blocking(cancel_terminal_event(3))
+            .expect("run_cancelled must still commit after safe resolution");
+        let kinds: Vec<_> = d.drain().into_iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RuntimeEventKind::Heartbeat,
+                RuntimeEventKind::WriteProposalResolved,
+                RuntimeEventKind::RunCancelled,
+            ]
+        );
+    }
+
+    #[test]
+    fn after_cancel_second_write_resolution_and_non_cancel_terminals_are_rejected() {
+        let d = BoundedDelivery::new(8);
+        d.request_cancel();
+        d.push_blocking(write_resolved_event(1)).unwrap();
+        let dup = d.push_blocking(write_resolved_event(2)).unwrap_err();
+        assert!(matches!(dup, RuntimeError::Cancelled));
+        let completed = RuntimeEvent::new(
+            RunId::new(),
+            3,
+            RuntimeEventKind::TurnCompleted,
+            serde_json::json!({}),
+            Utc::now(),
+        )
+        .unwrap();
+        let blocked = d.push_blocking(completed).unwrap_err();
+        assert!(matches!(blocked, RuntimeError::Cancelled));
+        let kinds: Vec<_> = d.drain().into_iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec![RuntimeEventKind::WriteProposalResolved]);
     }
 }

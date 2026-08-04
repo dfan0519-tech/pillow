@@ -1,0 +1,29 @@
+[package]
+name = "keeper-tool-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-policy = { path = "../kernel-policy" }
+keeper-process-executor = { path = "../process-executor" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+keeper-policy = { path = "../kernel-policy" }
+keeper-project = { path = "../kernel-project" }
+keeper-session = { path = "../kernel-session" }
+tempfile = "3"

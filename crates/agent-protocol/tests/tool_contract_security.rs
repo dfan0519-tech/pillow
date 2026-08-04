@@ -2,9 +2,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use keeper_agent_protocol::{
-    RunId, ToolActiveContext, ToolCallReservationDecision, ToolExecutionState, ToolProposal,
-    ToolProtocolError, ToolProtocolErrorCode, ToolResult, ValidatedToolProposal,
-    canonical_arguments_digest,
+    ArgumentsDigest, PROCESS_ARGV_BYTE_CAP, PROCESS_ARGV_COUNT_CAP, RunId, ToolActiveContext,
+    ToolCallReservationDecision, ToolExecutionState, ToolProposal, ToolProtocolError,
+    ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult, ValidatedToolProposal,
+    WRITE_CONTENT_BYTE_CAP, canonical_arguments_digest,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -455,4 +456,241 @@ fn result_receipt_fields_are_required_and_strict() {
         serde_json::from_str(&read_fixture("tool-result-fs-read-v1.json")).unwrap();
     value.as_object_mut().unwrap().remove("arguments_digest");
     assert!(ToolResult::parse_value(value).is_err());
+}
+
+fn write_security_proposal(path: &str, mode: &str, content: &str) -> ToolProposal {
+    let arguments = json!({
+        "path": path,
+        "mode": mode,
+        "content": content,
+    });
+    let arguments_digest = canonical_arguments_digest(&arguments).unwrap_or_else(|_| {
+        ArgumentsDigest::parse(
+            "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        )
+        .unwrap()
+    });
+    ToolProposal {
+        project_id: "VK-013".into(),
+        conversation_id: "VK-013-C116".into(),
+        run_id: RunId(Uuid::nil()),
+        call_id: "call-write-sec-1".into(),
+        tool_id: "fs.write".into(),
+        tool_version: 1,
+        arguments,
+        arguments_digest,
+    }
+}
+
+#[test]
+fn write_reservation_distinguishes_replay_from_content_conflict() {
+    let context = active_context();
+    let original = write_security_proposal("src/a.ts", "create", "one")
+        .validate_for_context(&context)
+        .unwrap();
+    let replay = write_security_proposal("src/a.ts", "create", "one")
+        .validate_for_context(&context)
+        .unwrap();
+    let changed = write_security_proposal("src/a.ts", "create", "two")
+        .validate_for_context(&context)
+        .unwrap();
+
+    assert_eq!(original.reservation().key(), replay.reservation().key());
+    assert_eq!(original.reservation().key(), changed.reservation().key());
+    assert_eq!(original.fingerprint(), replay.fingerprint());
+    assert_ne!(original.fingerprint(), changed.fingerprint());
+    assert_eq!(
+        original.reservation().classify(Some(replay.fingerprint())),
+        ToolCallReservationDecision::Replay
+    );
+    assert_eq!(
+        original.reservation().classify(Some(changed.fingerprint())),
+        ToolCallReservationDecision::Conflict
+    );
+}
+
+#[test]
+fn write_failed_public_error_is_secret_safe_on_wire() {
+    let error = ToolPublicError::canonical(ToolPublicErrorCode::WriteFailed);
+    let text = serde_json::to_string(&error).unwrap();
+    assert!(!text.contains("TOP_SECRET"));
+    assert!(!text.contains("C:"));
+    assert!(!text.to_ascii_lowercase().contains("stack"));
+    let mut forged = serde_json::to_value(error).unwrap();
+    forged["message"] = json!("failed writing C:\\TOP_SECRET\\secret.env");
+    assert!(serde_json::from_value::<ToolPublicError>(forged).is_err());
+}
+
+#[test]
+fn write_content_cap_constant_matches_contract() {
+    assert_eq!(WRITE_CONTENT_BYTE_CAP, 262_144);
+}
+
+fn process_run_security_proposal(program: &str, argv: &[&str], cwd: Option<&str>) -> ToolProposal {
+    let mut arguments = json!({
+        "program": program,
+        "argv": argv,
+    });
+    if let Some(cwd) = cwd {
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .insert("cwd".into(), json!(cwd));
+    }
+    let arguments_digest = canonical_arguments_digest(&arguments).unwrap_or_else(|_| {
+        ArgumentsDigest::parse(
+            "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        )
+        .unwrap()
+    });
+    ToolProposal {
+        project_id: "VK-013".into(),
+        conversation_id: "VK-013-C116".into(),
+        run_id: RunId(Uuid::nil()),
+        call_id: "call-process-sec-1".into(),
+        tool_id: "process.run".into(),
+        tool_version: 1,
+        arguments,
+        arguments_digest,
+    }
+}
+
+#[test]
+fn process_run_reservation_distinguishes_replay_from_argv_conflict() {
+    let context = active_context();
+    let original = process_run_security_proposal("cargo", &["test"], Some("."))
+        .validate_for_context(&context)
+        .unwrap();
+    let replay = process_run_security_proposal("cargo", &["test"], Some("."))
+        .validate_for_context(&context)
+        .unwrap();
+    let changed = process_run_security_proposal("cargo", &["build"], Some("."))
+        .validate_for_context(&context)
+        .unwrap();
+
+    assert_eq!(original.reservation().key(), replay.reservation().key());
+    assert_eq!(original.reservation().key(), changed.reservation().key());
+    assert_eq!(original.fingerprint(), replay.fingerprint());
+    assert_ne!(original.fingerprint(), changed.fingerprint());
+    assert_eq!(
+        original.reservation().classify(Some(replay.fingerprint())),
+        ToolCallReservationDecision::Replay
+    );
+    assert_eq!(
+        original.reservation().classify(Some(changed.fingerprint())),
+        ToolCallReservationDecision::Conflict
+    );
+}
+
+#[test]
+fn process_run_rejects_authority_fields_and_native_paths_in_arguments() {
+    let context = active_context();
+    for (key, value) in [
+        ("executable", json!("C:/Windows/System32/cmd.exe")),
+        ("environment", json!({"TOP_SECRET": "leak"})),
+        ("timeout_ms", json!(1)),
+        ("approval_grant", json!("grant-must-not-appear")),
+        ("shell", json!("powershell -Command evil")),
+    ] {
+        let mut proposal = process_run_security_proposal("cargo", &["test"], Some("."));
+        proposal
+            .arguments
+            .as_object_mut()
+            .unwrap()
+            .insert(key.into(), value);
+        proposal.arguments_digest = canonical_arguments_digest(&proposal.arguments).unwrap();
+        let error = proposal.validate_for_context(&context).unwrap_err();
+        assert_secret_safe(error, ToolProtocolErrorCode::InvalidArguments);
+    }
+
+    for cwd in [
+        "C:/Windows",
+        "\\\\server\\share",
+        "/etc/passwd",
+        r"crates\agent",
+        "crates/../../etc",
+    ] {
+        let error = process_run_security_proposal("cargo", &["test"], Some(cwd))
+            .validate_for_context(&context)
+            .unwrap_err();
+        assert_secret_safe(error, ToolProtocolErrorCode::InvalidArguments);
+    }
+}
+
+#[test]
+fn process_run_result_output_denies_transcript_fields_and_is_secret_safe() {
+    let context = active_context();
+    let proposal = process_run_security_proposal("cargo", &["test"], Some("."))
+        .validate_for_context(&context)
+        .unwrap();
+    let empty = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let mut result = ToolResult {
+        project_id: proposal.project_id().into(),
+        conversation_id: proposal.conversation_id().into(),
+        run_id: proposal.run_id(),
+        call_id: proposal.call_id().into(),
+        tool_id: proposal.tool_id().into(),
+        tool_version: proposal.tool_version(),
+        proposal_fingerprint: proposal.fingerprint().clone(),
+        arguments_digest: proposal.normalized_arguments_digest().clone(),
+        state: ToolExecutionState::Succeeded,
+        output: Some(json!({
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout_sha256": empty,
+            "stderr_sha256": empty,
+            "captured_bytes": 0,
+            "truncated": false,
+            "encoding_lossy": false,
+            "cancelled": false,
+            "timed_out": false,
+            "stdout": "TOP_SECRET transcript",
+        })),
+        error: None,
+    };
+    let error = result
+        .validate_for_proposal(&context, &proposal)
+        .unwrap_err();
+    assert_secret_safe(error, ToolProtocolErrorCode::InvalidResult);
+
+    result.output = Some(json!({
+        "exit_code": 0,
+        "duration_ms": 1,
+        "stdout_sha256": empty,
+        "stderr_sha256": empty,
+        "captured_bytes": 0,
+        "truncated": false,
+        "encoding_lossy": false,
+        "cancelled": false,
+        "timed_out": false,
+        "native_executable": "C:\\TOP_SECRET\\cargo.exe",
+    }));
+    let error = result
+        .validate_for_proposal(&context, &proposal)
+        .unwrap_err();
+    assert_secret_safe(error, ToolProtocolErrorCode::InvalidResult);
+}
+
+#[test]
+fn process_run_argv_caps_are_fixed_contract_constants() {
+    // Behavioral lock: 64 argv entries and 32_768 combined program+argv bytes.
+    assert_eq!(PROCESS_ARGV_COUNT_CAP, 64);
+    assert_eq!(PROCESS_ARGV_BYTE_CAP, 32_768);
+    let program = "cargo";
+    let at_count: Vec<String> = (0..PROCESS_ARGV_COUNT_CAP)
+        .map(|i| format!("x{i}"))
+        .collect();
+    let at_refs: Vec<&str> = at_count.iter().map(String::as_str).collect();
+    assert!(
+        process_run_security_proposal(program, &at_refs, None)
+            .validate_for_context(&active_context())
+            .is_ok()
+    );
+    let remaining = PROCESS_ARGV_BYTE_CAP - program.len();
+    let filler = "y".repeat(remaining);
+    assert!(
+        process_run_security_proposal(program, &[filler.as_str()], None)
+            .validate_for_context(&active_context())
+            .is_ok()
+    );
 }

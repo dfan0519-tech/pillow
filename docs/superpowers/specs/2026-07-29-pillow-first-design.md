@@ -8,19 +8,22 @@ Owner: Keeper controller
 
 ## 0. Current Execution Status
 
-Updated: 2026-07-30
+Updated: 2026-07-31
 
-- Slice A is functionally complete and independently verified.
-- The accepted shell no longer uses a blocking project launcher. It opens
-  directly into an always-visible, Grok App-derived workbench with native
-  folder picking.
-- `rusqlite` is the selected Stage 1 SQLite implementation.
-- Focused Grok App UI code is adapted directly under MIT with pinned
-  provenance in `THIRD_PARTY_NOTICES.md`.
-- The next implementation milestone is Slice B1: a runtime-neutral,
-  persistent conversation vertical slice using a deterministic fake adapter.
-- A real Grok ACP connection is Slice B2 and cannot be declared complete from
-  fake-stream evidence.
+- Slice A desktop foundation, Slice B1 conversation kernel, Slice B2 real Grok
+  ACP, B3 governed reads, and the provider-to-B3 C1 loop are accepted in the
+  unstaged working tree.
+- C2 is the active Slice C milestone. Its resource core, SQLite recents, typed
+  Tauri/TypeScript bridge, collapsible resource panel, and conversation-owned
+  Agent activity disclosure have focused acceptance.
+- The C2 renderer slices are not yet mounted into the product. Preview
+  transport/view, workbench and timeline wiring, project-switch/restart E2E,
+  full regression gates, and independent review remain.
+- C2 continues to exclude writes, terminal, Git, Obsidian, key management, and
+  additional runtime adapters.
+- Current status and execution order are maintained in
+  `docs/roadmap/2026-07-31-stage1-overall-status.md` and
+  `docs/superpowers/plans/2026-07-31-c2-read-only-workbench-completion.md`.
 
 ## 1. Product Decision
 
@@ -408,4 +411,3 @@ Deferred:
 - Windows signing and updater channel for public alpha.
 
 These decisions do not change the product boundary in this specification.
-

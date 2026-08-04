@@ -4,9 +4,17 @@ pub mod conversation_events;
 pub mod conversation_service;
 pub mod desktop_lifecycle;
 pub mod directory_ops;
+mod exec_commands;
 pub mod path_scope;
 mod project_commands;
+mod resource_commands;
 pub mod runtime_composition;
+mod write_commands;
+
+#[cfg(test)]
+mod resource_commands_tests;
+#[cfg(test)]
+mod write_commands_tests;
 
 use std::sync::Arc;
 
@@ -26,8 +34,13 @@ use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
 };
+use resource_commands::{
+    list_project_resources, list_recent_project_resources, preview_project_resource,
+    read_project_resource, search_project_resources,
+};
 use runtime_composition::open_conversation_service;
 use tauri::Manager;
+use write_commands::{decide_write_proposal, list_write_proposals, open_write_proposal_diff};
 
 fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -47,7 +60,15 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         send_turn,
         cancel_run,
         get_conversation_acceptance_scenario,
-        complete_conversation_acceptance
+        complete_conversation_acceptance,
+        list_project_resources,
+        read_project_resource,
+        search_project_resources,
+        list_recent_project_resources,
+        preview_project_resource,
+        list_write_proposals,
+        decide_write_proposal,
+        open_write_proposal_diff
     ])
 }
 

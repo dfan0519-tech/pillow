@@ -29,6 +29,13 @@
   gap: 6px;
 }
 
+.composer:focus-within {
+  border-color: var(--border-strong);
+  box-shadow:
+    var(--shadow-composer),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -46,7 +53,7 @@
   color: var(--text-tertiary);
 }
 
-/* Kill mouse-focus ring; restore a clear keyboard focus state. */
+/* Keep pointer focus quiet while preserving a clear keyboard focus ring. */
 .composer textarea:focus {
   outline: none;
 }
@@ -54,7 +61,7 @@
 .composer textarea:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .composer__error {
@@ -95,39 +102,41 @@
   min-width: 0;
 }
 
-.composer-chip {
+.composer-context__item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   max-width: 220px;
   min-height: 28px;
-  padding: 4px 10px;
+  padding: 2px 4px;
   border: 0;
-  border-radius: 999px;
-  background: var(--bg-hover);
+  background: transparent;
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
 }
 
-.composer-chip span {
+.composer-context__label {
+  color: var(--text-tertiary);
+}
+
+.composer-context__value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.composer-chip--action {
+.composer-context__action {
   cursor: pointer;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
 }
 
-.composer-chip--action:hover:not(:disabled) {
+.composer-context__action:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-.composer-chip--action:disabled {
+.composer-context__action:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -158,12 +167,12 @@
 /* Circular primary send — dark fill, not rectangular text button */
 .icon-btn--primary {
   background: var(--text-primary);
-  color: var(--bg-main);
+  color: var(--text-inverse);
 }
 
 .icon-btn--primary:hover:not(:disabled) {
-  background: var(--text-secondary);
-  color: var(--bg-main);
+  background: #fff;
+  color: var(--text-inverse);
 }
 
 .icon-btn--primary:disabled {
@@ -171,19 +180,24 @@
   cursor: not-allowed;
 }
 
-/* Resource pane chrome */
+/* Resource pane chrome — contextual right column (browser + preview share scroll) */
 .resource-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
   padding: 12px 14px;
   border-left: 1px solid var(--border-subtle);
   background: var(--bg-aside);
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
-  min-width: 0;
+  overflow: hidden;
 }
 
 .resource-pane__heading {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   color: var(--text-primary);
@@ -195,6 +209,16 @@
   margin: 0;
   font-size: 13px;
   font-weight: 650;
+}
+
+.resource-pane__scroll {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
 }
 
 .resource-pane p {
@@ -226,7 +250,7 @@
 
 .resource-pane__kind {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .resource-pane__content pre {
@@ -249,7 +273,34 @@
 }
 
 .resource-pane__truncation {
-  font-size: 11px;
+  font-size: 12px;
+}
+
+.resource-pane__preview {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.resource-pane__status {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.resource-pane__status--error {
+  color: var(--danger, #c44);
+}
+
+.workbench.has-resources .stage-top__actions {
+  margin-right: 0;
+}
+
+.workbench.has-resources .resource-pane {
+  padding-top: calc(var(--titlebar-height) + 12px);
 }
 
 /* Name-only new project dialog */

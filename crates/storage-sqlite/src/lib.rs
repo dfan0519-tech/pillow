@@ -1,8 +1,30 @@
 mod conversation;
 mod conversation_rows;
+mod exec_proposal;
 mod migrations;
+mod resource_recent;
+mod tool_call;
+mod write_proposal;
 
 pub use conversation::SqliteConversationRepository;
+pub use exec_proposal::{
+    EXEC_RESULT_JSON_BYTE_CAP, ExecDecisionOutcome, ExecProposalReserveInput,
+    ExecProposalStoreError, ExecReservationOutcome, ExecRunClaimOutcome, ExecTerminalReceipt,
+    MAX_RUN_LEASE_MS, SqliteExecProposalRepository, StoredExecProposal,
+};
+pub use resource_recent::{
+    MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
+};
+pub use tool_call::{
+    SqliteToolCallRepository, StoredToolCall, ToolCallReservationOutcome, ToolCallStoreError,
+    ToolExecutionClaimOutcome,
+};
+pub use write_proposal::{
+    MAX_APPLY_LEASE_MS, RESULT_JSON_BYTE_CAP, SqliteWriteProposalRepository, StoredWriteProposal,
+    WriteApplyClaimOutcome, WriteApplyErrorCode, WriteApplyReceipt, WriteApplyReconcileObservation,
+    WriteDecisionOutcome, WriteProposalReserveInput, WriteProposalStoreError,
+    WriteReservationOutcome,
+};
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};

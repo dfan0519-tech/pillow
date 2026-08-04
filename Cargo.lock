@@ -1916,8 +1916,15 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "keeper-agent-protocol",
+ "keeper-policy",
+ "keeper-process-executor",
+ "keeper-project",
+ "keeper-runtime-host",
+ "keeper-session",
+ "keeper-storage-sqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "uuid",
  "windows-sys 0.59.0",
@@ -1928,11 +1935,37 @@ name = "keeper-agent-protocol"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "keeper-policy",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.19",
  "uuid",
+]
+
+[[package]]
+name = "keeper-git-executor"
+version = "0.1.0"
+dependencies = [
+ "keeper-process-executor",
+]
+
+[[package]]
+name = "keeper-policy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "keeper-process-executor"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1945,13 +1978,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-resource"
+version = "0.1.0"
+dependencies = [
+ "keeper-project",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "keeper-runtime-host"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "getrandom 0.2.17",
  "keeper-agent-protocol",
+ "keeper-policy",
+ "keeper-process-executor",
+ "keeper-project",
+ "keeper-session",
+ "keeper-storage-sqlite",
+ "keeper-tool-executor",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
  "uuid",
 ]
 
@@ -1972,12 +2026,36 @@ name = "keeper-storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "keeper-agent-protocol",
+ "keeper-policy",
  "keeper-project",
  "keeper-session",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "uuid",
+]
+
+[[package]]
+name = "keeper-tool-executor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-agent-protocol",
+ "keeper-policy",
+ "keeper-process-executor",
+ "keeper-project",
+ "keeper-session",
+ "keeper-storage-sqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2572,13 +2650,17 @@ dependencies = [
 name = "pillow-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "keeper-adapter-grok-acp",
  "keeper-agent-protocol",
+ "keeper-policy",
  "keeper-project",
+ "keeper-resource",
  "keeper-runtime-host",
  "keeper-session",
  "keeper-storage-sqlite",
+ "keeper-tool-executor",
  "rfd",
  "serde",
  "serde_json",

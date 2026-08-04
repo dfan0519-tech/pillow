@@ -9,14 +9,37 @@ description = "Bounded runtime host and deterministic fake agent adapter"
 default = []
 # Non-default: exposes HostConfig test seams for external test crates.
 # Unit tests of this crate use cfg(test) instead. Release builds leave this off.
-test-support = []
+test-support = ["keeper-storage-sqlite/test-support"]
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
+getrandom.workspace = true
 keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-policy = { path = "../kernel-policy" }
+keeper-process-executor = { path = "../process-executor" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
+keeper-tool-executor = { path = "../tool-executor" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+keeper-project = { path = "../kernel-project" }
+keeper-session = { path = "../kernel-session" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
 serde_json.workspace = true
+tempfile = "3"
+
+# Integration tests may use the non-default test-support expiry seam.
+[[test]]
+name = "governed_write_bridge"
+path = "tests/governed_write_bridge.rs"
+required-features = []
+
+[[test]]
+name = "governed_process_bridge"
+path = "tests/governed_process_bridge.rs"
+required-features = []

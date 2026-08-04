@@ -24,6 +24,8 @@ export type RuntimeEventKind =
   | "subagent_progress"
   | "subagent_completed"
   | "artifact_produced"
+  | "write_proposal_requested"
+  | "write_proposal_resolved"
   | "turn_completed"
   | "turn_failed"
   | "run_cancelled"
@@ -173,6 +175,33 @@ export type HeartbeatPayload = {
   tick: number;
 };
 
+/** Summary-only write proposal request — never content, grant, or native path. */
+export type WriteProposalRequestedPayload = {
+  proposal_id: string;
+  path: string;
+  mode: "create" | "modify";
+  summary: string;
+  expires_at: string;
+};
+
+/** Summary-only write proposal resolution — never content, grant, or native path. */
+export type WriteProposalResolvedPayload = {
+  proposal_id: string;
+  path: string;
+  mode: "create" | "modify";
+  state:
+    | "pending_approval"
+    | "approved"
+    | "applying"
+    | "succeeded"
+    | "rejected"
+    | "expired"
+    | "cancelled"
+    | "interrupted"
+    | "failed";
+  error_code?: string;
+};
+
 type RuntimeEventBase = {
   eventId: string;
   runId: string;
@@ -203,6 +232,14 @@ export type RuntimeEventDto =
       payload: SubagentCompletedPayload;
     })
   | (RuntimeEventBase & { kind: "artifact_produced"; payload: ArtifactProducedPayload })
+  | (RuntimeEventBase & {
+      kind: "write_proposal_requested";
+      payload: WriteProposalRequestedPayload;
+    })
+  | (RuntimeEventBase & {
+      kind: "write_proposal_resolved";
+      payload: WriteProposalResolvedPayload;
+    })
   | (RuntimeEventBase & { kind: "turn_completed"; payload: TurnCompletedPayload })
   | (RuntimeEventBase & { kind: "turn_failed"; payload: TurnFailedPayload })
   | (RuntimeEventBase & { kind: "run_cancelled"; payload: RunCancelledPayload })

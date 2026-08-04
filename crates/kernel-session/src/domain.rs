@@ -153,6 +153,17 @@ pub enum RuntimeEventKind {
     SubagentProgress,
     SubagentCompleted,
     ArtifactProduced,
+    WriteProposalRequested,
+    WriteProposalResolved,
+    /// Summary-only process proposal waiting for a one-shot human decision.
+    ProcessProposalRequested,
+    /// Summary-only process proposal decision (approve-once / reject).
+    ProcessProposalDecided,
+    /// Process has been claimed and is starting (never for reject/expire).
+    ProcessStarted,
+    /// Summary-only process terminal outcome (no transcript payload).
+    /// Non-terminal at the run level: process end does not close the run.
+    ProcessTerminalOutcome,
     TurnCompleted,
     TurnFailed,
     RunCancelled,
@@ -160,6 +171,54 @@ pub enum RuntimeEventKind {
 }
 
 impl RuntimeEventKind {
+    /// Exhaustive fixed vocabulary (B1 / C3 write / C4 process kinds).
+    pub const ALL: [RuntimeEventKind; 21] = [
+        RuntimeEventKind::RunStarted,
+        RuntimeEventKind::AssistantDelta,
+        RuntimeEventKind::ReasoningSummaryDelta,
+        RuntimeEventKind::PlanUpdated,
+        RuntimeEventKind::ToolCallStarted,
+        RuntimeEventKind::ToolCallOutput,
+        RuntimeEventKind::ToolCallCompleted,
+        RuntimeEventKind::SubagentStarted,
+        RuntimeEventKind::SubagentProgress,
+        RuntimeEventKind::SubagentCompleted,
+        RuntimeEventKind::ArtifactProduced,
+        RuntimeEventKind::WriteProposalRequested,
+        RuntimeEventKind::WriteProposalResolved,
+        RuntimeEventKind::ProcessProposalRequested,
+        RuntimeEventKind::ProcessProposalDecided,
+        RuntimeEventKind::ProcessStarted,
+        RuntimeEventKind::ProcessTerminalOutcome,
+        RuntimeEventKind::TurnCompleted,
+        RuntimeEventKind::TurnFailed,
+        RuntimeEventKind::RunCancelled,
+        RuntimeEventKind::Heartbeat,
+    ];
+
+    /// Terminal kinds are mutually exclusive: at most one may close a run.
+    /// Process kinds are never run-terminal.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RuntimeEventKind::TurnCompleted
+                | RuntimeEventKind::TurnFailed
+                | RuntimeEventKind::RunCancelled
+        )
+    }
+
+    /// Optional run-status transition driven by this event kind.
+    /// Process kinds do not change run status.
+    pub fn status_for_kind(self) -> Option<RunStatus> {
+        match self {
+            RuntimeEventKind::RunStarted => Some(RunStatus::Running),
+            RuntimeEventKind::TurnCompleted => Some(RunStatus::Completed),
+            RuntimeEventKind::TurnFailed => Some(RunStatus::Failed),
+            RuntimeEventKind::RunCancelled => Some(RunStatus::Cancelled),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RuntimeEventKind::RunStarted => "run_started",
@@ -173,6 +232,12 @@ impl RuntimeEventKind {
             RuntimeEventKind::SubagentProgress => "subagent_progress",
             RuntimeEventKind::SubagentCompleted => "subagent_completed",
             RuntimeEventKind::ArtifactProduced => "artifact_produced",
+            RuntimeEventKind::WriteProposalRequested => "write_proposal_requested",
+            RuntimeEventKind::WriteProposalResolved => "write_proposal_resolved",
+            RuntimeEventKind::ProcessProposalRequested => "process_proposal_requested",
+            RuntimeEventKind::ProcessProposalDecided => "process_proposal_decided",
+            RuntimeEventKind::ProcessStarted => "process_started",
+            RuntimeEventKind::ProcessTerminalOutcome => "process_terminal_outcome",
             RuntimeEventKind::TurnCompleted => "turn_completed",
             RuntimeEventKind::TurnFailed => "turn_failed",
             RuntimeEventKind::RunCancelled => "run_cancelled",
@@ -193,6 +258,12 @@ impl RuntimeEventKind {
             "subagent_progress" => Some(RuntimeEventKind::SubagentProgress),
             "subagent_completed" => Some(RuntimeEventKind::SubagentCompleted),
             "artifact_produced" => Some(RuntimeEventKind::ArtifactProduced),
+            "write_proposal_requested" => Some(RuntimeEventKind::WriteProposalRequested),
+            "write_proposal_resolved" => Some(RuntimeEventKind::WriteProposalResolved),
+            "process_proposal_requested" => Some(RuntimeEventKind::ProcessProposalRequested),
+            "process_proposal_decided" => Some(RuntimeEventKind::ProcessProposalDecided),
+            "process_started" => Some(RuntimeEventKind::ProcessStarted),
+            "process_terminal_outcome" => Some(RuntimeEventKind::ProcessTerminalOutcome),
             "turn_completed" => Some(RuntimeEventKind::TurnCompleted),
             "turn_failed" => Some(RuntimeEventKind::TurnFailed),
             "run_cancelled" => Some(RuntimeEventKind::RunCancelled),
@@ -342,4 +413,61 @@ pub enum SessionError {
     SequenceOutOfRange(u64),
     #[error("session store error: {0}")]
     Store(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_event_kind_round_trips_through_snake_case_strings() {
+        for kind in RuntimeEventKind::ALL {
+            assert_eq!(RuntimeEventKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(RuntimeEventKind::parse("unknown"), None);
+        assert_eq!(
+            RuntimeEventKind::parse("process_proposal_requested"),
+            Some(RuntimeEventKind::ProcessProposalRequested)
+        );
+        assert_eq!(
+            RuntimeEventKind::parse("process_proposal_decided"),
+            Some(RuntimeEventKind::ProcessProposalDecided)
+        );
+        assert_eq!(
+            RuntimeEventKind::parse("process_started"),
+            Some(RuntimeEventKind::ProcessStarted)
+        );
+        assert_eq!(
+            RuntimeEventKind::parse("process_terminal_outcome"),
+            Some(RuntimeEventKind::ProcessTerminalOutcome)
+        );
+    }
+
+    #[test]
+    fn process_kinds_are_non_terminal_and_do_not_drive_run_status() {
+        let process = [
+            RuntimeEventKind::ProcessProposalRequested,
+            RuntimeEventKind::ProcessProposalDecided,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessTerminalOutcome,
+        ];
+        for kind in process {
+            assert!(
+                !kind.is_terminal(),
+                "{:?} must be non-terminal at run level",
+                kind
+            );
+            assert!(
+                kind.status_for_kind().is_none(),
+                "{:?} must not derive run status",
+                kind
+            );
+        }
+        assert!(RuntimeEventKind::TurnCompleted.is_terminal());
+        assert_eq!(
+            RuntimeEventKind::TurnCompleted.status_for_kind(),
+            Some(RunStatus::Completed)
+        );
+        assert_eq!(RuntimeEventKind::ALL.len(), 21);
+    }
 }

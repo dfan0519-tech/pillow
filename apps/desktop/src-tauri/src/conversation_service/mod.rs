@@ -16,8 +16,10 @@
 mod ids;
 mod pipeline;
 mod project_cwd;
+mod reconciliation;
 mod service;
 mod types;
+mod write_service;
 
 #[cfg(test)]
 mod tests;
@@ -26,3 +28,4 @@ pub use service::ConversationService;
 pub use types::ConversationCommandError;
 #[cfg(test)]
 pub use types::PumpRegistrationHooks;
+pub use write_service::{WriteDiffDto, WriteProposalDto};

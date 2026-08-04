@@ -13,6 +13,8 @@ required-features = []
 [dependencies]
 chrono.workspace = true
 keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-process-executor = { path = "../process-executor" }
+keeper-runtime-host = { path = "../runtime-host" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -29,3 +31,8 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-policy = { path = "../kernel-policy" }
+keeper-project = { path = "../kernel-project" }
+keeper-session = { path = "../kernel-session" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
+tempfile = "3"

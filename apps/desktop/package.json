@@ -9,7 +9,7 @@
     "build:ui": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:e2e": "node --test --test-concurrency=1 tests/e2e/conversation-recovery.spec.ts tests/e2e/project-launcher.spec.ts",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e/conversation-recovery.spec.ts tests/e2e/project-launcher.spec.ts tests/e2e/wave-c1-visual-acceptance.spec.ts tests/e2e/c2-resource-workbench.spec.ts tests/e2e/c3-governed-write.spec.ts",
     "tauri": "tauri"
   },
   "dependencies": {

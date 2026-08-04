@@ -222,7 +222,7 @@ fn tools_and_vendor_noise_do_not_leak() {
 }
 
 #[test]
-fn permission_read_allows_and_completes() {
+fn permission_read_inside_project_is_rejected_without_governed_manifest() {
     let adapter = adapter_with_script("permission-read");
     let session = start(&adapter);
     let run_id = RunId::new();
@@ -237,7 +237,7 @@ fn permission_read_allows_and_completes() {
             &mut sink,
         )
         .unwrap();
-    assert_eq!(sink.kinds().last(), Some(&RuntimeEventKind::TurnCompleted));
+    assert_eq!(sink.kinds().last(), Some(&RuntimeEventKind::RunCancelled));
     adapter.shutdown().unwrap();
 }
 

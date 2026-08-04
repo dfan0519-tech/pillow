@@ -9,7 +9,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { RunActivity } from "./RunActivity";
+import { AgentActivityDisclosure } from "./AgentActivityDisclosure";
+import {
+  agentActivityFromRun,
+  resolveResourceFromActivity,
+} from "./agentActivityFromTimeline";
 import type {
   ConversationTimelineView,
   ResourceReferenceView,
@@ -22,8 +26,6 @@ import type { TimelineMessageDto } from "../../lib/conversationGateway";
 type ConversationTimelineProps = {
   timeline: ConversationTimelineView;
   run: RunView | null;
-  showMockBadge?: boolean;
-  mockBadgeLabel?: string;
   onOpenResource?: (resource: ResourceReferenceView) => void;
 };
 
@@ -40,8 +42,6 @@ type TimelineItem =
 export function ConversationTimeline({
   timeline,
   run,
-  showMockBadge = false,
-  mockBadgeLabel = "模拟运行时",
   onOpenResource,
 }: ConversationTimelineProps) {
   const items = useMemo(() => buildChronologicalItems(timeline), [timeline]);
@@ -55,12 +55,6 @@ export function ConversationTimeline({
       data-paginated={usePagination ? "true" : "false"}
       data-windowed="false"
     >
-      {showMockBadge ? (
-        <div className="mock-runtime-badge" data-testid="mock-runtime-badge">
-          {mockBadgeLabel}
-        </div>
-      ) : null}
-
       <PaginatedItemList
         items={items}
         key={timeline.conversationId}
@@ -117,20 +111,54 @@ function itemPriority(item: TimelineItem): number {
 
 function TimelineItemView({
   item,
+  conversationId,
   onOpenResource,
   run,
   streaming,
+  timeline,
 }: {
   item: TimelineItem;
+  conversationId: string;
   onOpenResource?: (resource: ResourceReferenceView) => void;
   run: RunView | null;
   streaming: boolean;
+  timeline: ConversationTimelineView;
 }) {
   if (item.type === "activity") {
+    const record = agentActivityFromRun(
+      conversationId,
+      item.activity,
+      timeline.events,
+    );
     return (
-      <RunActivity
-        activity={item.activity}
-        onOpenResource={onOpenResource}
+      <AgentActivityDisclosure
+        activity={record}
+        conversationId={conversationId}
+        onOpenArtifact={
+          onOpenResource
+            ? (relativePath, sourceToken) => {
+                const resource = resolveResourceFromActivity(
+                  item.activity,
+                  relativePath,
+                  sourceToken,
+                );
+                if (resource) {
+                  onOpenResource(resource);
+                  return;
+                }
+                // Succeeded write outcomes open via portable path only.
+                if (!sourceToken) {
+                  onOpenResource({
+                    resourceId: `write:${relativePath}`,
+                    kind: "file",
+                    label: relativePath.split("/").pop() ?? relativePath,
+                    path: relativePath,
+                    truncated: false,
+                  });
+                }
+              }
+            : undefined
+        }
       />
     );
   }
@@ -251,11 +279,13 @@ function PaginatedItemList({
       ) : null}
       {slice.map((item, offset) => (
         <TimelineItemView
+          conversationId={timeline.conversationId}
           item={item}
           key={itemKey(item, visibleRange.start + offset)}
           onOpenResource={onOpenResource}
           run={run}
           streaming={streaming}
+          timeline={timeline}
         />
       ))}
       {hasNewer ? (

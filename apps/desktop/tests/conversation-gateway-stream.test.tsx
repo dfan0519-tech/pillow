@@ -1,12 +1,9 @@
 /**
  * Gateway contract + background-stream workbench paths (Slice B1).
  */
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  MockConversationGateway,
-  MOCK_RUNTIME_BADGE,
-} from "../src/lib/mockConversationGateway";
+import { MockConversationGateway } from "../src/lib/mockConversationGateway";
 import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import { isTerminalKind } from "../src/lib/conversationGateway";
 import {
@@ -126,6 +123,24 @@ describe("conversation gateway contract", () => {
 });
 
 describe("conversation workbench stream UI", () => {
+  it("refreshes a persisted first-turn title in the rail and stage header", async () => {
+    const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
+    const user = await selectProjectAfterRender(conversationGateway);
+
+    await user.click(screen.getByRole("button", { name: "新建对话" }));
+    expect(screen.getByTestId("conversation-row")).toHaveTextContent("新对话");
+
+    const title = "修复首轮后仍显示新对话";
+    await user.type(screen.getByRole("textbox", { name: "工作请求" }), title);
+    await user.click(screen.getByTestId("composer-send"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("conversation-row")).toHaveTextContent(title);
+      expect(screen.getByTestId("active-conversation-title")).toHaveTextContent(title);
+    });
+    expect(screen.getByTestId("conversation-row")).toHaveAttribute("aria-current", "page");
+  });
+
   it("sends a turn, streams structured activity, and completes", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     const user = await selectProjectAfterRender(conversationGateway);
@@ -140,18 +155,42 @@ describe("conversation workbench stream UI", () => {
     expect(await screen.findByTestId("conversation-timeline")).toBeVisible();
     expect(screen.getByTestId("timeline-user-message")).toHaveTextContent("请分析仓库");
     expect(screen.getByTestId("timeline-assistant-message")).toBeVisible();
-    const activity = screen.getByTestId("run-activity");
+    const activity = screen.getByTestId("agent-activity-disclosure");
     expect(activity).toBeVisible();
-    expect(activity.querySelector("details")).not.toHaveAttribute("open");
-    await user.click(activity.querySelector("summary")!);
-    expect(screen.getByTestId("run-activity-plan")).toBeVisible();
-    expect(screen.getAllByTestId("run-activity-plan-step").length).toBeGreaterThan(0);
-    expect(screen.getByTestId("run-activity-tool")).toHaveTextContent(/crates|apps/);
-    expect(screen.getByTestId("run-activity-subagent")).toHaveTextContent(/explore|indexed/i);
+    const details = within(activity).getByTestId("agent-activity-details");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(within(activity).getByTestId("agent-activity-summary"));
+    expect(details).toHaveAttribute("open");
+
+    const steps = within(activity).getByTestId("agent-activity-steps");
+    expect(steps).toBeVisible();
+    expect(within(steps).getAllByRole("listitem").length).toBeGreaterThan(0);
+
+    const tools = within(activity).getByTestId("agent-activity-tools");
+    // Tool output is fail-closed: expand only to verify the fixed local state.
+    await user.click(within(tools).getByText("输出"));
+    expect(tools).toHaveTextContent("工具已返回输出。");
+    expect(tools).not.toHaveTextContent(/crates|apps\//);
+
+    const artifactToggle = within(activity).getByTestId(
+      "agent-activity-artifacts-toggle",
+    );
+    await user.click(artifactToggle);
+    expect(
+      within(activity).getByText("artifacts/workspace-summary.md"),
+    ).toBeVisible();
+
+    const subagents = within(activity).getByTestId("agent-activity-subagents");
+    expect(subagents).toHaveTextContent(/explore|indexed/i);
+
     await waitFor(() => {
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成|completed/i);
+      expect(within(activity).getByTestId("agent-activity-summary")).toHaveTextContent(
+        /已完成/,
+      );
     });
-    expect(screen.getByTestId("mock-runtime-badge")).toHaveTextContent(MOCK_RUNTIME_BADGE);
+    expect(within(steps).getByText("Scan files")).toBeVisible();
+    expect(tools).toHaveTextContent("list workspace root");
+    expect(screen.getByLabelText("运行时：模拟")).toBeVisible();
     expect(screen.queryByText(/Grok|provider|model|routeCode/i)).not.toBeInTheDocument();
   });
 
@@ -182,7 +221,7 @@ describe("conversation workbench stream UI", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("timeline-assistant-message")).toBeVisible();
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成|completed/i);
+      expect(screen.getByTestId("agent-activity-summary")).toHaveTextContent(/已完成/);
     });
   });
 
@@ -204,8 +243,8 @@ describe("conversation workbench stream UI", () => {
     await drainMock(conversationGateway);
 
     await waitFor(() => {
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已取消|cancelled/i);
+      expect(screen.getByTestId("agent-activity-summary")).toHaveTextContent(/已取消/);
     });
-    expect(screen.queryByTestId("run-status")).not.toHaveTextContent(/已完成/);
+    expect(screen.getByTestId("agent-activity-summary")).not.toHaveTextContent(/已完成/);
   });
 });

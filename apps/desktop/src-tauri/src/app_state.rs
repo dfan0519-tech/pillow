@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use keeper_project::{CreateProject, Project, ProjectId};
 use keeper_session::ConversationId;
-use keeper_storage_sqlite::{ProjectStoreError, SqliteProjectRepository};
+use keeper_storage_sqlite::{
+    ProjectStoreError, ResourceRecent, ResourceRecentError, SqliteProjectRepository,
+    SqliteResourceRecentRepository,
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -42,15 +45,47 @@ pub struct CommandError {
 
 pub struct AppState {
     projects: SqliteProjectRepository,
+    resource_recents: SqliteResourceRecentRepository,
     path_capabilities: path_scope::PathCapabilities,
 }
 
 impl AppState {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProjectStoreError> {
+        let path = path.as_ref();
+        // Projects open applies all migrations (including resource_recents).
+        let projects = SqliteProjectRepository::open(path)?;
+        let resource_recents =
+            SqliteResourceRecentRepository::open(path).map_err(map_recent_open_error)?;
         Ok(Self {
-            projects: SqliteProjectRepository::open(path)?,
+            projects,
+            resource_recents,
             path_capabilities: path_scope::PathCapabilities::default(),
         })
+    }
+
+    /// Look up a registered project by id only. Never falls back to cwd or last-opened.
+    pub fn get_registered_project(&self, project_id: &str) -> Result<Project, CommandError> {
+        let id = parse_project_id(project_id)?;
+        self.projects
+            .get(id)
+            .map_err(map_store_error)?
+            .ok_or_else(project_not_found)
+    }
+
+    pub(crate) fn record_resource_recent(
+        &self,
+        project_id: &str,
+        path: &str,
+    ) -> Result<(), ResourceRecentError> {
+        self.resource_recents.record(project_id, path)
+    }
+
+    pub(crate) fn list_resource_recents(
+        &self,
+        project_id: &str,
+        limit: u32,
+    ) -> Result<Vec<ResourceRecent>, ResourceRecentError> {
+        self.resource_recents.list(project_id, limit)
     }
 
     pub fn register_picker_selection(
@@ -357,5 +392,16 @@ fn command_error(code: &'static str, message: &'static str) -> CommandError {
     CommandError {
         code,
         message: message.to_owned(),
+    }
+}
+
+fn map_recent_open_error(error: ResourceRecentError) -> ProjectStoreError {
+    // Projects already opened the same path; recents failure is treated as
+    // store unavailability without constructing a rusqlite::Error here.
+    match error {
+        ResourceRecentError::LockPoisoned => ProjectStoreError::LockPoisoned,
+        ResourceRecentError::Sqlite
+        | ResourceRecentError::InvalidProjectId
+        | ResourceRecentError::InvalidPath => ProjectStoreError::LockPoisoned,
     }
 }

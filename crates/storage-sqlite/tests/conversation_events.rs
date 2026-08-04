@@ -492,3 +492,119 @@ fn load_timeline_orders_events_by_owning_run_then_sequence() {
         "events must be grouped by run conversation order, then sequence"
     );
 }
+
+#[test]
+fn append_and_load_timeline_persists_all_four_process_kinds_in_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let (projects, sessions) = open_pair(&temp);
+    let project = seed_project(&projects, &temp, "process-events");
+    let conversation = sessions
+        .create_conversation(NewConversation {
+            project_id: project.id,
+            title: None,
+        })
+        .unwrap();
+    let run = sessions
+        .create_run(NewRun {
+            conversation_id: conversation.id,
+            user_message: "run a process".into(),
+        })
+        .unwrap();
+
+    // Run remains non-terminal while process kinds stream (append_event alone
+    // does not apply status; process kinds are non-terminal by vocabulary).
+    assert_eq!(run.status, keeper_session::RunStatus::Pending);
+    assert!(!RuntimeEventKind::ProcessProposalRequested.is_terminal());
+    assert!(!RuntimeEventKind::ProcessProposalDecided.is_terminal());
+    assert!(!RuntimeEventKind::ProcessStarted.is_terminal());
+    assert!(!RuntimeEventKind::ProcessTerminalOutcome.is_terminal());
+    assert!(
+        RuntimeEventKind::ProcessProposalRequested
+            .status_for_kind()
+            .is_none()
+    );
+    assert!(
+        RuntimeEventKind::ProcessTerminalOutcome
+            .status_for_kind()
+            .is_none()
+    );
+
+    let kinds = [
+        RuntimeEventKind::ProcessProposalRequested,
+        RuntimeEventKind::ProcessProposalDecided,
+        RuntimeEventKind::ProcessStarted,
+        RuntimeEventKind::ProcessTerminalOutcome,
+    ];
+    let mut recorded = Vec::new();
+    for (sequence, kind) in kinds.iter().copied().enumerate() {
+        let event = sessions
+            .append_event(NewRunEvent {
+                run_id: run.id,
+                sequence: sequence as u64,
+                kind,
+                payload_json: format!(r#"{{"kind":"{}"}}"#, kind.as_str()),
+            })
+            .unwrap();
+        assert_eq!(event.sequence, sequence as u64);
+        assert_eq!(event.kind, kind);
+        recorded.push(event);
+    }
+
+    // Same-kind replay is idempotent (first payload wins).
+    let replay = sessions
+        .append_event(NewRunEvent {
+            run_id: run.id,
+            sequence: 1,
+            kind: RuntimeEventKind::ProcessProposalDecided,
+            payload_json: r#"{"kind":"should-not-replace"}"#.into(),
+        })
+        .unwrap();
+    assert_eq!(replay, recorded[1]);
+    assert_eq!(
+        replay.payload_json,
+        format!(
+            r#"{{"kind":"{}"}}"#,
+            RuntimeEventKind::ProcessProposalDecided.as_str()
+        )
+    );
+
+    // Different-kind conflict leaves timeline unchanged.
+    let conflict = sessions
+        .append_event(NewRunEvent {
+            run_id: run.id,
+            sequence: 2,
+            kind: RuntimeEventKind::Heartbeat,
+            payload_json: r#"{}"#.into(),
+        })
+        .unwrap_err();
+    assert_eq!(
+        conflict,
+        SessionError::ConflictingEventKind {
+            run_id: run.id,
+            sequence: 2,
+            persisted: RuntimeEventKind::ProcessStarted,
+            got: RuntimeEventKind::Heartbeat,
+        }
+    );
+
+    let timeline = sessions.load_timeline(conversation.id).unwrap();
+    assert_eq!(timeline.events.len(), 4);
+    assert_eq!(
+        timeline
+            .events
+            .iter()
+            .map(|e| (e.sequence, e.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, RuntimeEventKind::ProcessProposalRequested),
+            (1, RuntimeEventKind::ProcessProposalDecided),
+            (2, RuntimeEventKind::ProcessStarted),
+            (3, RuntimeEventKind::ProcessTerminalOutcome),
+        ]
+    );
+    assert_eq!(timeline.events, recorded);
+
+    // Run status stays pending: process kinds do not close the run.
+    assert_eq!(timeline.runs.len(), 1);
+    assert_eq!(timeline.runs[0].status, keeper_session::RunStatus::Pending);
+}

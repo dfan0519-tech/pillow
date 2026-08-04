@@ -19,22 +19,29 @@ mod validate;
 
 pub use adapter::{AgentRuntimeAdapter, EventSink};
 pub use error::RuntimeError;
+pub use keeper_policy::WriteProposalState;
 pub use tool::{
     ArgumentsDigest, FsListArguments, FsListEntry, FsListOutput, FsReadArguments, FsReadOutput,
-    FsSearchArguments, FsSearchMatch, FsSearchOutput, ToolActiveContext, ToolArgumentSpec,
-    ToolArgumentType, ToolArguments, ToolCallReservation, ToolCallReservationDecision,
-    ToolCallReservationKey, ToolContentKind, ToolEntryKind, ToolExecutionLimits,
-    ToolExecutionState, ToolId, ToolManifest, ToolProposal, ToolProposalFingerprint,
-    ToolProtocolError, ToolProtocolErrorCode, ToolPublicError, ToolPublicErrorCode, ToolResult,
-    ValidatedToolProposal, ValidatedToolResult, canonical_arguments_digest, fixed_tool_manifests,
+    FsSearchArguments, FsSearchMatch, FsSearchOutput, FsWriteArguments, FsWriteOutput,
+    PROCESS_ARGV_BYTE_CAP, PROCESS_ARGV_COUNT_CAP, ProcessRunArguments, ProcessRunOutput,
+    ToolActiveContext, ToolArgumentSpec, ToolArgumentType, ToolArguments, ToolCallReservation,
+    ToolCallReservationDecision, ToolCallReservationKey, ToolContentKind, ToolEntryKind,
+    ToolExecutionLimits, ToolExecutionState, ToolId, ToolManifest, ToolProposal,
+    ToolProposalFingerprint, ToolProtocolError, ToolProtocolErrorCode, ToolPublicError,
+    ToolPublicErrorCode, ToolResult, ValidatedToolProposal, ValidatedToolResult,
+    WRITE_CONTENT_BYTE_CAP, WriteMode, WritePublicErrorCode, canonical_arguments_digest,
+    fixed_tool_manifests,
 };
 pub use types::{
     ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PlanStep, PlanUpdatedPayload,
-    ReasoningSummaryDeltaPayload, RunCancelledPayload, RunId, RunStartedPayload, RunStatus,
-    RuntimeEvent, RuntimeEventKind, RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn,
-    StartSession, SubagentCompletedPayload, SubagentProgressPayload, SubagentStartedPayload,
-    SubagentStatus, ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload,
-    ToolCallStatus, TurnCompletedPayload, TurnFailedPayload,
+    ProcessProposalDecidedPayload, ProcessProposalRequestedPayload, ProcessRiskClass,
+    ProcessStartedPayload, ProcessTerminalOutcomePayload, ReasoningSummaryDeltaPayload,
+    RunCancelledPayload, RunId, RunStartedPayload, RunStatus, RuntimeEvent, RuntimeEventKind,
+    RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn, StartSession,
+    SubagentCompletedPayload, SubagentProgressPayload, SubagentStartedPayload, SubagentStatus,
+    ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload, ToolCallStatus,
+    TurnCompletedPayload, TurnFailedPayload, WriteProposalRequestedPayload,
+    WriteProposalResolvedPayload,
 };
 pub use validate::validate_payload;
 
@@ -91,6 +98,52 @@ mod tests {
                 "artifact_id": "art-1",
                 "path": "out/report.md",
                 "kind": "markdown"
+            }),
+            RuntimeEventKind::WriteProposalRequested => serde_json::json!({
+                "proposal_id": "wp-1",
+                "path": "src/example.ts",
+                "mode": "create",
+                "summary": "Create src/example.ts",
+                "expires_at": "2026-08-01T12:10:00Z"
+            }),
+            RuntimeEventKind::WriteProposalResolved => serde_json::json!({
+                "proposal_id": "wp-1",
+                "path": "src/example.ts",
+                "mode": "create",
+                "state": "succeeded"
+            }),
+            RuntimeEventKind::ProcessProposalRequested => serde_json::json!({
+                "proposal_id": "ep-1",
+                "program": "node",
+                "argv": ["--version"],
+                "portable_cwd": ".",
+                "summary": "\"node\" \"--version\"",
+                "risk_class": "standard",
+                "expires_at": "2026-08-01T12:10:00Z"
+            }),
+            RuntimeEventKind::ProcessProposalDecided => serde_json::json!({
+                "proposal_id": "ep-1",
+                "program": "node",
+                "decision": "approve_once",
+                "state": "approved"
+            }),
+            RuntimeEventKind::ProcessStarted => serde_json::json!({
+                "proposal_id": "ep-1",
+                "program": "node",
+                "argv": ["--version"],
+                "portable_cwd": "."
+            }),
+            RuntimeEventKind::ProcessTerminalOutcome => serde_json::json!({
+                "proposal_id": "ep-1",
+                "program": "node",
+                "state": "succeeded",
+                "exit_code": 0,
+                "duration_ms": 12,
+                "truncated": false,
+                "encoding_lossy": false,
+                "captured_bytes": 8,
+                "cancelled": false,
+                "timed_out": false
             }),
             RuntimeEventKind::TurnCompleted => serde_json::json!({
                 "summary": "done"
@@ -265,6 +318,22 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_value(HeartbeatPayload { tick: 3 }).unwrap(),
+            serde_json::to_value(WriteProposalRequestedPayload {
+                proposal_id: "wp-1".into(),
+                path: "src/a.ts".into(),
+                mode: WriteMode::Create,
+                summary: "Create src/a.ts".into(),
+                expires_at: fixed_time(),
+            })
+            .unwrap(),
+            serde_json::to_value(WriteProposalResolvedPayload {
+                proposal_id: "wp-1".into(),
+                path: "src/a.ts".into(),
+                mode: WriteMode::Create,
+                state: WriteProposalState::Succeeded,
+                error_code: None,
+            })
+            .unwrap(),
         ];
 
         for sample in samples {
@@ -285,7 +354,38 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_covers_fifteen_fixed_kinds() {
-        assert_eq!(RuntimeEventKind::all().len(), 15);
+    fn vocabulary_covers_twenty_one_fixed_kinds() {
+        // Base 13 + write pair (2) + process quartet (4) + terminals/heartbeat (2) = 21.
+        assert_eq!(RuntimeEventKind::all().len(), 21);
+    }
+
+    #[test]
+    fn write_proposal_event_payloads_reject_secret_fields() {
+        let err = validate_payload(
+            RuntimeEventKind::WriteProposalRequested,
+            &serde_json::json!({
+                "proposal_id": "wp-1",
+                "path": "src/a.ts",
+                "mode": "create",
+                "summary": "Create src/a.ts",
+                "expires_at": "2026-08-01T12:10:00Z",
+                "content": "secret body"
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidEvent { .. }), "{err}");
+
+        let err = validate_payload(
+            RuntimeEventKind::WriteProposalResolved,
+            &serde_json::json!({
+                "proposal_id": "wp-1",
+                "path": "src/a.ts",
+                "mode": "create",
+                "state": "succeeded",
+                "approval_grant": "not-allowed"
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidEvent { .. }), "{err}");
     }
 }

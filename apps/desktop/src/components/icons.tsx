@@ -57,9 +57,9 @@ function IconShell({
   );
 }
 
-/** Quiet product mark — geometric K monogram (functional brand glyph). */
-export function IconKeeperMark({ size = 20, title = "Keeper", className = "" }: IconProps) {
-  const classes = ["g-icon", "g-icon--keeper-mark", className].filter(Boolean).join(" ");
+/** Quiet product mark — geometric P monogram for the desktop shell. */
+export function IconPillowMark({ size = 20, title, className = "" }: IconProps) {
+  const classes = ["g-icon", "g-icon--pillow-mark", className].filter(Boolean).join(" ");
   return (
     <span
       className={classes}
@@ -95,7 +95,7 @@ export function IconKeeperMark({ size = 20, title = "Keeper", className = "" }: 
           opacity="0.12"
         />
         <path
-          d="M8.25 7h2.1v4.05L14.9 7h2.55l-4.15 4.35L17.7 17h-2.6l-3.75-4.7V17h-2.1V7z"
+          d="M8 7h4.05a3.65 3.65 0 0 1 0 7.3H10.2V17H8V7zm2.2 2v3.1h1.76a1.55 1.55 0 1 0 0-3.1H10.2z"
           fill="currentColor"
         />
       </svg>
@@ -190,6 +190,25 @@ export function IconCircleDot(props: IconProps) {
     <IconShell {...props}>
       <circle cx="12" cy="12" r="8" />
       <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+    </IconShell>
+  );
+}
+
+export function IconTerminal(props: IconProps) {
+  return (
+    <IconShell {...props}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m7 9 3 3-3 3" />
+      <path d="M13 15h4" />
+    </IconShell>
+  );
+}
+
+export function IconLock(props: IconProps) {
+  return (
+    <IconShell {...props}>
+      <rect x="5" y="10" width="14" height="10" rx="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" />
     </IconShell>
   );
 }

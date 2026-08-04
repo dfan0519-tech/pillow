@@ -1,3 +1,7 @@
+// Process tool payloads (process.run@1) convert through typed
+// ProcessRunArguments / ProcessRunOutput validation in validate.rs.
+// This module only owns the shared proposal/result envelope wire parsers.
+
 use serde::Deserialize;
 use serde_json::Value;
 

@@ -23,10 +23,7 @@ import {
   type RunActivityView,
 } from "../src/features/conversations/conversationReducer";
 import { RunActivity } from "../src/features/conversations/RunActivity";
-import {
-  MockConversationGateway,
-  MOCK_RUNTIME_BADGE,
-} from "../src/lib/mockConversationGateway";
+import { MockConversationGateway } from "../src/lib/mockConversationGateway";
 import { materializeCanonicalEvents } from "../src/lib/canonicalTurnFixture";
 import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import { Composer } from "../src/features/workbench/Composer";
@@ -133,16 +130,82 @@ describe("conversation workbench UI", () => {
       "project-b",
       "B activity",
     );
-    const eventsA = materializeCanonicalEvents("c-a", "run-a").map((event) =>
-      event.kind === "reasoning_summary_delta"
-        ? { ...event, conversationId: chatA.id, payload: { text: "A-only detail" } }
-        : { ...event, conversationId: chatA.id },
-    );
-    const eventsB = materializeCanonicalEvents("c-b", "run-b").map((event) =>
-      event.kind === "reasoning_summary_delta"
-        ? { ...event, conversationId: chatB.id, payload: { text: "B-only detail" } }
-        : { ...event, conversationId: chatB.id },
-    );
+    // Distinct labels come from conversation-owned structured activity, never
+    // provider tool output, so project switching cannot hide a raw-output leak.
+    const eventsA = materializeCanonicalEvents("c-a", "run-a").map((event) => {
+      if (event.kind === "plan_updated") {
+        return {
+          ...event,
+          conversationId: chatA.id,
+          payload: {
+            ...event.payload,
+            steps: event.payload.steps.map((step) => ({
+              ...step,
+              title: "A owned step",
+            })),
+          },
+        };
+      }
+      if (event.kind === "tool_call_started") {
+        return {
+          ...event,
+          conversationId: chatA.id,
+          payload: { ...event.payload, summary: "A owned tool" },
+        };
+      }
+      if (event.kind === "subagent_started") {
+        return {
+          ...event,
+          conversationId: chatA.id,
+          payload: { ...event.payload, role: "A owned subagent" },
+        };
+      }
+      if (event.kind === "artifact_produced") {
+        return {
+          ...event,
+          conversationId: chatA.id,
+          payload: { ...event.payload, path: "artifacts/a-owned.md" },
+        };
+      }
+      return { ...event, conversationId: chatA.id };
+    });
+    const eventsB = materializeCanonicalEvents("c-b", "run-b").map((event) => {
+      if (event.kind === "plan_updated") {
+        return {
+          ...event,
+          conversationId: chatB.id,
+          payload: {
+            ...event.payload,
+            steps: event.payload.steps.map((step) => ({
+              ...step,
+              title: "B owned step",
+            })),
+          },
+        };
+      }
+      if (event.kind === "tool_call_started") {
+        return {
+          ...event,
+          conversationId: chatB.id,
+          payload: { ...event.payload, summary: "B owned tool" },
+        };
+      }
+      if (event.kind === "subagent_started") {
+        return {
+          ...event,
+          conversationId: chatB.id,
+          payload: { ...event.payload, role: "B owned subagent" },
+        };
+      }
+      if (event.kind === "artifact_produced") {
+        return {
+          ...event,
+          conversationId: chatB.id,
+          payload: { ...event.payload, path: "artifacts/b-owned.md" },
+        };
+      }
+      return { ...event, conversationId: chatB.id };
+    });
     conversationGateway.seedTimeline(chatA.id, {
       events: eventsA,
       runs: [
@@ -161,13 +224,36 @@ describe("conversation workbench UI", () => {
 
     await user.click(await screen.findByRole("button", { name: "Project A" }));
     await user.click(await screen.findByRole("button", { name: "A activity" }));
-    expect(await screen.findByText("A-only detail")).toBeInTheDocument();
+    const activityA = await screen.findByTestId("agent-activity-disclosure");
+    await user.click(within(activityA).getByTestId("agent-activity-summary"));
+    expect(within(activityA).getAllByText("A owned step")).toHaveLength(2);
+    expect(within(activityA).getByText("A owned tool")).toBeInTheDocument();
+    expect(within(activityA).getByText("A owned subagent")).toBeInTheDocument();
+    await user.click(
+      within(activityA).getByTestId("agent-activity-artifacts-toggle"),
+    );
+    expect(
+      within(activityA).getByText("artifacts/a-owned.md"),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Project B" }));
     await user.click(await screen.findByRole("button", { name: "B activity" }));
-    expect(await screen.findByText("B-only detail")).toBeInTheDocument();
-    expect(screen.queryByText("A-only detail")).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("run-activity")).toHaveLength(1);
+    const activityB = await screen.findByTestId("agent-activity-disclosure");
+    await user.click(within(activityB).getByTestId("agent-activity-summary"));
+    expect(within(activityB).getAllByText("B owned step")).toHaveLength(2);
+    expect(within(activityB).getByText("B owned tool")).toBeInTheDocument();
+    expect(within(activityB).getByText("B owned subagent")).toBeInTheDocument();
+    await user.click(
+      within(activityB).getByTestId("agent-activity-artifacts-toggle"),
+    );
+    expect(
+      within(activityB).getByText("artifacts/b-owned.md"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("A owned step")).not.toBeInTheDocument();
+    expect(screen.queryByText("A owned tool")).not.toBeInTheDocument();
+    expect(screen.queryByText("A owned subagent")).not.toBeInTheDocument();
+    expect(screen.queryByText("artifacts/a-owned.md")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("agent-activity-disclosure")).toHaveLength(1);
   });
 
   it("clears conversation scope when opening a registered project", async () => {
@@ -212,13 +298,11 @@ describe("conversation workbench UI", () => {
     expect(screen.queryByText("Stay behind")).not.toBeInTheDocument();
   });
 
-  it("shows 模拟运行时 before the first send when mock gateway is active", async () => {
+  it("shows the explicit simulated runtime context before the first send", async () => {
     const conversationGateway = new MockConversationGateway({ stepDelayMs: 0 });
     await selectProjectAfterRender(conversationGateway);
 
-    expect(await screen.findByTestId("mock-runtime-badge")).toHaveTextContent(
-      MOCK_RUNTIME_BADGE,
-    );
+    expect(await screen.findByLabelText("运行时：模拟")).toBeVisible();
     expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
   });
 
@@ -274,7 +358,10 @@ describe("conversation workbench UI", () => {
     await drainMock(conversationGateway);
 
     await waitFor(() => {
-      expect(screen.getByTestId("run-status")).toHaveTextContent(/已完成/);
+      // Timeline mounts AgentActivityDisclosure; completed status is human-readable.
+      expect(screen.getByTestId("agent-activity-summary")).toHaveTextContent(
+        /已完成/,
+      );
     });
 
     await user.type(
@@ -349,19 +436,37 @@ describe("conversation workbench UI", () => {
       />,
     );
 
-    const activities = screen.getAllByTestId("run-activity");
+    const activities = screen.getAllByTestId("agent-activity-disclosure");
     expect(activities).toHaveLength(2);
-    expect(activities.map((node) => node.getAttribute("data-run-id"))).toEqual([
-      "run-1",
-      "run-2",
-    ]);
+    // Raw run IDs must never appear as DOM attributes or visible copy.
+    for (const node of activities) {
+      expect(node.getAttribute("data-run-id")).toBeNull();
+      expect(node.textContent ?? "").not.toContain("run-1");
+      expect(node.textContent ?? "").not.toContain("run-2");
+    }
 
-    const firstDisclosure = activities[0]!.querySelector("details");
-    expect(firstDisclosure).not.toBeNull();
-    expect(firstDisclosure).not.toHaveAttribute("open");
-    await userEvent.setup().click(firstDisclosure!.querySelector("summary")!);
-    expect(firstDisclosure).toHaveAttribute("open");
-    expect(within(activities[0]!).getByText(/crates\//)).toBeVisible();
+    const firstDetails = within(activities[0]!).getByTestId(
+      "agent-activity-details",
+    );
+    expect(firstDetails).not.toHaveAttribute("open");
+    const user = userEvent.setup();
+    await user.click(
+      within(activities[0]!).getByTestId("agent-activity-summary"),
+    );
+    expect(firstDetails).toHaveAttribute("open");
+    // Tool output stays fail-closed while structured artifact evidence remains
+    // reachable through progressive disclosure.
+    const nestedSummaries = within(activities[0]!).getAllByText("输出");
+    expect(nestedSummaries.length).toBeGreaterThan(0);
+    await user.click(nestedSummaries[0]!);
+    expect(within(activities[0]!).getByText("工具已返回输出。")).toBeVisible();
+    expect(within(activities[0]!).queryByText(/crates\//)).toBeNull();
+    await user.click(
+      within(activities[0]!).getByTestId("agent-activity-artifacts-toggle"),
+    );
+    expect(
+      within(activities[0]!).getByText("artifacts/workspace-summary.md"),
+    ).toBeVisible();
   });
 
   it("renders authoritative eventless run rows even without messages", () => {
@@ -397,16 +502,17 @@ describe("conversation workbench UI", () => {
       />,
     );
 
-    const activities = screen.getAllByTestId("run-activity");
+    const activities = screen.getAllByTestId("agent-activity-disclosure");
     expect(activities).toHaveLength(2);
-    expect(activities[0]).toHaveAttribute("data-run-id", "pending-run");
-    expect(activities[1]).toHaveAttribute("data-run-id", "interrupted-run");
-    expect(within(activities[0]!).getByTestId("run-status")).toHaveTextContent(
-      "等待中",
-    );
-    expect(within(activities[1]!).getByTestId("run-status")).toHaveTextContent(
-      "已中断",
-    );
+    // Raw run IDs are keys only — never attributes or visible copy.
+    for (const node of activities) {
+      expect(node.getAttribute("data-run-id")).toBeNull();
+      expect(node.textContent ?? "").not.toContain("pending-run");
+      expect(node.textContent ?? "").not.toContain("interrupted-run");
+    }
+    const summaries = screen.getAllByTestId("agent-activity-summary");
+    expect(summaries[0]).toHaveTextContent("等待中");
+    expect(summaries[1]).toHaveTextContent("已中断");
   });
 
   it("preserves Slice A empty and selected empty-conversation surfaces", async () => {
@@ -414,7 +520,7 @@ describe("conversation workbench UI", () => {
     renderApp(conversationGateway, []);
 
     expect(await screen.findByTestId("empty-workbench")).toBeVisible();
-    expect(screen.queryByTestId("mock-runtime-badge")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("运行时：模拟")).toBeVisible();
     expect(screen.queryByTestId("conversation-timeline")).not.toBeInTheDocument();
 
     const withProject = new MockConversationGateway({ stepDelayMs: 0 });
@@ -424,8 +530,7 @@ describe("conversation workbench UI", () => {
     expect(await screen.findByTestId("selected-workbench")).toBeVisible();
     expect(screen.getByTestId("project-conversations")).toBeVisible();
     expect(screen.getByText(/尚无对话/)).toBeVisible();
-    // Mock badge is intentional on selected project with mock gateway (before first send).
-    expect(screen.getByTestId("mock-runtime-badge")).toBeVisible();
+    expect(screen.getAllByLabelText("运行时：模拟")).toHaveLength(2);
   });
 });
 
@@ -692,6 +797,7 @@ describe("run activity disclosure", () => {
       />,
     );
     await waitFor(() => expect(details).not.toHaveAttribute("open"));
+    expect(screen.getByTestId("run-status")).toHaveTextContent("思考完成");
 
     await userEvent.setup().click(details.querySelector("summary")!);
     expect(details).toHaveAttribute("open");
@@ -841,14 +947,14 @@ describe("run resource navigation", () => {
       />,
     );
 
-    const activity = screen.getByTestId("run-activity");
-    const disclosure = activity.querySelector("details")!;
-    disclosure.open = true;
-    expect(
-      within(activity).getByText("输入 · README.md · 0–1024 字节"),
-    ).toBeVisible();
-
+    const activity = screen.getByTestId("agent-activity-disclosure");
     const user = userEvent.setup();
+    await user.click(within(activity).getByTestId("agent-activity-summary"));
+    const artifactToggle = within(activity).getByTestId(
+      "agent-activity-artifacts-toggle",
+    );
+    await user.click(artifactToggle);
+
     await user.click(
       within(activity).getByRole("button", { name: "打开 README.md" }),
     );
@@ -937,8 +1043,13 @@ describe("run resource navigation", () => {
         <Workbench {...props} project={projectA} />
       </Profiler>,
     );
-    const details = screen.getByTestId("run-activity").querySelector("details")!;
-    details.open = true;
+    const disclosure = screen.getByTestId("agent-activity-disclosure");
+    await userEvent.setup().click(
+      within(disclosure).getByTestId("agent-activity-summary"),
+    );
+    await userEvent.setup().click(
+      within(disclosure).getByTestId("agent-activity-artifacts-toggle"),
+    );
     await userEvent.setup().click(
       screen.getByRole("button", { name: "打开 Project A report" }),
     );

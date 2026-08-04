@@ -10,11 +10,12 @@ import type { ProjectDto, ProjectGateway } from "../src/lib/projectGateway";
 import tokensCss from "../src/styles/tokens.css?raw";
 import workbenchShellCss from "../src/styles/workbench-shell.css?raw";
 import workbenchChromeCss from "../src/styles/workbench-chrome.css?raw";
+import workbenchConversationCss from "../src/styles/workbench-conversation.css?raw";
 import "../src/styles/tokens.css";
 import "../src/styles/workbench.css";
 
 /** Composed workbench stylesheet (cascade order matches workbench.css imports). */
-const workbenchCss = `${workbenchShellCss}\n${workbenchChromeCss}`;
+const workbenchCss = `${workbenchShellCss}\n${workbenchConversationCss}\n${workbenchChromeCss}`;
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
@@ -45,8 +46,10 @@ function fixtureGateway(): ProjectGateway {
 }
 
 describe("grok shell visual contract", () => {
-  it("uses upstream indigo accent and rejects the old #1769aa accent", () => {
-    expect(tokensCss).toMatch(/--accent:\s*#3d5fd9/i);
+  it("uses upstream dark tokens and rejects the old light prototype accent", () => {
+    expect(tokensCss).toMatch(/color-scheme:\s*dark/i);
+    expect(tokensCss).toMatch(/--bg-main:\s*#151515/i);
+    expect(tokensCss).toMatch(/--accent:\s*#8aa4ff/i);
     // Token assignment only (comments are free-form).
     expect(tokensCss).not.toMatch(/--accent:\s*#1769aa/i);
     expect(workbenchCss).not.toMatch(/#1769aa/i);
@@ -86,6 +89,8 @@ describe("grok shell visual contract", () => {
     expect(document.querySelectorAll(".app-sidebar").length).toBe(1);
     expect(document.querySelector(".project-sidebar")).toBeNull();
     expect(document.querySelector(".conversation-sidebar")).toBeNull();
+    expect(document.querySelector(".titlebar")).toBeNull();
+    expect(document.querySelectorAll(".sidebar-brand-row")).toHaveLength(1);
     // Workbench is stage + optional resource only (no second rail column).
     expect(workbenchCss).toMatch(
       /\.workbench\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
@@ -102,5 +107,45 @@ describe("grok shell visual contract", () => {
     // No hard footer divider on composer.
     const footerBlock = workbenchCss.match(/\.composer__footer\s*\{[^}]+\}/)?.[0] ?? "";
     expect(footerBlock).not.toMatch(/border-top:/);
+    const focusWithinBlock =
+      workbenchChromeCss.match(/\.composer:focus-within\s*\{[^}]+\}/)?.[0] ?? "";
+    expect(focusWithinBlock).toMatch(/border-color:\s*var\(--border-strong\)/);
+    expect(focusWithinBlock).toMatch(/box-shadow:/);
+
+    const focusVisibleBlock =
+      workbenchChromeCss.match(
+        /\.composer textarea:focus-visible\s*\{[^}]+\}/,
+      )?.[0] ?? "";
+    const focusToken =
+      tokensCss.match(/--border-focus:\s*([^;]+);/)?.[1]?.trim() ?? "";
+    const outlineWidth = Number(
+      focusVisibleBlock.match(
+        /outline(?:-width)?:\s*([0-9.]+)(?:px|rem|em)\b/,
+      )?.[1] ?? 0,
+    );
+    const outlineStyle =
+      focusVisibleBlock.match(
+        /outline:\s*[0-9.]+(?:px|rem|em)\s+([a-z-]+)/,
+      )?.[1] ??
+      focusVisibleBlock.match(/outline-style:\s*([a-z-]+)/)?.[1] ??
+      "";
+
+    expect(focusVisibleBlock).toMatch(/var\(--border-focus\)/);
+    expect(focusToken).not.toMatch(/\btransparent\b/i);
+    expect(focusToken).not.toMatch(/rgba\([^)]*,\s*0(?:\.0+)?\s*\)/i);
+    expect(outlineWidth).toBeGreaterThan(0);
+    expect(outlineStyle).toMatch(/^(?:solid|dashed|dotted|double)$/);
+  });
+
+  it("keeps collapsed run activity as a quiet inline disclosure", () => {
+    const activityBlock = workbenchConversationCss.match(
+      /\.run-activity\s*\{[^}]+\}/,
+    )?.[0] ?? "";
+    const summaryBlock = workbenchConversationCss.match(
+      /\.run-activity summary\s*\{[^}]+\}/,
+    )?.[0] ?? "";
+    expect(activityBlock).toMatch(/border:\s*0/);
+    expect(activityBlock).toMatch(/background:\s*transparent/);
+    expect(summaryBlock).toMatch(/display:\s*inline-flex/);
   });
 });

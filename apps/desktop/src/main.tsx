@@ -7,17 +7,22 @@ import {
 } from "./lib/desktopLifecycle";
 import { TauriConversationGateway } from "./lib/tauriConversationGateway";
 import { TauriProjectGateway } from "./lib/tauriProjectGateway";
+import { TauriResourceGateway } from "./lib/tauriResourceGateway";
+import { TauriWriteApprovalGateway } from "./lib/tauriWriteApprovalGateway";
 import type { ConversationGateway } from "./lib/conversationGateway";
 import type { ProjectGateway } from "./lib/projectGateway";
 import { invoke } from "@tauri-apps/api/core";
 import "./styles/tokens.css";
 import "./styles/workbench.css";
+import "./styles/write-approval.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing renderer root");
 
 const projectGateway = new TauriProjectGateway();
 const conversationGateway = new TauriConversationGateway();
+const resourceGateway = new TauriResourceGateway();
+const writeApprovalGateway = new TauriWriteApprovalGateway();
 const desktopLifecycle = new TauriDesktopLifecycle();
 
 createRoot(root).render(
@@ -25,6 +30,8 @@ createRoot(root).render(
     <App
       gateway={projectGateway}
       conversationGateway={conversationGateway}
+      resourceGateway={resourceGateway}
+      writeApprovalGateway={writeApprovalGateway}
       onProjectLauncherReady={() => desktopLifecycle.markProjectLauncherReady()}
     />
   </StrictMode>,

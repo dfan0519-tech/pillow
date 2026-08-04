@@ -16,14 +16,18 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 # Grok ACP is composed only in desktop `runtime_composition` (not domain/service).
 keeper-adapter-grok-acp = { path = "../../../crates/adapter-grok-acp" }
 keeper-agent-protocol = { path = "../../../crates/agent-protocol" }
+keeper-policy = { path = "../../../crates/kernel-policy" }
 keeper-project = { path = "../../../crates/kernel-project" }
+keeper-resource = { path = "../../../crates/kernel-resource" }
 keeper-runtime-host = { path = "../../../crates/runtime-host" }
 keeper-session = { path = "../../../crates/kernel-session" }
 keeper-storage-sqlite = { path = "../../../crates/storage-sqlite" }
+keeper-tool-executor = { path = "../../../crates/tool-executor" }
 rfd = "0.15"
 serde.workspace = true
 serde_json.workspace = true

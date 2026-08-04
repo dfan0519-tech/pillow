@@ -8,7 +8,7 @@ use keeper_agent_protocol::{
     validate_payload,
 };
 
-use crate::delivery::BoundedDelivery;
+use crate::delivery::{BoundedDelivery, is_safe_post_cancel_write_resolution};
 
 /// Collects events into a vector (tests and in-process capture).
 #[derive(Debug, Default)]
@@ -71,7 +71,14 @@ pub struct ProtocolGuardSink<'a> {
     terminal_seen: bool,
     /// When set, host cancel wins: adapter events are replaced with
     /// `run_cancelled` and further emits return [`RuntimeError::Cancelled`].
+    ///
+    /// Exception: at most one narrowly validated
+    /// `write_proposal_resolved` (`cancelled`/`cancelled` or
+    /// `interrupted`/`interrupted`) may commit before the host-forced
+    /// terminal so the UI can event-drive pending-proposal refresh.
     cancel: Option<&'a AtomicBool>,
+    /// Whether the single post-cancel safe write resolution already committed.
+    post_cancel_safe_resolution_emitted: bool,
 }
 
 impl<'a> ProtocolGuardSink<'a> {
@@ -82,6 +89,7 @@ impl<'a> ProtocolGuardSink<'a> {
             next_sequence: 1,
             terminal_seen: false,
             cancel: None,
+            post_cancel_safe_resolution_emitted: false,
         }
     }
 
@@ -97,6 +105,7 @@ impl<'a> ProtocolGuardSink<'a> {
             next_sequence: 1,
             terminal_seen: false,
             cancel: Some(cancel),
+            post_cancel_safe_resolution_emitted: false,
         }
     }
 
@@ -184,6 +193,15 @@ impl<'a> ProtocolGuardSink<'a> {
 impl EventSink for ProtocolGuardSink<'_> {
     fn emit(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
         if self.host_cancelled() {
+            // Permit at most one safe write_proposal_resolved before the
+            // host-forced run_cancelled. Everything else fails closed.
+            if !self.terminal_seen
+                && !self.post_cancel_safe_resolution_emitted
+                && is_safe_post_cancel_write_resolution(&event)
+                && self.emit_validated(event).is_ok()
+            {
+                self.post_cancel_safe_resolution_emitted = true;
+            }
             if !self.terminal_seen {
                 self.force_run_cancelled()?;
             }
@@ -384,6 +402,299 @@ mod tests {
             collect.events[1].kind,
             RuntimeEventKind::RunCancelled,
             "host cancel must win over turn_completed"
+        );
+    }
+
+    fn write_resolved_payload(state: &str, error_code: Option<&str>) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert("proposal_id".into(), serde_json::json!("wp-1"));
+        map.insert("path".into(), serde_json::json!("note.txt"));
+        map.insert("mode".into(), serde_json::json!("create"));
+        map.insert("state".into(), serde_json::json!(state));
+        if let Some(code) = error_code {
+            map.insert("error_code".into(), serde_json::json!(code));
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// C3-F: after host cancel, exactly one safe write_proposal_resolved
+    /// (cancelled/cancelled) must commit before the host-forced run_cancelled.
+    #[test]
+    fn post_cancel_safe_write_resolution_cancelled_before_run_cancelled() {
+        let mut collect = CollectingSink::default();
+        let run = RunId::new();
+        let cancel = AtomicBool::new(false);
+        {
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::RunStarted,
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            cancel.store(true, Ordering::SeqCst);
+            let err = guard
+                .emit(event(
+                    run,
+                    2,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("cancelled", Some("cancelled")),
+                ))
+                .unwrap_err();
+            assert!(matches!(err, RuntimeError::Cancelled));
+            guard.finish().unwrap();
+        }
+        let kinds: Vec<_> = collect.events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RuntimeEventKind::RunStarted,
+                RuntimeEventKind::WriteProposalResolved,
+                RuntimeEventKind::RunCancelled,
+            ],
+            "safe cancelled resolution must precede host run_cancelled; got {kinds:?}"
+        );
+        assert_eq!(
+            collect.events[1]
+                .payload
+                .get("state")
+                .and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            collect.events[1]
+                .payload
+                .get("error_code")
+                .and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+    }
+
+    /// C3-F: interrupted/interrupted is the other permitted post-cancel pair.
+    #[test]
+    fn post_cancel_safe_write_resolution_interrupted_before_run_cancelled() {
+        let mut collect = CollectingSink::default();
+        let run = RunId::new();
+        let cancel = AtomicBool::new(false);
+        {
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::RunStarted,
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            cancel.store(true, Ordering::SeqCst);
+            let err = guard
+                .emit(event(
+                    run,
+                    2,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("interrupted", Some("interrupted")),
+                ))
+                .unwrap_err();
+            assert!(matches!(err, RuntimeError::Cancelled));
+            guard.finish().unwrap();
+        }
+        let kinds: Vec<_> = collect.events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RuntimeEventKind::RunStarted,
+                RuntimeEventKind::WriteProposalResolved,
+                RuntimeEventKind::RunCancelled,
+            ]
+        );
+    }
+
+    /// C3-F negatives: success / mismatched / malformed / duplicate / ordinary
+    /// post-cancel events must not commit; only host run_cancelled lands.
+    #[test]
+    fn post_cancel_blocks_success_mismatch_malformed_duplicate_and_ordinary() {
+        // Success write resolution after cancel.
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(true);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            let err = guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("succeeded", None),
+                ))
+                .unwrap_err();
+            assert!(matches!(err, RuntimeError::Cancelled));
+            assert_eq!(collect.events.len(), 1);
+            assert_eq!(collect.events[0].kind, RuntimeEventKind::RunCancelled);
+        }
+
+        // Rejected write resolution after cancel.
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(true);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            let _ = guard.emit(event(
+                run,
+                1,
+                RuntimeEventKind::WriteProposalResolved,
+                write_resolved_payload("rejected", Some("approval_rejected")),
+            ));
+            assert_eq!(collect.events.len(), 1);
+            assert_eq!(collect.events[0].kind, RuntimeEventKind::RunCancelled);
+        }
+
+        // Mismatched state/error pair (cancelled / interrupted).
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(true);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            let _ = guard.emit(event(
+                run,
+                1,
+                RuntimeEventKind::WriteProposalResolved,
+                write_resolved_payload("cancelled", Some("interrupted")),
+            ));
+            assert_eq!(collect.events.len(), 1);
+            assert_eq!(collect.events[0].kind, RuntimeEventKind::RunCancelled);
+        }
+
+        // Malformed payload (missing required fields).
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(true);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            let _ = guard.emit(event(
+                run,
+                1,
+                RuntimeEventKind::WriteProposalResolved,
+                serde_json::json!({"state": "cancelled", "error_code": "cancelled"}),
+            ));
+            assert_eq!(collect.events.len(), 1);
+            assert_eq!(collect.events[0].kind, RuntimeEventKind::RunCancelled);
+        }
+
+        // Ordinary tool output after cancel.
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(true);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            let _ = guard.emit(event(
+                run,
+                1,
+                RuntimeEventKind::ToolCallOutput,
+                serde_json::json!({"tool_call_id": "t1", "chunk": "x"}),
+            ));
+            assert_eq!(collect.events.len(), 1);
+            assert_eq!(collect.events[0].kind, RuntimeEventKind::RunCancelled);
+        }
+
+        // Duplicate safe resolution: only first commits; second is blocked.
+        {
+            let mut collect = CollectingSink::default();
+            let run = RunId::new();
+            let cancel = AtomicBool::new(false);
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut collect, &cancel);
+            guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::RunStarted,
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            cancel.store(true, Ordering::SeqCst);
+            let err1 = guard
+                .emit(event(
+                    run,
+                    2,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("cancelled", Some("cancelled")),
+                ))
+                .unwrap_err();
+            assert!(matches!(err1, RuntimeError::Cancelled));
+            // Second attempt after terminal: must not add another resolution.
+            let err2 = guard
+                .emit(event(
+                    run,
+                    3,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("cancelled", Some("cancelled")),
+                ))
+                .unwrap_err();
+            assert!(matches!(err2, RuntimeError::Cancelled));
+            let resolved_count = collect
+                .events
+                .iter()
+                .filter(|e| e.kind == RuntimeEventKind::WriteProposalResolved)
+                .count();
+            assert_eq!(resolved_count, 1, "at most one post-cancel safe resolution");
+            assert_eq!(
+                collect.events.last().map(|e| e.kind),
+                Some(RuntimeEventKind::RunCancelled)
+            );
+            assert_eq!(
+                collect
+                    .events
+                    .iter()
+                    .filter(|e| e.kind == RuntimeEventKind::RunCancelled)
+                    .count(),
+                1,
+                "exactly one host-forced run_cancelled"
+            );
+        }
+    }
+
+    /// C3-F: delivery+guard stack — safe resolution enqueues before cancel terminal.
+    #[test]
+    fn post_cancel_safe_resolution_through_bounded_delivery_before_run_cancelled() {
+        let delivery = BoundedDelivery::new(8);
+        let mut sink = BoundedDeliverySink::new(std::sync::Arc::clone(&delivery));
+        let run = RunId::new();
+        let cancel = AtomicBool::new(false);
+        {
+            let mut guard = ProtocolGuardSink::with_cancel(run, &mut sink, &cancel);
+            guard
+                .emit(event(
+                    run,
+                    1,
+                    RuntimeEventKind::RunStarted,
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            // Host cancel wins on both AtomicBool and delivery queue.
+            delivery.request_cancel();
+            cancel.store(true, Ordering::SeqCst);
+            let err = guard
+                .emit(event(
+                    run,
+                    2,
+                    RuntimeEventKind::WriteProposalResolved,
+                    write_resolved_payload("cancelled", Some("cancelled")),
+                ))
+                .unwrap_err();
+            assert!(matches!(err, RuntimeError::Cancelled));
+            guard.finish().unwrap();
+        }
+        let events = delivery.drain();
+        let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RuntimeEventKind::RunStarted,
+                RuntimeEventKind::WriteProposalResolved,
+                RuntimeEventKind::RunCancelled,
+            ],
+            "bounded delivery must commit safe resolution before run_cancelled; got {kinds:?}"
         );
     }
 }

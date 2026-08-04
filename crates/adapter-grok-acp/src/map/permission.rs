@@ -110,7 +110,7 @@ pub fn observe_tool_update(registry: &mut ToolRegistry, update: &Value) {
     bump_activity(registry);
 }
 
-/// Decide allow_once for read/search; deny everything else.
+/// Provider-native permission requests never grant tool authority.
 pub fn decide_permission(
     registry: Option<&ToolRegistry>,
     params: &Value,
@@ -168,18 +168,11 @@ pub fn decide_permission(
                     .as_deref()
                     .is_some_and(|root| all_targets_are_inside(root, &call.tool_inputs, &tool_call))
         });
-    if same_session
-        && read_only
-        && target_is_in_project
-        && let Some(option_id) = allow_once
-    {
-        return PermissionDecision {
-            result: permission_result(Some(option_id)),
-            allowed: true,
-        };
-    }
+    // Provider metadata is observation only. Even a same-session, in-project
+    // read claim must use Pillow's fixed manifest gateway instead.
+    let _provider_claim_is_bounded_read =
+        same_session && read_only && target_is_in_project && allow_once.is_some();
 
-    // Never select allow_always for any class in B2.
     PermissionDecision {
         result: permission_result(reject),
         allowed: false,
@@ -393,29 +386,43 @@ mod tests {
     }
 
     #[test]
-    fn allows_read_once_for_same_session() {
-        let mut reg = ToolRegistry::new("sess-1", test_root());
-        observe_tool_update(
-            &mut reg,
-            &json!({
-                "sessionUpdate": "tool_call",
-                "toolCallId": "tc-1",
-                "kind": "read",
-                "title": "read_file",
-                "rawInput": { "target": "." }
-            }),
-        );
-        let decision = decide_permission(
-            Some(&reg),
-            &json!({
-                "sessionId": "sess-1",
-                "toolCall": { "toolCallId": "tc-1", "kind": "read" },
-                "options": read_options()
-            }),
-            false,
-        );
-        assert!(decision.allowed);
-        assert_eq!(decision.result["outcome"]["optionId"], json!("allow-once"));
+    fn provider_labels_never_authorize_native_tools() {
+        for (case, tool_call) in [
+            ("kind-read", json!({ "kind": "read" })),
+            ("kind-search", json!({ "kind": "search" })),
+            ("title-read", json!({ "title": "read_file" })),
+            (
+                "meta-search",
+                json!({ "_meta": { "x.ai/tool": { "kind": "search" } } }),
+            ),
+        ] {
+            let tool_call_id = format!("tc-{case}");
+            let mut observed = tool_call.clone();
+            observed["sessionUpdate"] = json!("tool_call");
+            observed["toolCallId"] = json!(tool_call_id);
+            observed["rawInput"] = json!({ "target": "." });
+            let mut reg = ToolRegistry::new("sess-1", test_root());
+            observe_tool_update(&mut reg, &observed);
+
+            let mut permission_call = tool_call;
+            permission_call["toolCallId"] = json!(tool_call_id);
+            let decision = decide_permission(
+                Some(&reg),
+                &json!({
+                    "sessionId": "sess-1",
+                    "toolCall": permission_call,
+                    "options": read_options()
+                }),
+                false,
+            );
+
+            assert!(!decision.allowed, "{case} bypassed the governed bridge");
+            assert_eq!(
+                decision.result["outcome"]["optionId"],
+                json!("reject-once"),
+                "{case} did not fail closed"
+            );
+        }
     }
 
     #[test]
@@ -468,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_every_named_target_field_inside_the_project_root() {
+    fn denies_search_even_when_every_target_is_inside_the_project_root() {
         let mut reg = ToolRegistry::new("sess-1", test_root());
         observe_tool_update(
             &mut reg,
@@ -494,7 +501,8 @@ mod tests {
             }),
             false,
         );
-        assert!(decision.allowed);
+        assert!(!decision.allowed);
+        assert_eq!(decision.result["outcome"]["optionId"], json!("reject-once"));
     }
 
     #[test]

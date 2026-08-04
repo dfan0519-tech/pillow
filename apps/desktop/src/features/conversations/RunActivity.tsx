@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useId, useRef } from "react";
-import { IconPanelRight } from "../../components/icons";
+import { IconChevronRight, IconPanelRight } from "../../components/icons";
 import type {
   ResourceReferenceView,
   RunActivityView,
@@ -19,8 +19,8 @@ const STATUS_LABEL: Record<string, string> = {
   pending: "等待中",
   running: "运行中",
   cancelling: "取消中",
-  completed: "已完成",
-  failed: "失败",
+  completed: "思考完成",
+  failed: "运行失败",
   cancelled: "已取消",
   interrupted: "已中断",
 };
@@ -76,6 +76,9 @@ export function RunActivity({
       <h2 className="sr-only" id={headingId}>运行活动</h2>
       <details ref={detailsRef}>
         <summary>
+          <span aria-hidden="true" className="run-activity__chevron">
+            <IconChevronRight size={13} />
+          </span>
           <span
             aria-hidden="true"
             className={

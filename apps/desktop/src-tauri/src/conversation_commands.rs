@@ -183,11 +183,9 @@ pub fn complete_conversation_acceptance(
     result: ConversationAcceptanceResult,
 ) -> Result<(), CommandError> {
     let result_path =
-        std::env::var_os("PILLOW_CONVERSATION_ACCEPTANCE_RESULT").ok_or_else(|| {
-            CommandError {
-                code: "conversation_acceptance_unavailable",
-                message: "Conversation acceptance is not configured.".into(),
-            }
+        std::env::var_os("PILLOW_CONVERSATION_ACCEPTANCE_RESULT").ok_or_else(|| CommandError {
+            code: "conversation_acceptance_unavailable",
+            message: "Conversation acceptance is not configured.".into(),
         })?;
     let path = std::path::PathBuf::from(result_path);
     if !matches!(result.status.as_str(), "passed" | "failed") {

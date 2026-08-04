@@ -1,0 +1,247 @@
+/**
+ * Compact conversation-owned write approval bar + governed-write diff pane.
+ * Conversation remains the visual center; one bar, no historical card stack.
+ */
+
+.write-approval-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 16px;
+  width: 100%;
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-elevated, #1a1a1a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.write-approval-bar__meta {
+  min-width: 0;
+  flex: 1 1 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.write-approval-bar__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.write-approval-bar__path {
+  margin: 0;
+  min-width: 0;
+}
+
+.write-approval-bar__path code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 13px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.write-approval-bar__details,
+.write-approval-bar__summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.write-approval-bar__sep {
+  margin: 0 6px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.write-approval-bar__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.write-approval-bar__btn {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.write-approval-bar__btn:hover:not(:disabled) {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.write-approval-bar__btn:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.write-approval-bar__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.write-approval-bar__btn--primary {
+  border-color: transparent;
+  background: var(--accent, #8aa4ff);
+  color: var(--accent-fg, #0d0d0d);
+}
+
+.write-approval-bar__btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover, #a0b6ff);
+}
+
+.write-diff-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.write-diff-preview__header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.write-diff-preview__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.write-diff-preview__path {
+  margin: 0;
+  min-width: 0;
+}
+
+.write-diff-preview__path code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 13px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.write-diff-preview__meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.write-diff-preview__sep {
+  margin: 0 6px;
+}
+
+.write-diff-preview__truncation {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #f0993d);
+}
+
+.write-diff-preview__body {
+  margin: 0;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-code, #0a0a0a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.write-diff-preview__body:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+/* Compact terminal write outcome rows in the conversation timeline. */
+.write-outcome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elevated, #1a1a1a);
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.write-outcome__message {
+  margin: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.write-outcome__open {
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.write-outcome__open:hover {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.write-outcome__open:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.composer-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0 22px 0;
+}
+
+.composer-stack .composer-wrap {
+  width: 100%;
+  padding-top: 0;
+}

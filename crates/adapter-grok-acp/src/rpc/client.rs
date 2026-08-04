@@ -164,6 +164,20 @@ impl RpcClient {
         self.write_message(&message)
     }
 
+    pub fn respond_error(
+        &self,
+        id: Value,
+        code: i64,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message }
+        });
+        self.write_message(&response)
+    }
+
     pub fn close(&self) {
         if self.shared.closed.swap(true, Ordering::SeqCst) {
             return;

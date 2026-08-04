@@ -2,16 +2,21 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use sha2::{Digest, Sha256};
+
 use super::digest::canonical_arguments_digest;
 use super::manifest::{
-    LIST_RESULT_COUNT_CAP, READ_OUTPUT_BYTE_CAP, SEARCH_RESULT_COUNT_CAP, manifest_for,
+    LIST_RESULT_COUNT_CAP, PROCESS_OUTPUT_BYTE_CAP, READ_OUTPUT_BYTE_CAP, SEARCH_RESULT_COUNT_CAP,
+    manifest_for,
 };
 use super::protocol_error::{ToolProtocolError, ToolProtocolErrorCode};
 use super::reservation::{ToolCallReservation, ToolCallReservationKey, ToolProposalFingerprint};
 use super::types::{
-    FsListArguments, FsListOutput, FsReadArguments, FsReadOutput, FsSearchArguments,
-    FsSearchOutput, ToolActiveContext, ToolArguments, ToolContentKind, ToolExecutionState, ToolId,
-    ToolProposal, ToolResult, ValidatedToolProposal, ValidatedToolResult,
+    ArgumentsDigest, FsListArguments, FsListOutput, FsReadArguments, FsReadOutput,
+    FsSearchArguments, FsSearchOutput, FsWriteArguments, FsWriteOutput, PROCESS_ARGV_BYTE_CAP,
+    PROCESS_ARGV_COUNT_CAP, ProcessRunArguments, ProcessRunOutput, ToolActiveContext,
+    ToolArguments, ToolContentKind, ToolExecutionState, ToolId, ToolProposal, ToolResult,
+    ValidatedToolProposal, ValidatedToolResult, WRITE_CONTENT_BYTE_CAP,
 };
 
 impl ToolActiveContext {
@@ -244,6 +249,25 @@ fn decode_arguments(
             let canonical = encode(&arguments, ToolProtocolErrorCode::InvalidArguments)?;
             Ok((ToolArguments::FsSearch(arguments), canonical))
         }
+        ToolId::FsWrite => {
+            let arguments =
+                decode::<FsWriteArguments>(raw, ToolProtocolErrorCode::InvalidArguments)?;
+            validate_write_path(&arguments.path)?;
+            validate_write_content(&arguments.content)?;
+            let canonical = encode(&arguments, ToolProtocolErrorCode::InvalidArguments)?;
+            Ok((ToolArguments::FsWrite(arguments), canonical))
+        }
+        ToolId::ProcessRun => {
+            let arguments =
+                decode::<ProcessRunArguments>(raw, ToolProtocolErrorCode::InvalidArguments)?;
+            validate_process_program(&arguments.program)?;
+            validate_process_argv(&arguments.program, &arguments.argv)?;
+            if let Some(cwd) = arguments.cwd.as_deref() {
+                validate_project_path(cwd)?;
+            }
+            let canonical = encode(&arguments, ToolProtocolErrorCode::InvalidArguments)?;
+            Ok((ToolArguments::ProcessRun(arguments), canonical))
+        }
     }
 }
 
@@ -339,6 +363,54 @@ fn decode_output(
                 Some(count),
             )
         }
+        ToolId::FsWrite => {
+            let output = decode::<FsWriteOutput>(raw, ToolProtocolErrorCode::InvalidResult)?;
+            let ToolArguments::FsWrite(arguments) = arguments else {
+                return Err(invalid_result(
+                    "validated argument type does not match tool",
+                ));
+            };
+            validate_write_path_for_result(&output.path)?;
+            if output.path != arguments.path {
+                return Err(invalid_result(
+                    "fs.write output path does not match the requested path",
+                ));
+            }
+            if output.mode != arguments.mode {
+                return Err(invalid_result(
+                    "fs.write output mode does not match the requested mode",
+                ));
+            }
+            let expected_bytes = arguments.content.len() as u64;
+            if output.bytes_written != expected_bytes {
+                return Err(invalid_result(
+                    "fs.write bytes_written does not match the sealed content length",
+                ));
+            }
+            let expected_digest = content_digest(&arguments.content);
+            if output.content_digest != expected_digest.as_str() {
+                return Err(invalid_result(
+                    "fs.write content_digest does not match the sealed content",
+                ));
+            }
+            (encode(&output, ToolProtocolErrorCode::InvalidResult)?, None)
+        }
+        ToolId::ProcessRun => {
+            let output = decode::<ProcessRunOutput>(raw, ToolProtocolErrorCode::InvalidResult)?;
+            let ToolArguments::ProcessRun(_) = arguments else {
+                return Err(invalid_result(
+                    "validated argument type does not match tool",
+                ));
+            };
+            validate_stream_digest(&output.stdout_sha256)?;
+            validate_stream_digest(&output.stderr_sha256)?;
+            if output.captured_bytes > PROCESS_OUTPUT_BYTE_CAP {
+                return Err(invalid_result(
+                    "process.run captured_bytes exceeds the manifest output byte cap",
+                ));
+            }
+            (encode(&output, ToolProtocolErrorCode::InvalidResult)?, None)
+        }
     };
 
     let manifest = manifest_for(tool_id);
@@ -382,6 +454,101 @@ fn validate_project_path(path: &str) -> Result<(), ToolProtocolError> {
 fn validate_project_path_for_result(path: &str) -> Result<(), ToolProtocolError> {
     validate_project_path_inner(path)
         .map_err(|message| invalid_result(format!("invalid result path: {message}")))
+}
+
+fn validate_write_path(path: &str) -> Result<(), ToolProtocolError> {
+    if path == "." {
+        return Err(invalid_arguments(
+            "fs.write path must name a project-relative file",
+        ));
+    }
+    validate_project_path(path)
+}
+
+fn validate_write_path_for_result(path: &str) -> Result<(), ToolProtocolError> {
+    if path == "." {
+        return Err(invalid_result(
+            "fs.write result path must name a project-relative file",
+        ));
+    }
+    validate_project_path_for_result(path)
+}
+
+fn validate_write_content(content: &str) -> Result<(), ToolProtocolError> {
+    let bytes = content.as_bytes();
+    if bytes.is_empty() || bytes.len() as u64 > WRITE_CONTENT_BYTE_CAP {
+        return Err(invalid_arguments(format!(
+            "fs.write content must be 1..={WRITE_CONTENT_BYTE_CAP} UTF-8 bytes"
+        )));
+    }
+    if bytes.contains(&0) {
+        return Err(invalid_arguments(
+            "fs.write content must not contain NUL bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// Program label grammar: `^[a-z][a-z0-9_-]{0,31}$` (1..=32 ASCII chars).
+fn validate_process_program(program: &str) -> Result<(), ToolProtocolError> {
+    let bytes = program.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 {
+        return Err(invalid_arguments(
+            "process.run program label must be 1..=32 characters matching ^[a-z][a-z0-9_-]{0,31}$",
+        ));
+    }
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() {
+        return Err(invalid_arguments(
+            "process.run program label must start with a lowercase ASCII letter",
+        ));
+    }
+    if !bytes[1..].iter().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+    }) {
+        return Err(invalid_arguments(
+            "process.run program label may only contain lowercase letters, digits, '_' and '-'",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_process_argv(program: &str, argv: &[String]) -> Result<(), ToolProtocolError> {
+    if argv.len() > PROCESS_ARGV_COUNT_CAP {
+        return Err(invalid_arguments(format!(
+            "process.run argv must contain at most {PROCESS_ARGV_COUNT_CAP} entries"
+        )));
+    }
+    let mut combined = program.len();
+    for entry in argv {
+        if entry.chars().any(char::is_control) {
+            return Err(invalid_arguments(
+                "process.run argv entries must not contain control characters",
+            ));
+        }
+        combined = combined.saturating_add(entry.len());
+        if combined > PROCESS_ARGV_BYTE_CAP {
+            return Err(invalid_arguments(format!(
+                "process.run combined program and argv must be at most {PROCESS_ARGV_BYTE_CAP} UTF-8 bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_stream_digest(value: &str) -> Result<(), ToolProtocolError> {
+    ArgumentsDigest::parse(value).map(|_| ()).map_err(|_| {
+        invalid_result("process.run stream digests must be sha256:<64 lowercase hex> values")
+    })
+}
+
+fn content_digest(content: &str) -> ArgumentsDigest {
+    let digest = Sha256::digest(content.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    ArgumentsDigest::from_sha256_hex(hex)
 }
 
 fn validate_result_scope(requested: &str, candidate: &str) -> Result<(), ToolProtocolError> {

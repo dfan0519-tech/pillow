@@ -2,9 +2,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::protocol_error::{ToolProtocolError, ToolProtocolErrorCode};
-use super::types::ArgumentsDigest;
+use super::types::{ArgumentsDigest, WRITE_CONTENT_BYTE_CAP};
 
-const MAX_ARGUMENT_BYTES: usize = 65_536;
+// fs.write@1 content may be any non-NUL UTF-8 up to WRITE_CONTENT_BYTE_CAP.
+// JSON string encoding of a control byte is six bytes (`\u00XX`); the path is
+// already bounded at 4_096 bytes and the fixed schema envelope is tiny.
+// Cap = sixfold content escape + max path + quotes/keys/mode/braces margin.
+const MAX_ARGUMENT_BYTES: usize = (WRITE_CONTENT_BYTE_CAP as usize) * 6 + 4_096 + 256;
 const MAX_ARGUMENT_DEPTH: usize = 32;
 
 pub fn canonical_arguments_digest(arguments: &Value) -> Result<ArgumentsDigest, ToolProtocolError> {
@@ -97,5 +101,22 @@ mod tests {
             canonical_arguments_digest(&json!({})).unwrap().as_str(),
             "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
         );
+    }
+
+    #[test]
+    fn full_write_content_of_control_bytes_that_need_u00xx_escapes_is_within_cap() {
+        // `\u{1}` serializes as `\u0001` (six JSON bytes per content byte).
+        let content = "\u{1}".repeat(WRITE_CONTENT_BYTE_CAP as usize);
+        assert_eq!(content.len(), WRITE_CONTENT_BYTE_CAP as usize);
+        let escaped = serde_json::to_string(&content).unwrap();
+        assert!(escaped.contains("\\u0001"));
+        assert_eq!(escaped.len(), 2 + (WRITE_CONTENT_BYTE_CAP as usize) * 6);
+
+        let arguments = json!({
+            "path": "src/a.ts",
+            "mode": "create",
+            "content": content,
+        });
+        assert!(canonical_arguments_digest(&arguments).is_ok());
     }
 }

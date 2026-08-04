@@ -3,7 +3,23 @@ import { spawn, spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 const POLL_INTERVAL_MS = 50;
-const CLEANUP_ATTEMPTS = 4;
+const CLEANUP_ATTEMPTS = 120;
+const SYSTEM_PROCESS_NAMES = new Set([
+  "csrss.exe",
+  "dwm.exe",
+  "fontdrvhost.exe",
+  "lsass.exe",
+  "memory compression",
+  "registry",
+  "services.exe",
+  "smss.exe",
+  "svchost.exe",
+  "system",
+  "system idle process",
+  "wininit.exe",
+  "winlogon.exe",
+]);
+const MSVC_VCTIP_TELEMETRY_PATH = /^[a-z]:\\program files(?: \(x86\))?\\microsoft visual studio\\\d{4}\\[^\\]+\\vc\\tools\\msvc\\[^\\]+\\bin\\hostx64\\x64\\vctip\.exe$/u;
 
 export function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -26,6 +42,99 @@ function parseJsonArray(text) {
   return Array.isArray(value) ? value : [value];
 }
 
+function normalizeProcessName(name) {
+  return String(name ?? "").trim().toLowerCase();
+}
+
+function normalizeExecutablePath(executablePath) {
+  return String(executablePath ?? "")
+    .trim()
+    .replaceAll("/", "\\")
+    .replace(/\\+$/u, "")
+    .toLowerCase();
+}
+
+function normalizeCreationTicks(creationTicks) {
+  const text = String(creationTicks ?? "").trim();
+  if (!/^\d+$/u.test(text)) return "";
+  return BigInt(text).toString();
+}
+
+function processIdentity(entry) {
+  const pid = Number(entry?.pid);
+  const creationTicks = normalizeCreationTicks(entry?.creationTicks);
+  const executablePath = normalizeExecutablePath(entry?.executablePath);
+  const name = normalizeProcessName(entry?.name);
+  if (!Number.isInteger(pid) || pid <= 0 || !creationTicks || !executablePath || !name) {
+    return null;
+  }
+  return Object.freeze({ creationTicks, executablePath, name, pid });
+}
+
+function lookupProcess(processes, pid) {
+  const entry = processes.find((candidate) => Number(candidate.pid) === pid);
+  if (entry === undefined) return { identity: null, state: "absent" };
+  const identity = processIdentity(entry);
+  return identity === null
+    ? { identity: null, state: "present-incomplete" }
+    : { identity, state: "present-complete" };
+}
+
+function childHasExited(child) {
+  return (child?.exitCode !== null && child?.exitCode !== undefined)
+    || (child?.signalCode !== null && child?.signalCode !== undefined);
+}
+
+function resolveWindowsRoot(systemRoot, windir) {
+  const candidates = [
+    ["SystemRoot", systemRoot],
+    ["WINDIR", windir],
+  ].filter(([, value]) => String(value ?? "").trim());
+  const roots = [];
+  for (const [name, value] of candidates) {
+    const normalized = normalizeExecutablePath(value);
+    if (!/^[a-z]:\\/u.test(normalized) && !/^\\\\[^\\]+\\[^\\]+/u.test(normalized)) {
+      return { error: `invalid Windows root ${name}`, root: null };
+    }
+    roots.push(normalized);
+  }
+  if (roots.length === 0) return { error: "SystemRoot/WINDIR is required", root: null };
+  if (roots.length === 2 && roots[0] !== roots[1]) {
+    return { error: "conflicting Windows roots", root: null };
+  }
+  return { error: null, root: roots[0] };
+}
+
+function identitiesMatch(left, right) {
+  return left !== null
+    && right !== null
+    && left.pid === right.pid
+    && left.creationTicks === right.creationTicks
+    && left.executablePath === right.executablePath
+    && left.name === right.name;
+}
+
+function systemProcessReason(identity, systemRoot) {
+  if (SYSTEM_PROCESS_NAMES.has(identity.name)) return "system process name";
+  const normalizedSystemRoot = normalizeExecutablePath(systemRoot);
+  if (
+    normalizedSystemRoot
+    && (
+      identity.executablePath === normalizedSystemRoot
+      || identity.executablePath.startsWith(`${normalizedSystemRoot}\\`)
+    )
+  ) {
+    return "Windows directory executable";
+  }
+  return null;
+}
+
+function isMsvcVctipTelemetryIdentity(identity) {
+  return identity !== null
+    && identity.name === "vctip.exe"
+    && MSVC_VCTIP_TELEMETRY_PATH.test(identity.executablePath);
+}
+
 export function snapshotWindowsProcesses() {
   if (process.platform !== "win32") return [];
   const command = [
@@ -34,7 +143,8 @@ export function snapshotWindowsProcesses() {
     "pid=[int]$_.ProcessId;",
     "parentPid=[int]$_.ParentProcessId;",
     "name=[string]$_.Name;",
-    "executablePath=[string]$_.ExecutablePath",
+    "executablePath=[string]$_.ExecutablePath;",
+    "creationTicks=if ($_.CreationDate) { [string]$_.CreationDate.ToFileTimeUtc() } else { '' }",
     "} } | ConvertTo-Json -Compress",
   ].join(" ");
   const result = spawnSync(
@@ -48,6 +158,7 @@ export function snapshotWindowsProcesses() {
     );
   }
   return parseJsonArray(result.stdout).map((entry) => ({
+    creationTicks: entry.creationTicks ?? "",
     executablePath: entry.executablePath ?? "",
     name: entry.name ?? "",
     parentPid: Number(entry.parentPid),
@@ -110,42 +221,6 @@ export function assertDesktopBaselineClean(baseline) {
   );
 }
 
-function descendantsOf(processes, roots) {
-  const descendants = new Set();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const entry of processes) {
-      if (
-        !roots.has(entry.pid)
-        && !descendants.has(entry.pid)
-        && (roots.has(entry.parentPid) || descendants.has(entry.parentPid))
-      ) {
-        descendants.add(entry.pid);
-        changed = true;
-      }
-    }
-  }
-  return descendants;
-}
-
-function terminateWindowsPids(pids) {
-  const alive = pids.filter(isProcessAlive);
-  if (alive.length === 0) return;
-  const result = spawnSync(
-    "taskkill.exe",
-    [...alive.flatMap((pid) => ["/PID", String(pid)]), "/T", "/F"],
-    { encoding: "utf8", windowsHide: true },
-  );
-  const survivors = alive.filter(isProcessAlive);
-  if (result.status !== 0 && survivors.length > 0) {
-    throw new Error(
-      `taskkill failed for PIDs ${survivors.join(",")} with code ${result.status}: `
-      + `${result.stderr || result.stdout}`,
-    );
-  }
-}
-
 /** True when no pillow.exe and no supervised port listeners remain. */
 export function isDesktopProcessSnapshotClean(port = 1420) {
   if (process.platform !== "win32") return true;
@@ -181,105 +256,322 @@ export async function waitForDesktopProcessSnapshotClean({
 }
 
 export class ProcessSupervisor {
-  constructor({ rootPid, baseline, enforceDesktopClean = true }) {
+  constructor({
+    allowMsvcVctipTelemetry = false,
+    child,
+    baseline,
+    cleanupAttempts = CLEANUP_ATTEMPTS,
+    desktopObservation,
+    delayFn = delay,
+    enforceDesktopClean = true,
+    platform = process.platform,
+    snapshot = snapshotWindowsProcesses,
+    systemRoot = process.env.SystemRoot,
+    windir = process.env.WINDIR,
+  }) {
+    this.allowMsvcVctipTelemetry = allowMsvcVctipTelemetry === true;
     this.baseline = baseline;
+    this.child = child;
+    this.cleanupAttempts = cleanupAttempts;
+    this.desktopObservation = desktopObservation ?? (() => ({
+      keeperPids: keeperProcessPids(this.snapshot()),
+      listenerPids: listenerPidsForPort(baseline?.port ?? 1420),
+    }));
+    this.delayFn = delayFn;
     this.enforceDesktopClean = enforceDesktopClean;
-    this.knownPids = new Set();
-    this.lastCaptureAt = 0;
-    this.port = baseline?.port ?? 1420;
-    if (rootPid) this.knownPids.add(rootPid);
+    this.platform = platform;
+    this.records = new Map();
+    this.snapshot = snapshot;
+    this.systemRoot = systemRoot;
+    this.windir = windir;
+    this.lastDesktopObservation = null;
+    this.rootPid = Number(child?.pid);
+    if (!Number.isInteger(this.rootPid) || this.rootPid <= 0) {
+      throw new Error("ProcessSupervisor requires the launcher-owned child handle.");
+    }
+    if (this.platform === "win32") this.captureIdentity(this.rootPid, true);
+    else {
+      this.records.set(this.rootPid, {
+        identity: null,
+        isRoot: true,
+        state: childHasExited(child) ? "confirmed-dead" : "observed",
+      });
+    }
+  }
+
+  currentIdentity(processes, pid) {
+    return lookupProcess(processes, pid);
+  }
+
+  captureIdentity(pid, isRoot = false, processes = this.snapshot()) {
+    const existing = this.records.get(pid);
+    const current = this.currentIdentity(processes, pid);
+    if (existing !== undefined) {
+      if (
+        existing.state === "confirmed-dead"
+        || existing.state === "identity-mismatch"
+        || existing.state === "identity-replaced"
+      ) return false;
+      if (existing.identity === null) {
+        if (existing.state === "identity-incomplete" && current.state === "absent") {
+          existing.state = "confirmed-dead";
+          return false;
+        }
+        if (existing.isRoot && existing.state === "never-observed" && !childHasExited(this.child)) {
+          if (current.state === "present-complete") {
+            existing.identity = current.identity;
+            existing.state = "observed";
+            return true;
+          }
+          if (current.state === "present-incomplete") existing.state = "identity-incomplete";
+        }
+        return false;
+      }
+      if (current.state === "absent") {
+        existing.state = "confirmed-dead";
+        return false;
+      }
+      if (current.state === "present-incomplete") {
+        existing.state = "identity-incomplete";
+        return false;
+      }
+      if (!identitiesMatch(existing.identity, current.identity)) {
+        if (!existing.isRoot && existing.state === "identity-incomplete") {
+          return false;
+        }
+        existing.state = existing.isRoot
+          ? (childHasExited(this.child) ? "confirmed-dead" : "identity-mismatch")
+          : "identity-replaced";
+        return false;
+      }
+      return true;
+    }
+    if (current.state !== "present-complete") {
+      this.records.set(pid, {
+        identity: null,
+        isRoot,
+        state: current.state === "present-incomplete" ? "identity-incomplete" : "never-observed",
+      });
+      return false;
+    }
+    this.records.set(pid, { identity: current.identity, isRoot, state: "observed" });
+    return true;
   }
 
   trackPid(pid) {
-    if (Number.isInteger(pid) && pid > 0) this.knownPids.add(pid);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    if (this.platform !== "win32") return pid === this.rootPid && this.records.has(pid);
+    return this.captureIdentity(pid, pid === this.rootPid);
   }
 
   hasTrackedPid(pid) {
-    return this.knownPids.has(pid);
+    const record = this.records.get(pid);
+    return record !== undefined && record.identity !== null;
   }
 
-  async capture(force = false) {
-    if (process.platform !== "win32") return;
-    if (!force && performance.now() - this.lastCaptureAt < 500) return;
-    const processes = snapshotWindowsProcesses();
-    for (const pid of descendantsOf(processes, this.knownPids)) {
-      this.knownPids.add(pid);
-    }
-    if (this.enforceDesktopClean) {
-      for (const pid of keeperProcessPids(processes)) this.knownPids.add(pid);
-      for (const pid of listenerPidsForPort(this.port)) this.knownPids.add(pid);
-    }
-    this.lastCaptureAt = performance.now();
+  trackedPids() {
+    return [...this.records.keys()];
   }
 
-  /**
-   * Terminate known PIDs and do not return until:
-   * - every known PID fails isProcessAlive, AND
-   * - a fresh process snapshot has no pillow.exe and no port listener
-   *   (when enforceDesktopClean is set).
-   *
-   * isProcessAlive alone is insufficient: Windows can drop the kill check
-   * before Get-CimInstance stops listing the process name.
-   */
-  async cleanup() {
-    let lastError = null;
-    // Allow enough polls for graceful exit + residual reaping (not a single sleep).
-    const maxAttempts = Math.max(CLEANUP_ATTEMPTS, 120);
+  trackedState(pid) {
+    return this.records.get(pid)?.state ?? "untracked";
+  }
 
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      await this.capture(true);
-      const alive = [...this.knownPids].filter(isProcessAlive);
-      if (alive.length > 0) {
-        try {
-          if (process.platform === "win32") {
-            terminateWindowsPids(alive.reverse());
-          } else {
-            for (const pid of alive.reverse()) {
-              process.kill(pid, "SIGKILL");
-            }
-          }
-        } catch (error) {
-          lastError = error;
+  retainTrackedPids(keep) {
+    for (const pid of this.trackedPids()) {
+      if (!keep(pid)) this.records.delete(pid);
+    }
+    return this.trackedPids();
+  }
+
+  permitsDetachedMsvcVctipTelemetry(record, root) {
+    return this.allowMsvcVctipTelemetry
+      && !record.isRoot
+      && record.state === "observed"
+      && isMsvcVctipTelemetryIdentity(record.identity)
+      && (root?.state === "confirmed-dead" || root?.state === "identity-replaced");
+  }
+
+  refreshRecords(processes) {
+    for (const [pid, record] of this.records) {
+      if (
+        record.state === "confirmed-dead"
+        || record.state === "identity-mismatch"
+        || record.state === "identity-replaced"
+      ) continue;
+      const current = this.currentIdentity(processes, pid);
+      if (record.identity === null) {
+        this.captureIdentity(pid, record.isRoot, processes);
+      } else if (current.state === "absent") record.state = "confirmed-dead";
+      else if (current.state === "present-incomplete") record.state = "identity-incomplete";
+      else if (!identitiesMatch(record.identity, current.identity)) {
+        if (!record.isRoot && record.state === "identity-incomplete") continue;
+        record.state = record.isRoot
+          ? (childHasExited(this.child) ? "confirmed-dead" : "identity-mismatch")
+          : "identity-replaced";
+      }
+    }
+  }
+
+  discoverDescendants(processes) {
+    const parents = new Map(
+      [...this.records.entries()]
+        .filter(([, record]) => record.identity !== null && record.state === "observed")
+        .map(([pid, record]) => [pid, record.identity]),
+    );
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const entry of processes) {
+        const identity = processIdentity(entry);
+        const incompleteCreationTicks = normalizeCreationTicks(entry.creationTicks);
+        const parent = parents.get(Number(entry.parentPid));
+        const pid = Number(entry.pid);
+        if (
+          identity === null
+          && parent !== undefined
+          && Number.isInteger(pid)
+          && pid > 0
+          && !this.records.has(pid)
+          && (
+            !incompleteCreationTicks
+            || BigInt(incompleteCreationTicks) > BigInt(parent.creationTicks)
+          )
+        ) {
+          this.records.set(pid, { identity: null, isRoot: false, state: "identity-incomplete" });
+          continue;
         }
-        await delay(POLL_INTERVAL_MS);
+        if (
+          identity !== null
+          && parent !== undefined
+          && !this.records.has(identity.pid)
+          && BigInt(identity.creationTicks) > BigInt(parent.creationTicks)
+        ) {
+          this.records.set(identity.pid, { identity, isRoot: false, state: "observed" });
+          parents.set(identity.pid, identity);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  async capture() {
+    const processes = this.platform === "win32" ? this.snapshot() : [];
+    if (this.platform === "win32") {
+      this.refreshRecords(processes);
+      this.discoverDescendants(processes);
+    }
+    return processes;
+  }
+
+  async cleanup() {
+    if (this.platform !== "win32") {
+      const root = this.records.get(this.rootPid);
+      if (root?.state === "confirmed-dead") return;
+      for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
+        if (childHasExited(this.child)) {
+          root.state = "confirmed-dead";
+          return;
+        }
+        if (root.state === "observed") root.state = "terminating";
+        if (attempt === 0 && this.child.kill() !== true) {
+          throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
+        }
+        await this.delayFn(POLL_INTERVAL_MS);
+      }
+      throw new Error(`Desktop cleanup refused: root PID ${this.rootPid} still present after root termination request.`);
+    }
+    for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
+      const processes = await this.capture(true);
+      const root = this.records.get(this.rootPid);
+      const mismatch = [...this.records.entries()]
+        .find(([, record]) => record.state === "identity-mismatch");
+      if (mismatch !== undefined) {
+        throw new Error(`Desktop cleanup refused: identity mismatch for PID ${mismatch[0]}.`);
+      }
+      const rootIncomplete = [...this.records.entries()]
+        .find(([, record]) => record.isRoot && record.state === "identity-incomplete");
+      if (rootIncomplete !== undefined) {
+        throw new Error(`Desktop cleanup refused: incomplete identity for PID ${rootIncomplete[0]}.`);
+      }
+      const incompleteDescendant = [...this.records.entries()]
+        .find(([, record]) => !record.isRoot && record.state === "identity-incomplete");
+      const neverObservedDescendant = [...this.records.entries()]
+        .find(([, record]) => !record.isRoot && record.state === "never-observed");
+      if (neverObservedDescendant !== undefined) {
+        throw new Error(
+          `Desktop cleanup refused: never-observed descendant PID ${neverObservedDescendant[0]}.`,
+        );
+      }
+      const live = [...this.records.entries()]
+        .filter(
+          ([, record]) => (
+            record.state !== "confirmed-dead"
+            && record.state !== "identity-replaced"
+            && record.identity !== null
+            && !this.permitsDetachedMsvcVctipTelemetry(record, root)
+          ),
+        );
+      if (live.length === 0 && root?.state !== "never-observed") {
+        if (incompleteDescendant !== undefined) {
+          await this.delayFn(POLL_INTERVAL_MS);
+          continue;
+        }
+        if (!this.enforceDesktopClean) return;
+        const residual = this.desktopObservation();
+        this.lastDesktopObservation = residual;
+        if (residual.keeperPids.length === 0 && residual.listenerPids.length === 0) return;
+        await this.delayFn(POLL_INTERVAL_MS);
         continue;
       }
-
-      if (!this.enforceDesktopClean || process.platform !== "win32") {
-        return;
-      }
-
-      const processes = snapshotWindowsProcesses();
-      const keepers = keeperProcessPids(processes);
-      const listeners = listenerPidsForPort(this.port);
-      if (keepers.length === 0 && listeners.length === 0) {
-        return;
-      }
-
-      // Snapshot still lists processes even though kill(0) failed — re-track and kill.
-      for (const pid of keepers) this.knownPids.add(pid);
-      for (const pid of listeners) this.knownPids.add(pid);
-      const residual = [...new Set([...keepers, ...listeners])].filter(isProcessAlive);
-      if (residual.length > 0) {
-        try {
-          terminateWindowsPids(residual.reverse());
-        } catch (error) {
-          lastError = error;
+      const liveRoot = root?.state === "observed" && root.identity !== null;
+      if (liveRoot) {
+        const windowsRoot = resolveWindowsRoot(this.systemRoot, this.windir);
+        if (windowsRoot.error !== null) {
+          throw new Error(`Desktop cleanup refused: ${windowsRoot.error}.`);
+        }
+        const unsafeReason = systemProcessReason(root.identity, windowsRoot.root);
+        if (unsafeReason !== null) {
+          throw new Error(`Desktop cleanup refused: PID ${this.rootPid} is a ${unsafeReason}.`);
+        }
+        root.state = "terminating";
+        if (this.child.kill() !== true) {
+          throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
         }
       }
-      await delay(POLL_INTERVAL_MS);
+      await this.delayFn(POLL_INTERVAL_MS);
     }
-
-    const survivingKnown = [...this.knownPids].filter(isProcessAlive);
-    const processes = process.platform === "win32" ? snapshotWindowsProcesses() : [];
-    const keepers = keeperProcessPids(processes);
-    const listeners =
-      process.platform === "win32" ? listenerPidsForPort(this.port) : [];
-    const detail = lastError instanceof Error ? ` ${lastError.message}` : "";
-    throw new Error(
-      `Desktop cleanup left known=[${survivingKnown}] keepers=[${keepers}] `
-      + `listeners=[${listeners}] after ${maxAttempts} attempts.${detail}`,
-    );
+    const root = this.records.get(this.rootPid);
+    if (root?.state === "never-observed") {
+      throw new Error(`Desktop cleanup refused: root PID ${this.rootPid} was never observed.`);
+    }
+    const persistentIncomplete = [...this.records.entries()]
+      .find(([, record]) => !record.isRoot && record.state === "identity-incomplete");
+    if (persistentIncomplete !== undefined) {
+      throw new Error(`Desktop cleanup refused: incomplete identity for PID ${persistentIncomplete[0]}.`);
+    }
+    if (
+      this.lastDesktopObservation !== null
+      && (
+        this.lastDesktopObservation.keeperPids.length > 0
+        || this.lastDesktopObservation.listenerPids.length > 0
+      )
+    ) {
+      throw new Error(
+        `Desktop cleanup refused: unbound residual pillow=[${this.lastDesktopObservation.keeperPids}] `
+        + `listener=[${this.lastDesktopObservation.listenerPids}].`,
+      );
+    }
+    if (root?.state === "terminating") {
+      throw new Error(
+        `Desktop cleanup refused: root PID ${this.rootPid} still present after root termination request.`,
+      );
+    }
+    const live = this.trackedPids().filter((pid) => {
+      const state = this.trackedState(pid);
+      return state !== "confirmed-dead" && state !== "identity-replaced";
+    });
+    throw new Error(`Desktop cleanup refused: observation-only PIDs remain [${live.join(",")}].`);
   }
 }
 
@@ -403,15 +695,21 @@ export async function runChecked(command, args, options = {}) {
 export async function runSupervisedCommand(
   command,
   args,
-  { timeoutMs, enforceDesktopClean = true, ...options },
+  {
+    timeoutMs,
+    allowMsvcVctipTelemetry = false,
+    enforceDesktopClean = true,
+    ...options
+  },
 ) {
   const baseline = captureDesktopBaseline();
   if (enforceDesktopClean) assertDesktopBaselineClean(baseline);
   const processRun = startCaptured(command, args, options);
   const supervisor = new ProcessSupervisor({
     baseline,
+    child: processRun.child,
+    allowMsvcVctipTelemetry,
     enforceDesktopClean,
-    rootPid: processRun.child.pid,
   });
   let timer;
   let timedOut = false;

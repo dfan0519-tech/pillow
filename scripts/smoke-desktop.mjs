@@ -111,7 +111,7 @@ async function smoke(mode) {
     });
     supervisor = new ProcessSupervisor({
       baseline,
-      rootPid: processRun.child.pid,
+      child: processRun.child,
     });
     readiness = await waitForJsonFile(readinessPath, {
       label: `${mode} desktop`,

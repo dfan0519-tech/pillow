@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::RuntimeError;
+use crate::tool::{WriteMode, WritePublicErrorCode};
+use keeper_policy::{ExecDecision, ExecProposalState, WriteProposalState};
 
 // ── Identifiers ─────────────────────────────────────────────────────────────
 
@@ -69,7 +71,7 @@ pub enum RunStatus {
     Interrupted,
 }
 
-/// Fixed runtime event kinds. Order and names are part of the Slice B1 contract.
+/// Fixed runtime event kinds. Order and names are part of the Slice B1/C3 contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEventKind {
@@ -84,6 +86,18 @@ pub enum RuntimeEventKind {
     SubagentProgress,
     SubagentCompleted,
     ArtifactProduced,
+    /// Summary-only write proposal waiting for a one-shot human decision.
+    WriteProposalRequested,
+    /// Summary-only terminal or non-pending write proposal outcome.
+    WriteProposalResolved,
+    /// Summary-only process proposal waiting for a one-shot human decision.
+    ProcessProposalRequested,
+    /// Summary-only process proposal decision (approve-once / reject).
+    ProcessProposalDecided,
+    /// Process has been claimed and is starting (never for reject/expire).
+    ProcessStarted,
+    /// Summary-only process terminal outcome (no transcript payload).
+    ProcessTerminalOutcome,
     TurnCompleted,
     TurnFailed,
     RunCancelled,
@@ -112,6 +126,12 @@ impl RuntimeEventKind {
             Self::SubagentProgress,
             Self::SubagentCompleted,
             Self::ArtifactProduced,
+            Self::WriteProposalRequested,
+            Self::WriteProposalResolved,
+            Self::ProcessProposalRequested,
+            Self::ProcessProposalDecided,
+            Self::ProcessStarted,
+            Self::ProcessTerminalOutcome,
             Self::TurnCompleted,
             Self::TurnFailed,
             Self::RunCancelled,
@@ -248,6 +268,102 @@ pub struct RunCancelledPayload {
 #[serde(deny_unknown_fields)]
 pub struct HeartbeatPayload {
     pub tick: u64,
+}
+
+/// Summary-only write proposal request. Never carries content, diff, grant,
+/// native path, session id, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteProposalRequestedPayload {
+    pub proposal_id: String,
+    pub path: String,
+    pub mode: WriteMode,
+    pub summary: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Summary-only write proposal resolution. Never carries content, diff, grant,
+/// native path, session id, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteProposalResolvedPayload {
+    pub proposal_id: String,
+    pub path: String,
+    pub mode: WriteMode,
+    pub state: WriteProposalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<WritePublicErrorCode>,
+}
+
+/// Display risk class for process proposals (safe summary only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessRiskClass {
+    Standard,
+    High,
+}
+
+/// Summary-only process proposal request. Never carries raw grant, native
+/// executable/root, full output, environment, provider payload, session id,
+/// database path, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessProposalRequestedPayload {
+    pub proposal_id: String,
+    pub program: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_cwd: Option<String>,
+    pub summary: String,
+    pub risk_class: ProcessRiskClass,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Summary-only process proposal decision. Never carries raw grant, native
+/// paths, full output, environment, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessProposalDecidedPayload {
+    pub proposal_id: String,
+    pub program: String,
+    pub decision: ExecDecision,
+    pub state: ExecProposalState,
+}
+
+/// Process start notice after one-shot claim. Never carries raw grant, native
+/// executable/root, full output, environment, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessStartedPayload {
+    pub proposal_id: String,
+    pub program: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_cwd: Option<String>,
+}
+
+/// Summary-only process terminal outcome. Metadata and digests only — never
+/// full stdout/stderr, raw grant, native paths, environment, or debug metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessTerminalOutcomePayload {
+    pub proposal_id: String,
+    pub program: String,
+    pub state: ExecProposalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_lossy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
 }
 
 // ── Runtime event envelope ──────────────────────────────────────────────────

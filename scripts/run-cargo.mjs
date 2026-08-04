@@ -36,8 +36,8 @@ async function runManagedChild(
   });
   const supervisor = new ProcessSupervisor({
     baseline: { port: 1420 },
+    child,
     enforceDesktopClean: false,
-    rootPid: child.pid,
   });
   const captureTimer = setInterval(() => {
     void supervisor.capture();
@@ -94,7 +94,7 @@ async function selfTest() {
   const quietSignals = new EventEmitter();
   const preservedExit = await runManagedChild(
     process.execPath,
-    ["-e", "process.exit(7)"],
+    ["-e", "setTimeout(() => process.exit(7), 2_000)"],
     { signalSource: quietSignals, stdio: "ignore" },
   );
   assert.equal(preservedExit, 7);

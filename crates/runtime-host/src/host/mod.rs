@@ -13,6 +13,7 @@
 //! releases its permit.
 
 mod config;
+mod process;
 mod spawned;
 
 #[cfg(test)]
@@ -22,9 +23,20 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_TURNS, HostConfig, normalize_max_concurrent_turns,
     workspace_fixture_path,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use process::force_live_process_expiry_for_tests;
+pub use process::{
+    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessReceipt,
+    LiveProcessProposalView, ProcessOrigin, ProcessOutputChunk, ProcessOutputStream,
+    ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass, ProviderProcessProposal,
+    decide_process_proposal, execute_governed_process, list_process_proposals,
+    live_process_authority_count, open_process_output, pending_process_run_count,
+    recover_process_proposals,
+};
 pub use spawned::SpawnedTurn;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,10 +45,26 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeProbe, RuntimeSession, SendTurn,
     StartSession,
 };
+use keeper_tool_executor::GovernedReadToolGateway;
 
 use crate::fake::FakeRuntimeAdapter;
+use crate::governed_read::{
+    GovernedReadBridgeError, bind_run, open_gateway, release_owner, release_run,
+};
+use crate::governed_write::{
+    self as governed_write, GovernedWriteBridgeError, LiveWriteProposalView, WriteDiffView,
+    bind_write_run, open_write_gateway, release_write_owner, release_write_run,
+};
+use crate::host::process::{
+    self as governed_process, bind_process_run, open_process_gateway, release_process_owner,
+    release_process_run,
+};
 use crate::sink::ProtocolGuardSink;
 use crate::worker::{SyncTurnLifecycle, TurnSlotPermit, WorkerRecord, run_turn_worker};
+use chrono::{DateTime, Utc};
+use keeper_policy::{ExecDecision, WriteDecision};
+use keeper_storage_sqlite::{StoredExecProposal, StoredWriteProposal};
+use keeper_tool_executor::{GovernedProcessToolGateway, GovernedWriteToolGateway};
 
 /// Host that bounds concurrency and enforces the provider-neutral protocol.
 pub struct RuntimeHost {
@@ -48,10 +76,69 @@ pub struct RuntimeHost {
     workers: Mutex<HashMap<RunId, Arc<WorkerRecord>>>,
     /// Sync `send_turn` admission linearized with shutdown (mutex + condvar).
     sync_turns: SyncTurnLifecycle,
+    governed_owner: uuid::Uuid,
+    governed_gateway: Option<Arc<GovernedReadToolGateway>>,
+    governed_write_gateway: Option<Arc<GovernedWriteToolGateway>>,
+    governed_process_gateway: Option<Arc<GovernedProcessToolGateway>>,
+    /// Retained for host construction identity; process recovery uses the
+    /// gateway handle only (no repository/path side channel).
+    #[allow(dead_code)]
+    governed_db_path: Option<std::path::PathBuf>,
 }
 
 impl RuntimeHost {
     pub fn new(adapter: Arc<dyn AgentRuntimeAdapter>, config: HostConfig) -> Self {
+        Self::build(adapter, config, None, None, None, None)
+    }
+
+    pub fn new_with_governed_reads(
+        adapter: Arc<dyn AgentRuntimeAdapter>,
+        config: HostConfig,
+        database_path: impl AsRef<Path>,
+    ) -> Result<Self, GovernedReadBridgeError> {
+        let path = database_path.as_ref();
+        let read = open_gateway(path)?;
+        // Write gateway shares the same durable store; failure maps to the
+        // same unavailable surface as a missing read gateway.
+        let write = open_write_gateway(path).map_err(|_| GovernedReadBridgeError::Gateway)?;
+        let process = open_process_gateway(path).map_err(|_| GovernedReadBridgeError::Gateway)?;
+        Ok(Self::build(
+            adapter,
+            config,
+            Some(read),
+            Some(write),
+            Some(process),
+            Some(path.to_path_buf()),
+        ))
+    }
+
+    pub fn new_with_governed_tools(
+        adapter: Arc<dyn AgentRuntimeAdapter>,
+        config: HostConfig,
+        database_path: impl AsRef<Path>,
+    ) -> Result<Self, GovernedWriteBridgeError> {
+        let path = database_path.as_ref();
+        let read = open_gateway(path).map_err(|_| GovernedWriteBridgeError::Gateway)?;
+        let write = open_write_gateway(path)?;
+        let process = open_process_gateway(path).map_err(|_| GovernedWriteBridgeError::Gateway)?;
+        Ok(Self::build(
+            adapter,
+            config,
+            Some(read),
+            Some(write),
+            Some(process),
+            Some(path.to_path_buf()),
+        ))
+    }
+
+    fn build(
+        adapter: Arc<dyn AgentRuntimeAdapter>,
+        config: HostConfig,
+        governed_gateway: Option<Arc<GovernedReadToolGateway>>,
+        governed_write_gateway: Option<Arc<GovernedWriteToolGateway>>,
+        governed_process_gateway: Option<Arc<GovernedProcessToolGateway>>,
+        governed_db_path: Option<std::path::PathBuf>,
+    ) -> Self {
         #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_mut))]
         let mut normalized = HostConfig::new(
             normalize_max_concurrent_turns(config.max_concurrent_turns),
@@ -69,6 +156,11 @@ impl RuntimeHost {
             shut_down: AtomicBool::new(false),
             workers: Mutex::new(HashMap::new()),
             sync_turns: SyncTurnLifecycle::new(),
+            governed_owner: uuid::Uuid::new_v4(),
+            governed_gateway,
+            governed_write_gateway,
+            governed_process_gateway,
+            governed_db_path,
         }
     }
 
@@ -85,6 +177,237 @@ impl RuntimeHost {
     pub fn start_session(&self, request: StartSession) -> Result<RuntimeSession, RuntimeError> {
         self.ensure_alive()?;
         self.adapter.start_session(request)
+    }
+
+    pub fn register_governed_read_run(
+        &self,
+        run_id: RunId,
+        project_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        project_root: impl AsRef<Path>,
+    ) -> Result<(), GovernedReadBridgeError> {
+        let Some(gateway) = self.governed_gateway.as_ref().cloned() else {
+            // Explicit fake/test hosts have no provider read surface to bind.
+            return Ok(());
+        };
+        let project_id = project_id.into();
+        let conversation_id = conversation_id.into();
+        bind_run(
+            self.governed_owner,
+            gateway,
+            run_id,
+            project_id.clone(),
+            conversation_id.clone(),
+            project_root.as_ref(),
+        )?;
+        if let Some(write_gateway) = self.governed_write_gateway.as_ref().cloned() {
+            bind_write_run(
+                self.governed_owner,
+                write_gateway,
+                run_id,
+                project_id,
+                conversation_id,
+                project_root,
+            )
+            .map_err(|_| GovernedReadBridgeError::InvalidContext)?;
+        }
+        Ok(())
+    }
+
+    pub fn register_governed_write_run(
+        &self,
+        run_id: RunId,
+        project_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        project_root: impl AsRef<Path>,
+    ) -> Result<(), GovernedWriteBridgeError> {
+        let Some(gateway) = self.governed_write_gateway.as_ref().cloned() else {
+            return Ok(());
+        };
+        bind_write_run(
+            self.governed_owner,
+            gateway,
+            run_id,
+            project_id,
+            conversation_id,
+            project_root,
+        )
+    }
+
+    pub fn register_governed_process_run(
+        &self,
+        run_id: RunId,
+        project_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        project_root: impl AsRef<Path>,
+    ) -> Result<(), GovernedProcessBridgeError> {
+        let Some(gateway) = self.governed_process_gateway.as_ref().cloned() else {
+            return Ok(());
+        };
+        bind_process_run(
+            self.governed_owner,
+            gateway,
+            run_id,
+            project_id,
+            conversation_id,
+            project_root,
+        )
+    }
+
+    pub fn release_governed_read_run(&self, run_id: RunId) {
+        release_run(self.governed_owner, run_id);
+        release_write_run(self.governed_owner, run_id);
+        release_process_run(self.governed_owner, run_id);
+    }
+
+    pub fn release_governed_write_run(&self, run_id: RunId) {
+        release_write_run(self.governed_owner, run_id);
+    }
+
+    pub fn release_governed_process_run(&self, run_id: RunId) {
+        release_process_run(self.governed_owner, run_id);
+    }
+
+    pub fn write_gateway(&self) -> Option<&GovernedWriteToolGateway> {
+        self.governed_write_gateway.as_deref()
+    }
+
+    pub fn process_gateway(&self) -> Option<&GovernedProcessToolGateway> {
+        self.governed_process_gateway.as_deref()
+    }
+
+    /// Owner-scoped process proposal list for this host instance.
+    pub fn list_process_proposals(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<LiveProcessProposalView>, GovernedProcessBridgeError> {
+        governed_process::list_process_proposals(
+            self.governed_owner,
+            conversation_id,
+            self.governed_process_gateway.as_deref(),
+        )
+    }
+
+    /// Owner-scoped one-shot process decision for a live proposal on this host.
+    ///
+    /// Accepts approve-once / reject only. Does not accept or return a raw grant;
+    /// the host supplies its retained digest to the gateway internally.
+    pub fn decide_process_proposal(
+        &self,
+        conversation_id: &str,
+        proposal_id: &str,
+        decision: ExecDecision,
+    ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
+        governed_process::decide_process_proposal(
+            self.governed_owner,
+            conversation_id,
+            proposal_id,
+            decision,
+        )
+    }
+
+    /// Owner-scoped live process output open.
+    pub fn open_process_output(
+        &self,
+        conversation_id: &str,
+        proposal_id: &str,
+    ) -> Result<governed_process::ProcessOutputView, GovernedProcessBridgeError> {
+        governed_process::open_process_output(
+            self.governed_owner,
+            conversation_id,
+            proposal_id,
+            self.governed_process_gateway.as_deref(),
+        )
+    }
+
+    /// Restart recovery for process proposals (non-terminal → interrupted).
+    ///
+    /// Goes only through [`GovernedProcessToolGateway`]; never opens a raw
+    /// repository or database-path side channel.
+    pub fn recover_process_proposals(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<StoredExecProposal>, GovernedProcessBridgeError> {
+        let Some(gateway) = self.governed_process_gateway.as_ref() else {
+            return Ok(Vec::new());
+        };
+        governed_process::recover_process_proposals(gateway.as_ref(), now)
+    }
+
+    /// Residual non-terminal process authority for this host (tests / invariants).
+    pub fn live_process_authority_count(&self) -> usize {
+        governed_process::live_process_authority_count(self.governed_owner)
+    }
+
+    /// Residual pending-by-run process slots for this host (tests / invariants).
+    pub fn pending_process_run_count(&self) -> usize {
+        governed_process::pending_process_run_count(self.governed_owner)
+    }
+
+    /// Test seam: force live process expiry for integration tests.
+    /// Absent from ordinary product builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_live_process_expiry_for_tests(&self, proposal_id: &str) -> bool {
+        governed_process::force_live_process_expiry_for_tests(self.governed_owner, proposal_id)
+    }
+
+    /// Owner-scoped list: only proposals for this host instance.
+    ///
+    /// Durable rows come from this host's own write gateway (works with no
+    /// bound runs after restart). Live grants remain owner-scoped.
+    pub fn list_write_proposals(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<LiveWriteProposalView>, GovernedWriteBridgeError> {
+        governed_write::list_write_proposals(
+            self.governed_owner,
+            conversation_id,
+            self.governed_write_gateway.as_deref(),
+        )
+    }
+
+    /// Owner-scoped one-shot decision for a live proposal on this host.
+    pub fn decide_write_proposal(
+        &self,
+        conversation_id: &str,
+        proposal_id: &str,
+        approval_grant: &str,
+        decision: WriteDecision,
+    ) -> Result<LiveWriteProposalView, GovernedWriteBridgeError> {
+        governed_write::decide_write_proposal(
+            self.governed_owner,
+            conversation_id,
+            proposal_id,
+            approval_grant,
+            decision,
+        )
+    }
+
+    /// Owner-scoped live diff open.
+    pub fn open_write_proposal_diff(
+        &self,
+        conversation_id: &str,
+        proposal_id: &str,
+    ) -> Result<WriteDiffView, GovernedWriteBridgeError> {
+        governed_write::open_write_proposal_diff(self.governed_owner, conversation_id, proposal_id)
+    }
+
+    /// Restart recovery for this host's write gateway (interrupted + applying).
+    pub fn recover_write_proposals(
+        &self,
+        now: DateTime<Utc>,
+        resolve_root: impl FnMut(&str) -> Option<std::path::PathBuf>,
+    ) -> Result<Vec<StoredWriteProposal>, GovernedWriteBridgeError> {
+        let Some(gateway) = self.governed_write_gateway.as_ref() else {
+            return Ok(Vec::new());
+        };
+        governed_write::recover_write_proposals_with_roots(gateway, now, resolve_root)
+    }
+
+    /// Test-only expiry injection (requires `test-support` or unit-test cfg).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_live_expiry_for_tests(&self, proposal_id: &str) -> bool {
+        governed_write::force_live_expiry_for_tests(self.governed_owner, proposal_id)
     }
 
     pub fn send_turn(
@@ -266,6 +589,9 @@ impl RuntimeHost {
         // Prefer the adapter error when both fail; residual is still evaluated
         // so cleanup bookkeeping is verified either way.
         let residual = self.ensure_registry_empty_implies_no_slots();
+        release_owner(self.governed_owner);
+        release_write_owner(self.governed_owner);
+        release_process_owner(self.governed_owner);
         adapter_result?;
         residual?;
         Ok(())
@@ -419,5 +745,15 @@ impl RuntimeHost {
             });
         }
         Ok(())
+    }
+}
+
+impl Drop for RuntimeHost {
+    fn drop(&mut self) {
+        // Idempotent: release read/write/process owners so live grants and
+        // process waiters cannot survive a drop that skipped explicit shutdown.
+        release_owner(self.governed_owner);
+        release_write_owner(self.governed_owner);
+        release_process_owner(self.governed_owner);
     }
 }

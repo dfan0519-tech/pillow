@@ -2,7 +2,8 @@
 
 Date: 2026-07-30
 
-Status: Controller-approved execution baseline
+Status: Historical comparison; current state moved to
+`2026-07-31-stage1-overall-status.md`
 
 ## Product Goal
 
@@ -19,13 +20,13 @@ company orchestration remains the third stage.
 | Project entry | Blocking project launcher | Always-visible Grok-style shell with native open/create | Update plan |
 | Persistence | SQLite authority | `rusqlite`, migration 0001, canonical project roots | Keep |
 | UI baseline | Grok App-derived | Pinned Grok light shell, single sidebar and floating composer | Accept |
-| Runtime | Adapters behind neutral contract | Not implemented | Slice B1/B2 |
-| Conversation | Persistent, streaming, cancellable | Visual placeholders only | Slice B1 |
-| Files/terminal/Git | Contextual IDE resources | Stub resource pane only | Slice C |
+| Runtime | Adapters behind neutral contract | Grok ACP adapter and the C1 provider-to-B3 governed read-only loop accepted | Keep read-only boundary; expand runtimes only in Slice D |
+| Conversation | Persistent, streaming, cancellable | Project-scoped SQLite conversation, cancellation, recovery and timeline projection accepted | Keep |
+| Files/terminal/Git | Contextual IDE resources | C2 read-only core/bridge plus unmounted resource and Agent-activity renderer slices accepted | Finish preview and product wiring; terminal and Git stay deferred |
 | Knowledge | Obsidian after IDE | Not implemented | Correctly deferred |
 | Company OS | Project teams and orchestration | Not implemented | Correctly deferred |
 
-## Completed Baseline
+## Historical Slice A Baseline
 
 Slice A provides:
 
@@ -37,7 +38,7 @@ Slice A provides:
 - deterministic renderer, Rust, release and startup gates;
 - pinned MIT provenance for adapted Grok App surfaces.
 
-Slice A does not provide:
+At Slice A acceptance, the repository did not yet provide:
 
 - a conversation database;
 - a runtime-neutral event protocol;
@@ -49,6 +50,8 @@ Slice A does not provide:
 ## Corrected Delivery Sequence
 
 ### Slice B1: Conversation Kernel Vertical Slice
+
+Status: accepted.
 
 Deliver one complete deterministic path:
 
@@ -67,6 +70,8 @@ The fake adapter is a test instrument, not a product runtime.
 
 ### Slice B2: Real Grok ACP
 
+Status: accepted.
+
 Replace the fake adapter at the runtime boundary:
 
 - probe Grok Build installation and authentication;
@@ -78,8 +83,15 @@ Replace the fake adapter at the runtime boundary:
 
 ### Slice C: IDE Resources
 
-Add file tree, editor, terminal, Git diff, artifacts and permission bar only
-after a real conversation can run and recover.
+The original slice name is now executed as staged C2 work. C2 begins only with
+file tree, search, recent files, read-only editor and contextual previews after
+the accepted C1 conversation and governed-read baseline. Terminal, Git,
+write/diff approval and additional runtime work remain later boundaries.
+
+Status: in progress. C2-A resource core, C2-B bridge, C2-C1 resource panel, and
+C2-C2 Agent activity disclosure have focused acceptance. Preview, mounting,
+real projection wiring, project-switch/restart E2E, full gates, and independent
+review remain before checkpoint.
 
 ### Slice D: Runtime Expansion
 
@@ -101,4 +113,3 @@ No slice advances on screenshots alone. Each gate requires:
 5. process cleanup evidence for runtime work;
 6. a committed report with residual risks;
 7. independent spec and code review.
-
