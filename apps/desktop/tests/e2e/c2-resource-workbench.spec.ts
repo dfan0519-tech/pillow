@@ -32,6 +32,11 @@ test("Wave C2-E proves two-project isolation, restart recovery, and normal close
     {
       cwd: repositoryRoot,
       // Nested orchestrator owns desktop process baseline and cleanup proofs.
+      // MSVC spawns a detached vctip.exe telemetry process during the debug
+      // build that routinely outlives the supervisor's cleanup grace. The
+      // allowance is identity-gated and applies only after the root is
+      // confirmed dead, so it cannot mask a live desktop process.
+      allowMsvcVctipTelemetry: true,
       enforceDesktopClean: false,
       env: process.env,
       timeoutMs: 840_000,

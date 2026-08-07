@@ -12,7 +12,15 @@ test("Wave C1 visual acceptance captures every desktop state without geometry or
   const result = await runSupervisedCommand(
     process.execPath,
     ["scripts/wave-c1-visual-acceptance.mjs"],
-    { cwd: repositoryRoot, enforceDesktopClean: false, env: process.env, timeoutMs: 150_000 },
+    {
+      cwd: repositoryRoot,
+      // Detached MSVC vctip.exe telemetry outlives the cleanup grace after a
+      // debug build. Identity-gated, and only honoured once the root is dead.
+      allowMsvcVctipTelemetry: true,
+      enforceDesktopClean: false,
+      env: process.env,
+      timeoutMs: 150_000,
+    },
   );
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
 

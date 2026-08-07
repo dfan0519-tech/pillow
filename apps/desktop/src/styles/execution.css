@@ -362,13 +362,6 @@
   min-width: 0;
 }
 
-.git-changes-view__title {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
-}
-
 .git-changes-view__identity {
   margin: 0;
   font-size: 12px;

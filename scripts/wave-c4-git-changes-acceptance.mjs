@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   access,
   mkdir,
@@ -113,6 +114,14 @@ const FIXTURE_AUTHOR = Object.freeze({
   name: "Pillow Fixture",
   email: "fixture@pillow.local",
 });
+
+/**
+ * Project A embeds a nested git repo under vendor/nested. Porcelain v2 with
+ * `--untracked-files=normal` collapses that tree to a single untracked
+ * directory record `? vendor/` (trailing slash preserved by the product).
+ * This is intentional fixture dirt on the root repo — not ignored.
+ */
+const PROJECT_A_UNTRACKED_VENDOR_DIR = "vendor/";
 
 const desktopRequire = createRequire(
   path.join(repositoryRoot, "apps", "desktop", "package.json"),
@@ -905,11 +914,37 @@ function resolveHostGit() {
 
 const hostGit = resolveHostGit();
 
+/** Absolute path to an empty global gitconfig used only by fixture host-git. */
+let fixtureGlobalGitConfigPath = null;
+
+/**
+ * Point fixture git at an empty temporary global config so the host user's
+ * `~/.gitconfig` (core.autocrlf, init.defaultBranch, filters, …) cannot
+ * change fixture content or hashes across machines.
+ *
+ * Does not read or write the user global config file. Local repo config
+ * written under the fixture tree remains authoritative for author identity
+ * after `initRepo`.
+ */
+function ensureFixtureGlobalGitConfig() {
+  if (fixtureGlobalGitConfigPath) return fixtureGlobalGitConfigPath;
+  const dir = path.join(os.tmpdir(), "pillow-c4-git-fixture-gitconfig");
+  mkdirSync(dir, { recursive: true });
+  const cfgPath = path.join(dir, "gitconfig");
+  // Always (re)write empty content so a stale leftover never reintroduces
+  // ambient keys if the temp file was edited outside this process.
+  writeFileSync(cfgPath, "", "utf8");
+  fixtureGlobalGitConfigPath = cfgPath;
+  return cfgPath;
+}
+
 function fixtureGitEnv() {
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
+    // Isolate global config; system already disabled via GIT_CONFIG_NOSYSTEM.
+    GIT_CONFIG_GLOBAL: ensureFixtureGlobalGitConfig(),
     GIT_AUTHOR_NAME: FIXTURE_AUTHOR.name,
     GIT_AUTHOR_EMAIL: FIXTURE_AUTHOR.email,
     GIT_COMMITTER_NAME: FIXTURE_AUTHOR.name,
@@ -953,7 +988,14 @@ async function initRepo(repoRoot, { branch = "main" } = {}) {
 }
 
 async function commitAll(repoRoot, message) {
-  runFixtureGit(repoRoot, ["add", "-A"]);
+  // `vendor/` must stay untracked for the whole run: it is the fixture's
+  // untracked-directory coverage (porcelain `? vendor/`). Plain `add -A` would
+  // absorb the embedded repository as a gitlink on the first commit after the
+  // fixture is built, silently removing that coverage — which is exactly how
+  // the `conflict` scenario lost its second dirty entry. Excluding it here is
+  // also the realistic shape: a nested checkout is not committed into its
+  // parent.
+  runFixtureGit(repoRoot, ["add", "-A", "--", ".", ":(exclude)vendor"]);
   runFixtureGit(repoRoot, ["commit", "-m", message]);
 }
 
@@ -1054,11 +1096,11 @@ async function buildProjectAFixture(projectRoot) {
   await writeRepoFile(projectRoot, "blob.bin", Buffer.from([0, 1, 2, 3, 0, 9]));
   await writeRepoFile(projectRoot, "old_name.txt", "rename-body\n");
   await writeRepoFile(projectRoot, "project-a-only.txt", "alpha-marker\n");
-  // Nested repos live under vendor/. Without ignore, porcelain reports
-  // `?? vendor/` (trailing slash) which the read executor rejects as a
-  // non-portable status path and fails the entire root status call.
-  // Discovery walks the filesystem independently of gitignore.
-  await writeRepoFile(projectRoot, ".gitignore", "vendor/\n");
+  // Do NOT gitignore vendor/. Nested repos intentionally remain untracked on
+  // the parent so E2E covers porcelain `? vendor/` (trailing slash). The
+  // product accepts that form (status.rs decode_portable_path_or_directory);
+  // a prior harness bypass wrote `vendor/` into .gitignore and hid the path.
+  // Discovery still walks the filesystem independently of git status.
   await commitAll(projectRoot, "init root");
 
   const nested = path.join(projectRoot, "vendor", "nested");
@@ -1091,14 +1133,14 @@ async function buildUnsafeProjectFixture(projectRoot) {
 }
 
 async function resetRootToCleanMain(projectRoot) {
-  // Abort any merge, reset hard, clean untracked (not nested git dirs carefully).
+  // Abort any merge, reset hard, clean untracked — but never delete the nested
+  // vendor tree (exclude path so `clean -fd` cannot remove nested .git).
   runFixtureGit(projectRoot, ["merge", "--abort"], { allowFailure: true });
   runFixtureGit(projectRoot, ["checkout", "main"], { allowFailure: true });
   runFixtureGit(projectRoot, ["reset", "--hard", "HEAD"], { allowFailure: true });
-  // Clean untracked files but keep nested vendor/nested .git
+  // Keep vendor/ so the nested repo remains; root status will still report
+  // untracked `vendor/` (intentional; not gitignored).
   runFixtureGit(projectRoot, ["clean", "-fd", "-e", "vendor"], { allowFailure: true });
-  // Ensure ignore + nested remain after destructive scenario mutations.
-  await writeRepoFile(projectRoot, ".gitignore", "vendor/\n");
   const nested = path.join(projectRoot, "vendor", "nested");
   try {
     await access(path.join(nested, ".git"));
@@ -1106,17 +1148,6 @@ async function resetRootToCleanMain(projectRoot) {
     await initRepo(nested);
     await writeRepoFile(nested, "nested.txt", "nested clean\n");
     await commitAll(nested, "reinit nested");
-  }
-  // If .gitignore was wiped by hard reset to a commit without it, re-commit.
-  const ig = runFixtureGit(projectRoot, ["status", "--porcelain", "--", ".gitignore"], {
-    allowFailure: true,
-  });
-  const igOut = ig.stdout?.toString("utf8") ?? "";
-  if (igOut.includes(".gitignore")) {
-    runFixtureGit(projectRoot, ["add", ".gitignore"]);
-    runFixtureGit(projectRoot, ["commit", "-m", "restore gitignore vendor"], {
-      allowFailure: true,
-    });
   }
 }
 
@@ -1197,9 +1228,26 @@ async function scenarioNestedRepository({ page, projectARoot, privacyTokens }) {
   await resetRootToCleanMain(projectARoot);
   const before = await captureRepoManifest(projectARoot, "nested-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  // Root is clean (vendor/ gitignored); nested still discovered via FS walk.
-  await waitForGitClean(page);
-  // Multi-repo selector when root + nested are discovered.
+  // Root is intentionally dirty: untracked nested tree collapses to `vendor/`.
+  // RED→GREEN for the former status parse failure on trailing-slash directories:
+  // status must settle with a painted dirty count and no error, not abort.
+  const rootDirty = await waitForGitDirty(page, { minDirty: 1 });
+  assert.equal(
+    rootDirty.dirtyCount,
+    1,
+    `nested-repository root must show exactly 1 dirty entry (untracked ${PROJECT_A_UNTRACKED_VENDOR_DIR}); got ${rootDirty.dirtyCountText}`,
+  );
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
+  assert.equal(
+    await page.getByTestId(GIT_TEST_IDS.error).count(),
+    0,
+    "root status must not fail when untracked directory entry is present",
+  );
+  // Multi-repo selector when root + nested are discovered via FS walk.
   await page.getByTestId(GIT_TEST_IDS.repoSelector).waitFor({
     state: "visible",
     timeout: 30_000,
@@ -1222,11 +1270,32 @@ async function scenarioNestedRepository({ page, projectARoot, privacyTokens }) {
     "selector must not show drive roots",
   );
   await selectGitRepository(page, ".");
-  await waitForGitClean(page);
+  // Back on root: same untracked directory must still paint without status failure.
+  const rootAgain = await waitForGitDirty(page, { minDirty: 1 });
+  assert.equal(
+    rootAgain.dirtyCount,
+    1,
+    `reselected root must still show exactly untracked ${PROJECT_A_UNTRACKED_VENDOR_DIR}`,
+  );
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
+  assert.equal(
+    await page.getByTestId(GIT_TEST_IDS.error).count(),
+    0,
+    "reselected root status must not fail with untracked directory",
+  );
   await assertGitPrivacyClean(page, "nested-repository", privacyTokens);
   const after = await captureRepoManifest(projectARoot, "nested-after");
   assertManifestEqual(before, after, "nested-repository");
-  return { nestedId: "vendor/nested", immutability: { equal: true } };
+  return {
+    nestedId: "vendor/nested",
+    rootUntrackedDirectory: PROJECT_A_UNTRACKED_VENDOR_DIR,
+    rootDirtyCount: 1,
+    immutability: { equal: true },
+  };
 }
 
 async function scenarioModifiedUntracked({ page, projectARoot, privacyTokens }) {
@@ -1235,13 +1304,25 @@ async function scenarioModifiedUntracked({ page, projectARoot, privacyTokens }) 
   await writeRepoFile(projectARoot, "untracked-new.txt", "brand new\n");
   const before = await captureRepoManifest(projectARoot, "mod-untracked-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 2 });
+  // Exact set: modified note.txt + untracked-new.txt + untracked vendor/.
+  // Count is 3 (not a floor of 2); vendor/ is product-visible dirt, not noise.
+  const dirty = await waitForGitDirty(page, { minDirty: 3 });
+  assert.equal(
+    dirty.dirtyCount,
+    3,
+    `modified-untracked must be exactly 3 entries; got ${dirty.dirtyCountText}`,
+  );
   await assertGitEntryVisible(page, GIT_KIND_LABEL.modified, "note.txt");
   await assertGitEntryVisible(page, GIT_KIND_LABEL.untracked, "untracked-new.txt");
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
   await assertGitPrivacyClean(page, "modified-untracked", privacyTokens);
   const after = await captureRepoManifest(projectARoot, "mod-untracked-after");
   assertManifestEqual(before, after, "modified-untracked");
-  return { immutability: { equal: true } };
+  return { dirtyCount: 3, immutability: { equal: true } };
 }
 
 async function scenarioRename({ page, projectARoot, privacyTokens }) {
@@ -1249,16 +1330,27 @@ async function scenarioRename({ page, projectARoot, privacyTokens }) {
   runFixtureGit(projectARoot, ["mv", "old_name.txt", "new_name.txt"]);
   const before = await captureRepoManifest(projectARoot, "rename-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 1 });
+  // Rename entry + untracked vendor/ = 2 (exact).
+  const dirty = await waitForGitDirty(page, { minDirty: 2 });
+  assert.equal(
+    dirty.dirtyCount,
+    2,
+    `rename must be exactly 2 entries (rename + ${PROJECT_A_UNTRACKED_VENDOR_DIR}); got ${dirty.dirtyCountText}`,
+  );
   await assertGitEntryVisible(page, GIT_KIND_LABEL.renamed, "new_name.txt", {
     originalPath: "old_name.txt",
   });
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
   await assertGitPrivacyClean(page, "rename", privacyTokens);
   const after = await captureRepoManifest(projectARoot, "rename-after");
   assertManifestEqual(before, after, "rename");
   // Restore for later scenarios
   runFixtureGit(projectARoot, ["reset", "--hard", "HEAD"]);
-  return { immutability: { equal: true } };
+  return { dirtyCount: 2, immutability: { equal: true } };
 }
 
 async function scenarioConflict({ page, projectARoot, privacyTokens }) {
@@ -1280,13 +1372,24 @@ async function scenarioConflict({ page, projectARoot, privacyTokens }) {
 
   const before = await captureRepoManifest(projectARoot, "conflict-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 1 });
+  // Conflict entry + untracked vendor/ = 2 (exact).
+  const dirty = await waitForGitDirty(page, { minDirty: 2 });
+  assert.equal(
+    dirty.dirtyCount,
+    2,
+    `conflict must be exactly 2 entries (conflict + ${PROJECT_A_UNTRACKED_VENDOR_DIR}); got ${dirty.dirtyCountText}`,
+  );
   await assertGitEntryVisible(page, GIT_KIND_LABEL.conflict, "conflict.txt");
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
   // Must not resolve or mutate — only observe.
   await assertGitPrivacyClean(page, "conflict", privacyTokens);
   const after = await captureRepoManifest(projectARoot, "conflict-after");
   assertManifestEqual(before, after, "conflict");
-  return { immutability: { equal: true }, unresolved: true };
+  return { dirtyCount: 2, immutability: { equal: true }, unresolved: true };
 }
 
 async function scenarioDetachedHead({ page, projectARoot, privacyTokens }) {
@@ -1318,7 +1421,18 @@ async function scenarioTextDiff({ page, projectARoot, privacyTokens }) {
   await writeRepoFile(projectARoot, "note.txt", "line1\nline2-text-diff\n");
   const before = await captureRepoManifest(projectARoot, "text-diff-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 1 });
+  // Modified note.txt + untracked vendor/ = 2 (exact).
+  const dirty = await waitForGitDirty(page, { minDirty: 2 });
+  assert.equal(
+    dirty.dirtyCount,
+    2,
+    `text-diff must be exactly 2 entries; got ${dirty.dirtyCountText}`,
+  );
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
   await selectGitPath(page, "note.txt");
   const unified = page.getByTestId(GIT_TEST_IDS.diffUnified);
   await unified.waitFor({ state: "visible", timeout: 30_000 });
@@ -1350,7 +1464,18 @@ async function scenarioBinaryOversizedDiff({ page, projectARoot, privacyTokens }
 
   const before = await captureRepoManifest(projectARoot, "binary-over-before");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 2 });
+  // blob.bin modified + huge.txt modified + untracked vendor/ = 3 (exact).
+  const dirty = await waitForGitDirty(page, { minDirty: 3 });
+  assert.equal(
+    dirty.dirtyCount,
+    3,
+    `binary-oversized-diff must be exactly 3 entries; got ${dirty.dirtyCountText}`,
+  );
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
 
   await selectGitPath(page, "blob.bin");
   await page.getByTestId(GIT_TEST_IDS.diffBinary).waitFor({
@@ -1433,7 +1558,18 @@ async function scenarioGenerationDrift({ page, projectARoot, privacyTokens }) {
   await writeRepoFile(projectARoot, "note.txt", "line1\ngen-a\n");
   const beforeDirty = await captureRepoManifest(projectARoot, "gen-drift-dirty");
   await openProjectChanges(page, PROJECT_A_NAME);
-  await waitForGitDirty(page, { minDirty: 1 });
+  // gen-marker-a.txt untracked + note.txt modified + vendor/ untracked = 3.
+  const dirty = await waitForGitDirty(page, { minDirty: 3 });
+  assert.equal(
+    dirty.dirtyCount,
+    3,
+    `generation-drift pre-refresh must be exactly 3 entries; got ${dirty.dirtyCountText}`,
+  );
+  await assertGitEntryVisible(
+    page,
+    GIT_KIND_LABEL.untracked,
+    PROJECT_A_UNTRACKED_VENDOR_DIR,
+  );
   await selectGitPath(page, "note.txt");
   const preRefreshDiff = (
     await page.getByTestId(GIT_TEST_IDS.diffUnified).innerText().catch(() => "")
@@ -1564,11 +1700,22 @@ async function scenarioRestartRecovery({
       await selectProject(page, PROJECT_A_NAME);
       await seedConversation(page, "git-acceptance restart session 1");
       await openProjectChanges(page, PROJECT_A_NAME);
-      await waitForGitDirty(page, { minDirty: 1 });
+      // restart-marker.txt + untracked vendor/ = 2 (exact).
+      const dirty = await waitForGitDirty(page, { minDirty: 2 });
+      assert.equal(
+        dirty.dirtyCount,
+        2,
+        `restart-recovery session1 must be exactly 2 entries; got ${dirty.dirtyCountText}`,
+      );
       await assertGitEntryVisible(
         page,
         GIT_KIND_LABEL.untracked,
         "restart-marker.txt",
+      );
+      await assertGitEntryVisible(
+        page,
+        GIT_KIND_LABEL.untracked,
+        PROJECT_A_UNTRACKED_VENDOR_DIR,
       );
       await capturePrivacySafeScreenshot({
         page,
@@ -1595,11 +1742,21 @@ async function scenarioRestartRecovery({
       await selectProject(page, PROJECT_A_NAME);
       await openGitChangesPane(page);
       await waitForGitSettled(page);
-      await waitForGitDirty(page, { minDirty: 1 });
+      const dirty = await waitForGitDirty(page, { minDirty: 2 });
+      assert.equal(
+        dirty.dirtyCount,
+        2,
+        `restart-recovery session2 must be exactly 2 entries; got ${dirty.dirtyCountText}`,
+      );
       await assertGitEntryVisible(
         page,
         GIT_KIND_LABEL.untracked,
         "restart-marker.txt",
+      );
+      await assertGitEntryVisible(
+        page,
+        GIT_KIND_LABEL.untracked,
+        PROJECT_A_UNTRACKED_VENDOR_DIR,
       );
       // Fresh discovery — no host generation reuse artifacts as path/error leaks.
       await assertGitPrivacyClean(page, "restart-recovery", privacyTokens);

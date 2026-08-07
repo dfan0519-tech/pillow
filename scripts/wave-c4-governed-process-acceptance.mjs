@@ -534,10 +534,62 @@ function fakeAcpExecutablePath(cargoTargetDir) {
   );
 }
 
+/**
+ * Grok CLI slots 2–4 set USERPROFILE to the slot home. Host Rust toolchains
+ * typically live under the OS user profile (HOMEDRIVE+HOMEPATH). When the slot
+ * rustup has no active toolchain, point cargo/rustup at the host install so
+ * the acceptance debug build can compile. Does not touch product runtime env.
+ * (Same harness fix as wave-c4-git-changes-acceptance; duplicated so this
+ * script stays independently runnable without reading the git harness.)
+ */
+function ensureHostRustToolchainEnv(environment) {
+  const env = { ...environment };
+  if (process.platform !== "win32") return env;
+
+  const hostUserProfile =
+    env.HOMEDRIVE && env.HOMEPATH
+      ? path.resolve(path.join(env.HOMEDRIVE, env.HOMEPATH))
+      : null;
+  if (!hostUserProfile) return env;
+
+  const hostRustup = path.join(hostUserProfile, ".rustup");
+  const hostCargo = path.join(hostUserProfile, ".cargo");
+  const hostCargoBin = path.join(hostCargo, "bin");
+  const hostCargoExe = path.join(hostCargoBin, "cargo.exe");
+
+  const hostPath = `${hostCargoBin};${env.Path ?? env.PATH ?? ""}`;
+  const hostEnv = {
+    ...env,
+    RUSTUP_HOME: hostRustup,
+    CARGO_HOME: hostCargo,
+    Path: hostPath,
+    PATH: hostPath,
+  };
+  const hostProbe = spawnSync(hostCargoExe, ["--version"], {
+    encoding: "utf8",
+    env: hostEnv,
+    windowsHide: true,
+  });
+  if (hostProbe.status !== 0) return env;
+
+  const slotProbe = spawnSync("rustup", ["show", "active-toolchain"], {
+    encoding: "utf8",
+    env,
+    windowsHide: true,
+  });
+  const slotActive =
+    slotProbe.status === 0
+    && String(slotProbe.stdout ?? "").trim().length > 0
+    && !String(slotProbe.stderr ?? "").toLowerCase().includes("no active toolchain");
+  if (slotActive) return env;
+
+  return hostEnv;
+}
+
 async function ensureDebugBuild(environment, acceptanceConfigPath, cargoTargetDir) {
   await mkdir(cargoTargetDir, { recursive: true });
   const buildEnv = {
-    ...environment,
+    ...ensureHostRustToolchainEnv(environment),
     CARGO_TARGET_DIR: cargoTargetDir,
   };
   await runChecked(
@@ -1143,12 +1195,35 @@ async function scenarioOutputBounds({ page }) {
 
 async function scenarioCancelTree({ page }) {
   // Failure-path dumps only (gitignored). Kept so a future RED captures the
-  // DOM gate state without re-instrumenting.
+  // DOM gate state without re-instrumenting. Phase timeline also written on
+  // green so intermittent REDs can be compared against successful sequences.
   const cancelTreeDebugDir = path.join(
     repositoryRoot,
     ".superpowers",
     "c4-cancel-tree-debug",
   );
+  await mkdir(cancelTreeDebugDir, { recursive: true });
+  /** @type {Array<object>} */
+  const phaseTimeline = [];
+  const pushPhase = async (phase) => {
+    const snap = await dumpCancelTreeUiState(page, phase);
+    phaseTimeline.push(snap);
+    return snap;
+  };
+  const writeTimeline = async (outcome, extra = {}) => {
+    const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
+    const timelinePath = path.join(
+      cancelTreeDebugDir,
+      `cancel-tree-${outcome}-${stamp}-timeline.json`,
+    );
+    await writeFile(
+      timelinePath,
+      `${JSON.stringify({ outcome, phaseTimeline, ...extra }, null, 2)}\n`,
+      "utf8",
+    );
+    console.error(`[cancel-tree-debug] timeline written ${timelinePath}`);
+    return timelinePath;
+  };
 
   await selectProject(page, PROJECT_A_NAME);
   await collapseResourcePaneIfOpen(page);
@@ -1159,7 +1234,15 @@ async function scenarioCancelTree({ page }) {
   // Product: canCancel = isRunActive(run) from accepted sendTurn; cancel must
   // already be mounted before the process approval bar (run is mid-turn).
   {
-    const snap = await dumpCancelTreeUiState(page, "after-send");
+    const snap = await pushPhase("after-send");
+    if (!snap.composerCancel.visible) {
+      await writeTimeline("red-after-send", { failPhase: "after-send", failDump: snap });
+      const shotPath = path.join(
+        cancelTreeDebugDir,
+        `cancel-tree-after-send-${new Date().toISOString().replace(/[:.]/gu, "-")}.png`,
+      );
+      await page.screenshot({ path: shotPath, fullPage: false }).catch(() => undefined);
+    }
     assert.equal(
       snap.composerCancel.visible,
       true,
@@ -1173,7 +1256,13 @@ async function scenarioCancelTree({ page }) {
     page,
     expectedProgram: "node",
     expectedArgvNeedle: "c4p-child",
+    debug: {
+      dumpDir: cancelTreeDebugDir,
+      label: "cancel-tree",
+      phase: "wait-approval",
+    },
   });
+  await pushPhase("after-approval-visible");
   // Long-running: host decide blocks through execute; do not wait for bar clear.
   const approveAt = performance.now();
   await approveCommandOnce(page, { waitForClear: false });
@@ -1187,7 +1276,19 @@ async function scenarioCancelTree({ page }) {
   // fixed 60s PROCESS_TIMEOUT window — harness timing fragility, not a
   // product cancel gate. Cancel is correct while the owning run is active.
   {
-    const snap = await dumpCancelTreeUiState(page, "after-approve");
+    const snap = await pushPhase("after-approve");
+    if (!snap.composerCancel.visible || snap.selectedConversationRows < 1) {
+      await writeTimeline("red-after-approve", {
+        failPhase: "after-approve",
+        failDump: snap,
+        msSinceApprove: Math.round(performance.now() - approveAt),
+      });
+      const shotPath = path.join(
+        cancelTreeDebugDir,
+        `cancel-tree-after-approve-${new Date().toISOString().replace(/[:.]/gu, "-")}.png`,
+      );
+      await page.screenshot({ path: shotPath, fullPage: false }).catch(() => undefined);
+    }
     assert.equal(
       snap.composerCancel.visible,
       true,
@@ -1206,16 +1307,31 @@ async function scenarioCancelTree({ page }) {
   // Brief poll for host-side child markers (spawn is async after approve).
   // Cap low so we never recreate a long cancel delay; cancel does not require
   // markers to be present first, but markers strengthen cleanup proof.
+  // Sample cancel visibility during the poll — historical RED may be cancel
+  // vanishing between after-approve and cancelOwningRun.
   let before = [];
+  /** @type {Array<object>} */
+  const markerPollSamples = [];
   const markerDeadline = performance.now() + 5_000;
   while (performance.now() < markerDeadline) {
     before = findMarkedNodeProcesses(["c4p-child"]);
+    const cancelCount = await page.getByTestId("composer-cancel").count();
+    const cancelVisible =
+      cancelCount > 0
+      && (await page.getByTestId("composer-cancel").isVisible().catch(() => false));
+    markerPollSamples.push({
+      tMs: Math.round(performance.now() - approveAt),
+      markers: before.length,
+      cancelVisible,
+      cancelCount,
+    });
     if (before.length > 0) break;
     await delay(100);
   }
   if (before.length === 0) {
     before = findMarkedNodeProcesses(["c4p-child"]);
   }
+  await pushPhase("before-cancelOwningRun");
 
   const msApproveToCancelStart = Math.round(performance.now() - approveAt);
   let cancelResult;
@@ -1229,27 +1345,13 @@ async function scenarioCancelTree({ page }) {
   } catch (cause) {
     const failDump = cause?.cancelTreeDump
       ?? (await dumpCancelTreeUiState(page, "cancelOwningRun-failed"));
-    await mkdir(cancelTreeDebugDir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
-    const timelinePath = path.join(
-      cancelTreeDebugDir,
-      `cancel-tree-${stamp}-timeline.json`,
-    );
-    await writeFile(
-      timelinePath,
-      `${JSON.stringify(
-        {
-          msApproveToCancelStart,
-          markersBefore: before.length,
-          failDump,
-          msSinceApproveAtFail: Math.round(performance.now() - approveAt),
-        },
-        null,
-        2,
-      )}\n`,
-      "utf8",
-    );
-    console.error(`[cancel-tree-debug] timeline written ${timelinePath}`);
+    await writeTimeline("red-cancelOwningRun", {
+      msApproveToCancelStart,
+      markersBefore: before.length,
+      markerPollSamples,
+      failDump,
+      msSinceApproveAtFail: Math.round(performance.now() - approveAt),
+    });
     throw cause;
   }
 
@@ -1273,6 +1375,15 @@ async function scenarioCancelTree({ page }) {
   );
   await assertCommandApprovalAbsent(page, 30_000);
   await waitForComposerIdle(page, 60_000);
+  await pushPhase("after-cancel-terminal");
+  // Keep only the latest green timeline (disk budget); RED timelines are
+  // always retained by distinct outcome prefixes.
+  await writeTimeline("green", {
+    msApproveToCancelStart,
+    markersBefore: before.length,
+    markerPollSamples,
+    cancelClicks: cancelResult?.clicks ?? null,
+  });
 
   return {
     scenario: "cancel-tree",
@@ -1284,6 +1395,7 @@ async function scenarioCancelTree({ page }) {
       cancelVisibleAfterApproveAsserted: true,
       msApproveToCancelStart,
       cancelClicks: cancelResult?.clicks ?? null,
+      markerPollSamples,
     },
   };
 }
@@ -1349,6 +1461,18 @@ async function scenarioTwoProjectIsolation({ page }) {
   const promptB = "[c4p:approve-b] pending isolation B";
   const aMarker = "c4p-project-a";
   const bMarker = "c4p-project-b";
+  // Prior exclusive RED (2026-08-07 run1) timed out on command-approval-bar
+  // with no DOM dump. Phase-labeled dumps go next to cancel-tree evidence.
+  const isoDebugDir = path.join(
+    repositoryRoot,
+    ".superpowers",
+    "c4-cancel-tree-debug",
+  );
+  const approvalDebug = (phase) => ({
+    dumpDir: isoDebugDir,
+    label: "two-project-isolation",
+    phase,
+  });
 
   await selectProject(page, PROJECT_A_NAME);
   await collapseResourcePaneIfOpen(page);
@@ -1358,6 +1482,7 @@ async function scenarioTwoProjectIsolation({ page }) {
     page,
     expectedProgram: "node",
     expectedArgvNeedle: aMarker,
+    debug: approvalDebug("prompt-a"),
   });
 
   // Switch to B while A is pending — A approval/activity must not leak.
@@ -1372,6 +1497,8 @@ async function scenarioTwoProjectIsolation({ page }) {
   // Switching back restores the native pending state for A.
   await selectProject(page, PROJECT_A_NAME);
   try {
+    // No debug dump on the short probe — missing bar here is an expected
+    // recovery branch (re-open conversation), not a scenario RED.
     await waitForCommandApproval({
       page,
       expectedProgram: "node",
@@ -1384,6 +1511,7 @@ async function scenarioTwoProjectIsolation({ page }) {
       page,
       expectedProgram: "node",
       expectedArgvNeedle: aMarker,
+      debug: approvalDebug("restore-a-after-open"),
     });
   }
   await assertNoForeignProcessEvidence({
@@ -1420,6 +1548,7 @@ async function scenarioTwoProjectIsolation({ page }) {
     page,
     expectedProgram: "node",
     expectedArgvNeedle: bMarker,
+    debug: approvalDebug("prompt-b"),
   });
 
   // B's pending must not leak into A.
@@ -1472,6 +1601,7 @@ async function scenarioTwoProjectIsolation({ page }) {
     page,
     expectedProgram: "node",
     expectedArgvNeedle: bMarker,
+    debug: approvalDebug("restore-b-before-reject"),
   });
   await rejectCommand(page);
   await waitForCommandActivity({ page, status: PROCESS_STATUS.rejected });

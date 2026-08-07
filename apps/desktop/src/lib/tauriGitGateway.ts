@@ -166,16 +166,36 @@ function assertExpected(
   }
 }
 
+/**
+ * Status entry paths may name a collapsed untracked/ignored directory, which
+ * porcelain v2 reports with exactly one trailing `/` (`vendor/`). The host
+ * carries that form through parsing and project-path mapping, so this layer
+ * must accept it too — otherwise one untracked folder makes the whole status
+ * response look malformed and it degrades to `git_unavailable`.
+ *
+ * Deliberately NOT used for repository ids or diff paths: a diff target must
+ * still be a file. The stem runs through the identical `portable` rules, so
+ * absolute, native, backslash, traversal and empty-segment rejection is
+ * unchanged.
+ */
+function portableEntryPath(value: unknown): value is string {
+  if (typeof value === "string" && value.endsWith("/")) {
+    const stem = value.slice(0, -1);
+    return stem.length > 0 && stem !== "." && !stem.endsWith("/") && portable(stem);
+  }
+  return portable(value);
+}
+
 function normalizeStatusEntry(item: unknown): GitStatusEntryView {
   if (
     !record(item)
     || !only(item, STATUS_ENTRY_KEYS)
-    || !portable(item.path)
+    || !portableEntryPath(item.path)
     || !enumValue(item.kind, STATUS_KINDS)
   ) {
     throw invalid();
   }
-  if (item.originalPath !== undefined && !portable(item.originalPath)) {
+  if (item.originalPath !== undefined && !portableEntryPath(item.originalPath)) {
     throw invalid();
   }
   return {

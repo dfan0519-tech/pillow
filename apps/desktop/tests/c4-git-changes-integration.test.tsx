@@ -448,7 +448,12 @@ describe("C4 D3B4 Git workbench composition", () => {
     expect(gitGateway.statusCalls).toEqual([]);
 
     await openResourcePane();
-    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+    // Mode switcher present: pane h2 is generic; mode name lives on the tab.
+    expect(screen.getByRole("heading", { name: "上下文", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "资源" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.queryByTestId("git-changes-pane")).toBeNull();
     expect(gitGateway.discoverCalls).toEqual([]);
 
@@ -471,6 +476,13 @@ describe("C4 D3B4 Git workbench composition", () => {
       expect(screen.getByTestId("git-changes-branch")).toHaveTextContent("feature");
       expect(screen.getByTestId("git-changes-dirty-count")).toHaveTextContent("2");
     });
+    // Compact labels: mode name once (tab); no duplicate heading "变更".
+    expect(screen.getAllByText("变更")).toHaveLength(1);
+    expect(screen.queryByRole("heading", { name: "变更" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "变更" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(gitGateway.diffCalls).toEqual([]);
   });
 
@@ -1138,7 +1150,11 @@ describe("C4 D3B4 Git workbench composition", () => {
       await waitFor(() => {
         expect(screen.getByTestId("git-changes-pane")).toBeInTheDocument();
       });
-      expect(screen.getByRole("heading", { name: "变更", level: 2 })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "上下文", level: 2 })).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "变更" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
 
       // Open write Diff via review — Diff outranks Changes.
       await waitFor(() => {

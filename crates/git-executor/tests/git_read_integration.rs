@@ -232,6 +232,75 @@ fn discover_nested_repository_isolation() {
 }
 
 #[test]
+fn root_status_reports_an_untracked_nested_repository_directory() {
+    // Regression, real git: an embedded repository that is NOT gitignored makes
+    // porcelain v2 emit `? vendor/` for the *root* repository. Every layer —
+    // parser, project-path mapping, and the runner — must carry that directory
+    // form, otherwise a single untracked folder fails the whole root status.
+    //
+    // `discover_nested_repository_isolation` builds this exact shape but only
+    // asserts discovery and the *nested* status, so it never covered the root.
+    let fx = Fixture::project("nested-root-status");
+    let root = fx.init_repo(".");
+    fx.write(&root, "root.txt", b"root\n");
+    fx.commit_all(&root, "root");
+
+    let nested = fx.init_repo("vendor/nested");
+    fx.write(&nested, "inner.txt", b"inner\n");
+    fx.commit_all(&nested, "nested");
+
+    let status = fx
+        .executor()
+        .status(&fx.root, &root_id(), 1)
+        .expect("root status must succeed with an untracked nested repository");
+
+    let paths: Vec<&str> = status.entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        paths.contains(&"vendor/"),
+        "root status must report the untracked directory; got {paths:?}"
+    );
+}
+
+#[test]
+fn root_status_matches_the_desktop_acceptance_project_shape() {
+    // Mirrors the C4 Git acceptance "Project A" fixture exactly (binary blob,
+    // rename source, markers, plus an untracked nested repository) so a real
+    // desktop failure can be reproduced here in seconds instead of a 4 minute
+    // E2E run.
+    let fx = Fixture::project("acceptance-shape");
+    let root = fx.init_repo(".");
+    fx.write(&root, "readme.md", b"project-a root\n");
+    fx.write(&root, "note.txt", b"line1\n");
+    fx.write(&root, "blob.bin", &[0u8, 1, 2, 3, 0, 9]);
+    fx.write(&root, "old_name.txt", b"rename-body\n");
+    fx.write(&root, "project-a-only.txt", b"alpha-marker\n");
+    fx.commit_all(&root, "init root");
+
+    let nested = fx.init_repo("vendor/nested");
+    fx.write(&nested, "nested.txt", b"nested clean\n");
+    fx.commit_all(&nested, "init nested");
+
+    let status = fx
+        .executor()
+        .status(&fx.root, &root_id(), 7)
+        .expect("root status must succeed on the acceptance project shape");
+
+    let paths: Vec<&str> = status.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["vendor/"],
+        "root should report exactly the untracked nested directory"
+    );
+
+    // The nested repository stays independently readable and clean.
+    let nested_status = fx
+        .executor()
+        .status(&fx.root, &nested_id("vendor/nested"), 7)
+        .expect("nested status");
+    assert!(nested_status.entries.is_empty(), "nested must be clean");
+}
+
+#[test]
 fn linked_worktree_outside_project_is_denied() {
     let fx = Fixture::project("wt-out");
     let main = fx.init_repo(".");

@@ -384,11 +384,19 @@ export async function assertSingleApprovalSlot(page) {
 /**
  * Wait for the single conversation-owned process approval bar.
  *
+ * Optional `debug` writes a phase-labeled DOM dump + screenshot on timeout so
+ * intermittent `command-approval-bar` misses leave RED forensics on disk.
+ *
  * @param {{
  *   page: import('playwright-core').Page,
  *   expectedProgram?: string,
  *   expectedArgvNeedle?: string,
  *   timeoutMs?: number,
+ *   debug?: {
+ *     dumpDir?: string,
+ *     label?: string,
+ *     phase?: string,
+ *   },
  * }} args
  */
 export async function waitForCommandApproval({
@@ -396,12 +404,84 @@ export async function waitForCommandApproval({
   expectedProgram = "node",
   expectedArgvNeedle,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  debug = null,
 }) {
   assertPage(page);
   assertNonEmptyString(expectedProgram, "expectedProgram");
 
   const bar = page.getByTestId(PROCESS_TEST_IDS.approval);
-  await bar.waitFor({ state: "visible", timeout: timeoutMs });
+  const t0 = performance.now();
+  /** @type {Array<{ tMs: number, count: number, visible: boolean }>} */
+  const visibilitySamples = [];
+  let everVisible = false;
+  const sampleBar = async () => {
+    const count = await page.getByTestId(PROCESS_TEST_IDS.approval).count();
+    const visible =
+      count > 0
+      && (await page.getByTestId(PROCESS_TEST_IDS.approval).isVisible().catch(() => false));
+    if (visible) everVisible = true;
+    const sample = {
+      tMs: Math.round(performance.now() - t0),
+      count,
+      visible,
+    };
+    visibilitySamples.push(sample);
+    return visible;
+  };
+
+  try {
+    // Sample once before and during the wait so a timeout dump shows whether
+    // the bar flickered or never mounted (product vs harness timing).
+    await sampleBar();
+    await bar.waitFor({ state: "visible", timeout: timeoutMs });
+    await sampleBar();
+  } catch (cause) {
+    await sampleBar();
+    const dump = await dumpCancelTreeUiState(
+      page,
+      debug?.phase ?? "waitForCommandApproval-timeout",
+    );
+    dump.everVisibleDuringWait = everVisible;
+    dump.visibilitySamples = visibilitySamples;
+    dump.waitMs = Math.round(performance.now() - t0);
+    dump.expectedProgram = expectedProgram;
+    dump.expectedArgvNeedle = expectedArgvNeedle ?? null;
+    dump.waitError = cause instanceof Error ? cause.message : String(cause);
+    if (debug?.dumpDir) {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      const pathMod = await import("node:path");
+      const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
+      const label = debug.label ?? "command-approval";
+      const phase = debug.phase ?? "timeout";
+      await mkdir(debug.dumpDir, { recursive: true });
+      const jsonPath = pathMod.join(
+        debug.dumpDir,
+        `${label}-${phase}-${stamp}-timeout.json`,
+      );
+      await writeFile(jsonPath, `${JSON.stringify(dump, null, 2)}\n`, "utf8");
+      const shotPath = pathMod.join(
+        debug.dumpDir,
+        `${label}-${phase}-${stamp}-timeout.png`,
+      );
+      await page.screenshot({ path: shotPath, fullPage: false }).catch(() => undefined);
+      dump.dumpJsonPath = jsonPath;
+      dump.dumpScreenshotPath = shotPath;
+    }
+    const err = new Error(
+      `command-approval-bar wait failed; phase=${debug?.phase ?? "unknown"}; `
+      + `everVisible=${everVisible}; `
+      + `approval=${JSON.stringify(dump.approval)}; `
+      + `composerCancel=${JSON.stringify(dump.composerCancel)}; `
+      + `activityStatuses=${JSON.stringify(dump.activityStatuses)}; `
+      + `selectedConversationRows=${dump.selectedConversationRows}; `
+      + `emptyStage=${dump.emptyStage}; `
+      + `projectName=${JSON.stringify(dump.projectName)}; `
+      + `body=${JSON.stringify(dump.bodySnippet.slice(0, 400))}`,
+    );
+    err.cause = cause;
+    err.approvalWaitDump = dump;
+    throw err;
+  }
 
   const programText = (
     await page.getByTestId("command-approval-program").innerText()
@@ -435,6 +515,8 @@ export async function waitForCommandApproval({
     program: programText,
     approveFocused: true,
     singleBar: true,
+    everVisibleDuringWait: everVisible,
+    visibilitySamples,
   };
 }
 

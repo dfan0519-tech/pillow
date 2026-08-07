@@ -612,7 +612,8 @@ describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
 
     expect(screen.queryByTestId("git-changes-pane")).toBeNull();
     expect(screen.queryByTestId("git-changes-view")).toBeNull();
-    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+    // Mode switcher present: pane h2 is generic; mode name lives on the tab.
+    expect(screen.getByRole("heading", { name: "上下文", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "项目资源" })).toBeInTheDocument();
     expect(screen.getByTestId("context-body-mode-switcher")).toBeInTheDocument();
     expect(screen.getByTestId("context-body-mode-resources")).toHaveAttribute(
@@ -637,7 +638,7 @@ describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
       await screen.findByRole("region", { name: "项目资源" }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("git-changes-pane")).toBeNull();
-    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "上下文", level: 2 })).toBeInTheDocument();
   });
 
   it("mounts compact Changes mode only after explicit mode selection", async () => {
@@ -675,7 +676,9 @@ describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
 
     expect(screen.getByTestId("git-changes-pane")).toBeInTheDocument();
     expect(screen.getByTestId("git-changes-view")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "变更", level: 2 })).toBeInTheDocument();
+    // Compact: generic pane heading; mode name only on the selected tab.
+    expect(screen.getByRole("heading", { name: "上下文", level: 2 })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "变更" })).toBeNull();
     expect(screen.getByTestId("git-changes-branch")).toHaveTextContent("main");
     expect(screen.getByTestId("git-changes-dirty-count")).toHaveTextContent(
       "1",
@@ -697,7 +700,78 @@ describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
     expect(screen.queryByTestId("git-changes-pane")).toBeNull();
     expect(screen.queryByTestId("git-changes-view")).toBeNull();
     expect(screen.queryByTestId("context-body-mode-switcher")).toBeNull();
+    // No switcher: single mode-specific pane heading remains.
     expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+  });
+
+  it("shows each mode name once while tabs keep accessible names and testids", async () => {
+    const user = userEvent.setup();
+    const onBodyModeChange = vi.fn();
+    const model = gitChangesModel({
+      diff: workbenchGitDiff(),
+    });
+    const gateway = createMockGateway();
+    const { rerender, onClose } = renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      bodyMode: "resources",
+      onBodyModeChange,
+      resourceGateway: gateway,
+    });
+
+    // Resources mode: exact mode label "资源" only once (the tab).
+    expect(screen.getAllByText("资源")).toHaveLength(1);
+    expect(screen.queryByText("变更", { selector: "h2, h3" })).toBeNull();
+    const resourcesTab = screen.getByRole("tab", { name: "资源" });
+    const changesTab = screen.getByRole("tab", { name: "变更" });
+    expect(resourcesTab).toHaveAttribute("aria-selected", "true");
+    expect(changesTab).toHaveAttribute("aria-selected", "false");
+    expect(resourcesTab).toHaveAttribute("data-testid", "context-body-mode-resources");
+    expect(changesTab).toHaveAttribute("data-testid", "context-body-mode-changes");
+    expect(screen.getByTestId("context-body-mode-switcher")).toBeInTheDocument();
+    expect(screen.getByTestId("resource-pane")).toBeInTheDocument();
+    expect(screen.getByTestId("resource-pane-close")).toBeInTheDocument();
+
+    await user.click(changesTab);
+    expect(onBodyModeChange).toHaveBeenCalledWith("changes");
+
+    rerender(
+      <WorkbenchResourcePane
+        open
+        onClose={onClose}
+        hasProject
+        projectId={workbenchProjectId}
+        resource={null}
+        resourceGateway={gateway}
+        gitChanges={model}
+        gitChangesCapable
+        bodyMode="changes"
+        onBodyModeChange={onBodyModeChange}
+      />,
+    );
+
+    // Changes mode: exact mode label "变更" only once (the tab); no view h3.
+    expect(screen.getAllByText("变更")).toHaveLength(1);
+    expect(screen.queryByRole("heading", { name: "变更" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "变更" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "资源" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    // Body region remains named for AT without a duplicate visible title.
+    expect(screen.getByTestId("git-changes-pane")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-view")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-branch")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-head")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-dirty-count")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-file-list")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-entry-0")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-diff")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-diff-path")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-refresh")).toBeInTheDocument();
   });
 
   it("places Terminal and governed-write Diff ahead of Changes mode", () => {

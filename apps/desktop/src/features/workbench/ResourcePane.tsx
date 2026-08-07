@@ -516,13 +516,18 @@ export function ResourcePane({
     && gitChangesCapable
     && onBodyModeChange,
   );
+  // When the mode switcher is present, mode identity lives on the selected tab
+  // (WAI-ARIA tabs). The h2 names the pane itself so 资源/变更 are not repeated.
+  // Terminal / write-diff still use specific headings (no switcher in those states).
   const heading = showTerminalOutput
     ? "终端输出"
     : showWriteDiff
       ? "写入差异"
-      : showGitChanges
-        ? "变更"
-        : "资源";
+      : showModeSwitcher
+        ? "上下文"
+        : showGitChanges
+          ? "变更"
+          : "资源";
 
   return (
     <aside

@@ -426,9 +426,21 @@ fn decode_portable_path(raw: &[u8]) -> Result<String, ParseError> {
 /// a file of the same name and is not mistaken for a diffable path.
 fn decode_portable_path_or_directory(raw: &[u8]) -> Result<String, ParseError> {
     let path = std::str::from_utf8(raw).map_err(|_| ParseError::Utf8)?;
+    validate_portable_path_or_directory(path)?;
+    Ok(path.to_string())
+}
+
+/// Portable-path rules plus the single trailing separator porcelain v2 uses for
+/// a collapsed untracked/ignored directory (`vendor/`).
+///
+/// Every layer that handles a status entry path must use this rather than
+/// [`validate_portable_path`]: the parser produces the directory form, so a
+/// stricter downstream check would reject an entry the parser just accepted and
+/// fail the whole repository status. Containment is unchanged — the stem runs
+/// through the identical rules.
+pub(crate) fn validate_portable_path_or_directory(path: &str) -> Result<(), ParseError> {
     let Some(stem) = path.strip_suffix('/') else {
-        validate_portable_path(path)?;
-        return Ok(path.to_string());
+        return validate_portable_path(path);
     };
     // `/`, `vendor//` and `./` are never emitted by git and stay rejected.
     if stem.is_empty() || stem == "." || stem.ends_with('/') {
@@ -436,8 +448,7 @@ fn decode_portable_path_or_directory(raw: &[u8]) -> Result<String, ParseError> {
             detail: "empty or repeated trailing separator",
         });
     }
-    validate_portable_path(stem)?;
-    Ok(path.to_string())
+    validate_portable_path(stem)
 }
 
 fn kind_from_xy(xy: [u8; 2]) -> GitStatusKind {

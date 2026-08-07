@@ -590,3 +590,51 @@ describe("public error normalization", () => {
     expect(normalized).not.toBe(stale);
   });
 });
+
+describe("untracked directory entries survive DTO validation", () => {
+  // Regression: the same portable-path rule is implemented in the parser, the
+  // host project-path mapping and here. Only fixing the first two still left a
+  // collapsed untracked directory looking malformed to the renderer, which
+  // degrades the whole status to `git_unavailable`.
+  it("accepts a collapsed untracked directory path in status entries", () => {
+    const view = normalizeGitStatus(
+      {
+        ...status,
+        dirtyCount: 2,
+        files: [
+          { path: "vendor/", kind: "untracked" },
+          { path: "notes/todo.md", kind: "untracked" },
+        ],
+      },
+      expected,
+    );
+    expect(view.files.map((f) => f.path)).toEqual(["vendor/", "notes/todo.md"]);
+  });
+
+  it("still rejects malformed separators and traversal in status entries", () => {
+    for (const bad of ["/", "//", "vendor//", "./", "../escape/", "a\b", "C:/x/"]) {
+      expect(() =>
+        normalizeGitStatus(
+          { ...status, dirtyCount: 1, files: [{ path: bad, kind: "untracked" }] },
+          expected,
+        ),
+      ).toThrow();
+    }
+  });
+
+  it("does not accept a directory form as a diff target", () => {
+    expect(() =>
+      normalizeGitDiff(
+        {
+          repositoryId: ".",
+          generation: 7,
+          path: "vendor/",
+          kind: "text",
+          truncated: false,
+          text: "",
+        },
+        expected,
+      ),
+    ).toThrow();
+  });
+});

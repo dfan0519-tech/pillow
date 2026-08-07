@@ -190,6 +190,31 @@ A worker ran `corepack enable`, installing pnpm shims into
 `packageManager`, but it is a machine-level change made without prior
 authorization. Recorded so it is not mistaken for repository state.
 
+## 5.8 Follow-up (2026-08-08): what the debt round changed
+
+Recorded here so this checkpoint is not read as still-current. Detail:
+`docs/handoff/2026-08-08-round5-tech-debt-status.md`.
+
+- §5.4 (redundant pane labels) — **fixed**.
+- §5.5 (fixture `vendor/` bypass, gitconfig isolation) — **fixed**, and removing
+  the bypass exposed that §4.2 was only ever half-repaired.
+- §5.3 (lifecycle events) — design accepted, **implementation still pending**.
+- §5.1 / §5.2 (`cancel-tree`, `two-project-isolation`) — **still open**. A
+  dedicated exclusive-lane investigation failed to reproduce in 8 runs and
+  correctly declined to invent a cause. Failure-path instrumentation is now in
+  place; treat the next RED as the diagnostic opportunity.
+
+**Correction to §4.2.** The untracked-directory defect was reported there as
+repaired. That was wrong: the same portable-path rule is implemented
+independently in three layers — the parser (`status.rs`), the project-path
+mapping (`discovery.rs`), and the renderer DTO validation
+(`tauriGitGateway.ts`). Round 4 fixed only the first, and the acceptance
+fixture's `.gitignore` bypass hid the rest. All three are now aligned with
+regression tests at each layer, but the duplication itself is architectural
+debt: it is the structural reason two consecutive rounds believed the defect
+was closed. Converge the rule to a single source of truth before trusting any
+future "path validation" change.
+
 ## 6. Next boundary
 
 No new capability may start without an accepted design change. The candidates

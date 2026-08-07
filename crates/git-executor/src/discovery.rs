@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::runner::GitReadError;
-use crate::status::validate_portable_path;
+use crate::status::{validate_portable_path, validate_portable_path_or_directory};
 
 /// Maximum directory depth walked under the project root when searching for
 /// nested repositories.
@@ -483,11 +483,85 @@ pub(crate) fn map_repo_path_to_project(
     repo_project_relative: &str,
     repo_relative: &str,
 ) -> Result<String, GitReadError> {
-    validate_portable_path(repo_relative).map_err(|_| GitReadError::PathRejected)?;
+    // Status entries may name a collapsed untracked/ignored directory
+    // (`vendor/`). The parser already accepts that form, so this mapping must
+    // too — otherwise one untracked directory rejects the whole repository
+    // status. Containment for the stem is identical.
+    validate_portable_path_or_directory(repo_relative).map_err(|_| GitReadError::PathRejected)?;
     if repo_project_relative == "." {
         return Ok(repo_relative.to_string());
     }
     let combined = format!("{repo_project_relative}/{repo_relative}");
-    validate_portable_path(&combined).map_err(|_| GitReadError::PathRejected)?;
+    validate_portable_path_or_directory(&combined).map_err(|_| GitReadError::PathRejected)?;
     Ok(combined)
+}
+
+#[cfg(test)]
+mod path_mapping_tests {
+    use super::map_repo_path_to_project;
+    use crate::status::GitRepositoryId;
+    use crate::status::parse_porcelain_v2_z;
+
+    fn z(parts: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for part in parts {
+            out.extend_from_slice(part.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    fn root() -> GitRepositoryId {
+        GitRepositoryId {
+            project_relative: ".".to_string(),
+        }
+    }
+
+    /// Regression: the parser accepted `? vendor/` but this mapping re-validated
+    /// with the stricter rule and rejected it, so one untracked directory still
+    /// failed the whole repository status. Both layers must agree.
+    #[test]
+    fn untracked_directory_survives_project_path_mapping() {
+        let bytes = z(&[
+            "# branch.oid deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "# branch.head main",
+            "? vendor/",
+            "? notes/todo.md",
+        ]);
+        let snap = parse_porcelain_v2_z(&bytes, root(), 1).expect("parse");
+        let mapped: Vec<String> = snap
+            .entries
+            .iter()
+            .map(|e| map_repo_path_to_project(".", &e.path).expect("map"))
+            .collect();
+        assert_eq!(
+            mapped,
+            vec!["vendor/".to_string(), "notes/todo.md".to_string()]
+        );
+    }
+
+    /// A nested repository prefixes its own project-relative id; the combined
+    /// form must keep the trailing separator.
+    #[test]
+    fn untracked_directory_maps_under_a_nested_repository() {
+        let mapped = map_repo_path_to_project("vendor/nested", "build/").expect("map");
+        assert_eq!(mapped, "vendor/nested/build/");
+    }
+
+    #[test]
+    fn path_mapping_still_rejects_malformed_separators() {
+        for bad in [
+            "/",
+            "//",
+            "vendor//",
+            "./",
+            "../escape/",
+            "vendor/../escape/",
+        ] {
+            assert!(
+                map_repo_path_to_project(".", bad).is_err(),
+                "expected rejection for {bad}"
+            );
+        }
+    }
 }

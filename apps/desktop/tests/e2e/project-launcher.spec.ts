@@ -10,6 +10,9 @@ const { runSupervisedCommand } = await import("../../../../scripts/lib/desktop-p
 async function runNode(args: string[], timeoutMs = 300_000) {
   return runSupervisedCommand(process.execPath, args, {
     cwd: repositoryRoot,
+    // Detached MSVC vctip.exe telemetry outlives the cleanup grace after a
+    // debug build. Identity-gated, and only honoured once the root is dead.
+    allowMsvcVctipTelemetry: true,
     env: process.env,
     timeoutMs,
   });

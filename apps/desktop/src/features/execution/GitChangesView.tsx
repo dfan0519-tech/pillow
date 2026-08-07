@@ -136,7 +136,11 @@ export function GitChangesView({
       data-testid="git-changes-view"
     >
       <header className="git-changes-view__header">
-        <h3 className="git-changes-view__title">变更</h3>
+        {/*
+          No visible "变更" title here: the host pane already exposes mode via the
+          selected tab (or pane h2 when the switcher is absent). This section keeps
+          aria-label="工作区变更" so screen readers still name the body region.
+        */}
         {status ? (
           <p className="git-changes-view__identity">
             <span data-testid="git-changes-branch">{branchDisplay(status)}</span>
