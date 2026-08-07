@@ -2654,6 +2654,7 @@ dependencies = [
  "chrono",
  "keeper-adapter-grok-acp",
  "keeper-agent-protocol",
+ "keeper-git-executor",
  "keeper-policy",
  "keeper-project",
  "keeper-resource",

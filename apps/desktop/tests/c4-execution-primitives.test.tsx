@@ -16,10 +16,13 @@ import {
   formatArgvDisplay,
   type CommandActivityView,
   type CommandProposalView,
-  type GitDiffView,
-  type GitStatusView,
   type TerminalOutputModel,
 } from "../src/features/execution/executionTypes";
+import type {
+  GitDiffView,
+  GitRepositoryView,
+  GitStatusView,
+} from "../src/lib/gitGateway";
 import "../src/styles/execution.css";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -78,6 +81,7 @@ function terminalFixture(
       { stream: "stdout", sequence: 0, text: "running 1 test\n" },
       { stream: "stdout", sequence: 1, text: "test result: ok. 1 passed\n" },
     ],
+    liveRetained: true,
     truncated: false,
     encodingLossy: false,
     capturedBytes: 48,
@@ -91,11 +95,12 @@ function gitStatusFixture(
   overrides: Partial<GitStatusView> = {},
 ): GitStatusView {
   return {
+    repositoryId: ".",
+    generation: 3,
     branch: "main",
     detached: false,
     headShort: "7b7f70f",
     dirtyCount: 2,
-    generation: 3,
     files: [
       {
         path: "src/features/execution/CommandActivityRow.tsx",
@@ -107,22 +112,31 @@ function gitStatusFixture(
       },
     ],
     truncated: false,
-    stale: false,
     ...overrides,
   };
 }
 
 function gitDiffFixture(overrides: Partial<GitDiffView> = {}): GitDiffView {
   return {
+    repositoryId: ".",
+    generation: 3,
     path: "src/features/execution/CommandActivityRow.tsx",
     kind: "text",
     unified: "@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n",
     truncated: false,
     lineCount: 4,
     byteCount: 52,
-    stale: false,
     ...overrides,
   };
+}
+
+function gitRepositoriesFixture(
+  overrides: GitRepositoryView[] = [
+    { repositoryId: ".", available: true },
+    { repositoryId: "nested/lib", available: true },
+  ],
+): GitRepositoryView[] {
+  return overrides;
 }
 
 function expectNoSecrets(container: HTMLElement) {
@@ -483,6 +497,40 @@ describe("TerminalOutputView", () => {
     );
     expectNoSecrets(container);
   });
+
+  it("shows durable-only notice when liveRetained is false and never invents transcript", () => {
+    const { container } = render(
+      <TerminalOutputView
+        output={terminalFixture({
+          liveRetained: false,
+          chunks: [],
+          capturedBytes: 48,
+          exitCode: 0,
+          durationMs: 1_250,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("terminal-output-durable-only")).toHaveTextContent(
+      "实时输出未保留",
+    );
+    expect(screen.getByTestId("terminal-output-view")).toHaveAttribute(
+      "data-live-retained",
+      "false",
+    );
+    // Metadata may remain; body must stay host-chunk-only (empty here).
+    expect(screen.getByTestId("terminal-output-body")).toHaveTextContent("");
+    expect(screen.getByTestId("terminal-output-bytes")).toHaveTextContent("48");
+    expectNoSecrets(container);
+  });
+
+  it("omits durable-only notice when live output is retained", () => {
+    render(<TerminalOutputView output={terminalFixture({ liveRetained: true })} />);
+    expect(screen.queryByTestId("terminal-output-durable-only")).toBeNull();
+    expect(screen.getByTestId("terminal-output-view")).toHaveAttribute(
+      "data-live-retained",
+      "true",
+    );
+  });
 });
 
 describe("GitChangesView", () => {
@@ -498,6 +546,27 @@ describe("GitChangesView", () => {
       "src/features/execution/CommandActivityRow.tsx",
     );
     expectNoSecrets(container);
+  });
+
+  it("shows detached HEAD without inventing a branch name", () => {
+    render(
+      <GitChangesView
+        status={gitStatusFixture({
+          branch: null,
+          detached: true,
+          headShort: "abc1234",
+          dirtyCount: 0,
+          files: [],
+        })}
+      />,
+    );
+    expect(screen.getByTestId("git-changes-branch")).toHaveTextContent(
+      "分离 HEAD",
+    );
+    expect(screen.getByTestId("git-changes-head")).toHaveTextContent("abc1234");
+    expect(screen.getByTestId("git-changes-clean")).toHaveTextContent(
+      "工作区干净",
+    );
   });
 
   it("shows rename as one semantic entry with original and new portable paths", () => {
@@ -523,23 +592,19 @@ describe("GitChangesView", () => {
     );
   });
 
-  it("shows binary diff summary without inventing unified text", () => {
-    render(
+  it("shows binary and unsupported diffs without inventing unified text", () => {
+    const { rerender } = render(
       <GitChangesView
         status={gitStatusFixture({
           dirtyCount: 1,
-          files: [
-            {
-              path: "assets/icon.png",
-              kind: "modified",
-              isBinary: true,
-            },
-          ],
+          files: [{ path: "assets/icon.png", kind: "modified" }],
         })}
         diff={gitDiffFixture({
           path: "assets/icon.png",
           kind: "binary",
           unified: undefined,
+          lineCount: undefined,
+          byteCount: undefined,
         })}
       />,
     );
@@ -547,21 +612,48 @@ describe("GitChangesView", () => {
       "二进制文件",
     );
     expect(screen.queryByTestId("git-changes-diff-unified")).toBeNull();
+    // Status entries must not invent isBinary badges from wire fields.
+    expect(screen.queryByText("二进制")).toBeNull();
+
+    rerender(
+      <GitChangesView
+        status={gitStatusFixture({
+          dirtyCount: 1,
+          files: [{ path: "huge.bin", kind: "modified" }],
+        })}
+        diff={gitDiffFixture({
+          path: "huge.bin",
+          kind: "unsupported",
+          unified: undefined,
+          lineCount: undefined,
+          byteCount: undefined,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("git-changes-diff-unsupported")).toHaveTextContent(
+      "不支持的差异类型",
+    );
+    expect(screen.queryByTestId("git-changes-diff-unified")).toBeNull();
   });
 
-  it("surfaces stale generation with refresh callback only", async () => {
+  it("surfaces UI-only stale/error/loading with refresh and path callbacks only", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn();
     const onSelectPath = vi.fn();
     const { container } = render(
       <GitChangesView
-        status={gitStatusFixture({ stale: true })}
+        status={gitStatusFixture()}
+        stale
+        error="Git result is stale; refresh changes."
         onRefresh={onRefresh}
         onSelectPath={onSelectPath}
       />,
     );
     expect(screen.getByTestId("git-changes-stale")).toHaveTextContent(
       "状态已过期",
+    );
+    expect(screen.getByTestId("git-changes-error")).toHaveTextContent(
+      "Git result is stale",
     );
     await user.click(screen.getByTestId("git-changes-refresh"));
     expect(onRefresh).toHaveBeenCalledTimes(1);
@@ -570,6 +662,13 @@ describe("GitChangesView", () => {
       "src/features/execution/CommandActivityRow.tsx",
     );
     expectNoSecrets(container);
+
+    render(
+      <GitChangesView status={null} loading onRefresh={onRefresh} />,
+    );
+    expect(screen.getByTestId("git-changes-loading")).toHaveTextContent(
+      "加载变更",
+    );
   });
 
   it("shows text diff truncation notice when host marks truncated", () => {
@@ -586,6 +685,62 @@ describe("GitChangesView", () => {
       "const a = 2",
     );
     expectNoSecrets(container);
+  });
+
+  it("shows repository selector only for multiple repos; unavailable not selectable", async () => {
+    const user = userEvent.setup();
+    const onSelectRepository = vi.fn();
+    const { rerender, container } = render(
+      <GitChangesView
+        repositories={gitRepositoriesFixture([
+          { repositoryId: ".", available: true },
+          { repositoryId: "nested/lib", available: false },
+        ])}
+        selectedRepositoryId="."
+        status={gitStatusFixture()}
+        onSelectRepository={onSelectRepository}
+      />,
+    );
+    expect(screen.getByTestId("git-changes-repo-selector")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-repo-root")).toBeEnabled();
+    expect(screen.getByTestId("git-changes-repo-nested/lib")).toBeDisabled();
+    expect(screen.getByTestId("git-changes-repo-nested/lib")).toHaveTextContent(
+      "不可用",
+    );
+    await user.click(screen.getByTestId("git-changes-repo-nested/lib"));
+    expect(onSelectRepository).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("git-changes-repo-root"));
+    expect(onSelectRepository).toHaveBeenCalledWith(".");
+    expectNoSecrets(container);
+
+    // Single repository: no selector chrome.
+    rerender(
+      <GitChangesView
+        repositories={[{ repositoryId: ".", available: true }]}
+        selectedRepositoryId="."
+        status={gitStatusFixture()}
+        onSelectRepository={onSelectRepository}
+      />,
+    );
+    expect(screen.queryByTestId("git-changes-repo-selector")).toBeNull();
+  });
+
+  it("does not declare isBinary/stale/unavailable on gateway wire types in source", () => {
+    const viewSource = readFileSync(
+      join(featureDir, "GitChangesView.tsx"),
+      "utf8",
+    );
+    const typesSource = readFileSync(
+      join(featureDir, "executionTypes.ts"),
+      "utf8",
+    );
+    expect(typesSource).not.toMatch(/export type GitStatusView/);
+    expect(typesSource).not.toMatch(/export type GitDiffView/);
+    expect(typesSource).not.toMatch(/isBinary/);
+    expect(viewSource).toMatch(/from ["']\.\.\/\.\.\/lib\/gitGateway["']/);
+    expect(viewSource).not.toMatch(/isBinary/);
+    expect(viewSource).not.toMatch(/unavailableReason/);
+    expect(viewSource).not.toMatch(/status\.stale|diff\.stale/);
   });
 });
 

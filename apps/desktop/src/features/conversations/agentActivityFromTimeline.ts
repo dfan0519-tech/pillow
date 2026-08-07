@@ -38,8 +38,10 @@ export function agentActivityFromRun(
   const currentStep = deriveCurrentStep(activity);
   const runId = activity.runId.trim();
   const writeOutcomes = events
-    ? writeOutcomesFromEvents(events, activity.runId)
+    ? writeOutcomesFromEvents(events, activity.runId, conversationId)
     : [];
+  // Process lifecycle is mounted as conversation-owned command activity rows
+  // (processActivityModel), not as generic agent-activity notice paragraphs.
   const forbiddenDisplayIds = collectRunForbiddenDisplayIds(
     activity,
     writeOutcomes,
@@ -79,10 +81,15 @@ export function agentActivityFromRun(
 export function writeOutcomesFromEvents(
   events: readonly RuntimeEventDto[],
   runId: string,
+  conversationId?: string,
 ): AgentWriteOutcomeInput[] {
   const outcomes: AgentWriteOutcomeInput[] = [];
-  for (const event of events) {
-    if (event.runId !== runId || event.kind !== "write_proposal_resolved") {
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
+    if (
+      event.runId !== runId
+      || event.kind !== "write_proposal_resolved"
+      || (conversationId !== undefined && event.conversationId !== conversationId)
+    ) {
       continue;
     }
     const payload = event.payload as WriteProposalResolvedPayload;

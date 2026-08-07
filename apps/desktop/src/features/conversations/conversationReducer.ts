@@ -3,24 +3,46 @@
  * per-conversation timelines without depending on provider payloads.
  */
 
-import type { TimelineDto } from "../../lib/conversationGateway";
+import type { ConversationDto, TimelineDto } from "../../lib/conversationGateway";
 import {
   applyRuntimeEvent,
   emptyTimeline,
   mergeTimelineWithInFlight,
 } from "./applyRuntimeEvent";
 import type {
-  ConversationAction,
+  ConversationAction as BaseConversationAction,
   ConversationTimelineView,
-  ConversationUiState,
+  ConversationUiState as BaseConversationUiState,
   RunView,
 } from "./conversationTypes";
 
+/**
+ * Extended UI state: per-project monotonic list-load freshness.
+ * Defined here so callers of this reducer get the full contract without
+ * requiring a parallel change to the base type module for this race fix.
+ */
+export type ConversationUiState = BaseConversationUiState & {
+  /**
+   * Highest `listSeq` already applied for each project via
+   * `conversations_loaded`. Strictly older results are discarded.
+   */
+  conversationListSeqByProject: Record<string, number>;
+};
+
+/** `conversations_loaded` carries a per-project list freshness sequence. */
+export type ConversationAction =
+  | {
+      type: "conversations_loaded";
+      projectId: string;
+      conversations: ConversationDto[];
+      /** Monotonic per-project sequence assigned when listConversations starts. */
+      listSeq: number;
+    }
+  | Exclude<BaseConversationAction, { type: "conversations_loaded" }>;
+
 export type {
   ArtifactActivity,
-  ConversationAction,
   ConversationTimelineView,
-  ConversationUiState,
   PlanActivity,
   PlanStepView,
   ReceiptReferenceView,
@@ -37,7 +59,19 @@ export function createInitialConversationState(): ConversationUiState {
     selectedConversationId: null,
     timelines: {},
     runs: {},
+    conversationListSeqByProject: {},
   };
+}
+
+/**
+ * Whether an incoming list load should replace the applied projection.
+ * Equal or older sequences are stale (out-of-order) and must be dropped.
+ */
+export function shouldApplyConversationListSeq(
+  appliedSeq: number | undefined,
+  incomingSeq: number,
+): boolean {
+  return incomingSeq > (appliedSeq ?? 0);
 }
 
 export function conversationReducer(
@@ -45,14 +79,23 @@ export function conversationReducer(
   action: ConversationAction,
 ): ConversationUiState {
   switch (action.type) {
-    case "conversations_loaded":
+    case "conversations_loaded": {
+      const applied = state.conversationListSeqByProject[action.projectId];
+      if (!shouldApplyConversationListSeq(applied, action.listSeq)) {
+        return state;
+      }
       return {
         ...state,
         conversationsByProject: {
           ...state.conversationsByProject,
           [action.projectId]: action.conversations,
         },
+        conversationListSeqByProject: {
+          ...state.conversationListSeqByProject,
+          [action.projectId]: action.listSeq,
+        },
       };
+    }
     case "conversation_created": {
       const { conversation } = action;
       const select = action.select !== false;
@@ -75,7 +118,8 @@ export function conversationReducer(
         selectedConversationId: action.conversationId,
       };
     case "timeline_loaded":
-      return mergeTimelineWithInFlight(state, action.timeline);
+      // mergeTimelineWithInFlight spreads `...state`, so list-seq map is kept.
+      return mergeTimelineWithInFlight(state, action.timeline) as ConversationUiState;
     case "user_message_appended": {
       const timeline =
         state.timelines[action.conversationId]
@@ -111,7 +155,8 @@ export function conversationReducer(
       };
     }
     case "runtime_event":
-      return applyRuntimeEvent(state, action.event);
+      // applyRuntimeEvent spreads `...state`, so list-seq map is kept.
+      return applyRuntimeEvent(state, action.event) as ConversationUiState;
     case "project_cleared":
       return {
         ...state,

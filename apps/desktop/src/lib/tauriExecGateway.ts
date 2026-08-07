@@ -23,7 +23,7 @@ const MAX_CHUNKS = 4_000;
 const MAX_LIST = 256;
 
 const proposalKeys = ["proposalId", "conversationId", "origin", "state", "programLabel", "argv", "portableCwd", "riskClass", "summary", "expiresAt", "decisionAvailable", "errorCode"];
-const outputKeys = ["proposalId", "state", "chunks", "truncated", "encodingLossy", "capturedBytes", "exitCode", "durationMs"];
+const outputKeys = ["proposalId", "state", "chunks", "liveRetained", "truncated", "encodingLossy", "capturedBytes", "exitCode", "durationMs"];
 
 function invalid(): ExecGatewayError {
   return new ExecGatewayError("process_unavailable", "Pillow received an invalid process response.");
@@ -49,7 +49,7 @@ export function normalizeExecProposal(value: unknown): ExecProposalView {
 }
 
 export function normalizeExecOutput(value: unknown): ExecOutputView {
-  if (!record(value) || !only(value, outputKeys) || !bounded(value.proposalId, MAX_ID) || !enumValue(value.state, STATES) || !Array.isArray(value.chunks) || value.chunks.length > MAX_CHUNKS || typeof value.truncated !== "boolean" || typeof value.encodingLossy !== "boolean" || !integer(value.capturedBytes, 0, MAX_OUTPUT_BYTES) || !(value.exitCode === null || integer(value.exitCode, -2147483648, 2147483647)) || !(value.durationMs === null || integer(value.durationMs))) throw invalid();
+  if (!record(value) || !only(value, outputKeys) || !bounded(value.proposalId, MAX_ID) || !enumValue(value.state, STATES) || !Array.isArray(value.chunks) || value.chunks.length > MAX_CHUNKS || typeof value.liveRetained !== "boolean" || typeof value.truncated !== "boolean" || typeof value.encodingLossy !== "boolean" || !integer(value.capturedBytes, 0, MAX_OUTPUT_BYTES) || !(value.exitCode === null || integer(value.exitCode, -2147483648, 2147483647)) || !(value.durationMs === null || integer(value.durationMs))) throw invalid();
   let byteCount = 0; let lineCount = 0; let previous = -1;
   const chunks = value.chunks.map((chunk) => {
     if (!record(chunk) || !only(chunk, ["stream", "sequence", "text"]) || !enumValue(chunk.stream, STREAMS) || !integer(chunk.sequence) || chunk.sequence <= previous || typeof chunk.text !== "string") throw invalid();
@@ -57,7 +57,7 @@ export function normalizeExecOutput(value: unknown): ExecOutputView {
     return { stream: chunk.stream, sequence: chunk.sequence, text: chunk.text };
   });
   if (byteCount > MAX_OUTPUT_BYTES || lineCount > MAX_OUTPUT_LINES || value.capturedBytes < byteCount) throw invalid();
-  return { proposalId: value.proposalId, state: value.state, chunks, truncated: value.truncated, encodingLossy: value.encodingLossy, capturedBytes: value.capturedBytes, exitCode: value.exitCode, durationMs: value.durationMs };
+  return { proposalId: value.proposalId, state: value.state, chunks, liveRetained: value.liveRetained, truncated: value.truncated, encodingLossy: value.encodingLossy, capturedBytes: value.capturedBytes, exitCode: value.exitCode, durationMs: value.durationMs };
 }
 
 export class TauriExecGateway implements ExecGateway {

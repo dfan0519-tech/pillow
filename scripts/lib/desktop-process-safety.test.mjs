@@ -32,6 +32,7 @@ function syntheticSupervisor({
   child,
   snapshot,
   cleanupAttempts = 3,
+  delayFn = async () => {},
   desktopObservation,
   enforceDesktopClean = false,
   platform = "win32",
@@ -43,7 +44,7 @@ function syntheticSupervisor({
     baseline: { port: 1420 },
     child,
     cleanupAttempts,
-    delayFn: async () => {},
+    delayFn,
     desktopObservation,
     enforceDesktopClean,
     platform,
@@ -107,6 +108,17 @@ test("never-observed root identity fails closed", async () => {
   await assert.rejects(supervisor.cleanup(), /PID 905.*never observed/u);
 
   assert.equal(child.killCalls, 0);
+});
+
+test("never-observed root that already exited succeeds without kill", async () => {
+  const child = fakeChild(987);
+  child.exitCode = 1;
+  const supervisor = syntheticSupervisor({ child, snapshot: () => [] });
+
+  await supervisor.cleanup();
+
+  assert.equal(child.killCalls, 0);
+  assert.equal(supervisor.trackedState(987), "confirmed-dead");
 });
 
 test("a PID reused by svchost.exe is rejected without using the root handle", async () => {
@@ -353,7 +365,8 @@ test("enforced residual observations fail only after budget exhaustion", async (
   processes = [];
 
   await assert.rejects(supervisor.cleanup(), /unbound residual.*991.*992/u);
-  assert.equal(observations, 3);
+  // In-budget polls plus one final fresh observation after the last delay.
+  assert.equal(observations, 4);
 });
 
 test("empty SystemRoot falls back to a valid absolute WINDIR", async () => {
@@ -783,4 +796,135 @@ test("a missing or invalid-tick incomplete candidate remains tracked and blocks 
     await assert.rejects(supervisor.cleanup(), new RegExp(`incomplete identity.*PID ${pid}`, "u"));
     assert.equal(child.killCalls, 1);
   }
+});
+
+test("natural root exit with observed descendant proven absent succeeds without kill", async () => {
+  const root = processEntry({
+    pid: 980,
+    creationTicks: "133670000000006000",
+    executablePath: "D:\\tools\\cargo.exe",
+    name: "cargo.exe",
+  });
+  const descendant = processEntry({
+    pid: 981,
+    parentPid: 980,
+    creationTicks: "133670000000006001",
+    executablePath: "D:\\tools\\rustc.exe",
+    name: "rustc.exe",
+  });
+  let processes = [root, descendant];
+  const child = fakeChild(980);
+  child.exitCode = 0;
+  const supervisor = syntheticSupervisor({
+    child,
+    snapshot: () => processes,
+  });
+
+  await supervisor.capture(true);
+  assert.equal(supervisor.trackedState(980), "observed");
+  assert.equal(supervisor.trackedState(981), "observed");
+  processes = [];
+
+  await supervisor.cleanup();
+
+  assert.equal(child.killCalls, 0);
+  assert.equal(supervisor.trackedState(980), "confirmed-dead");
+  assert.equal(supervisor.trackedState(981), "confirmed-dead");
+});
+
+test("still-live observed descendant after natural root exit fails observation-only", async () => {
+  const root = processEntry({
+    pid: 982,
+    creationTicks: "133670000000006100",
+    executablePath: "D:\\tools\\cargo.exe",
+    name: "cargo.exe",
+  });
+  const descendant = processEntry({
+    pid: 983,
+    parentPid: 982,
+    creationTicks: "133670000000006101",
+    executablePath: "D:\\tools\\rustc.exe",
+    name: "rustc.exe",
+  });
+  let processes = [root, descendant];
+  const child = fakeChild(982);
+  child.exitCode = 0;
+  const supervisor = syntheticSupervisor({
+    child,
+    cleanupAttempts: 3,
+    snapshot: () => processes,
+  });
+
+  await supervisor.capture(true);
+  processes = [descendant];
+
+  await assert.rejects(supervisor.cleanup(), /observation-only PIDs remain.*983/u);
+  assert.equal(child.killCalls, 0);
+  assert.equal(supervisor.trackedState(982), "confirmed-dead");
+  assert.equal(supervisor.trackedState(983), "observed");
+});
+
+test("descendant that dies during the final poll delay is proven absent before refusal", async () => {
+  const root = processEntry({
+    pid: 984,
+    creationTicks: "133670000000006200",
+    executablePath: "D:\\tools\\cargo.exe",
+    name: "cargo.exe",
+  });
+  const descendant = processEntry({
+    pid: 985,
+    parentPid: 984,
+    creationTicks: "133670000000006201",
+    executablePath: "D:\\tools\\rustc.exe",
+    name: "rustc.exe",
+  });
+  let processes = [root, descendant];
+  let delays = 0;
+  const child = fakeChild(984);
+  child.exitCode = 0;
+  const supervisor = syntheticSupervisor({
+    child,
+    cleanupAttempts: 2,
+    delayFn: async () => {
+      delays += 1;
+      // Reproduce the post-last-poll death: still live through every in-budget
+      // snapshot, then gone only after the final delay before refusal.
+      if (delays >= 2) processes = [];
+    },
+    snapshot: () => processes,
+  });
+
+  await supervisor.capture(true);
+  processes = [descendant];
+
+  await supervisor.cleanup();
+
+  assert.equal(child.killCalls, 0);
+  assert.equal(supervisor.trackedState(984), "confirmed-dead");
+  assert.equal(supervisor.trackedState(985), "confirmed-dead");
+  assert.ok(delays >= 2);
+});
+
+test("natural root exit does not call kill when the launcher handle already exited", async () => {
+  const root = processEntry({ pid: 986, creationTicks: "133670000000006300" });
+  let processes = [root];
+  const child = {
+    exitCode: 0,
+    killCalls: 0,
+    pid: 986,
+    kill() {
+      this.killCalls += 1;
+      return false;
+    },
+  };
+  const supervisor = syntheticSupervisor({
+    child,
+    cleanupAttempts: 3,
+    snapshot: () => processes,
+  });
+
+  await supervisor.cleanup();
+
+  assert.equal(child.killCalls, 0);
+  assert.equal(supervisor.trackedState(986), "confirmed-dead");
 });

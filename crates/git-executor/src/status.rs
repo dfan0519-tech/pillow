@@ -396,7 +396,7 @@ fn parse_simple_path_record(
             detail: "simple path record shape",
         });
     }
-    let path = decode_portable_path(&record[2..])?;
+    let path = decode_portable_path_or_directory(&record[2..])?;
     let xy = match kind {
         GitStatusKind::Untracked => *b"??",
         GitStatusKind::Ignored => *b"!!",
@@ -413,6 +413,30 @@ fn parse_simple_path_record(
 fn decode_portable_path(raw: &[u8]) -> Result<String, ParseError> {
     let path = std::str::from_utf8(raw).map_err(|_| ParseError::Utf8)?;
     validate_portable_path(path)?;
+    Ok(path.to_string())
+}
+
+/// Untracked/ignored records may name a collapsed directory, which porcelain v2
+/// reports with exactly one trailing `/` (`? vendor/`). Only these two record
+/// kinds can carry that form; tracked, rename and unmerged records never do.
+///
+/// The stem is validated under the identical portable-path rules, so traversal,
+/// absolute, device and non-portable-separator containment is unchanged. The
+/// trailing slash is preserved so a directory entry stays distinguishable from
+/// a file of the same name and is not mistaken for a diffable path.
+fn decode_portable_path_or_directory(raw: &[u8]) -> Result<String, ParseError> {
+    let path = std::str::from_utf8(raw).map_err(|_| ParseError::Utf8)?;
+    let Some(stem) = path.strip_suffix('/') else {
+        validate_portable_path(path)?;
+        return Ok(path.to_string());
+    };
+    // `/`, `vendor//` and `./` are never emitted by git and stay rejected.
+    if stem.is_empty() || stem == "." || stem.ends_with('/') {
+        return Err(ParseError::PathRejected {
+            detail: "empty or repeated trailing separator",
+        });
+    }
+    validate_portable_path(stem)?;
     Ok(path.to_string())
 }
 

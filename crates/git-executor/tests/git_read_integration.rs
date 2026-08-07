@@ -30,7 +30,6 @@ fn which_git() -> Option<PathBuf> {
         }
     }
     let candidates = [
-        r"F:\Git\cmd\git.exe",
         r"C:\Program Files\Git\cmd\git.exe",
         r"C:\Program Files (x86)\Git\cmd\git.exe",
     ];

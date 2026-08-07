@@ -1,8 +1,10 @@
 # Pillow Stage 1 Overall Status
 
-Date: 2026-07-31; updated 2026-08-04
+Date: 2026-07-31; updated 2026-08-07
 
-Status: Stage 1 active; C3 accepted; C4 D1 through D3AR2 accepted; D3B design pending approval
+Status: Stage 1 active; C3 accepted; C4 checkpointed through D3B4 (governed
+process and read-only Git Changes), with one intermittent D3B3 scenario carried
+as an open risk
 
 Authority:
 
@@ -35,7 +37,7 @@ independent resource manager and is not a Pillow product-code destination.
 | C1 provider-to-B3 loop | Accepted checkpoint | Provider proposals reach governed reads and owning timeline |
 | C2 read-only workbench | Accepted checkpoint | Project-scoped resources/activity, isolation, restart recovery, full gates and independent review accepted |
 | C3 governed write/diff/approval | Accepted checkpoint | One bounded UTF-8 create/modify, host diff, approve-once/reject, base-hash CAS, atomic apply, receipts, isolation and restart invalidation; full controller gates green |
-| C4 terminal and Git | Active; D1 through D3AR2 accepted | Protocol/policy/UI foundations, supervised execution, metadata authority, governed process gateway, hardened read-only Git runner, real bounded live output, durable process events and typed desktop gateway foundations passed controller source review and full gates; D3B process governance UI integration is next |
+| C4 terminal and Git | Checkpointed through D3B4 | D1-D3B1 foundations, D3B2 process workbench mounting, D3B3 provider-to-governed-process real desktop loop, and D3B4 read-only Git Changes have each passed controller source review and full gates. D3B4 Round 4 gate: `pnpm check` exit 0 (renderer 370/370, Rust 731, Clippy `-D warnings`), production build. That gate found and repaired a Critical regression (Git Changes displaced the accepted C2 resource browser) and an Important defect (one untracked directory failed whole-repository Git status). Checkpointed on 2026-08-07 after three consecutive 10/10 serial desktop E2E runs; the intermittent D3B3 `cancel-tree` scenario is carried as an open risk with an unproven root cause (see the checkpoint record). Interactive shell and Git mutation remain unstarted |
 | D Codex/OpenCode expansion | Not started | No new runtime before C4 boundary |
 | E industrial Alpha | Not started | Packaging, import, security, performance, diagnostics |
 
@@ -92,7 +94,8 @@ C2 is accepted only when the desktop can:
   controller completed the D3AR2 aggregate gate.
 - Historical worker session and lease identifiers plus machine-specific paths
   are redacted from committed execution records.
-- D3B product work begins only after its design boundary is approved.
+- D3B1 integration seams are controller-accepted; D3B2 must mount them without
+  reopening process authority or creating a second dashboard.
 
 ## Final C2 Gate
 
@@ -172,9 +175,12 @@ delivery was rejected because it recreated mutable SQLite authority, exposed
 test expiry and grant material, and omitted real output and the fixed event
 contract. D3AR/D3AR2 then repaired those defects, completed the typed desktop
 foundation, and passed the fresh controller aggregate gate recorded below.
-D3B workbench integration is now the next Stage 1 slice. Stage 2 work and
-runtime expansion remain outside the active product scope; the controller
-continues to own every acceptance verdict and aggregate gate.
+D3B1 native process commands, strict process-event projection and the pure
+write/process approval arbitration model are now controller-accepted as an
+integration foundation. D3B2 workbench mounting and real process-governance
+desktop E2E are the next Stage 1 slice. Stage 2 work and runtime expansion
+remain outside the active product scope; the controller continues to own every
+acceptance verdict and aggregate gate.
 
 ## C4 D3AR2 Controller Acceptance
 
@@ -196,3 +202,27 @@ Fresh controller evidence on 2026-08-04:
 
 Detailed evidence is recorded in
 `docs/verification/2026-08-04-wave-c4-d3ar2-acceptance.md`.
+
+## C4 D3B1 Controller Acceptance
+
+D3B1 adds the native list/decide/open-output command composition, carries the
+four durable process events through strict renderer normalization into fixed
+conversation-owned activity notices, and introduces a deterministic
+write/process approval arbitration model. The arbitration model is not yet
+mounted, so this is an integration-foundation acceptance rather than complete
+D3B product acceptance.
+
+Fresh controller evidence on 2026-08-04:
+
+- focused renderer tests: 45/45; focused native command tests: 6/6;
+- desktop TypeScript typecheck: exit 0;
+- `pnpm check`: exit 0; desktop Vitest 281/281, Rust workspace and doctests,
+  Clippy `-D warnings`;
+- production UI build: exit 0, 73 modules;
+- real serial desktop E2E: 8/8 in 772.2 seconds;
+- `cargo fmt --all -- --check` and `git diff --check`: exit 0;
+- HEAD `62149be9eddd2288eb45fd9b8278641cf64c7a5f`, staging unchanged, relevant
+  residual process count zero.
+
+Detailed evidence is recorded in
+`docs/verification/2026-08-04-wave-c4-d3b1-acceptance.md`.

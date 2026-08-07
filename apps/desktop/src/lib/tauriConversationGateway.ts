@@ -45,6 +45,10 @@ const EVENT_KINDS: RuntimeEventKind[] = [
   "artifact_produced",
   "write_proposal_requested",
   "write_proposal_resolved",
+  "process_proposal_requested",
+  "process_proposal_decided",
+  "process_started",
+  "process_terminal_outcome",
   "turn_completed",
   "turn_failed",
   "run_cancelled",
@@ -77,6 +81,20 @@ const WRITE_PUBLIC_ERROR_CODES = [
   "interrupted",
 ] as const;
 
+const PROCESS_RISK_CLASSES = ["standard", "high"] as const;
+const PROCESS_DECISIONS = ["approve_once", "reject"] as const;
+const PROCESS_STATES = [
+  "pending_approval",
+  "approved",
+  "running",
+  "succeeded",
+  "failed",
+  "rejected",
+  "expired",
+  "cancelled",
+  "interrupted",
+] as const;
+
 const MAX_ID_CHARS = 256;
 const MAX_LABEL_CHARS = 256;
 const MAX_PATH_CHARS = 1_024;
@@ -87,6 +105,9 @@ const MAX_RESOURCE_PREVIEW_CHARS = 16_384;
 const MAX_PLAN_STEPS = 512;
 const MAX_TOOL_BYTES = 16 * 1024 * 1024;
 const MAX_TOOL_RESULTS = 10_000;
+const MAX_PROCESS_ARGV = 64;
+const MAX_PROCESS_ARGV_BYTES = 32_768;
+const MAX_PROCESS_CAPTURED_BYTES = 256 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -134,6 +155,10 @@ function isSafeInteger(
 
 function optionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
+}
+
+function optionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
 }
 
 function bounded(value: string, maxChars: number): string {
@@ -373,6 +398,30 @@ function parseRuntimeEventDto(value: unknown): RuntimeEventDto {
         ...base,
         kind: value.kind,
         payload: parseWriteProposalResolved(payload),
+      };
+    case "process_proposal_requested":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseProcessProposalRequested(payload),
+      };
+    case "process_proposal_decided":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseProcessProposalDecided(payload),
+      };
+    case "process_started":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseProcessStarted(payload),
+      };
+    case "process_terminal_outcome":
+      return {
+        ...base,
+        kind: value.kind,
+        payload: parseProcessTerminalOutcome(payload),
       };
     case "turn_completed":
       if (
@@ -803,6 +852,159 @@ function parseWriteProposalResolved(
     error_code: payload.error_code === undefined
       ? undefined
       : payload.error_code,
+  };
+}
+
+function isProcessRiskClass(
+  value: unknown,
+): value is (typeof PROCESS_RISK_CLASSES)[number] {
+  return typeof value === "string"
+    && (PROCESS_RISK_CLASSES as readonly string[]).includes(value);
+}
+
+function isProcessDecision(
+  value: unknown,
+): value is (typeof PROCESS_DECISIONS)[number] {
+  return typeof value === "string"
+    && (PROCESS_DECISIONS as readonly string[]).includes(value);
+}
+
+function isProcessState(
+  value: unknown,
+): value is (typeof PROCESS_STATES)[number] {
+  return typeof value === "string"
+    && (PROCESS_STATES as readonly string[]).includes(value);
+}
+
+function isProcessPortableCwd(value: unknown): value is string {
+  return value === "." || isPortableRelativePath(value);
+}
+
+function processArgvIsBounded(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length <= MAX_PROCESS_ARGV
+    && value.every((argument) => typeof argument === "string")
+    && value.reduce((total, argument) => total + new TextEncoder().encode(argument).length, 0)
+      <= MAX_PROCESS_ARGV_BYTES;
+}
+
+function parseProcessProposalRequested(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "process_proposal_requested" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, [
+      "proposal_id",
+      "program",
+      "argv",
+      "portable_cwd",
+      "summary",
+      "risk_class",
+      "expires_at",
+    ])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isBoundedNonEmptyString(payload.program, 32)
+    || !processArgvIsBounded(payload.argv)
+    || (payload.portable_cwd !== undefined && !isProcessPortableCwd(payload.portable_cwd))
+    || typeof payload.summary !== "string"
+    || payload.summary.length > MAX_SUMMARY_CHARS
+    || !isProcessRiskClass(payload.risk_class)
+    || !isFiniteTimestamp(payload.expires_at)
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    program: payload.program,
+    argv: [...payload.argv],
+    portable_cwd: payload.portable_cwd,
+    summary: payload.summary,
+    risk_class: payload.risk_class,
+    expires_at: payload.expires_at,
+  };
+}
+
+function parseProcessProposalDecided(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "process_proposal_decided" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, ["proposal_id", "program", "decision", "state"])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isBoundedNonEmptyString(payload.program, 32)
+    || !isProcessDecision(payload.decision)
+    || !isProcessState(payload.state)
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    program: payload.program,
+    decision: payload.decision,
+    state: payload.state,
+  };
+}
+
+function parseProcessStarted(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "process_started" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, ["proposal_id", "program", "argv", "portable_cwd"])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isBoundedNonEmptyString(payload.program, 32)
+    || !processArgvIsBounded(payload.argv)
+    || (payload.portable_cwd !== undefined && !isProcessPortableCwd(payload.portable_cwd))
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    program: payload.program,
+    argv: [...payload.argv],
+    portable_cwd: payload.portable_cwd,
+  };
+}
+
+function parseProcessTerminalOutcome(
+  payload: Record<string, unknown>,
+): Extract<RuntimeEventDto, { kind: "process_terminal_outcome" }>["payload"] {
+  if (
+    !hasOnlyKeys(payload, [
+      "proposal_id",
+      "program",
+      "state",
+      "exit_code",
+      "duration_ms",
+      "truncated",
+      "encoding_lossy",
+      "captured_bytes",
+      "cancelled",
+      "timed_out",
+    ])
+    || !isBoundedNonEmptyString(payload.proposal_id)
+    || !isBoundedNonEmptyString(payload.program, 32)
+    || !isProcessState(payload.state)
+    || (payload.exit_code !== undefined
+      && !isSafeInteger(payload.exit_code, -2_147_483_648, 2_147_483_647))
+    || (payload.duration_ms !== undefined && !isSafeInteger(payload.duration_ms))
+    || (payload.captured_bytes !== undefined
+      && !isSafeInteger(payload.captured_bytes, 0, MAX_PROCESS_CAPTURED_BYTES))
+    || !optionalBoolean(payload.truncated)
+    || !optionalBoolean(payload.encoding_lossy)
+    || !optionalBoolean(payload.cancelled)
+    || !optionalBoolean(payload.timed_out)
+  ) {
+    throw invalidResponse("Invalid runtime event.");
+  }
+  return {
+    proposal_id: payload.proposal_id,
+    program: payload.program,
+    state: payload.state,
+    exit_code: payload.exit_code,
+    duration_ms: payload.duration_ms,
+    truncated: payload.truncated,
+    encoding_lossy: payload.encoding_lossy,
+    captured_bytes: payload.captured_bytes,
+    cancelled: payload.cancelled,
+    timed_out: payload.timed_out,
   };
 }
 

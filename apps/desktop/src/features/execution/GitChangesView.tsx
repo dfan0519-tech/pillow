@@ -1,19 +1,28 @@
 /**
- * Read-only Git Changes body for the contextual resource pane (C4.0 G0).
- * Host-built status/diff DTOs only — no spawn, no native paths.
+ * Read-only Git Changes body for the contextual resource pane (C4 D3B4).
+ * Wire DTOs come only from gitGateway — UI loading/error/stale are separate props.
+ * Host-built status/diff only — no spawn, no native paths, no project state.
  */
 
 import type {
   GitDiffView,
-  GitStatusEntry,
+  GitRepositoryView,
+  GitStatusEntryView,
   GitStatusKind,
   GitStatusView,
-} from "./executionTypes";
+} from "../../lib/gitGateway";
 import "../../styles/execution.css";
 
 export type GitChangesViewProps = {
-  status: GitStatusView;
+  repositories?: GitRepositoryView[];
+  selectedRepositoryId?: string | null;
+  status: GitStatusView | null;
   diff?: GitDiffView | null;
+  loading?: boolean;
+  error?: string | null;
+  /** UI-only stale guidance; never invent stale on wire status/diff records. */
+  stale?: boolean;
+  onSelectRepository?: (repositoryId: string) => void;
   onSelectPath?: (portablePath: string) => void;
   onRefresh?: () => void;
 };
@@ -52,12 +61,16 @@ function branchDisplay(status: GitStatusView): string {
   return status.branch;
 }
 
+function repositoryLabel(repositoryId: string): string {
+  return repositoryId === "." ? "项目根仓库" : repositoryId;
+}
+
 function EntryRow({
   entry,
   index,
   onSelectPath,
 }: {
-  entry: GitStatusEntry;
+  entry: GitStatusEntryView;
   index: number;
   onSelectPath?: (portablePath: string) => void;
 }) {
@@ -72,9 +85,6 @@ function EntryRow({
         <span className="git-changes-view__rename">
           ← <code>{entry.originalPath}</code>
         </span>
-      ) : null}
-      {entry.isBinary ? (
-        <span className="git-changes-view__binary-badge">二进制</span>
       ) : null}
     </>
   );
@@ -105,43 +115,53 @@ function EntryRow({
 }
 
 export function GitChangesView({
+  repositories = [],
+  selectedRepositoryId = null,
   status,
-  diff,
+  diff = null,
+  loading = false,
+  error = null,
+  stale = false,
+  onSelectRepository,
   onSelectPath,
   onRefresh,
 }: GitChangesViewProps) {
+  const showRepoSelector = repositories.length > 1;
+
   return (
     <section
       aria-label="工作区变更"
       className="git-changes-view"
-      data-stale={status.stale ? "true" : "false"}
+      data-stale={stale ? "true" : "false"}
       data-testid="git-changes-view"
     >
       <header className="git-changes-view__header">
         <h3 className="git-changes-view__title">变更</h3>
-        <p className="git-changes-view__identity">
-          <span data-testid="git-changes-branch">{branchDisplay(status)}</span>
-          <span aria-hidden="true" className="git-changes-view__sep">
-            ·
-          </span>
-          <code data-testid="git-changes-head">{status.headShort}</code>
-          <span aria-hidden="true" className="git-changes-view__sep">
-            ·
-          </span>
-          <span data-testid="git-changes-dirty-count">
-            {status.dirtyCount} 项变更
-          </span>
-        </p>
-        {status.unavailableReason ? (
-          <p
-            className="git-changes-view__notice"
-            data-testid="git-changes-unavailable"
-            role="status"
-          >
-            {status.unavailableReason}
+        {status ? (
+          <p className="git-changes-view__identity">
+            <span data-testid="git-changes-branch">{branchDisplay(status)}</span>
+            <span aria-hidden="true" className="git-changes-view__sep">
+              ·
+            </span>
+            <code data-testid="git-changes-head">{status.headShort}</code>
+            <span aria-hidden="true" className="git-changes-view__sep">
+              ·
+            </span>
+            <span data-testid="git-changes-dirty-count">
+              {status.dirtyCount} 项变更
+            </span>
           </p>
         ) : null}
-        {status.stale ? (
+        {error ? (
+          <p
+            className="git-changes-view__notice git-changes-view__notice--error"
+            data-testid="git-changes-error"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
+        {stale ? (
           <p
             className="git-changes-view__notice"
             data-testid="git-changes-stale"
@@ -150,7 +170,7 @@ export function GitChangesView({
             状态已过期，请刷新
           </p>
         ) : null}
-        {status.truncated ? (
+        {status?.truncated ? (
           <p
             className="git-changes-view__notice"
             data-testid="git-changes-truncated"
@@ -171,19 +191,92 @@ export function GitChangesView({
         ) : null}
       </header>
 
-      <ul
-        className="git-changes-view__list"
-        data-testid="git-changes-file-list"
-      >
-        {status.files.map((entry, index) => (
-          <EntryRow
-            entry={entry}
-            index={index}
-            key={`${entry.kind}:${entry.path}:${entry.originalPath ?? ""}`}
-            onSelectPath={onSelectPath}
-          />
-        ))}
-      </ul>
+      {showRepoSelector ? (
+        <div
+          className="git-changes-view__repos"
+          data-testid="git-changes-repo-selector"
+          role="group"
+          aria-label="仓库选择"
+        >
+          {repositories.map((repo) => {
+            const selected = repo.repositoryId === selectedRepositoryId;
+            return (
+              <button
+                key={repo.repositoryId}
+                aria-pressed={selected}
+                className={
+                  selected
+                    ? "git-changes-view__repo git-changes-view__repo--selected"
+                    : "git-changes-view__repo"
+                }
+                data-available={repo.available ? "true" : "false"}
+                data-testid={`git-changes-repo-${repo.repositoryId === "." ? "root" : repo.repositoryId}`}
+                disabled={!repo.available}
+                onClick={() => {
+                  if (repo.available) {
+                    onSelectRepository?.(repo.repositoryId);
+                  }
+                }}
+                type="button"
+                title={
+                  repo.available
+                    ? repositoryLabel(repo.repositoryId)
+                    : `${repositoryLabel(repo.repositoryId)}（不可用）`
+                }
+              >
+                <code>{repositoryLabel(repo.repositoryId)}</code>
+                {!repo.available ? (
+                  <span className="git-changes-view__repo-unavailable">
+                    不可用
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {loading ? (
+        <p
+          aria-live="polite"
+          className="git-changes-view__status"
+          data-testid="git-changes-loading"
+        >
+          加载变更…
+        </p>
+      ) : null}
+
+      {!loading && !error && !status ? (
+        <p className="git-changes-view__status" data-testid="git-changes-empty">
+          无工作区变更数据
+        </p>
+      ) : null}
+
+      {status ? (
+        <>
+          {status.files.length === 0 && !loading ? (
+            <p
+              className="git-changes-view__status"
+              data-testid="git-changes-clean"
+            >
+              工作区干净
+            </p>
+          ) : null}
+          <ul
+            className="git-changes-view__list"
+            data-testid="git-changes-file-list"
+          >
+            {status.files.map((entry, index) => (
+              <EntryRow
+                entry={entry}
+                index={index}
+                key={`${entry.kind}:${entry.path}:${entry.originalPath ?? ""}`}
+                onSelectPath={onSelectPath}
+              />
+            ))}
+          </ul>
+        </>
+      ) : null}
 
       {diff ? (
         <div className="git-changes-view__diff" data-testid="git-changes-diff">
@@ -195,15 +288,6 @@ export function GitChangesView({
               </span>
             ) : null}
           </p>
-          {diff.stale ? (
-            <p
-              className="git-changes-view__notice"
-              data-testid="git-changes-diff-stale"
-              role="status"
-            >
-              差异已过期，请刷新
-            </p>
-          ) : null}
           {diff.kind === "binary" ? (
             <p
               className="git-changes-view__notice"

@@ -75,73 +75,21 @@ export type TerminalOutputChunk = {
 /**
  * Contextual Terminal-output mode model (not an interactive shell).
  * Parent supplies capped chunks; this view never fetches or persists.
+ * `liveRetained` is presentation-only host truth: when false, the view must
+ * show an explicit durable-only notice and must not invent transcript text.
  */
 export type TerminalOutputModel = {
   programLabel: string;
   argv: string[];
   state: CommandState;
   chunks: TerminalOutputChunk[];
+  /** Host memory still holds live chunks; false after restart/eviction. */
+  liveRetained: boolean;
   truncated: boolean;
   encodingLossy: boolean;
   capturedBytes: number;
   exitCode?: number | null;
   durationMs?: number | null;
-};
-
-export type GitStatusKind =
-  | "modified"
-  | "added"
-  | "deleted"
-  | "untracked"
-  | "renamed"
-  | "copied"
-  | "typechange"
-  | "conflict"
-  | "submodule"
-  | "ignored"
-  | "unknown";
-
-export type GitStatusEntry = {
-  /** Project-relative portable path. */
-  path: string;
-  kind: GitStatusKind;
-  /** Rename/copy source as one semantic entry. */
-  originalPath?: string;
-  isBinary?: boolean;
-};
-
-/**
- * Resource-pane Changes mode status snapshot.
- * Generation/stale are host fields; UI never merges drifted results.
- */
-export type GitStatusView = {
-  branch: string | null;
-  detached: boolean;
-  headShort: string;
-  dirtyCount: number;
-  generation: number;
-  files: GitStatusEntry[];
-  truncated: boolean;
-  stale?: boolean;
-  /** Path-free opaque reason when Git is unavailable. */
-  unavailableReason?: string;
-};
-
-export type GitDiffKind = "text" | "binary" | "unsupported";
-
-/**
- * On-demand host-built diff for one selected portable path.
- * Binary/unsupported never invent unified text in the renderer.
- */
-export type GitDiffView = {
-  path: string;
-  kind: GitDiffKind;
-  unified?: string;
-  truncated: boolean;
-  lineCount?: number;
-  byteCount?: number;
-  originalPath?: string;
-  stale?: boolean;
 };
 
 /**

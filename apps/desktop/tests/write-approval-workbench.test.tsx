@@ -787,7 +787,6 @@ describe("write approval workbench integration", () => {
   });
 
   it("atomically drops a raw grant when the next list omits it or terminalizes", async () => {
-    const user = userEvent.setup();
     let listPhase: "with-grant" | "no-grant" | "terminal" = "with-grant";
     const writeGateway = createWriteGateway({
       listImpl: async () => {
@@ -841,10 +840,11 @@ describe("write approval workbench integration", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
+      expect(screen.queryByTestId("write-approval-bar")).toBeNull();
+      expect(screen.queryByTestId("write-approval-approve")).toBeNull();
+      expect(writeGateway.decideCalls).toHaveLength(0);
+      expect(document.body.innerHTML).not.toContain(grantSecret);
     });
-    await user.click(screen.getByTestId("write-approval-approve"));
-    expect(writeGateway.decideCalls).toHaveLength(0);
 
     listPhase = "terminal";
     rerender(
@@ -863,9 +863,10 @@ describe("write approval workbench integration", () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId("write-approval-bar")).toBeNull();
+      expect(screen.queryByTestId("write-approval-approve")).toBeNull();
+      expect(writeGateway.decideCalls).toHaveLength(0);
+      expect(document.body.innerHTML).not.toContain(grantSecret);
     });
-    expect(writeGateway.decideCalls).toHaveLength(0);
-    expect(document.body.innerHTML).not.toContain(grantSecret);
   });
 
   it("at expiry disables actions, closes governed diff, and re-lists", async () => {

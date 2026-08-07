@@ -6,9 +6,11 @@ import {
   runNativeAcceptanceIfRequested,
 } from "./lib/desktopLifecycle";
 import { TauriConversationGateway } from "./lib/tauriConversationGateway";
+import { TauriExecGateway } from "./lib/tauriExecGateway";
 import { TauriProjectGateway } from "./lib/tauriProjectGateway";
 import { TauriResourceGateway } from "./lib/tauriResourceGateway";
 import { TauriWriteApprovalGateway } from "./lib/tauriWriteApprovalGateway";
+import { TauriGitGateway } from "./lib/tauriGitGateway";
 import type { ConversationGateway } from "./lib/conversationGateway";
 import type { ProjectGateway } from "./lib/projectGateway";
 import { invoke } from "@tauri-apps/api/core";
@@ -23,6 +25,9 @@ const projectGateway = new TauriProjectGateway();
 const conversationGateway = new TauriConversationGateway();
 const resourceGateway = new TauriResourceGateway();
 const writeApprovalGateway = new TauriWriteApprovalGateway();
+const execGateway = new TauriExecGateway();
+/** Single read-only Git gateway instance for the desktop shell. */
+const gitGateway = new TauriGitGateway();
 const desktopLifecycle = new TauriDesktopLifecycle();
 
 createRoot(root).render(
@@ -32,6 +37,8 @@ createRoot(root).render(
       conversationGateway={conversationGateway}
       resourceGateway={resourceGateway}
       writeApprovalGateway={writeApprovalGateway}
+      execGateway={execGateway}
+      gitGateway={gitGateway}
       onProjectLauncherReady={() => desktopLifecycle.markProjectLauncherReady()}
     />
   </StrictMode>,

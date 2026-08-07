@@ -6,7 +6,11 @@
 //! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
 //! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`,
 //! `governed-write-create`, `governed-write-modify`, `governed-write-conflict`,
-//! `governed-write-desktop`.
+//! `governed-write-desktop`, `governed-process-approve`,
+//! `governed-process-reject`, `governed-process-replay`,
+//! `governed-process-conflict`, `governed-process-nonzero`,
+//! `governed-process-output-bounds`, `governed-process-long-tree`,
+//! `governed-process-timeout`, and `governed-process-desktop`.
 //!
 //! When the parent process does not forward `KEEPER_FAKE_ACP_SCRIPT` (production
 //! Grok ACP env allow-list), a sibling file `keeper_fake_acp_script.txt` next to

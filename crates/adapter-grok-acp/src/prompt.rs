@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use keeper_agent_protocol::{
-    EventSink, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
-    WriteProposalRequestedPayload, WriteProposalState, WritePublicErrorCode,
+    EventSink, ProcessProposalRequestedPayload, RuntimeError, RuntimeEvent, RuntimeEventKind,
+    SendTurn, WriteProposalRequestedPayload, WriteProposalState, WritePublicErrorCode,
 };
 
 use crate::config::GrokAcpConfig;
@@ -18,6 +18,10 @@ use crate::health::{ProbeState, is_auth_failure_error};
 use crate::map::{
     MappedEvent, decide_permission, map_session_update, map_stop_reason, observe_tool_update,
     terminal_for_error,
+};
+use crate::provider_processes::{
+    ProviderProcessRequestError, ProviderProcessResponseError, normalize_provider_process,
+    provider_process_response,
 };
 use crate::provider_tools::{
     ProviderToolRequestError, normalize_provider_tool, normalized_result_events, provider_response,
@@ -30,8 +34,9 @@ use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_para
 use crate::state::{Inner, PromptOutcome};
 use crate::turn::ProviderRequestIdentityError;
 use keeper_runtime_host::{
-    GovernedReadBridgeError, GovernedReadDelivery, GovernedWriteBridgeError, GovernedWriteDelivery,
-    GovernedWriteReceipt, execute_governed_read, execute_governed_write,
+    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedReadBridgeError,
+    GovernedReadDelivery, GovernedWriteBridgeError, GovernedWriteDelivery, GovernedWriteReceipt,
+    execute_governed_process, execute_governed_read, execute_governed_write,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -337,6 +342,11 @@ fn handle_server_request(
         return handle_write_tool(inner, sink, cancel, id, params);
     }
 
+    // Strict process entrypoint â€” never routed through governed reads.
+    if method == "pillow/process_tool" {
+        return handle_process_tool(inner, sink, cancel, id, params);
+    }
+
     let (run_id, session_id, project_root, rpc) = {
         let guard = inner.lock().expect("inner lock");
         let Some(active) = guard.turns.active().filter(|active| active.live) else {
@@ -605,6 +615,165 @@ fn handle_write_tool(
             rpc.respond_error(id, code, message)
         }
     }
+}
+
+fn handle_process_tool(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    cancel: &AtomicBool,
+    id: serde_json::Value,
+    params: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let (run_id, session_id, rpc) = {
+        let guard = inner.lock().expect("inner lock");
+        let Some(active) = guard.turns.active().filter(|active| active.live) else {
+            if let Some(connection) = guard.connection.as_ref() {
+                connection
+                    .rpc
+                    .respond_error(id, -32000, "governed_process_unavailable")?;
+            }
+            return Ok(());
+        };
+        let Some(connection) = guard.connection.as_ref() else {
+            return Ok(());
+        };
+        (
+            active.run_id,
+            active.acp_session_id.clone(),
+            Arc::clone(&connection.rpc),
+        )
+    };
+
+    let normalized = match normalize_provider_process("pillow/process_tool", params, &session_id) {
+        Ok(normalized) => normalized,
+        Err(ProviderProcessRequestError::MethodNotFound) => {
+            rpc.respond_error(id, -32601, "method_not_found")?;
+            return Ok(());
+        }
+        Err(ProviderProcessRequestError::InvalidParams) => {
+            rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
+            return Ok(());
+        }
+    };
+
+    let receipt = match execute_governed_process(run_id, normalized.proposal, cancel, |requested| {
+        let payload = ProcessProposalRequestedPayload {
+            proposal_id: requested.proposal_id.clone(),
+            program: requested.program.clone(),
+            argv: requested.argv.clone(),
+            portable_cwd: requested.portable_cwd.clone(),
+            summary: requested.summary.clone(),
+            risk_class: requested.risk_class.into(),
+            expires_at: requested.expires_at,
+        };
+        emit_process_event(
+            inner,
+            sink,
+            run_id,
+            RuntimeEventKind::ProcessProposalRequested,
+            payload,
+        )
+        .map_err(|_| GovernedProcessBridgeError::Gateway)
+    }) {
+        Ok(receipt) => receipt,
+        Err(GovernedProcessBridgeError::InvalidProposal) => {
+            rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
+            return Ok(());
+        }
+        Err(GovernedProcessBridgeError::ReservationConflict) => {
+            let (code, message) = ProviderProcessResponseError::Conflict.rpc_error();
+            rpc.respond_error(id, code, message)?;
+            return Ok(());
+        }
+        Err(GovernedProcessBridgeError::Busy) => {
+            let (code, message) = ProviderProcessResponseError::Busy.rpc_error();
+            rpc.respond_error(id, code, message)?;
+            return Ok(());
+        }
+        Err(
+            GovernedProcessBridgeError::RunNotRegistered
+            | GovernedProcessBridgeError::InvalidContext
+            | GovernedProcessBridgeError::Gateway
+            | GovernedProcessBridgeError::NotLive
+            | GovernedProcessBridgeError::OwnershipMismatch
+            | GovernedProcessBridgeError::DecisionDenied
+            | GovernedProcessBridgeError::Expired
+            | GovernedProcessBridgeError::Cancelled
+            | GovernedProcessBridgeError::Interrupted
+            | GovernedProcessBridgeError::ShutDown
+            | GovernedProcessBridgeError::CleanupUnproven,
+        ) => {
+            rpc.respond_error(id, -32000, "governed_process_unavailable")?;
+            return Ok(());
+        }
+    };
+
+    // A fresh execution's durable receipt contains the post-request lifecycle.
+    // Replays return existing terminal evidence and must not duplicate events.
+    if receipt.delivery == GovernedProcessDelivery::Executed {
+        if let Some(decided) = receipt.decided.as_ref() {
+            emit_process_event(
+                inner,
+                sink,
+                run_id,
+                RuntimeEventKind::ProcessProposalDecided,
+                decided,
+            )?;
+        }
+        if let Some(started) = receipt.started.as_ref() {
+            emit_process_event(
+                inner,
+                sink,
+                run_id,
+                RuntimeEventKind::ProcessStarted,
+                started,
+            )?;
+        }
+        if let Some(terminal) = receipt.terminal.as_ref() {
+            // Completion is deliberately sent only after this terminal event has
+            // been accepted by the durable sink.
+            emit_process_event(
+                inner,
+                sink,
+                run_id,
+                RuntimeEventKind::ProcessTerminalOutcome,
+                terminal,
+            )?;
+        }
+    }
+
+    match provider_process_response(&receipt) {
+        Ok(response) => rpc.respond(id, response),
+        Err(error) => {
+            let (code, message) = error.rpc_error();
+            rpc.respond_error(id, code, message)
+        }
+    }
+}
+
+fn emit_process_event(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    run_id: keeper_agent_protocol::RunId,
+    kind: RuntimeEventKind,
+    payload: impl serde::Serialize,
+) -> Result<(), RuntimeError> {
+    let sequence = {
+        let mut guard = inner.lock().expect("inner lock");
+        let Some(active) = guard
+            .turns
+            .active_mut()
+            .filter(|active| active.run_id == run_id && active.live)
+        else {
+            return Err(RuntimeError::Internal {
+                message: "governed_process_unavailable".into(),
+            });
+        };
+        active.sequence = active.sequence.saturating_add(1);
+        active.sequence
+    };
+    let event = RuntimeEvent::new(run_id, sequence, kind, payload, Utc::now())?;
+    sink.emit(event)
 }
 
 /// Narrow post-cancel write receipt: host may already have committed this

@@ -8,6 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ResourcePane } from "../src/features/resources/ResourcePane";
 import { RESOURCE_SEARCH_DEBOUNCE_MS } from "../src/features/resources/resourcePaneState";
 import {
+  ResourcePane as WorkbenchResourcePane,
+  type GitChangesPaneModel,
+} from "../src/features/workbench/ResourcePane";
+import type {
+  GitDiffView,
+  GitStatusView,
+} from "../src/lib/gitGateway";
+import {
   ResourceGatewayError,
   type RecentResource,
   type ResourceEntry,
@@ -479,5 +487,343 @@ describe("ResourcePane (C2-C1)", () => {
       "false",
     );
     expect(screen.queryByRole("region", { name: "项目资源" })).toBeNull();
+  });
+});
+
+/**
+ * Workbench contextual ResourcePane — Git Changes mode (C4 D3B4 Round 2A).
+ * View-only: host supplies GitChangesPaneModel; pane never calls Git gateway.
+ */
+const workbenchProjectId = "00000000-0000-0000-0000-0000000000aa";
+
+function workbenchGitStatus(
+  overrides: Partial<GitStatusView> = {},
+): GitStatusView {
+  return {
+    repositoryId: ".",
+    generation: 1,
+    branch: "main",
+    detached: false,
+    headShort: "abcdef0",
+    dirtyCount: 1,
+    files: [{ path: "src/app.ts", kind: "modified" }],
+    truncated: false,
+    ...overrides,
+  };
+}
+
+function workbenchGitDiff(
+  overrides: Partial<GitDiffView> = {},
+): GitDiffView {
+  return {
+    repositoryId: ".",
+    generation: 1,
+    path: "src/app.ts",
+    kind: "text",
+    unified: "@@ -1 +1 @@\n-old\n+new\n",
+    truncated: false,
+    lineCount: 3,
+    byteCount: 20,
+    ...overrides,
+  };
+}
+
+function gitChangesModel(
+  overrides: Partial<GitChangesPaneModel> = {},
+): GitChangesPaneModel {
+  return {
+    repositories: [{ repositoryId: ".", available: true }],
+    selectedRepositoryId: ".",
+    status: workbenchGitStatus(),
+    diff: null,
+    loading: false,
+    error: null,
+    stale: false,
+    onSelectRepository: vi.fn(),
+    onSelectPath: vi.fn(),
+    onRefresh: vi.fn(),
+    ...overrides,
+  };
+}
+
+function renderWorkbenchPane(
+  props: Partial<{
+    projectId: string | null;
+    hasProject: boolean;
+    open: boolean;
+    gitChanges: GitChangesPaneModel | null;
+    gitChangesCapable: boolean;
+    bodyMode: "resources" | "changes";
+    onBodyModeChange: (mode: "resources" | "changes") => void;
+    resourceGateway: ResourceGateway;
+    writeDiffTarget: {
+      projectId: string;
+      conversationId: string;
+      proposalId: string;
+      scopeGeneration: number;
+    } | null;
+    terminalOutputTarget: {
+      projectId: string;
+      conversationId: string;
+      proposalId: string;
+      programLabel: string;
+      argv: string[];
+      scopeGeneration: number;
+    } | null;
+  }> = {},
+) {
+  const onClose = vi.fn();
+  const onBodyModeChange = props.onBodyModeChange ?? vi.fn();
+  const projectId =
+    props.projectId === undefined ? workbenchProjectId : props.projectId;
+  const gitChangesCapable =
+    props.gitChangesCapable
+    ?? (props.gitChanges != null || props.bodyMode === "changes");
+  const view = render(
+    <WorkbenchResourcePane
+      open={props.open ?? true}
+      onClose={onClose}
+      hasProject={props.hasProject ?? true}
+      projectId={projectId}
+      resource={null}
+      resourceGateway={props.resourceGateway}
+      gitChanges={props.gitChanges}
+      gitChangesCapable={gitChangesCapable}
+      bodyMode={props.bodyMode ?? "resources"}
+      onBodyModeChange={onBodyModeChange}
+      writeDiffTarget={props.writeDiffTarget ?? null}
+      terminalOutputTarget={props.terminalOutputTarget ?? null}
+    />,
+  );
+  return { ...view, onClose, onBodyModeChange, projectId };
+}
+
+describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
+  it("defaults to the resource body even when gitChanges model is present", () => {
+    const model = gitChangesModel({
+      diff: workbenchGitDiff(),
+    });
+    const gateway = createMockGateway();
+    renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      resourceGateway: gateway,
+    });
+
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.queryByTestId("git-changes-view")).toBeNull();
+    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "项目资源" })).toBeInTheDocument();
+    expect(screen.getByTestId("context-body-mode-switcher")).toBeInTheDocument();
+    expect(screen.getByTestId("context-body-mode-resources")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("context-body-mode-changes")).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+
+  it("defaults to resource body with region 项目资源 when the pane opens", async () => {
+    const gateway = createMockGateway();
+    renderWorkbenchPane({
+      gitChanges: null,
+      gitChangesCapable: true,
+      resourceGateway: gateway,
+    });
+
+    expect(
+      await screen.findByRole("region", { name: "项目资源" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+  });
+
+  it("mounts compact Changes mode only after explicit mode selection", async () => {
+    const user = userEvent.setup();
+    const onBodyModeChange = vi.fn();
+    const model = gitChangesModel({
+      diff: workbenchGitDiff(),
+    });
+    const { rerender, onClose } = renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      bodyMode: "resources",
+      onBodyModeChange,
+    });
+
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+
+    await user.click(screen.getByTestId("context-body-mode-changes"));
+    expect(onBodyModeChange).toHaveBeenCalledWith("changes");
+
+    // Controlled host applies the selected mode.
+    rerender(
+      <WorkbenchResourcePane
+        open
+        onClose={onClose}
+        hasProject
+        projectId={workbenchProjectId}
+        resource={null}
+        gitChanges={model}
+        gitChangesCapable
+        bodyMode="changes"
+        onBodyModeChange={onBodyModeChange}
+      />,
+    );
+
+    expect(screen.getByTestId("git-changes-pane")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-view")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "变更", level: 2 })).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-branch")).toHaveTextContent("main");
+    expect(screen.getByTestId("git-changes-dirty-count")).toHaveTextContent(
+      "1",
+    );
+    expect(screen.getByTestId("git-changes-diff-path")).toHaveTextContent(
+      "src/app.ts",
+    );
+    // No permanent dashboard chrome beyond the compact body.
+    expect(screen.queryByTestId("terminal-output-pane")).toBeNull();
+    expect(screen.queryByTestId("write-diff-pane")).toBeNull();
+  });
+
+  it("does not show Changes mode when gitChanges is null and mode stays resources", () => {
+    renderWorkbenchPane({
+      gitChanges: null,
+      gitChangesCapable: false,
+      hasProject: true,
+    });
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.queryByTestId("git-changes-view")).toBeNull();
+    expect(screen.queryByTestId("context-body-mode-switcher")).toBeNull();
+    expect(screen.getByRole("heading", { name: "资源", level: 2 })).toBeInTheDocument();
+  });
+
+  it("places Terminal and governed-write Diff ahead of Changes mode", () => {
+    const model = gitChangesModel();
+    const { rerender, onClose } = renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      bodyMode: "changes",
+      terminalOutputTarget: {
+        projectId: workbenchProjectId,
+        conversationId: "conv-1",
+        proposalId: "prop-1",
+        programLabel: "cargo",
+        argv: ["test"],
+        scopeGeneration: 1,
+      },
+    });
+
+    expect(screen.getByTestId("terminal-output-pane")).toBeInTheDocument();
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.queryByTestId("context-body-mode-switcher")).toBeNull();
+    expect(screen.getByRole("heading", { name: "终端输出", level: 2 }))
+      .toBeInTheDocument();
+
+    rerender(
+      <WorkbenchResourcePane
+        open
+        onClose={onClose}
+        hasProject
+        projectId={workbenchProjectId}
+        resource={null}
+        gitChanges={model}
+        gitChangesCapable
+        bodyMode="changes"
+        writeDiffTarget={{
+          projectId: workbenchProjectId,
+          conversationId: "conv-1",
+          proposalId: "prop-write",
+          scopeGeneration: 1,
+        }}
+        terminalOutputTarget={null}
+      />,
+    );
+
+    expect(screen.getByTestId("write-diff-pane")).toBeInTheDocument();
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.queryByTestId("context-body-mode-switcher")).toBeNull();
+    expect(screen.getByRole("heading", { name: "写入差异", level: 2 }))
+      .toBeInTheDocument();
+  });
+
+  it("routes refresh, path and repository clicks only through supplied callbacks", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn();
+    const onSelectPath = vi.fn();
+    const onSelectRepository = vi.fn();
+    const model = gitChangesModel({
+      repositories: [
+        { repositoryId: ".", available: true },
+        { repositoryId: "nested/pkg", available: true },
+        { repositoryId: "broken/repo", available: false },
+      ],
+      selectedRepositoryId: ".",
+      onRefresh,
+      onSelectPath,
+      onSelectRepository,
+      stale: true,
+    });
+    const { container } = renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      bodyMode: "changes",
+    });
+
+    expect(screen.getByTestId("git-changes-repo-selector")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-repo-broken/repo")).toBeDisabled();
+
+    await user.click(screen.getByTestId("git-changes-refresh"));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByTestId("git-changes-entry-0"));
+    expect(onSelectPath).toHaveBeenCalledWith("src/app.ts");
+
+    await user.click(screen.getByTestId("git-changes-repo-nested/pkg"));
+    expect(onSelectRepository).toHaveBeenCalledWith("nested/pkg");
+
+    await user.click(screen.getByTestId("git-changes-repo-broken/repo"));
+    expect(onSelectRepository).not.toHaveBeenCalledWith("broken/repo");
+
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/F:\\|C:\\|\\\\server/);
+    expect(text).not.toMatch(/argv|sessionId|executor/i);
+  });
+
+  it("preserves Files/Preview path when gitChanges is absent and gateway is present", async () => {
+    const gateway = createMockGateway();
+    renderWorkbenchPane({
+      gitChanges: null,
+      gitChangesCapable: false,
+      resourceGateway: gateway,
+    });
+
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(await screen.findByRole("region", { name: "项目资源" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(gateway.listProjectResources).toHaveBeenCalledWith({
+        projectId: workbenchProjectId,
+      });
+    });
+  });
+
+  it("keeps resource body when mode is resources even if git model has status", async () => {
+    const gateway = createMockGateway();
+    const model = gitChangesModel({
+      status: workbenchGitStatus({ branch: "should-not-paint", dirtyCount: 9 }),
+    });
+    renderWorkbenchPane({
+      gitChanges: model,
+      gitChangesCapable: true,
+      bodyMode: "resources",
+      resourceGateway: gateway,
+    });
+
+    expect(await screen.findByRole("region", { name: "项目资源" })).toBeInTheDocument();
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(screen.queryByText("should-not-paint")).toBeNull();
+    expect(screen.queryByText("9")).toBeNull();
   });
 });

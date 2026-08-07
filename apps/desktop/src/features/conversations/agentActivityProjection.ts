@@ -103,6 +103,8 @@ function projectRecord(
   const artifacts = projectArtifacts(record.artifacts, forbiddenIds);
   const testResults = projectTestResults(record.testResults, forbiddenIds);
   const writeOutcomes = projectWriteOutcomes(record.writeOutcomes, forbiddenIds);
+  // Process lifecycle is rendered as conversation-owned command activity rows
+  // (processActivityModel), not as generic notice paragraphs.
   const notices = projectNotices(record.notices, forbiddenIds);
   const errorMessage = opaqueErrorMessage(
     record.errorMessage ?? firstToolError(record),

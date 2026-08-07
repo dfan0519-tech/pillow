@@ -5,21 +5,45 @@ import type {
   RunView,
 } from "../conversations/conversationReducer";
 import { isRunActive } from "../conversations/conversationReducer";
-import { ConversationTimeline } from "../conversations/ConversationTimeline";
+import {
+  ConversationTimeline,
+  type OpenProcessOutputRequest,
+} from "../conversations/ConversationTimeline";
+import {
+  selectVisibleApproval,
+  type ApprovalCandidate,
+  type VisibleApproval,
+} from "../conversations/approvalArbitration";
 import { WriteApprovalBar } from "../conversations/WriteApprovalBar";
 import type { ProjectDto } from "../../lib/projectGateway";
 import type { ResourceGateway } from "../../lib/resourceGateway";
 import {
-  selectOldestPendingProposal,
+  isPendingWriteProposal,
   stripApprovalGrant,
   type WriteApprovalGateway,
   type WriteDecision,
   type WriteProposalView,
 } from "../../lib/writeApprovalGateway";
+import type {
+  ExecDecision,
+  ExecGateway,
+  ExecProposalView,
+} from "../../lib/execGateway";
+import type {
+  CommandDecision,
+  CommandProposalView,
+} from "../execution/executionTypes";
+import { CommandApprovalBar } from "../execution/CommandApprovalBar";
 import { isPortableRelativePath } from "../resources/resourcePaneState";
 import { IconPanelRight } from "../../components/icons";
 import { Composer } from "./Composer";
-import { ResourcePane, type WriteDiffTarget } from "./ResourcePane";
+import {
+  ResourcePane,
+  type ContextBodyMode,
+  type GitChangesPaneModel,
+  type TerminalOutputTarget,
+  type WriteDiffTarget,
+} from "./ResourcePane";
 
 type WorkbenchProps = {
   project: ProjectDto | null;
@@ -42,7 +66,50 @@ type WorkbenchProps = {
    * selected conversation. Triggers a re-list without polling.
    */
   writeProposalRefreshToken?: number;
+  /** Optional conversation-owned process gateway (Wave C4-D3B2). */
+  execGateway?: ExecGateway;
+  /**
+   * Bumped by App on accepted process lifecycle events for the selected
+   * conversation. Triggers process re-list without polling.
+   */
+  execProposalRefreshToken?: number;
+  /**
+   * Host-owned Git Changes presentation model (C4 D3B4). Pass-through only —
+   * Workbench never calls the Git gateway or owns discovery generation.
+   */
+  gitChanges?: GitChangesPaneModel | null;
+  /**
+   * True when App has a Git gateway. Enables the compact 资源/变更 mode switch;
+   * does not select Changes by default.
+   */
+  gitChangesCapable?: boolean;
+  /**
+   * Notifies App with the active project id when the contextual pane is open on
+   * Changes mode (null when inactive). Discovery runs only for that project.
+   */
+  onGitChangesActive?: (projectId: string | null) => void;
 };
+
+function toCommandProposal(proposal: ExecProposalView): CommandProposalView {
+  return {
+    proposalId: proposal.proposalId,
+    conversationId: proposal.conversationId,
+    origin: proposal.origin,
+    state: proposal.state,
+    programLabel: proposal.programLabel,
+    argv: proposal.argv,
+    portableCwd: proposal.portableCwd,
+    riskClass: proposal.riskClass,
+    summary: proposal.summary,
+    expiresAt: proposal.expiresAt,
+  };
+}
+
+function isPendingProcessProposal(
+  proposal: Pick<ExecProposalView, "state">,
+): boolean {
+  return proposal.state === "pending_approval";
+}
 
 /**
  * Main stage adapted from Grok App welcome / conversation surface.
@@ -67,10 +134,18 @@ export function Workbench({
   resourceGateway,
   writeApprovalGateway,
   writeProposalRefreshToken = 0,
+  execGateway,
+  execProposalRefreshToken = 0,
+  gitChanges = null,
+  gitChangesCapable = false,
+  onGitChangesActive,
 }: WorkbenchProps) {
   const projectId = project?.id ?? null;
   const [resourcePaneScope, setResourcePaneScope] =
     useState<{ projectId: string | null } | null>(null);
+  /** Default resources — Changes is never an implicit body. */
+  const [contextBodyMode, setContextBodyMode] =
+    useState<ContextBodyMode>("resources");
   const [resourceSelection, setResourceSelection] =
     useState<{
       projectId: string;
@@ -84,18 +159,34 @@ export function Workbench({
   const [writeDiffTarget, setWriteDiffTarget] = useState<WriteDiffTarget | null>(
     null,
   );
-  /** Display-safe pending proposal — never carries approvalGrant. */
-  const [pendingProposal, setPendingProposal] =
+  const [terminalOutputTarget, setTerminalOutputTarget] =
+    useState<TerminalOutputTarget | null>(null);
+  /** Display-safe pending write proposal — never carries approvalGrant. */
+  const [pendingWriteProposal, setPendingWriteProposal] =
     useState<WriteProposalView | null>(null);
+  /** Full process proposal for the selected conversation (host decisionAvailable). */
+  const [pendingProcessProposal, setPendingProcessProposal] =
+    useState<ExecProposalView | null>(null);
+  /** Exactly one visible bar domain after dual-domain arbitration. */
+  const [visibleApproval, setVisibleApproval] = useState<VisibleApproval | null>(
+    null,
+  );
   const [decisionBusy, setDecisionBusy] = useState(false);
 
   /**
-   * Opaque grants live only in this ref map. Never React state, DOM, log,
+   * Opaque write grants live only in this ref map. Never React state, DOM, log,
    * storage, or snapshot. Cleared after decide settles and on scope change.
+   * Process authority never enters this map.
    */
   const grantByProposalRef = useRef<Map<string, string>>(new Map());
   /**
-   * Project + conversation generation guard for list/diff/decision async results.
+   * Latest listed proposals keyed for bar rendering after arbitration.
+   * Not a process cache outside the workbench — cleared on scope change.
+   */
+  const writeByIdRef = useRef<Map<string, WriteProposalView>>(new Map());
+  const processByIdRef = useRef<Map<string, ExecProposalView>>(new Map());
+  /**
+   * Project + conversation generation guard for list/diff/decision/output async.
    */
   const scopeRef = useRef({
     projectId: null as string | null,
@@ -119,6 +210,12 @@ export function Workbench({
     && writeDiffTarget.conversationId === conversationId
       ? writeDiffTarget
       : null;
+  const activeTerminalOutput =
+    terminalOutputTarget
+    && terminalOutputTarget.projectId === projectId
+    && terminalOutputTarget.conversationId === conversationId
+      ? terminalOutputTarget
+      : null;
   const hasTimeline = Boolean(
     timeline
     && (
@@ -128,20 +225,38 @@ export function Workbench({
   );
   const canCancel = isRunActive(run);
 
-  /** Synchronously clear pane scope, selection, and host preview request on close. */
+  /** Synchronously clear pane scope and presentation targets on close.
+   * Closing never cancels a process. */
   const closeResourcePane = () => {
     setResourcePaneScope(null);
     setResourceSelection(null);
     setPreviewPathRequest(null);
     setWriteDiffTarget(null);
+    setTerminalOutputTarget(null);
+    setContextBodyMode("resources");
   };
 
-  const clearWriteScope = useCallback(() => {
-    grantByProposalRef.current.clear();
-    setPendingProposal(null);
-    setDecisionBusy(false);
-    setWriteDiffTarget(null);
-  }, []);
+  /**
+   * Clear grant maps and bar presentation. Terminal is cleared only on
+   * project/conversation identity change so same-scope process refresh tokens
+   * can re-pull into an open pane.
+   */
+  const clearApprovalScope = useCallback(
+    (options?: { clearTerminal?: boolean }) => {
+      grantByProposalRef.current.clear();
+      writeByIdRef.current.clear();
+      processByIdRef.current.clear();
+      setPendingWriteProposal(null);
+      setPendingProcessProposal(null);
+      setVisibleApproval(null);
+      setDecisionBusy(false);
+      setWriteDiffTarget(null);
+      if (options?.clearTerminal !== false) {
+        setTerminalOutputTarget(null);
+      }
+    },
+    [],
+  );
 
   const isScopeCurrent = useCallback(
     (generation: number, project: string | null, conversation: string | null) => {
@@ -155,41 +270,80 @@ export function Workbench({
     [],
   );
 
-  const relistProposals = useCallback(
-    async (
-      generation: number,
-      project: string | null,
+  const applyListedApprovals = useCallback(
+    (
+      project: string,
       conversation: string,
+      writeList: WriteProposalView[],
+      processList: ExecProposalView[],
     ) => {
-      if (!writeApprovalGateway || !project) return;
-      try {
-        const list = await writeApprovalGateway.listWriteProposals(conversation);
-        if (!isScopeCurrent(generation, project, conversation)) return;
+      // Authoritative same-scope lists: atomically replace grant/process maps.
+      grantByProposalRef.current.clear();
+      writeByIdRef.current.clear();
+      processByIdRef.current.clear();
 
-        // Authoritative same-scope list: atomically replace grant memory.
-        // Only the exact currently selected live pending proposal may retain a grant.
-        const selected = selectOldestPendingProposal(list, conversation);
-        grantByProposalRef.current.clear();
+      const candidates: ApprovalCandidate[] = [];
 
-        if (!selected) {
-          setPendingProposal(null);
-          setWriteDiffTarget(null);
-          return;
+      for (const item of writeList) {
+        if (item.conversationId !== conversation) continue;
+        if (!isPendingWriteProposal(item)) continue;
+        writeByIdRef.current.set(item.proposalId, item);
+        // Opaque grant stays in the ref map only — never React state/DOM/logs.
+        if (item.approvalGrant) {
+          grantByProposalRef.current.set(item.proposalId, item.approvalGrant);
         }
+        // Decision-available only when the current list carried a grant.
+        // Grant-less pending writes must not win arbitration over process.
+        candidates.push({
+          domain: "write",
+          projectId: project,
+          requestId: item.proposalId,
+          conversationId: conversation,
+          expiresAt: item.expiresAt,
+          decisionAvailable: Boolean(item.approvalGrant),
+          summary: item.summary,
+          risk: item.mode,
+        });
+      }
 
-        if (selected.approvalGrant) {
-          grantByProposalRef.current.set(
-            selected.proposalId,
-            selected.approvalGrant,
-          );
-        }
+      for (const item of processList) {
+        if (item.conversationId !== conversation) continue;
+        if (!isPendingProcessProposal(item)) continue;
+        processByIdRef.current.set(item.proposalId, item);
+        candidates.push({
+          domain: "process",
+          projectId: project,
+          requestId: item.proposalId,
+          conversationId: conversation,
+          expiresAt: item.expiresAt,
+          decisionAvailable: item.decisionAvailable,
+          summary: item.summary,
+          risk: item.riskClass,
+        });
+      }
 
-        // If the selected proposal changes, drop a diff belonging to the prior one.
+      const selected = selectVisibleApproval(
+        { projectId: project, conversationId: conversation },
+        candidates,
+      );
+      setVisibleApproval(selected);
+
+      if (!selected) {
+        setPendingWriteProposal(null);
+        setPendingProcessProposal(null);
+        setWriteDiffTarget(null);
+        return;
+      }
+
+      if (selected.domain === "write") {
+        const raw = writeByIdRef.current.get(selected.requestId) ?? null;
+        setPendingWriteProposal(raw ? stripApprovalGrant(raw) : null);
+        setPendingProcessProposal(null);
         setWriteDiffTarget((current) => {
           if (
             current
             && (
-              current.proposalId !== selected.proposalId
+              current.proposalId !== selected.requestId
               || current.conversationId !== conversation
               || current.projectId !== project
             )
@@ -198,40 +352,89 @@ export function Workbench({
           }
           return current;
         });
+        return;
+      }
 
-        setPendingProposal(stripApprovalGrant(selected));
+      const process = processByIdRef.current.get(selected.requestId) ?? null;
+      setPendingProcessProposal(process);
+      setPendingWriteProposal(null);
+      setWriteDiffTarget(null);
+    },
+    [],
+  );
+
+  const relistApprovals = useCallback(
+    async (
+      generation: number,
+      project: string | null,
+      conversation: string,
+    ) => {
+      if (!project) return;
+      if (!writeApprovalGateway && !execGateway) return;
+
+      try {
+        const [writeList, processList] = await Promise.all([
+          writeApprovalGateway
+            ? writeApprovalGateway.listWriteProposals(conversation)
+            : Promise.resolve([] as WriteProposalView[]),
+          execGateway
+            ? execGateway.listExecProposals(conversation)
+            : Promise.resolve([] as ExecProposalView[]),
+        ]);
+        if (!isScopeCurrent(generation, project, conversation)) return;
+        applyListedApprovals(project, conversation, writeList, processList);
       } catch {
         if (!isScopeCurrent(generation, project, conversation)) return;
         // Never log the caught value — host errors may carry grants/secrets.
-        console.error("Failed to list write proposals.");
+        console.error("Failed to list governed approvals.");
         grantByProposalRef.current.clear();
-        setPendingProposal(null);
+        writeByIdRef.current.clear();
+        processByIdRef.current.clear();
+        setPendingWriteProposal(null);
+        setPendingProcessProposal(null);
+        setVisibleApproval(null);
         setWriteDiffTarget(null);
       }
     },
-    [writeApprovalGateway, isScopeCurrent],
+    [writeApprovalGateway, execGateway, isScopeCurrent, applyListedApprovals],
   );
 
-  // Conversation / project entry: re-list and park foreign state. No polling.
+  // Conversation / project / refresh-token entry: re-list and park foreign state.
+  // No polling — both write and process tokens share one generation-guarded list.
+  // Same-scope token bumps preserve an open terminal target for re-pull.
   useEffect(() => {
+    const previous = scopeRef.current;
+    const identityChanged =
+      previous.projectId !== projectId
+      || previous.conversationId !== conversationId;
+
     scopeRef.current = {
       projectId,
       conversationId,
-      generation: scopeRef.current.generation + 1,
+      generation: previous.generation + 1,
     };
     const generation = scopeRef.current.generation;
-    clearWriteScope();
-    if (!projectId || !conversationId || !writeApprovalGateway) {
+    // Identity change (or empty scope): drop terminal so foreign targets cannot
+    // paint or resurface. Token-only refresh keeps the open terminal target.
+    clearApprovalScope({
+      clearTerminal: identityChanged || !projectId || !conversationId,
+    });
+    if (!projectId || !conversationId) {
       return;
     }
-    void relistProposals(generation, projectId, conversationId);
+    if (!writeApprovalGateway && !execGateway) {
+      return;
+    }
+    void relistApprovals(generation, projectId, conversationId);
   }, [
     projectId,
     conversationId,
     writeApprovalGateway,
     writeProposalRefreshToken,
-    clearWriteScope,
-    relistProposals,
+    execGateway,
+    execProposalRefreshToken,
+    clearApprovalScope,
+    relistApprovals,
   ]);
 
   useEffect(() => {
@@ -247,20 +450,53 @@ export function Workbench({
     if (writeDiffTarget && writeDiffTarget.projectId !== projectId) {
       setWriteDiffTarget(null);
     }
+    if (terminalOutputTarget && terminalOutputTarget.projectId !== projectId) {
+      setTerminalOutputTarget(null);
+    }
   }, [
     projectId,
     resourcePaneScope?.projectId,
     resourceSelection?.projectId,
     previewPathRequest?.projectId,
     writeDiffTarget?.projectId,
+    terminalOutputTarget?.projectId,
   ]);
 
-  const handleDecide = useCallback(
+  // Project identity change: always return to resources mode.
+  useEffect(() => {
+    setContextBodyMode("resources");
+  }, [projectId]);
+
+  // Drive App Git discovery only while Changes mode is explicitly open for
+  // this project id (null otherwise — never leave a prior project's request).
+  useEffect(() => {
+    const requestProjectId =
+      resourcesOpen
+      && contextBodyMode === "changes"
+      && projectId
+      && gitChangesCapable
+        ? projectId
+        : null;
+    onGitChangesActive?.(requestProjectId);
+  }, [
+    resourcesOpen,
+    contextBodyMode,
+    projectId,
+    gitChangesCapable,
+    onGitChangesActive,
+  ]);
+
+  const handleWriteDecide = useCallback(
     async (decision: WriteDecision) => {
-      if (!writeApprovalGateway || !pendingProposal || !projectId || !conversationId) {
+      if (
+        !writeApprovalGateway
+        || !pendingWriteProposal
+        || !projectId
+        || !conversationId
+      ) {
         return;
       }
-      const proposalId = pendingProposal.proposalId;
+      const proposalId = pendingWriteProposal.proposalId;
       const grant = grantByProposalRef.current.get(proposalId) ?? null;
       if (!grant) return;
 
@@ -283,50 +519,149 @@ export function Workbench({
         if (isScopeCurrent(generation, projectId, conversationId)) {
           setDecisionBusy(false);
           // Reconcile from durable/native list — never optimistic-only terminal.
-          await relistProposals(generation, projectId, conversationId);
+          await relistApprovals(generation, projectId, conversationId);
         }
       }
     },
     [
       writeApprovalGateway,
-      pendingProposal,
+      pendingWriteProposal,
       projectId,
       conversationId,
       isScopeCurrent,
-      relistProposals,
+      relistApprovals,
+    ],
+  );
+
+  const handleProcessDecide = useCallback(
+    async (decision: CommandDecision) => {
+      if (
+        !execGateway
+        || !pendingProcessProposal
+        || !projectId
+        || !conversationId
+      ) {
+        return;
+      }
+      const proposalId = pendingProcessProposal.proposalId;
+      const generation = scopeRef.current.generation;
+      setDecisionBusy(true);
+      try {
+        // Process decisions carry no grant — host retains decision authority.
+        const execDecision: ExecDecision = decision;
+        await execGateway.decideExecProposal({
+          conversationId,
+          proposalId,
+          decision: execDecision,
+        });
+      } catch {
+        if (!isScopeCurrent(generation, projectId, conversationId)) return;
+        console.error("Failed to decide process proposal.");
+      } finally {
+        if (isScopeCurrent(generation, projectId, conversationId)) {
+          setDecisionBusy(false);
+          // Native authoritative re-list after every decision.
+          await relistApprovals(generation, projectId, conversationId);
+        }
+      }
+    },
+    [
+      execGateway,
+      pendingProcessProposal,
+      projectId,
+      conversationId,
+      isScopeCurrent,
+      relistApprovals,
     ],
   );
 
   const handleReviewDiff = useCallback(async () => {
-    if (!pendingProposal || !projectId || !conversationId) return;
+    if (!pendingWriteProposal || !projectId || !conversationId) return;
+    setTerminalOutputTarget(null);
     setWriteDiffTarget({
       projectId,
       conversationId,
-      proposalId: pendingProposal.proposalId,
+      proposalId: pendingWriteProposal.proposalId,
       scopeGeneration: scopeRef.current.generation,
     });
     setResourcePaneScope({ projectId });
     setResourceSelection(null);
     setPreviewPathRequest(null);
-  }, [pendingProposal, projectId, conversationId]);
+  }, [pendingWriteProposal, projectId, conversationId]);
+
+  const handleProcessReview = useCallback(async () => {
+    if (!pendingProcessProposal || !projectId || !conversationId) return;
+    setWriteDiffTarget(null);
+    setTerminalOutputTarget({
+      projectId,
+      conversationId,
+      proposalId: pendingProcessProposal.proposalId,
+      programLabel: pendingProcessProposal.programLabel,
+      argv: pendingProcessProposal.argv,
+      scopeGeneration: scopeRef.current.generation,
+    });
+    setResourcePaneScope({ projectId });
+    setResourceSelection(null);
+    setPreviewPathRequest(null);
+  }, [pendingProcessProposal, projectId, conversationId]);
+
+  /**
+   * Timeline command-activity “完整输出”: open the already-accepted Terminal
+   * output target in ResourcePane. Pull-on-demand via ExecGateway only.
+   */
+  const handleOpenProcessOutput = useCallback(
+    (request: OpenProcessOutputRequest) => {
+      if (!projectId || !conversationId) return;
+      setWriteDiffTarget(null);
+      setTerminalOutputTarget({
+        projectId,
+        conversationId,
+        proposalId: request.proposalId,
+        programLabel: request.programLabel,
+        argv: request.argv,
+        scopeGeneration: scopeRef.current.generation,
+      });
+      setResourcePaneScope({ projectId });
+      setResourceSelection(null);
+      setPreviewPathRequest(null);
+    },
+    [projectId, conversationId],
+  );
 
   const handleExpiryDeadline = useCallback(() => {
     const scope = scopeRef.current;
     if (!scope.projectId || !scope.conversationId) return;
-    // At the displayed deadline: invalidate governed diff; re-list so native
+    // At the displayed deadline: invalidate governed surfaces; re-list so native
     // remains the only terminal-state authority.
     setWriteDiffTarget(null);
-    void relistProposals(
+    void relistApprovals(
       scope.generation,
       scope.projectId,
       scope.conversationId,
     );
-  }, [relistProposals]);
+  }, [relistApprovals]);
 
   const grantForBar =
-    pendingProposal
-      ? grantByProposalRef.current.get(pendingProposal.proposalId) ?? null
+    pendingWriteProposal
+      ? grantByProposalRef.current.get(pendingWriteProposal.proposalId) ?? null
       : null;
+
+  const showWriteBar = Boolean(
+    visibleApproval
+    && visibleApproval.domain === "write"
+    && pendingWriteProposal
+    && conversationId
+    && pendingWriteProposal.conversationId === conversationId
+    && visibleApproval.requestId === pendingWriteProposal.proposalId,
+  );
+  const showProcessBar = Boolean(
+    visibleApproval
+    && visibleApproval.domain === "process"
+    && pendingProcessProposal
+    && conversationId
+    && pendingProcessProposal.conversationId === conversationId
+    && visibleApproval.requestId === pendingProcessProposal.proposalId,
+  );
 
   return (
     <main
@@ -376,6 +711,7 @@ export function Workbench({
                   return;
                 }
                 setWriteDiffTarget(null);
+                setTerminalOutputTarget(null);
                 setResourcePaneScope({ projectId: project.id });
               }}
               type="button"
@@ -388,9 +724,11 @@ export function Workbench({
         <div className="stage-body">
           {hasTimeline && timeline ? (
             <ConversationTimeline
+              onOpenProcessOutput={handleOpenProcessOutput}
               onOpenResource={(resource) => {
                 if (!project) return;
                 setWriteDiffTarget(null);
+                setTerminalOutputTarget(null);
                 setResourceSelection({ projectId: project.id, resource });
                 setResourcePaneScope({ projectId: project.id });
                 const portable =
@@ -424,16 +762,24 @@ export function Workbench({
         </div>
 
         <div className="composer-stack">
-          {pendingProposal
-          && conversationId
-          && pendingProposal.conversationId === conversationId ? (
+          {showWriteBar && pendingWriteProposal ? (
             <WriteApprovalBar
               approvalGrant={grantForBar}
               disabled={decisionBusy}
-              onDecide={handleDecide}
+              onDecide={handleWriteDecide}
               onExpiryDeadline={handleExpiryDeadline}
               onReviewDiff={handleReviewDiff}
-              proposal={pendingProposal}
+              proposal={pendingWriteProposal}
+            />
+          ) : null}
+          {showProcessBar && pendingProcessProposal ? (
+            <CommandApprovalBar
+              decisionAvailable={pendingProcessProposal.decisionAvailable}
+              disabled={decisionBusy}
+              onDecide={handleProcessDecide}
+              onExpiryDeadline={handleExpiryDeadline}
+              onReview={handleProcessReview}
+              proposal={toCommandProposal(pendingProcessProposal)}
             />
           ) : null}
           <Composer
@@ -461,6 +807,13 @@ export function Workbench({
         previewPathRequest={activePreviewRequest}
         writeApprovalGateway={writeApprovalGateway}
         writeDiffTarget={activeWriteDiff}
+        execGateway={execGateway}
+        terminalOutputTarget={activeTerminalOutput}
+        execProposalRefreshToken={execProposalRefreshToken}
+        gitChanges={gitChanges}
+        gitChangesCapable={gitChangesCapable}
+        bodyMode={contextBodyMode}
+        onBodyModeChange={setContextBodyMode}
       />
     </main>
   );

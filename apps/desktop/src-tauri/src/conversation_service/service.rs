@@ -329,6 +329,21 @@ impl ConversationService {
                 error.to_string(),
             ));
         }
+        if let Err(error) = self.host.register_governed_process_run(
+            protocol_run_id,
+            project_id.0.to_string(),
+            conversation_id.0.to_string(),
+            &working_directory,
+        ) {
+            // The established combined release path owns read/write/process
+            // bindings. Roll back before the provider session can start.
+            self.host.release_governed_read_run(protocol_run_id);
+            self.fail_admitted_run(run.id, RunStatus::Failed);
+            return Err(ConversationCommandError::new(
+                "governed_process_unavailable",
+                error.to_string(),
+            ));
+        }
 
         let session = match self.host.start_session(StartSession {
             conversation_key: conversation_id.0.to_string(),

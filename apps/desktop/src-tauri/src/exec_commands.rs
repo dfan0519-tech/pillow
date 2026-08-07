@@ -1,5 +1,72 @@
 //! C4 typed Tauri commands for conversation-owned process views.
 
+use std::sync::Arc;
+
+use tauri::{State, WebviewWindow};
+
+use crate::app_state::{AppState, CommandError};
+use crate::conversation_service::{
+    ConversationCommandError, ConversationService, ExecOutputDto, ExecProposalDto,
+};
+
+fn map_error(error: ConversationCommandError) -> CommandError {
+    CommandError {
+        code: error.code,
+        message: error.message,
+    }
+}
+
+#[tauri::command]
+pub fn list_exec_proposals<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
+    conversation_id: String,
+) -> Result<Vec<ExecProposalDto>, CommandError> {
+    let (id, project_id, root) = service
+        .conversation_project_context(&conversation_id)
+        .map_err(map_error)?;
+    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
+    service
+        .list_exec_proposals(conversation_id)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn decide_exec_proposal<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
+    conversation_id: String,
+    proposal_id: String,
+    decision: String,
+) -> Result<ExecProposalDto, CommandError> {
+    let (id, project_id, root) = service
+        .conversation_project_context(&conversation_id)
+        .map_err(map_error)?;
+    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
+    service
+        .decide_exec_proposal(conversation_id, proposal_id, decision)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn open_exec_output<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    service: State<'_, Arc<ConversationService>>,
+    window: WebviewWindow<R>,
+    conversation_id: String,
+    proposal_id: String,
+) -> Result<ExecOutputDto, CommandError> {
+    let (id, project_id, root) = service
+        .conversation_project_context(&conversation_id)
+        .map_err(map_error)?;
+    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
+    service
+        .open_exec_output(conversation_id, proposal_id)
+        .map_err(map_error)
+}
+
 /// Fixed public-error vocabulary mirrored from `apps/desktop/src/lib/execGateway.ts`
 /// (`EXEC_PUBLIC_ERRORS`). Private until product Tauri commands land (D3B scope).
 #[allow(dead_code)] // exercised by unit tests; product commands are out of D3AR2C scope

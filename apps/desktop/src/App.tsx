@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { WindowControls } from "./components/WindowControls";
 import {
   conversationBelongsToProject,
@@ -10,8 +10,18 @@ import {
   selectConversationsForProject,
 } from "./features/conversations/conversationReducer";
 import { AppSidebar } from "./features/projects/AppSidebar";
+import type { GitChangesPaneModel } from "./features/workbench/ResourcePane";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
+import type { ExecGateway } from "./lib/execGateway";
+import {
+  GIT_ERROR_MESSAGES,
+  normalizeGitError,
+  type GitDiffView,
+  type GitGateway,
+  type GitRepositoryView,
+  type GitStatusView,
+} from "./lib/gitGateway";
 import { MockConversationGateway } from "./lib/mockConversationGateway";
 import {
   normalizeProjectGatewayError,
@@ -30,11 +40,57 @@ type AppProps = {
   resourceGateway?: ResourceGateway;
   /** Optional conversation-owned write approval gateway (Wave C3-E). */
   writeApprovalGateway?: WriteApprovalGateway;
+  /** Optional conversation-owned process gateway (Wave C4-D3B2). */
+  execGateway?: ExecGateway;
+  /**
+   * Optional read-only Git gateway (C4 D3B4). When omitted, App never calls Git
+   * and passes `gitChanges={null}` so existing resource/diff/terminal modes stay.
+   */
+  gitGateway?: GitGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
   defaultSelectedProjectId?: string;
 };
+
+type GitPresentationState = {
+  repositories: GitRepositoryView[];
+  selectedRepositoryId: string | null;
+  /** Native discovery generation for status/diff expects; null before discover. */
+  discoveryGeneration: number | null;
+  status: GitStatusView | null;
+  diff: GitDiffView | null;
+  loading: boolean;
+  error: string | null;
+  stale: boolean;
+};
+
+const EMPTY_GIT_STATE: GitPresentationState = {
+  repositories: [],
+  selectedRepositoryId: null,
+  discoveryGeneration: null,
+  status: null,
+  diff: null,
+  loading: false,
+  error: null,
+  stale: false,
+};
+
+/** Prefer project-root `.` when available; otherwise the first available id. */
+function pickFirstAvailableRepository(
+  repositories: GitRepositoryView[],
+): string | null {
+  const root = repositories.find(
+    (repo) => repo.repositoryId === "." && repo.available,
+  );
+  if (root) return root.repositoryId;
+  const first = repositories.find((repo) => repo.available);
+  return first?.repositoryId ?? null;
+}
+
+function isStaleGitCode(code: string): boolean {
+  return code === "git_generation_stale" || code === "git_generation_mismatch";
+}
 
 /**
  * Shell regions adapt Grok App's App.tsx layout under MIT.
@@ -46,6 +102,8 @@ export function App({
   conversationGateway: conversationGatewayProp,
   resourceGateway,
   writeApprovalGateway,
+  execGateway,
+  gitGateway,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
@@ -69,6 +127,22 @@ export function App({
    * conversation — drives Workbench re-list without polling.
    */
   const [writeProposalRefreshToken, setWriteProposalRefreshToken] = useState(0);
+  /**
+   * Bumped only on accepted process lifecycle events for the selected
+   * conversation under the active project — drives Workbench re-list without
+   * polling or a process state cache.
+   */
+  const [execProposalRefreshToken, setExecProposalRefreshToken] = useState(0);
+  /** App-owned Git Changes presentation for the active project (C4 D3B4). */
+  const [gitState, setGitState] = useState<GitPresentationState>(EMPTY_GIT_STATE);
+  /**
+   * Project id for which Workbench has the pane open on explicit Changes mode.
+   * Must match `activeProject.id` before discovery/status run. Project selection
+   * alone never activates Git.
+   */
+  const [gitChangesRequestProjectId, setGitChangesRequestProjectId] = useState<
+    string | null
+  >(null);
   const [conversationState, dispatchConversation] = useReducer(
     conversationReducer,
     undefined,
@@ -81,12 +155,29 @@ export function App({
   /** Bumps on every project-scope clear so in-flight create/send cannot select stale results. */
   const projectScopeGenRef = useRef(0);
   /**
+   * Per-project monotonic counter for listConversations freshness.
+   * Allocated when a list request starts; carried on `conversations_loaded`
+   * so the reducer can drop strictly older out-of-order results.
+   */
+  const conversationListSeqCounterRef = useRef<Record<string, number>>({});
+  /**
    * Independent activation generation: last-request-wins for select/open.
    * Only the current generation may commit project, error, or busy from async select.
    */
   const projectActivationGenRef = useRef(0);
   const activeProjectIdRef = useRef<string | null>(null);
   activeProjectIdRef.current = activeProject?.id ?? null;
+  /**
+   * Controller-owned Git request/scope generation. Bumps on project switch,
+   * clear, refresh, repository selection, and path selection so late async
+   * results cannot mutate visible state.
+   */
+  const gitScopeRef = useRef({
+    projectId: null as string | null,
+    generation: 0,
+  });
+  const gitStateRef = useRef(gitState);
+  gitStateRef.current = gitState;
 
   useEffect(() => {
     let active = true;
@@ -132,22 +223,38 @@ export function App({
   useEffect(() => {
     return conversationGateway.subscribe((event) => {
       dispatchConversation({ type: "runtime_event", event });
-      // Event-driven write re-list only; never interval polling.
+      // Event-driven re-list only; never interval polling.
       // Only the conversation owned by the currently active project may bump.
+      const selectedConversationId =
+        conversationStateRef.current.selectedConversationId;
+      const ownedByActiveProject = conversationBelongsToProject(
+        conversationStateRef.current,
+        event.conversationId,
+        activeProjectIdRef.current,
+      );
+      const targetsSelectedConversation =
+        event.conversationId === selectedConversationId && ownedByActiveProject;
+
       if (
         (
           event.kind === "write_proposal_requested"
           || event.kind === "write_proposal_resolved"
         )
-        && event.conversationId
-          === conversationStateRef.current.selectedConversationId
-        && conversationBelongsToProject(
-          conversationStateRef.current,
-          event.conversationId,
-          activeProjectIdRef.current,
-        )
+        && targetsSelectedConversation
       ) {
         setWriteProposalRefreshToken((token) => token + 1);
+      }
+
+      if (
+        (
+          event.kind === "process_proposal_requested"
+          || event.kind === "process_proposal_decided"
+          || event.kind === "process_started"
+          || event.kind === "process_terminal_outcome"
+        )
+        && targetsSelectedConversation
+      ) {
+        setExecProposalRefreshToken((token) => token + 1);
       }
     });
   }, [conversationGateway]);
@@ -158,13 +265,16 @@ export function App({
       return;
     }
     let active = true;
-    void conversationGateway.listConversations(activeProject.id).then(
+    const projectId = activeProject.id;
+    const listSeq = nextConversationListSeq(projectId);
+    void conversationGateway.listConversations(projectId).then(
       (conversations) => {
         if (!active) return;
         dispatchConversation({
           type: "conversations_loaded",
-          projectId: activeProject.id,
+          projectId,
           conversations,
+          listSeq,
         });
       },
       (cause: unknown) => {
@@ -176,6 +286,317 @@ export function App({
       active = false;
     };
   }, [activeProject, conversationGateway]);
+
+  const isGitScopeCurrent = useCallback(
+    (projectId: string, generation: number): boolean => {
+      return (
+        gitScopeRef.current.generation === generation
+        && gitScopeRef.current.projectId === projectId
+        && activeProjectIdRef.current === projectId
+      );
+    },
+    [],
+  );
+
+  const loadGitStatus = useCallback(
+    async (
+      projectId: string,
+      scopeGeneration: number,
+      repositoryId: string,
+      discoveryGeneration: number,
+    ) => {
+      if (!gitGateway) return;
+      try {
+        const status = await gitGateway.getGitStatus({
+          projectId,
+          expected: {
+            repositoryId,
+            generation: discoveryGeneration,
+          },
+        });
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        setGitState((current) => ({
+          ...current,
+          selectedRepositoryId: repositoryId,
+          discoveryGeneration,
+          status,
+          diff: null,
+          loading: false,
+          error: null,
+          stale: false,
+        }));
+      } catch (cause) {
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        const normalized = normalizeGitError(cause);
+        setGitState((current) => ({
+          ...current,
+          selectedRepositoryId: repositoryId,
+          discoveryGeneration,
+          status: null,
+          diff: null,
+          loading: false,
+          error: normalized.message,
+          stale: isStaleGitCode(normalized.code),
+        }));
+      }
+    },
+    [gitGateway, isGitScopeCurrent],
+  );
+
+  const runGitDiscovery = useCallback(
+    async (projectId: string, scopeGeneration: number) => {
+      if (!gitGateway) return;
+      try {
+        const discovery = await gitGateway.discoverGitRepositories(projectId);
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+
+        const repositories = discovery.repositories;
+        const selectedId = pickFirstAvailableRepository(repositories);
+
+        if (!selectedId) {
+          setGitState({
+            repositories,
+            selectedRepositoryId: null,
+            discoveryGeneration: discovery.generation,
+            status: null,
+            diff: null,
+            loading: false,
+            error: GIT_ERROR_MESSAGES.git_repository_not_found,
+            stale: false,
+          });
+          return;
+        }
+
+        setGitState({
+          repositories,
+          selectedRepositoryId: selectedId,
+          discoveryGeneration: discovery.generation,
+          status: null,
+          diff: null,
+          loading: true,
+          error: null,
+          stale: false,
+        });
+
+        await loadGitStatus(
+          projectId,
+          scopeGeneration,
+          selectedId,
+          discovery.generation,
+        );
+      } catch (cause) {
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        const normalized = normalizeGitError(cause);
+        setGitState({
+          repositories: [],
+          selectedRepositoryId: null,
+          discoveryGeneration: null,
+          status: null,
+          diff: null,
+          loading: false,
+          error: normalized.message,
+          stale: isStaleGitCode(normalized.code),
+        });
+      }
+    },
+    [gitGateway, isGitScopeCurrent, loadGitStatus],
+  );
+
+  // Project identity / gateway / explicit Changes activation: clear
+  // synchronously, discover only when Changes mode is active for the same
+  // project id. A stale request for a prior project never starts discovery.
+  useEffect(() => {
+    const projectId = activeProject?.id ?? null;
+    gitScopeRef.current = {
+      projectId,
+      generation: gitScopeRef.current.generation + 1,
+    };
+    const generation = gitScopeRef.current.generation;
+    const changesActiveForProject =
+      projectId != null
+      && gitChangesRequestProjectId === projectId;
+
+    if (!projectId || !gitGateway || !changesActiveForProject) {
+      setGitState(EMPTY_GIT_STATE);
+      return;
+    }
+
+    setGitState({
+      ...EMPTY_GIT_STATE,
+      loading: true,
+    });
+    void runGitDiscovery(projectId, generation);
+  }, [
+    activeProject?.id,
+    gitGateway,
+    gitChangesRequestProjectId,
+    runGitDiscovery,
+  ]);
+
+  const handleGitSelectRepository = useCallback(
+    (repositoryId: string) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (current.discoveryGeneration === null) return;
+
+      const allowed = current.repositories.find(
+        (repo) => repo.repositoryId === repositoryId && repo.available,
+      );
+      if (!allowed) return;
+      if (repositoryId === current.selectedRepositoryId && current.status) {
+        return;
+      }
+
+      gitScopeRef.current = {
+        projectId,
+        generation: gitScopeRef.current.generation + 1,
+      };
+      const generation = gitScopeRef.current.generation;
+      const discoveryGeneration = current.discoveryGeneration;
+
+      setGitState((prev) => ({
+        ...prev,
+        selectedRepositoryId: repositoryId,
+        status: null,
+        diff: null,
+        loading: true,
+        error: null,
+        stale: false,
+      }));
+
+      void loadGitStatus(
+        projectId,
+        generation,
+        repositoryId,
+        discoveryGeneration,
+      );
+    },
+    [gitGateway, loadGitStatus],
+  );
+
+  const handleGitSelectPath = useCallback(
+    (portablePath: string) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (!current.selectedRepositoryId || current.discoveryGeneration === null) {
+        return;
+      }
+      if (!current.status?.files.some((file) => file.path === portablePath)) {
+        return;
+      }
+
+      gitScopeRef.current = {
+        projectId,
+        generation: gitScopeRef.current.generation + 1,
+      };
+      const generation = gitScopeRef.current.generation;
+      const repositoryId = current.selectedRepositoryId;
+      const discoveryGeneration = current.discoveryGeneration;
+
+      setGitState((prev) => ({
+        ...prev,
+        diff: null,
+        error: null,
+        stale: false,
+      }));
+
+      void (async () => {
+        try {
+          const diff = await gitGateway.openGitDiff({
+            projectId,
+            expected: {
+              repositoryId,
+              generation: discoveryGeneration,
+            },
+            path: portablePath,
+          });
+          if (!isGitScopeCurrent(projectId, generation)) return;
+          setGitState((prev) => ({
+            ...prev,
+            diff,
+            error: null,
+            stale: false,
+          }));
+        } catch (cause) {
+          if (!isGitScopeCurrent(projectId, generation)) return;
+          const normalized = normalizeGitError(cause);
+          setGitState((prev) => ({
+            ...prev,
+            diff: null,
+            error: normalized.message,
+            stale: isStaleGitCode(normalized.code),
+          }));
+        }
+      })();
+    },
+    [gitGateway, isGitScopeCurrent],
+  );
+
+  const handleGitRefresh = useCallback(() => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId || !gitGateway) return;
+
+    gitScopeRef.current = {
+      projectId,
+      generation: gitScopeRef.current.generation + 1,
+    };
+    const generation = gitScopeRef.current.generation;
+
+    setGitState({
+      repositories: [],
+      selectedRepositoryId: null,
+      discoveryGeneration: null,
+      status: null,
+      diff: null,
+      loading: true,
+      error: null,
+      stale: false,
+    });
+    void runGitDiscovery(projectId, generation);
+  }, [gitGateway, runGitDiscovery]);
+
+  /**
+   * Render-time ownership guard: the project-change effect updates
+   * `gitScopeRef` and clears `gitState` only after React commits the render
+   * that introduced a new `activeProject`. Until that effect establishes the
+   * new scope (and loading state), pass `null` so the prior project's
+   * repositories/status/diff cannot paint for one frame under the new project.
+   * Model is also null while Changes mode is inactive so resource body is
+   * never displaced by a non-empty Git presentation.
+   */
+  const gitChanges: GitChangesPaneModel | null = useMemo(() => {
+    if (!activeProject || !gitGateway) return null;
+    if (gitChangesRequestProjectId !== activeProject.id) return null;
+    if (gitScopeRef.current.projectId !== activeProject.id) return null;
+    return {
+      repositories: gitState.repositories,
+      selectedRepositoryId: gitState.selectedRepositoryId,
+      status: gitState.status,
+      diff: gitState.diff,
+      loading: gitState.loading,
+      error: gitState.error,
+      stale: gitState.stale,
+      onSelectRepository: handleGitSelectRepository,
+      onSelectPath: handleGitSelectPath,
+      onRefresh: handleGitRefresh,
+    };
+  }, [
+    activeProject,
+    gitGateway,
+    gitChangesRequestProjectId,
+    gitState.repositories,
+    gitState.selectedRepositoryId,
+    gitState.status,
+    gitState.diff,
+    gitState.loading,
+    gitState.error,
+    gitState.stale,
+    handleGitSelectRepository,
+    handleGitSelectPath,
+    handleGitRefresh,
+  ]);
 
   function upsertProject(project: ProjectDto) {
     setProjects((current) => {
@@ -202,6 +623,13 @@ export function App({
       projectScopeGenRef.current === generation
       && activeProjectIdRef.current === projectId
     );
+  }
+
+  /** Allocate the next monotonic list-load sequence for a project. */
+  function nextConversationListSeq(projectId: string): number {
+    const next = (conversationListSeqCounterRef.current[projectId] ?? 0) + 1;
+    conversationListSeqCounterRef.current[projectId] = next;
+    return next;
   }
 
   /**
@@ -405,6 +833,8 @@ export function App({
       // "新对话" from the first turn, so the rail and stage title must follow.
       await conversationGateway.sendTurn(conversationId, content);
 
+      // Stamp list freshness at request start (same contract as project effect).
+      const listSeq = nextConversationListSeq(projectIdAtStart);
       const [timelineResult, conversationsResult] = await Promise.allSettled([
         conversationGateway.loadTimeline(conversationId),
         conversationGateway.listConversations(projectIdAtStart),
@@ -426,6 +856,7 @@ export function App({
             type: "conversations_loaded",
             projectId: projectIdAtStart,
             conversations: conversationsResult.value,
+            listSeq,
           });
         } else {
           console.error(
@@ -531,6 +962,11 @@ export function App({
           resourceGateway={resourceGateway}
           writeApprovalGateway={writeApprovalGateway}
           writeProposalRefreshToken={writeProposalRefreshToken}
+          execGateway={execGateway}
+          execProposalRefreshToken={execProposalRefreshToken}
+          gitChanges={gitChanges}
+          gitChangesCapable={Boolean(gitGateway)}
+          onGitChangesActive={setGitChangesRequestProjectId}
         />
       </div>
     </div>

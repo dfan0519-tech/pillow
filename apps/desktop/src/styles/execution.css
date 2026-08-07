@@ -391,6 +391,72 @@
   color: var(--warning, #f0993d);
 }
 
+.git-changes-view__notice--error {
+  color: var(--danger, #f07178);
+}
+
+.git-changes-view__status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.git-changes-view__repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.git-changes-view__repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 2px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.git-changes-view__repo code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-changes-view__repo:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.git-changes-view__repo:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
+}
+
+.git-changes-view__repo--selected {
+  background: var(--bg-active, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  border-color: var(--border-focus, rgba(140, 170, 255, 0.35));
+}
+
+.git-changes-view__repo:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.git-changes-view__repo-unavailable {
+  font-size: 11px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
 .git-changes-view__refresh {
   align-self: flex-start;
   min-height: 28px;
@@ -480,11 +546,6 @@
 .git-changes-view__rename code {
   font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
   font-size: 12px;
-}
-
-.git-changes-view__binary-badge {
-  font-size: 11px;
-  color: var(--warning, #f0993d);
 }
 
 .git-changes-view__diff {

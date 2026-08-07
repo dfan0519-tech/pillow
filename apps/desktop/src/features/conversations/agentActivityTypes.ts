@@ -99,6 +99,7 @@ export type AgentWriteOutcomeInput = {
 /**
  * One run/role activity record supplied by the owning conversation.
  * Diagnostic fields (sessionId, runId) must never be projected into UI text.
+ * Process lifecycle is owned by processActivityModel command rows, not notices.
  */
 export type AgentActivityRecord = {
   conversationId: string;

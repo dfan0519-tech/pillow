@@ -464,85 +464,103 @@ export class ProcessSupervisor {
     return processes;
   }
 
-  async cleanup() {
-    if (this.platform !== "win32") {
-      const root = this.records.get(this.rootPid);
-      if (root?.state === "confirmed-dead") return;
-      for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
-        if (childHasExited(this.child)) {
-          root.state = "confirmed-dead";
-          return;
-        }
-        if (root.state === "observed") root.state = "terminating";
-        if (attempt === 0 && this.child.kill() !== true) {
-          throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
-        }
-        await this.delayFn(POLL_INTERVAL_MS);
-      }
-      throw new Error(`Desktop cleanup refused: root PID ${this.rootPid} still present after root termination request.`);
-    }
-    for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
-      const processes = await this.capture(true);
-      const root = this.records.get(this.rootPid);
-      const mismatch = [...this.records.entries()]
-        .find(([, record]) => record.state === "identity-mismatch");
-      if (mismatch !== undefined) {
-        throw new Error(`Desktop cleanup refused: identity mismatch for PID ${mismatch[0]}.`);
-      }
-      const rootIncomplete = [...this.records.entries()]
-        .find(([, record]) => record.isRoot && record.state === "identity-incomplete");
-      if (rootIncomplete !== undefined) {
-        throw new Error(`Desktop cleanup refused: incomplete identity for PID ${rootIncomplete[0]}.`);
-      }
-      const incompleteDescendant = [...this.records.entries()]
-        .find(([, record]) => !record.isRoot && record.state === "identity-incomplete");
-      const neverObservedDescendant = [...this.records.entries()]
-        .find(([, record]) => !record.isRoot && record.state === "never-observed");
-      if (neverObservedDescendant !== undefined) {
-        throw new Error(
-          `Desktop cleanup refused: never-observed descendant PID ${neverObservedDescendant[0]}.`,
-        );
-      }
-      const live = [...this.records.entries()]
-        .filter(
-          ([, record]) => (
-            record.state !== "confirmed-dead"
-            && record.state !== "identity-replaced"
-            && record.identity !== null
-            && !this.permitsDetachedMsvcVctipTelemetry(record, root)
-          ),
-        );
-      if (live.length === 0 && root?.state !== "never-observed") {
-        if (incompleteDescendant !== undefined) {
-          await this.delayFn(POLL_INTERVAL_MS);
-          continue;
-        }
-        if (!this.enforceDesktopClean) return;
-        const residual = this.desktopObservation();
-        this.lastDesktopObservation = residual;
-        if (residual.keeperPids.length === 0 && residual.listenerPids.length === 0) return;
-        await this.delayFn(POLL_INTERVAL_MS);
-        continue;
-      }
-      const liveRoot = root?.state === "observed" && root.identity !== null;
-      if (liveRoot) {
-        const windowsRoot = resolveWindowsRoot(this.systemRoot, this.windir);
-        if (windowsRoot.error !== null) {
-          throw new Error(`Desktop cleanup refused: ${windowsRoot.error}.`);
-        }
-        const unsafeReason = systemProcessReason(root.identity, windowsRoot.root);
-        if (unsafeReason !== null) {
-          throw new Error(`Desktop cleanup refused: PID ${this.rootPid} is a ${unsafeReason}.`);
-        }
-        root.state = "terminating";
-        if (this.child.kill() !== true) {
-          throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
-        }
-      }
-      await this.delayFn(POLL_INTERVAL_MS);
-    }
+  /**
+   * Assess the current identity store after a fresh snapshot.
+   * Success requires every complete identity to be confirmed-dead or
+   * identity-replaced (or an opted-in detached VCTIP residual). Incomplete
+   * non-root records may wait; hard failures reject immediately.
+   */
+  assessWindowsCleanup() {
     const root = this.records.get(this.rootPid);
-    if (root?.state === "never-observed") {
+    const mismatch = [...this.records.entries()]
+      .find(([, record]) => record.state === "identity-mismatch");
+    if (mismatch !== undefined) {
+      return {
+        kind: "reject",
+        error: new Error(`Desktop cleanup refused: identity mismatch for PID ${mismatch[0]}.`),
+      };
+    }
+    const rootIncomplete = [...this.records.entries()]
+      .find(([, record]) => record.isRoot && record.state === "identity-incomplete");
+    if (rootIncomplete !== undefined) {
+      return {
+        kind: "reject",
+        error: new Error(`Desktop cleanup refused: incomplete identity for PID ${rootIncomplete[0]}.`),
+      };
+    }
+    const incompleteDescendant = [...this.records.entries()]
+      .find(([, record]) => !record.isRoot && record.state === "identity-incomplete");
+    const neverObservedDescendant = [...this.records.entries()]
+      .find(([, record]) => !record.isRoot && record.state === "never-observed");
+    if (neverObservedDescendant !== undefined) {
+      return {
+        kind: "reject",
+        error: new Error(
+          `Desktop cleanup refused: never-observed descendant PID ${neverObservedDescendant[0]}.`,
+        ),
+      };
+    }
+    const live = [...this.records.entries()]
+      .filter(
+        ([, record]) => (
+          record.state !== "confirmed-dead"
+          && record.state !== "identity-replaced"
+          && record.identity !== null
+          && !this.permitsDetachedMsvcVctipTelemetry(record, root)
+        ),
+      );
+    // A never-observed root is fail-closed while the launcher handle is still
+    // live (no termination authority without identity). Once the handle has
+    // exited, no kill is required: absence of complete live identities is
+    // enough, and short-lived roots that exit before the first CIM capture
+    // must not false-fail a successful natural exit.
+    const rootSettled = root?.state !== "never-observed"
+      || childHasExited(this.child);
+    if (live.length === 0 && rootSettled) {
+      if (incompleteDescendant !== undefined) {
+        return { kind: "wait" };
+      }
+      if (root?.state === "never-observed" && childHasExited(this.child)) {
+        root.state = "confirmed-dead";
+      }
+      if (!this.enforceDesktopClean) return { kind: "success" };
+      const residual = this.desktopObservation();
+      this.lastDesktopObservation = residual;
+      if (residual.keeperPids.length === 0 && residual.listenerPids.length === 0) {
+        return { kind: "success" };
+      }
+      return { kind: "wait" };
+    }
+    return { kind: "wait", liveRoot: root?.state === "observed" && root.identity !== null };
+  }
+
+  requestRootTermination() {
+    const root = this.records.get(this.rootPid);
+    if (root?.state !== "observed" || root.identity === null) return;
+    // Launcher-owned handle already reports exit: authoritative for the root.
+    // Never call kill() on an exited handle (returns false on Windows and
+    // falsely fails a successful natural exit).
+    if (childHasExited(this.child)) {
+      root.state = "confirmed-dead";
+      return;
+    }
+    const windowsRoot = resolveWindowsRoot(this.systemRoot, this.windir);
+    if (windowsRoot.error !== null) {
+      throw new Error(`Desktop cleanup refused: ${windowsRoot.error}.`);
+    }
+    const unsafeReason = systemProcessReason(root.identity, windowsRoot.root);
+    if (unsafeReason !== null) {
+      throw new Error(`Desktop cleanup refused: PID ${this.rootPid} is a ${unsafeReason}.`);
+    }
+    root.state = "terminating";
+    if (this.child.kill() !== true) {
+      throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
+    }
+  }
+
+  refuseWindowsCleanupExhausted() {
+    const root = this.records.get(this.rootPid);
+    if (root?.state === "never-observed" && !childHasExited(this.child)) {
       throw new Error(`Desktop cleanup refused: root PID ${this.rootPid} was never observed.`);
     }
     const persistentIncomplete = [...this.records.entries()]
@@ -572,6 +590,48 @@ export class ProcessSupervisor {
       return state !== "confirmed-dead" && state !== "identity-replaced";
     });
     throw new Error(`Desktop cleanup refused: observation-only PIDs remain [${live.join(",")}].`);
+  }
+
+  async cleanup() {
+    if (this.platform !== "win32") {
+      const root = this.records.get(this.rootPid);
+      if (root?.state === "confirmed-dead") return;
+      for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
+        if (childHasExited(this.child)) {
+          root.state = "confirmed-dead";
+          return;
+        }
+        if (root.state === "observed") root.state = "terminating";
+        if (attempt === 0 && this.child.kill() !== true) {
+          throw new Error(`Desktop cleanup refused: root handle PID ${this.rootPid} rejected termination.`);
+        }
+        await this.delayFn(POLL_INTERVAL_MS);
+      }
+      throw new Error(`Desktop cleanup refused: root PID ${this.rootPid} still present after root termination request.`);
+    }
+    for (let attempt = 0; attempt < this.cleanupAttempts; attempt += 1) {
+      await this.capture(true);
+      const decision = this.assessWindowsCleanup();
+      if (decision.kind === "reject") throw decision.error;
+      if (decision.kind === "success") return;
+      if (decision.liveRoot) this.requestRootTermination();
+      // Natural exit may mark the root confirmed-dead without a kill. Reassess
+      // from the same fresh snapshot before waiting for another poll.
+      if (decision.liveRoot && childHasExited(this.child)) {
+        const afterExit = this.assessWindowsCleanup();
+        if (afterExit.kind === "reject") throw afterExit.error;
+        if (afterExit.kind === "success") return;
+      }
+      await this.delayFn(POLL_INTERVAL_MS);
+    }
+    // Final fresh snapshot after the last poll delay. A descendant that dies
+    // during that delay must be proven absent (or identity-replaced) here;
+    // otherwise the prior attempt's live observation would false-fail.
+    await this.capture(true);
+    const finalDecision = this.assessWindowsCleanup();
+    if (finalDecision.kind === "reject") throw finalDecision.error;
+    if (finalDecision.kind === "success") return;
+    this.refuseWindowsCleanupExhausted();
   }
 }
 

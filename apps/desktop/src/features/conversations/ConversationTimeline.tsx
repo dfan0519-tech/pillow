@@ -22,11 +22,29 @@ import type {
 } from "./conversationReducer";
 import { isRunActive } from "./conversationReducer";
 import type { TimelineMessageDto } from "../../lib/conversationGateway";
+import {
+  buildProcessActivityModels,
+  formatProcessArgvDisplay,
+  type ProcessActivityModel,
+} from "../execution/processActivityModel";
+import "../../styles/execution.css";
+
+export type OpenProcessOutputRequest = {
+  /** Internal only — never painted in the timeline. */
+  proposalId: string;
+  programLabel: string;
+  argv: string[];
+};
 
 type ConversationTimelineProps = {
   timeline: ConversationTimelineView;
   run: RunView | null;
   onOpenResource?: (resource: ResourceReferenceView) => void;
+  /**
+   * Opens the existing Terminal output pane for a conversation-owned process.
+   * Receives internal proposal identity plus safe program/argv only.
+   */
+  onOpenProcessOutput?: (request: OpenProcessOutputRequest) => void;
 };
 
 /** Histories above this count use explicit recent-page rendering. */
@@ -43,6 +61,7 @@ export function ConversationTimeline({
   timeline,
   run,
   onOpenResource,
+  onOpenProcessOutput,
 }: ConversationTimelineProps) {
   const items = useMemo(() => buildChronologicalItems(timeline), [timeline]);
   const streaming = isRunActive(run);
@@ -58,6 +77,7 @@ export function ConversationTimeline({
       <PaginatedItemList
         items={items}
         key={timeline.conversationId}
+        onOpenProcessOutput={onOpenProcessOutput}
         onOpenResource={onOpenResource}
         run={run}
         streaming={streaming}
@@ -112,6 +132,7 @@ function itemPriority(item: TimelineItem): number {
 function TimelineItemView({
   item,
   conversationId,
+  onOpenProcessOutput,
   onOpenResource,
   run,
   streaming,
@@ -119,6 +140,7 @@ function TimelineItemView({
 }: {
   item: TimelineItem;
   conversationId: string;
+  onOpenProcessOutput?: (request: OpenProcessOutputRequest) => void;
   onOpenResource?: (resource: ResourceReferenceView) => void;
   run: RunView | null;
   streaming: boolean;
@@ -130,36 +152,60 @@ function TimelineItemView({
       item.activity,
       timeline.events,
     );
+    const processModels = buildProcessActivityModels(
+      timeline.events,
+      conversationId,
+      item.activity.runId,
+    );
     return (
-      <AgentActivityDisclosure
-        activity={record}
-        conversationId={conversationId}
-        onOpenArtifact={
-          onOpenResource
-            ? (relativePath, sourceToken) => {
-                const resource = resolveResourceFromActivity(
-                  item.activity,
-                  relativePath,
-                  sourceToken,
-                );
-                if (resource) {
-                  onOpenResource(resource);
-                  return;
+      <>
+        <AgentActivityDisclosure
+          activity={record}
+          conversationId={conversationId}
+          onOpenArtifact={
+            onOpenResource
+              ? (relativePath, sourceToken) => {
+                  const resource = resolveResourceFromActivity(
+                    item.activity,
+                    relativePath,
+                    sourceToken,
+                  );
+                  if (resource) {
+                    onOpenResource(resource);
+                    return;
+                  }
+                  // Succeeded write outcomes open via portable path only.
+                  if (!sourceToken) {
+                    onOpenResource({
+                      resourceId: `write:${relativePath}`,
+                      kind: "file",
+                      label: relativePath.split("/").pop() ?? relativePath,
+                      path: relativePath,
+                      truncated: false,
+                    });
+                  }
                 }
-                // Succeeded write outcomes open via portable path only.
-                if (!sourceToken) {
-                  onOpenResource({
-                    resourceId: `write:${relativePath}`,
-                    kind: "file",
-                    label: relativePath.split("/").pop() ?? relativePath,
-                    path: relativePath,
-                    truncated: false,
-                  });
-                }
-              }
-            : undefined
-        }
-      />
+              : undefined
+          }
+        />
+        {processModels.map((model) => (
+          <ProcessCommandActivityRow
+            key={model.proposalId}
+            model={model}
+            onOpenOutput={
+              model.canOpenOutput
+                ? () => {
+                    onOpenProcessOutput?.({
+                      proposalId: model.proposalId,
+                      programLabel: model.programLabel,
+                      argv: model.argv,
+                    });
+                  }
+                : undefined
+            }
+          />
+        ))}
+      </>
     );
   }
 
@@ -193,14 +239,175 @@ type VisibleRange = {
   end: number;
 };
 
+/**
+ * Compact progressive-disclosure row for one process proposal.
+ * Summary: program + lifecycle status. Details hold argv/meta/完整输出.
+ * Reuses existing command-activity CSS; proposal id never enters the DOM.
+ */
+function ProcessCommandActivityRow({
+  model,
+  onOpenOutput,
+}: {
+  model: ProcessActivityModel;
+  onOpenOutput?: () => void;
+}) {
+  const isFailureLike =
+    model.state === "failed"
+    || model.state === "rejected"
+    || model.state === "expired"
+    || model.state === "cancelled"
+    || model.state === "interrupted";
+  const isLive =
+    model.state === "pending_approval"
+    || model.state === "approved"
+    || model.state === "running";
+  const argvText = formatProcessArgvDisplay(model.argv);
+  const hasDetails =
+    model.argv.length > 0
+    || model.decisionLabel
+    || model.exitCode !== undefined
+    || model.durationMs !== undefined
+    || model.capturedBytes !== undefined
+    || model.truncated
+    || model.encodingLossy
+    || Boolean(onOpenOutput);
+
+  return (
+    <article
+      className="command-activity-row"
+      data-origin="agent"
+      data-status={model.state}
+      data-testid="command-activity-row"
+    >
+      <details
+        className={
+          model.conciseSuccess
+            ? "command-activity-row__details command-activity-row__details--concise"
+            : "command-activity-row__details"
+        }
+        data-testid="command-activity-details"
+      >
+        <summary
+          className="command-activity-row__summary"
+          data-testid="command-activity-summary"
+        >
+          <span
+            aria-hidden="true"
+            className={
+              isLive
+                ? "command-activity-row__dot command-activity-row__dot--live"
+                : isFailureLike
+                  ? "command-activity-row__dot command-activity-row__dot--risk"
+                  : "command-activity-row__dot"
+            }
+          />
+          <span
+            className="command-activity-row__origin"
+            data-testid="command-activity-origin"
+          >
+            代理
+          </span>
+          <span
+            className="command-activity-row__status"
+            data-testid="command-activity-status"
+          >
+            {model.statusLabel}
+          </span>
+          <code
+            className="command-activity-row__program"
+            data-testid="command-activity-program"
+          >
+            {model.programLabel}
+          </code>
+        </summary>
+
+        {hasDetails ? (
+          <div className="command-activity-row__body">
+            {model.argv.length > 0 ? (
+              <code
+                className="command-activity-row__argv"
+                data-testid="command-activity-argv"
+              >
+                {argvText}
+              </code>
+            ) : null}
+            {model.decisionLabel ? (
+              <span
+                className="command-activity-row__meta"
+                data-testid="command-activity-decision"
+              >
+                决定：{model.decisionLabel}
+              </span>
+            ) : null}
+            {model.exitCode !== undefined && model.exitCode !== null ? (
+              <span
+                className="command-activity-row__meta"
+                data-testid="command-activity-exit"
+              >
+                退出 {model.exitCode}
+              </span>
+            ) : null}
+            {model.durationMs !== undefined && model.durationMs !== null ? (
+              <span
+                className="command-activity-row__meta"
+                data-testid="command-activity-duration"
+              >
+                {model.durationMs} ms
+              </span>
+            ) : null}
+            {model.capturedBytes !== undefined && model.capturedBytes !== null ? (
+              <span
+                className="command-activity-row__meta"
+                data-testid="command-activity-bytes"
+              >
+                已捕获 {model.capturedBytes} 字节
+              </span>
+            ) : null}
+            {model.truncated ? (
+              <p
+                className="command-activity-row__notice"
+                data-testid="command-activity-truncated"
+                role="status"
+              >
+                输出已截断
+              </p>
+            ) : null}
+            {model.encodingLossy ? (
+              <p
+                className="command-activity-row__notice"
+                data-testid="command-activity-lossy"
+                role="status"
+              >
+                编码有损
+              </p>
+            ) : null}
+            {onOpenOutput ? (
+              <button
+                className="command-activity-row__open"
+                data-testid="command-activity-open-output"
+                onClick={onOpenOutput}
+                type="button"
+              >
+                完整输出
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </details>
+    </article>
+  );
+}
+
 function PaginatedItemList({
   items,
+  onOpenProcessOutput,
   onOpenResource,
   timeline,
   run,
   streaming,
 }: {
   items: TimelineItem[];
+  onOpenProcessOutput?: (request: OpenProcessOutputRequest) => void;
   onOpenResource?: (resource: ResourceReferenceView) => void;
   timeline: ConversationTimelineView;
   run: RunView | null;
@@ -282,6 +489,7 @@ function PaginatedItemList({
           conversationId={timeline.conversationId}
           item={item}
           key={itemKey(item, visibleRange.start + offset)}
+          onOpenProcessOutput={onOpenProcessOutput}
           onOpenResource={onOpenResource}
           run={run}
           streaming={streaming}

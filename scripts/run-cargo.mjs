@@ -37,6 +37,11 @@ async function runManagedChild(
   const supervisor = new ProcessSupervisor({
     baseline: { port: 1420 },
     child,
+    // MSVC spawns a detached vctip.exe telemetry process during compilation
+    // that routinely outlives the cargo root by more than the cleanup grace.
+    // The allowance is identity-gated (exact MSVC tools path) and only applies
+    // once the root is confirmed dead, so it cannot mask a live build.
+    allowMsvcVctipTelemetry: true,
     enforceDesktopClean: false,
   });
   const captureTimer = setInterval(() => {
@@ -99,6 +104,37 @@ async function selfTest() {
   );
   assert.equal(preservedExit, 7);
 
+  // Natural successful child path with a short-lived descendant: root exits 0,
+  // descendant is observed during capture, then both are gone before cleanup
+  // finishes. Cleanup must succeed without numeric-PID termination.
+  const naturalSignals = new EventEmitter();
+  let naturalDescendantPid;
+  let naturalOutput = "";
+  const naturalNested = [
+    'const { spawn } = require("node:child_process");',
+    'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 400)"],',
+    '{ stdio: "ignore", windowsHide: true });',
+    'console.log(`CARGO_NATURAL_DESCENDANT=${child.pid}`);',
+    "setTimeout(() => process.exit(0), 800);",
+  ].join("");
+  const naturalExit = await runManagedChild(
+    process.execPath,
+    ["-e", naturalNested],
+    {
+      onStdout: (chunk) => {
+        naturalOutput += chunk;
+        const match = naturalOutput.match(/CARGO_NATURAL_DESCENDANT=(\d+)/u);
+        if (!match || naturalDescendantPid) return;
+        naturalDescendantPid = Number(match[1]);
+      },
+      signalSource: naturalSignals,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  assert.equal(naturalExit, 0);
+  assert.ok(naturalDescendantPid);
+  assert.equal(isProcessAlive(naturalDescendantPid), false);
+
   const signalSource = new EventEmitter();
   let descendantPid;
   let output = "";
@@ -141,6 +177,7 @@ async function selfTest() {
   console.log(
     `KEEPER_RUN_CARGO_SELF_TEST ${JSON.stringify({
       exitCode: "passed",
+      naturalChildCleanup: "passed",
       msvcDiscovery: msvc.discovery,
       msvcToolchain: "passed",
       signalCleanup: "passed",

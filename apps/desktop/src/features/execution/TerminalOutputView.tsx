@@ -12,6 +12,7 @@ export type TerminalOutputViewProps = {
 };
 
 export function TerminalOutputView({ output }: TerminalOutputViewProps) {
+  // Host-supplied chunks only — never reconstruct transcript from metadata.
   const body = [...output.chunks]
     .sort((a, b) => a.sequence - b.sequence)
     .map((chunk) => chunk.text)
@@ -22,6 +23,7 @@ export function TerminalOutputView({ output }: TerminalOutputViewProps) {
       aria-label="终端输出"
       className="terminal-output-view"
       data-status={output.state}
+      data-live-retained={output.liveRetained ? "true" : "false"}
       data-testid="terminal-output-view"
     >
       <header className="terminal-output-view__header">
@@ -60,6 +62,15 @@ export function TerminalOutputView({ output }: TerminalOutputViewProps) {
             </>
           ) : null}
         </p>
+        {!output.liveRetained ? (
+          <p
+            className="terminal-output-view__notice"
+            data-testid="terminal-output-durable-only"
+            role="status"
+          >
+            实时输出未保留，仅显示持久化摘要
+          </p>
+        ) : null}
         {output.truncated ? (
           <p
             className="terminal-output-view__notice"

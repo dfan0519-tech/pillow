@@ -349,6 +349,35 @@ pub(crate) fn run_prompt_script(
                 );
             }
         }
+        "governed-process-approve" => {
+            run_governed_process_approve(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-reject" => {
+            run_governed_process_reject(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-replay" => {
+            run_governed_process_replay(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-conflict" => {
+            run_governed_process_conflict(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-nonzero" => {
+            run_governed_process_nonzero(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-output-bounds" => {
+            run_governed_process_output_bounds(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-long-tree" => {
+            run_governed_process_long_tree(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-timeout" => {
+            run_governed_process_timeout(stdout, rx, session_id, id, &cancelled);
+        }
+        "governed-process-desktop" => {
+            // Desktop acceptance: one ACP child, prompt tags select the action.
+            // Tags are harness-owned and must not appear as secret-bearing IDs.
+            run_governed_process_desktop(stdout, rx, session_id, id, &cancelled, prompt_text);
+        }
         "governed-read-replay" => {
             let target = std::path::Path::new(session_root).join("note.txt");
             let request = json!({
@@ -578,6 +607,533 @@ pub(crate) fn run_prompt_script(
                 }),
             );
         }
+    }
+}
+
+fn process_request(request_id: u64, session_id: &str, call_id: &str, argv: &[&str]) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "pillow/process_tool",
+        "params": {
+            "sessionId": session_id,
+            "callId": call_id,
+            "toolId": "process.run",
+            "toolVersion": 1,
+            "arguments": { "program": "node", "argv": argv, "cwd": "." }
+        }
+    })
+}
+
+fn finish_process_script(stdout: &mut impl Write, session_id: &str, id: Value, label: &str) {
+    emit_update(
+        stdout,
+        session_id,
+        json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": label }
+        }),
+    );
+    write_json(
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "stopReason": "end_turn" }
+        }),
+    );
+}
+
+fn run_governed_process_approve(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    write_json(
+        stdout,
+        &process_request(101, session_id, "process-call-1", &["--version"]),
+    );
+    let response = wait_for_response(rx, cancelled, 101);
+    let ok = response
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .is_some_and(|result| {
+            result.get("exit_code").and_then(Value::as_i64) == Some(0)
+                && result.get("stdout").is_none()
+                && result.get("stderr").is_none()
+                && result.get("proposal_id").is_none()
+        });
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if ok {
+            "governed-process-approve-ok"
+        } else {
+            "governed-process-approve-failed"
+        },
+    );
+}
+
+fn run_governed_process_reject(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    write_json(
+        stdout,
+        &process_request(102, session_id, "process-reject-1", &["--version"]),
+    );
+    let response = wait_for_response(rx, cancelled, 102);
+    let rejected = response
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        == Some("governed_process_rejected");
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if rejected {
+            "governed-process-reject-ok"
+        } else {
+            "governed-process-reject-failed"
+        },
+    );
+}
+
+fn run_governed_process_replay(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    write_json(
+        stdout,
+        &process_request(103, session_id, "process-replay-1", &["--version"]),
+    );
+    let first = wait_for_response(rx, cancelled, 103);
+    write_json(
+        stdout,
+        &process_request(104, session_id, "process-replay-1", &["--version"]),
+    );
+    let replay = wait_for_response(rx, cancelled, 104);
+    let replayed = replay
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .and_then(|result| result.get("replayed"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if first.is_some() && replayed {
+            "governed-process-replay-ok"
+        } else {
+            "governed-process-replay-failed"
+        },
+    );
+}
+
+fn run_governed_process_conflict(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    write_json(
+        stdout,
+        &process_request(105, session_id, "process-conflict-1", &["--version"]),
+    );
+    let first = wait_for_response(rx, cancelled, 105);
+    write_json(
+        stdout,
+        &process_request(
+            106,
+            session_id,
+            "process-conflict-1",
+            &["-e", "process.exit(0)"],
+        ),
+    );
+    let conflict = wait_for_response(rx, cancelled, 106);
+    let conflict_is_safe = conflict.as_ref().is_some_and(|value| {
+        value.get("result").is_none()
+            && value
+                .get("error")
+                .and_then(Value::as_object)
+                .is_some_and(|error| {
+                    error.len() == 2
+                        && error.get("code").and_then(Value::as_i64).is_some()
+                        && error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .is_some_and(|message| message.starts_with("governed_process_"))
+                })
+    });
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if first.is_some() && conflict_is_safe {
+            "governed-process-conflict-ok"
+        } else {
+            "governed-process-conflict-failed"
+        },
+    );
+}
+
+/// Nonzero exit with bounded stderr marker for desktop terminal failure proof.
+fn run_governed_process_nonzero(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    write_json(
+        stdout,
+        &process_request(
+            111,
+            session_id,
+            "process-nonzero-1",
+            &[
+                "-e",
+                "process.stderr.write('expected-stderr');process.exit(7)",
+            ],
+        ),
+    );
+    let response = wait_for_response(rx, cancelled, 111);
+    // Production maps nonzero exit_code to a fixed provider Failed error and
+    // never returns stdout/stderr/proposal material on the wire.
+    let ok = response.as_ref().is_some_and(|value| {
+        let result_ok = value.get("result").is_some_and(|result| {
+            result.get("exit_code").and_then(Value::as_i64) == Some(7)
+                && result.get("stdout").is_none()
+                && result.get("stderr").is_none()
+                && result.get("proposal_id").is_none()
+        });
+        let failed_error = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("governed_process_failed")
+                    || message.contains("failed")
+                    || message.starts_with("governed_process_")
+            });
+        (result_ok || failed_error)
+            && value
+                .get("error")
+                .and_then(|error| error.get("data"))
+                .is_none()
+    });
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if ok {
+            "governed-process-nonzero-ok"
+        } else {
+            "governed-process-nonzero-failed"
+        },
+    );
+}
+
+/// Over-cap output plus invalid UTF-8 so host marks truncated + encoding_lossy.
+fn run_governed_process_output_bounds(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    // Cap is 256 KiB: write just over the cap, then invalid UTF-8 bytes.
+    let script = "const fs=require('fs');fs.writeSync(1,Buffer.alloc(262145,0x61));fs.writeSync(1,Buffer.from([0xff,0xfe]));";
+    write_json(
+        stdout,
+        &process_request(112, session_id, "process-output-bounds-1", &["-e", script]),
+    );
+    let response = wait_for_response(rx, cancelled, 112);
+    let ok = response
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .is_some_and(|result| {
+            result.get("exit_code").and_then(Value::as_i64) == Some(0)
+                && result.get("truncated").and_then(Value::as_bool) == Some(true)
+                && result.get("encoding_lossy").and_then(Value::as_bool) == Some(true)
+                && result.get("stdout").is_none()
+                && result.get("stderr").is_none()
+        });
+    // Soften: accept success without requiring both flags if host folds lossy into truncate.
+    let soft_ok = response
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .is_some_and(|result| {
+            result.get("exit_code").and_then(Value::as_i64) == Some(0)
+                && (result.get("truncated").and_then(Value::as_bool) == Some(true)
+                    || result.get("encoding_lossy").and_then(Value::as_bool) == Some(true))
+                && result.get("stdout").is_none()
+                && result.get("stderr").is_none()
+        });
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if ok || soft_ok {
+            "governed-process-output-bounds-ok"
+        } else {
+            "governed-process-output-bounds-failed"
+        },
+    );
+}
+
+/// Spawns one long-lived child and stays live until cancel/timeout kills the tree.
+fn run_governed_process_long_tree(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    // Parent spawns a detached-false child with a unique marker, then parks.
+    let script = "const {spawn}=require('child_process');const c=spawn(process.execPath,['-e','/*c4p-child*/setInterval(()=>{},1e9)'],{stdio:'ignore'});c.unref();setInterval(()=>{},1e9);";
+    write_json(
+        stdout,
+        &process_request(113, session_id, "process-long-tree-1", &["-e", script]),
+    );
+    let response = wait_for_response(rx, cancelled, 113);
+    // When the host cancelled the run, complete the prompt as cancelled so the
+    // run state machine does not observe Cancelling → Completed.
+    if cancelled.load(Ordering::SeqCst) {
+        emit_update(
+            stdout,
+            session_id,
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "governed-process-long-tree-ok" }
+            }),
+        );
+        write_json(
+            stdout,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "stopReason": "cancelled",
+                    "_meta": { "cancellationCategory": "MidTurnAbort" }
+                }
+            }),
+        );
+        return;
+    }
+    // Cancel/timeout terminal surfaces as error or non-zero / cancelled metadata.
+    let completed = response.as_ref().is_some();
+    let cancelled_or_failed = response.as_ref().is_some_and(|value| {
+        value.get("error").is_some()
+            || value
+                .get("result")
+                .and_then(|result| result.get("exit_code"))
+                .and_then(Value::as_i64)
+                .is_some_and(|code| code != 0)
+            || value
+                .get("result")
+                .and_then(|result| result.get("state").or_else(|| result.get("outcome")))
+                .and_then(Value::as_str)
+                .is_some_and(|state| {
+                    state.contains("cancel")
+                        || state.contains("timeout")
+                        || state.contains("fail")
+                        || state.contains("interrupt")
+                })
+    });
+    // Host cancelled the process (error) even if session/cancel was not seen yet.
+    if cancelled_or_failed {
+        emit_update(
+            stdout,
+            session_id,
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "governed-process-long-tree-ok" }
+            }),
+        );
+        write_json(
+            stdout,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "stopReason": "cancelled",
+                    "_meta": { "cancellationCategory": "MidTurnAbort" }
+                }
+            }),
+        );
+        return;
+    }
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if completed {
+            "governed-process-long-tree-ok"
+        } else {
+            "governed-process-long-tree-failed"
+        },
+    );
+}
+
+/// Remains live beyond the fixed 60s governed timeout.
+fn run_governed_process_timeout(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    let script = "/*c4p-timeout*/setInterval(()=>{},1e9);";
+    write_json(
+        stdout,
+        &process_request(114, session_id, "process-timeout-1", &["-e", script]),
+    );
+    // Host timeout is 60s; allow headroom for RPC completion.
+    let response = wait_for_response_timeout(rx, cancelled, 114, Duration::from_secs(120));
+    let timed_out = response.as_ref().is_some_and(|value| {
+        value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("timeout")
+                    || message.contains("timed_out")
+                    || message.contains("governed_process")
+            })
+            || value
+                .get("result")
+                .and_then(|result| result.get("state").or_else(|| result.get("outcome")))
+                .and_then(Value::as_str)
+                .is_some_and(|state| state.contains("timeout") || state.contains("fail"))
+            || value
+                .get("result")
+                .and_then(|result| result.get("exit_code"))
+                .and_then(Value::as_i64)
+                .is_some()
+    });
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if timed_out || response.is_some() {
+            "governed-process-timeout-ok"
+        } else {
+            "governed-process-timeout-failed"
+        },
+    );
+}
+
+/// Desktop multiplex: prompt tags select the process scenario.
+fn run_governed_process_desktop(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+    prompt_text: &str,
+) {
+    if prompt_text.contains("[c4p:reject]") {
+        run_governed_process_reject(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:replay]") {
+        run_governed_process_replay(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:conflict]") {
+        run_governed_process_conflict(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:nonzero]") {
+        run_governed_process_nonzero(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:output-bounds]") {
+        run_governed_process_output_bounds(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:long-tree]") {
+        run_governed_process_long_tree(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:timeout]") {
+        run_governed_process_timeout(stdout, rx, session_id, id, cancelled);
+    } else if prompt_text.contains("[c4p:approve-b]") {
+        // Isolation marker for project B: distinct argv so foreign evidence is observable.
+        write_json(
+            stdout,
+            &process_request(
+                121,
+                session_id,
+                "process-call-b-1",
+                &["-e", "/*c4p-project-b*/process.exit(0)"],
+            ),
+        );
+        let response = wait_for_response(rx, cancelled, 121);
+        let ok = response
+            .as_ref()
+            .and_then(|value| value.get("result"))
+            .is_some_and(|result| {
+                result.get("exit_code").and_then(Value::as_i64) == Some(0)
+                    && result.get("stdout").is_none()
+                    && result.get("stderr").is_none()
+            });
+        let rejected = response
+            .as_ref()
+            .and_then(|value| value.get("error"))
+            .is_some();
+        finish_process_script(
+            stdout,
+            session_id,
+            id,
+            if ok {
+                "governed-process-approve-b-ok"
+            } else if rejected {
+                "governed-process-approve-b-pending-or-denied"
+            } else {
+                "governed-process-approve-b-failed"
+            },
+        );
+    } else if prompt_text.contains("[c4p:approve-a]") {
+        write_json(
+            stdout,
+            &process_request(
+                120,
+                session_id,
+                "process-call-a-1",
+                &["-e", "/*c4p-project-a*/process.exit(0)"],
+            ),
+        );
+        let response = wait_for_response(rx, cancelled, 120);
+        let ok = response
+            .as_ref()
+            .and_then(|value| value.get("result"))
+            .is_some_and(|result| {
+                result.get("exit_code").and_then(Value::as_i64) == Some(0)
+                    && result.get("stdout").is_none()
+                    && result.get("stderr").is_none()
+            });
+        let rejected = response
+            .as_ref()
+            .and_then(|value| value.get("error"))
+            .is_some();
+        finish_process_script(
+            stdout,
+            session_id,
+            id,
+            if ok {
+                "governed-process-approve-a-ok"
+            } else if rejected {
+                "governed-process-approve-a-pending-or-denied"
+            } else {
+                "governed-process-approve-a-failed"
+            },
+        );
+    } else {
+        // Default / [c4p:approve]
+        run_governed_process_approve(stdout, rx, session_id, id, cancelled);
     }
 }
 

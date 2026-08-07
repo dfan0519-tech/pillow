@@ -11,6 +11,7 @@ mod health;
 mod map;
 mod process;
 mod prompt;
+mod provider_processes;
 mod provider_tools;
 mod provider_writes;
 mod rpc;

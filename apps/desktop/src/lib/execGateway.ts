@@ -55,6 +55,8 @@ export type ExecOutputView = {
   proposalId: string;
   state: ExecState;
   chunks: ExecOutputChunk[];
+  /** Presentation metadata only; it is never execution or approval authority. */
+  liveRetained: boolean;
   truncated: boolean;
   encodingLossy: boolean;
   capturedBytes: number;

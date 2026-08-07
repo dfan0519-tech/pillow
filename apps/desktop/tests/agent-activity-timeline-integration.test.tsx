@@ -13,7 +13,9 @@ import {
   agentActivityFromRun,
   resolveResourceFromActivity,
 } from "../src/features/conversations/agentActivityFromTimeline";
+import { projectAgentActivity } from "../src/features/conversations/agentActivityProjection";
 import { ConversationTimeline } from "../src/features/conversations/ConversationTimeline";
+import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import type {
   ConversationTimelineView,
   ResourceReferenceView,
@@ -286,6 +288,118 @@ describe("agentActivityFromRun mapper (pure)", () => {
     });
     const record = agentActivityFromRun(conversationId, activity);
     expect(record.currentStep).toBeUndefined();
+  });
+
+  it("no longer projects generic process lifecycle notices into agent activity", async () => {
+    const processProposalId = "process-proposal-raw-never-show";
+    const processEvents: RuntimeEventDto[] = [
+      {
+        eventId: "process-terminal-event",
+        runId: SENSITIVE_IDS.runId,
+        conversationId,
+        sequence: 4,
+        createdAt: "2026-08-04T00:00:04.000Z",
+        kind: "process_terminal_outcome",
+        payload: {
+          proposal_id: processProposalId,
+          program: "node",
+          state: "succeeded",
+          exit_code: 0,
+          duration_ms: 12,
+          captured_bytes: 8,
+        },
+      },
+      {
+        eventId: "process-request-event",
+        runId: SENSITIVE_IDS.runId,
+        conversationId,
+        sequence: 1,
+        createdAt: "2026-08-04T00:00:01.000Z",
+        kind: "process_proposal_requested",
+        payload: {
+          proposal_id: processProposalId,
+          program: "node",
+          argv: ["--version"],
+          portable_cwd: ".",
+          summary: "Run node --version",
+          risk_class: "standard",
+          expires_at: "2026-08-04T00:10:00.000Z",
+        },
+      },
+      {
+        eventId: "process-decision-event",
+        runId: SENSITIVE_IDS.runId,
+        conversationId,
+        sequence: 2,
+        createdAt: "2026-08-04T00:00:02.000Z",
+        kind: "process_proposal_decided",
+        payload: {
+          proposal_id: processProposalId,
+          program: "node",
+          decision: "approve_once",
+          state: "approved",
+        },
+      },
+      {
+        eventId: "process-start-event",
+        runId: SENSITIVE_IDS.runId,
+        conversationId,
+        sequence: 3,
+        createdAt: "2026-08-04T00:00:03.000Z",
+        kind: "process_started",
+        payload: {
+          proposal_id: processProposalId,
+          program: "node",
+          argv: ["--version"],
+          portable_cwd: ".",
+        },
+      },
+      {
+        eventId: "foreign-process-terminal-event",
+        runId: SENSITIVE_IDS.runId,
+        conversationId: foreignConversationId,
+        sequence: 5,
+        createdAt: "2026-08-04T00:00:05.000Z",
+        kind: "process_terminal_outcome",
+        payload: {
+          proposal_id: "foreign-process-proposal",
+          program: "node",
+          state: "failed",
+        },
+      },
+    ];
+    const record = agentActivityFromRun(
+      conversationId,
+      baseActivity({ plan: null }),
+      processEvents,
+    );
+
+    // Process lifecycle moved to conversation-owned command activity rows.
+    expect("processActivity" in record).toBe(false);
+    expect(record.forbiddenDisplayIds ?? []).not.toContain(processProposalId);
+
+    const projection = projectAgentActivity(conversationId, record)[0]!;
+    expect(projection.notices.some((n) => n.text.startsWith("Process "))).toBe(
+      false,
+    );
+    expect(projection.notices.map((n) => n.text).join("\n")).not.toMatch(
+      /Process (approval|proposal|started|completed)/,
+    );
+
+    const user = userEvent.setup();
+    render(
+      <AgentActivityDisclosure
+        activity={record}
+        conversationId={conversationId}
+      />,
+    );
+    await user.click(screen.getByTestId("agent-activity-summary"));
+    const text = screen.getByTestId("agent-activity-disclosure").textContent ?? "";
+    expect(text).not.toContain("Process completed.");
+    expect(text).not.toContain("Process approval requested.");
+    expect(text).not.toContain(processProposalId);
+    expect(text).not.toContain("foreign-process-proposal");
+    expect(text).not.toContain(SENSITIVE_IDS.runId);
   });
 
   it("routes failed/cancelled tool output through the error path", () => {

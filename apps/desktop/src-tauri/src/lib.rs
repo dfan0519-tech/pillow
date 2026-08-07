@@ -5,12 +5,17 @@ pub mod conversation_service;
 pub mod desktop_lifecycle;
 pub mod directory_ops;
 mod exec_commands;
+mod git_commands;
 pub mod path_scope;
 mod project_commands;
 mod resource_commands;
 pub mod runtime_composition;
 mod write_commands;
 
+#[cfg(test)]
+mod exec_commands_tests;
+#[cfg(test)]
+mod git_commands_tests;
 #[cfg(test)]
 mod resource_commands_tests;
 #[cfg(test)]
@@ -30,6 +35,8 @@ use desktop_lifecycle::{
     conversation_exit_decision, get_native_acceptance_scenario, mark_project_launcher_ready,
     write_conversation_shutdown_success_marker,
 };
+use exec_commands::{decide_exec_proposal, list_exec_proposals, open_exec_output};
+use git_commands::{GitCommandState, discover_git_repositories, get_git_status, open_git_diff};
 use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
@@ -68,7 +75,13 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         preview_project_resource,
         list_write_proposals,
         decide_write_proposal,
-        open_write_proposal_diff
+        open_write_proposal_diff,
+        list_exec_proposals,
+        decide_exec_proposal,
+        open_exec_output,
+        discover_git_repositories,
+        get_git_status,
+        open_git_diff
     ])
 }
 
@@ -95,6 +108,7 @@ pub fn run() {
             }
             app.manage(state);
             app.manage(conversations);
+            app.manage(GitCommandState::new());
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));
             Ok(())
         })

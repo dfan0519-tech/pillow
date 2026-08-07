@@ -26,6 +26,10 @@ export type RuntimeEventKind =
   | "artifact_produced"
   | "write_proposal_requested"
   | "write_proposal_resolved"
+  | "process_proposal_requested"
+  | "process_proposal_decided"
+  | "process_started"
+  | "process_terminal_outcome"
   | "turn_completed"
   | "turn_failed"
   | "run_cancelled"
@@ -202,6 +206,65 @@ export type WriteProposalResolvedPayload = {
   error_code?: string;
 };
 
+/** Summary-only process proposal request. Never includes a grant or native path. */
+export type ProcessProposalRequestedPayload = {
+  proposal_id: string;
+  program: string;
+  argv: string[];
+  portable_cwd?: string;
+  summary: string;
+  risk_class: "standard" | "high";
+  expires_at: string;
+};
+
+/** Summary-only process decision. The approval grant remains host-private. */
+export type ProcessProposalDecidedPayload = {
+  proposal_id: string;
+  program: string;
+  decision: "approve_once" | "reject";
+  state:
+    | "pending_approval"
+    | "approved"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "rejected"
+    | "expired"
+    | "cancelled"
+    | "interrupted";
+};
+
+/** Process start notice. Output remains available only from ExecGateway. */
+export type ProcessStartedPayload = {
+  proposal_id: string;
+  program: string;
+  argv: string[];
+  portable_cwd?: string;
+};
+
+/** Summary-only terminal metadata. Never includes stdout, stderr, or chunks. */
+export type ProcessTerminalOutcomePayload = {
+  proposal_id: string;
+  program: string;
+  state:
+    | "pending_approval"
+    | "approved"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "rejected"
+    | "expired"
+    | "cancelled"
+    | "interrupted";
+  exit_code?: number;
+  duration_ms?: number;
+  truncated?: boolean;
+  encoding_lossy?: boolean;
+  captured_bytes?: number;
+  cancelled?: boolean;
+  timed_out?: boolean;
+};
+
 type RuntimeEventBase = {
   eventId: string;
   runId: string;
@@ -239,6 +302,19 @@ export type RuntimeEventDto =
   | (RuntimeEventBase & {
       kind: "write_proposal_resolved";
       payload: WriteProposalResolvedPayload;
+    })
+  | (RuntimeEventBase & {
+      kind: "process_proposal_requested";
+      payload: ProcessProposalRequestedPayload;
+    })
+  | (RuntimeEventBase & {
+      kind: "process_proposal_decided";
+      payload: ProcessProposalDecidedPayload;
+    })
+  | (RuntimeEventBase & { kind: "process_started"; payload: ProcessStartedPayload })
+  | (RuntimeEventBase & {
+      kind: "process_terminal_outcome";
+      payload: ProcessTerminalOutcomePayload;
     })
   | (RuntimeEventBase & { kind: "turn_completed"; payload: TurnCompletedPayload })
   | (RuntimeEventBase & { kind: "turn_failed"; payload: TurnFailedPayload })

@@ -1,9 +1,11 @@
-> **已接入共享知识仓库 <workspace>\VaultSystem\vault\**
-> 项目：pillow
-> 开始任何任务前，先执行 QUERY 工作流：读 `<workspace>\VaultSystem\vault\hot.md` (近期上下文) -> `<workspace>\VaultSystem\vault\index.md` (知识索引) -> 按需检索 wiki 页面和 skills。
-> 完成非平凡任务后，执行 INGEST 工作流回填经验到 `<workspace>\VaultSystem\vault\wiki\projects\`。
-> 完整规则见 `<workspace>\VaultSystem\vault\AGENTS.md`。
-> Keeper Bridge boot: POST http://127.0.0.1:7890/api/agent-bridge/boot with {"project":"pillow","task":"<task>","agentName":"<agent>","agentRole":"controller"}.
+> **Keeper is record-only for Pillow project work.**
+> Controllers and launchers may use Keeper to record session boot, query
+> registered runtime/account information, claim or release a slot, and post a
+> completion summary. Keeper must not generate or rewrite task prompts, inject
+> context packs, execute project work, judge completion, or require automatic
+> Vault query/ingest. Workers receive their complete task contract from Pillow
+> and must not call Keeper or read Vault material unless the task explicitly
+> asks for a specific recorded fact.
 
 ---
 

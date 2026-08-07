@@ -64,6 +64,96 @@ fn untracked_entry() {
 }
 
 #[test]
+fn untracked_directory_entry_keeps_trailing_slash() {
+    // Real shape: `--untracked-files=normal` collapses an untracked directory
+    // into a single record with exactly one trailing separator.
+    let bytes = z(&[
+        "# branch.oid deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "# branch.head main",
+        "? vendor/",
+    ]);
+    let snap = parse_porcelain_v2_z(&bytes, repo(), 1).expect("parse");
+    assert_eq!(snap.entries.len(), 1);
+    assert_eq!(snap.entries[0].path, "vendor/");
+    assert_eq!(snap.entries[0].kind, GitStatusKind::Untracked);
+}
+
+#[test]
+fn ignored_directory_entry_keeps_trailing_slash() {
+    let bytes = z(&[
+        "# branch.oid deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "# branch.head main",
+        "! target/",
+    ]);
+    let snap = parse_porcelain_v2_z(&bytes, repo(), 1).expect("parse");
+    assert_eq!(snap.entries.len(), 1);
+    assert_eq!(snap.entries[0].path, "target/");
+    assert_eq!(snap.entries[0].kind, GitStatusKind::Ignored);
+}
+
+#[test]
+fn untracked_directory_does_not_abort_the_whole_status() {
+    // Regression: a single collapsed-directory record used to fail the entire
+    // parse, so one untracked folder blanked the whole repository status.
+    let bytes = z(&[
+        "# branch.oid deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "# branch.head main",
+        "1 .M N... 100644 100644 100644 ce013625030ba8dba906f756967f9e9ca394464a ce013625030ba8dba906f756967f9e9ca394464a src/lib.rs",
+        "? vendor/",
+        "? notes/todo.md",
+        "? nested/deep/dir/",
+    ]);
+    let snap = parse_porcelain_v2_z(&bytes, repo(), 1).expect("parse");
+    let paths: Vec<&str> = snap.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["src/lib.rs", "vendor/", "notes/todo.md", "nested/deep/dir/"]
+    );
+}
+
+#[test]
+fn rejects_malformed_trailing_separator_forms() {
+    // Only one trailing separator on an untracked/ignored record is legal.
+    // Containment for traversal, absolute and repeated separators is unchanged.
+    let cases = [
+        "? /",
+        "? //",
+        "? vendor//",
+        "? ./",
+        "? ../escape/",
+        "? vendor/../escape/",
+        "! /",
+        "! build//",
+    ];
+    for line in cases {
+        let bytes = z(&["# branch.oid aa", "# branch.head main", line]);
+        let err = parse_porcelain_v2_z(&bytes, repo(), 1).expect_err(line);
+        assert!(
+            matches!(err, ParseError::PathRejected { .. }),
+            "expected PathRejected for {line}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn tracked_records_still_reject_a_trailing_separator() {
+    // The directory form is permitted only for `?`/`!`. Git never emits a
+    // trailing separator for tracked, rename or unmerged records.
+    let cases = [
+        "1 .M N... 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb src/dir/",
+        "u UU N... 100644 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc conflict/",
+    ];
+    for line in cases {
+        let bytes = z(&["# branch.oid aa", "# branch.head main", line]);
+        let err = parse_porcelain_v2_z(&bytes, repo(), 1).expect_err(line);
+        assert!(
+            matches!(err, ParseError::PathRejected { .. }),
+            "expected PathRejected for {line}, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn rename_is_one_entry_with_old_path() {
     // Real -z shape: score+path NUL-terminated, then origPath NUL-terminated.
     let mut bytes = z(&[

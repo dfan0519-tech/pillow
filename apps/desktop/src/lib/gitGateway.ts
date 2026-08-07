@@ -12,6 +12,7 @@ export type GitStatusKind =
   | "submodule"
   | "ignored"
   | "unknown";
+
 export type GitDiffKind = "text" | "binary" | "unsupported";
 
 export const GIT_PUBLIC_ERRORS = [
@@ -22,11 +23,25 @@ export const GIT_PUBLIC_ERRORS = [
   "git_generation_stale",
   "git_generation_mismatch",
 ] as const;
+
 export type GitPublicError = (typeof GIT_PUBLIC_ERRORS)[number];
 
-export type GitRepositoryView = { repositoryId: string; available: boolean };
-export type GitDiscoveryView = { generation: number; repositories: GitRepositoryView[] };
-export type GitStatusEntryView = { path: string; kind: GitStatusKind; originalPath?: string };
+export type GitRepositoryView = {
+  repositoryId: string;
+  available: boolean;
+};
+
+export type GitDiscoveryView = {
+  generation: number;
+  repositories: GitRepositoryView[];
+};
+
+export type GitStatusEntryView = {
+  path: string;
+  kind: GitStatusKind;
+  originalPath?: string;
+};
+
 export type GitStatusView = {
   repositoryId: string;
   generation: number;
@@ -37,22 +52,36 @@ export type GitStatusView = {
   files: GitStatusEntryView[];
   truncated: boolean;
 };
+
 export type GitDiffView = {
   repositoryId: string;
   generation: number;
   path: string;
   kind: GitDiffKind;
+  /** Present only for `kind: "text"`. Binary/unsupported never invent unified text. */
   unified?: string;
   truncated: boolean;
   lineCount?: number;
   byteCount?: number;
   originalPath?: string;
 };
-export type GitGeneration = { repositoryId: string; generation: number };
 
+export type GitGeneration = {
+  repositoryId: string;
+  generation: number;
+};
+
+/**
+ * Renderer wire contract for the read-only Git slice.
+ * Invokes use only projectId / repositoryId / generation / path — never roots,
+ * executables, argv, or native paths.
+ */
 export interface GitGateway {
   discoverGitRepositories(projectId: string): Promise<GitDiscoveryView>;
-  getGitStatus(input: { projectId: string; expected: GitGeneration }): Promise<GitStatusView>;
+  getGitStatus(input: {
+    projectId: string;
+    expected: GitGeneration;
+  }): Promise<GitStatusView>;
   openGitDiff(input: {
     projectId: string;
     expected: GitGeneration;
@@ -61,13 +90,17 @@ export interface GitGateway {
 }
 
 export class GitGatewayError extends Error {
-  constructor(readonly code: GitPublicError, message: string) {
+  constructor(
+    readonly code: GitPublicError,
+    message: string,
+  ) {
     super(message);
     this.name = "GitGatewayError";
   }
 }
 
-const GIT_ERROR_MESSAGES: Record<GitPublicError, string> = {
+/** Fixed path-free copy for the six public codes. Host messages are never echoed. */
+export const GIT_ERROR_MESSAGES: Record<GitPublicError, string> = {
   git_project_not_found: "Git project was not found.",
   git_path_rejected: "Git path was rejected.",
   git_repository_not_found: "Git repository was not found.",
@@ -77,9 +110,17 @@ const GIT_ERROR_MESSAGES: Record<GitPublicError, string> = {
 };
 
 export function isGitPublicError(value: unknown): value is GitPublicError {
-  return typeof value === "string" && (GIT_PUBLIC_ERRORS as readonly string[]).includes(value);
+  return (
+    typeof value === "string"
+    && (GIT_PUBLIC_ERRORS as readonly string[]).includes(value)
+  );
 }
 
+/**
+ * Normalize any rejection into a path-free public error.
+ * Known codes (including generation stale/mismatch) are preserved; everything
+ * else becomes `git_unavailable`.
+ */
 export function normalizeGitError(error: unknown): GitGatewayError {
   const code =
     error instanceof GitGatewayError
