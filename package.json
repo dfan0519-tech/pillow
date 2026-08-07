@@ -5,7 +5,8 @@
   "private": true,
   "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "check": "node scripts/check-workspace.mjs && pnpm typecheck && pnpm test && node scripts/run-cargo.mjs test --workspace && node scripts/run-cargo.mjs clippy --workspace -- -D warnings",
+    "check": "node scripts/check-workspace.mjs && node scripts/check-secrets.mjs && pnpm typecheck && pnpm test && node scripts/run-cargo.mjs test --workspace && node scripts/run-cargo.mjs clippy --workspace -- -D warnings",
+    "check:secrets": "node scripts/check-secrets.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "desktop:dev": "pnpm --filter @pillow/desktop tauri dev",

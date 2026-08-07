@@ -142,7 +142,48 @@ Git executor integration test, and the acceptance harness. It was removed before
 this checkpoint's commit: only standard install locations remain, with PATH
 lookup and the `PILLOW_HOST_GIT` / `PILLOW_TEST_GIT` overrides as fallbacks.
 
-### 5.6 Environment change made outside the repository
+### 5.6 History audit and the secret gate
+
+A full-history scan (117 commits, all refs) before the checkpoint push found:
+
+| Pattern | History | HEAD |
+| --- | --- | --- |
+| Credential shapes (`xai-`/`sk-`/`ghp_`/PAT/private key) | **0** | 0 |
+| Host user-profile paths (`C:\Users\<name>`) | **0** | 0 |
+| Keeper session / lease ids | **0** | 0 |
+| Developer Git install path | 1 blob | 0 (removed) |
+
+The 305 raw `xai-` hits were false positives: a redaction test asserting
+`!lower.contains("xai-")`, the `xai-org/grok-build` upstream reference, and a
+security doc listing secret shapes to reject. No key-shaped value exists in any
+blob.
+
+The one real residual is `F:\Git\cmd\git.exe` inside
+`crates/git-executor/tests/git_read_integration.rs` as committed at `62149be9`
+and earlier. It is removed as of this checkpoint but remains in history, which
+is now pushed. **Not rewritten**: it discloses a drive letter and a standard Git
+layout — no credential, username or personal data — in a private repository,
+and rewriting would change every commit SHA and break the checkpoint chain that
+committed records reference by SHA. Recorded as accepted rather than silently
+dropped.
+
+Separately, 40 documentation files record the literal project root
+(`<repo>`). Product, test and harness code is free of real machine paths;
+`AGENTS.md` already models the preferred `<workspace>` placeholder convention,
+which new documents should follow.
+
+`scripts/check-secrets.mjs` now enforces this mechanically inside `pnpm check`.
+It is built around the failure that produced this section: during the checkpoint
+a hand-written regex reported "clean" while a developer-specific Git path sat in
+product code. The gate therefore **self-tests every pattern against a
+known-positive sample and fails closed if any pattern stops detecting**, and it
+distinguishes a real machine path from the many synthetic adversarial fixtures
+in this repo (`C:\project\..\escape`, `C:\pillow-missing-git-not-real\git.exe`)
+by requiring the path to actually exist outside system locations on the
+committer's machine. Verified end-to-end: reintroducing the original path makes
+the gate fail on that exact line, and removing it makes it pass.
+
+### 5.7 Environment change made outside the repository
 
 A worker ran `corepack enable`, installing pnpm shims into
 `C:\Program Files\nodejs\`. Benign and the same pinned pnpm 10.14.0 as
