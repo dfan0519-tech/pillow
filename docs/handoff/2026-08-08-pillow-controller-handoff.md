@@ -135,6 +135,35 @@ expiry 判断,再看有几笔 transition。
 ⚠️ 总控修了它遗留的一处 clippy `collapsible_if`(`governed_write.rs:1005`)。
 Codex 的门当时被 §9.8 那条 secrets 挡在编译之前,所以它没机会看到这个 lint。
 
+### 4.7 S0a 设置层(grok3,已验收)
+
+简报:`.superpowers/round10/BRIEF_S0A_settings_storage.md`
+报告:`docs/execution/2026-08-08-settings-s0a-report.md`
+口径:**ADR-0003**
+
+`settings_entries` 表(global + project)、`SqliteSettingsRepository`、
+`resolve_runtime` 优先级链 `env → project → global → default`,
+每个值返回 `ResolvedSetting { value, source }`,S0b 的 UI 靠 `source` 显示
+"已被环境变量覆盖"。18 个测试,六项硬要求全覆盖。
+
+**总控核验要点**:
+
+- migration 用**部分唯一索引**绕开 SQLite "NULL 互不相等" 语义:
+  global 用 `key` 单列、project 用 `(project_id, key)`。这是真坑,处理对了。
+- "无密钥字段"是用 `PRAGMA table_info` **真查 schema**,不是 grep 源码。
+- 默认值是 `GrokAcp` 而非 `Fake`;非法值三种来源(global/project/env)各有 fail-closed 测试。
+- 新 `RuntimeAdapterSetting::parse` 与现有 `RuntimeSelection::parse` **逐字对应**
+  (标签集、空串处理、错误码 `invalid_runtime_selection` 全同),故**无行为漂移**。
+
+🔴 **S0b 必须做的收敛(已建任务 #16)**:上面那条"逐字对应"意味着
+**同一条不变量现在有两个实现**。它们今天相同,所以看不出问题;
+哪天只改一处就会重演 §4.2 的四遍实现事故。
+S0b 必须收敛为单一事实源,并加**跨层测试**让漂移被机械捕获,而不是靠人 review。
+
+⚠️ **我的简报缺陷**:我要求了测试,却没把 `crates/storage-sqlite/tests/` 写进白名单。
+Worker 把集成测试放那里是合理判断,不算越界 —— 是我漏写。
+**下次简报:凡要求测试,必须同时白名单测试目录。**
+
 ---
 
 ## 5. Round 8/9 成果与验收结论
@@ -206,12 +235,12 @@ Codex 的门当时被 §9.8 那条 secrets 挡在编译之前,所以它没机会
 3. ~~人工看截图验收视觉~~ **已完成**,结论与残留见 §5.1
 4. ~~提交推送~~ **已完成**
 5. ~~在干净树上派 Codex 做 storage barrier 实验~~ **已完成并验收**,见 §4.6
-6. **下一步:S0a 设置层存储 + 解析服务**(Rust,不含 UI)
-   简报已备好:`.superpowers/round10/BRIEF_S0A_settings_storage.md`
-   口径已由 **ADR-0003** 拍死(Q1–Q9 全部有结论,Q4/Q6 明确推到 S1)。
+6. ~~S0a 设置层存储 + 解析服务~~ **已完成并验收**,见 §4.7
+7. **下一步:S0b —— UI + `runtime_composition` 接线**
+   口径见 **ADR-0003**。**必须带上 §4.7 那条收敛要求**(重复 parser)。
    **S0 按串行两片走,不并行** —— 坑 #1(白名单重叠)与坑 #2(抢 `target/`)
-   都是并行切出来的。S0b(UI + `runtime_composition` 接线)等 S0a 收工再派。
-7. 再之后:双皮肤持久化(顺带补浅色截图证据)→ 知识层设计(需先拍 §2 两条红线)
+   都是并行切出来的。
+8. 再之后:双皮肤持久化(顺带补浅色截图证据)→ 知识层设计(需先拍 §2 两条红线)
 
 ⚠️ 用户明确要求:**两个 codex 槽位保证能正常调用,不得违规操作让账号有风险**。
 派 codex 前必须先确认全机没有在跑的 `codex exec`(按命令行查,**不要按进程名杀**)。

@@ -10,6 +10,7 @@ const RUN_EVENTS_WRITE_KINDS_MIGRATION: &str =
 const EXEC_PROPOSALS_MIGRATION: &str = include_str!("../migrations/0007_exec_proposals.sql");
 const RUN_EVENTS_PROCESS_KINDS_MIGRATION: &str =
     include_str!("../migrations/0008_run_events_process_kinds.sql");
+const SETTINGS_MIGRATION: &str = include_str!("../migrations/0009_settings.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -17,6 +18,7 @@ const RUN_EVENTS_PROCESS_KINDS_MIGRATION: &str =
 /// Migration 0007 adds the metadata-only process execution ledger.
 /// Migration 0008 conditionally rebuilds `run_events` when the live kind CHECK
 /// still rejects any of the four C4 process event kinds.
+/// Migration 0009 adds non-secret settings (global + project scopes).
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -26,6 +28,7 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     upgrade_run_events_write_proposal_kinds(connection)?;
     connection.execute_batch(EXEC_PROPOSALS_MIGRATION)?;
     upgrade_run_events_process_kinds(connection)?;
+    connection.execute_batch(SETTINGS_MIGRATION)?;
     Ok(())
 }
 
