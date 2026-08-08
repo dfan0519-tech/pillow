@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use keeper_git_executor::{
     GIT_READ_TIMEOUT, GitDiffSnapshot, GitDiffView as ExecutorDiffView, GitHead, GitReadError,
     GitReadExecutor, GitRepositoryId, GitStatusEntry, GitStatusKind, GitStatusSnapshot,
+    is_portable_path,
 };
 use serde::Serialize;
 use tauri::State;
@@ -563,30 +564,6 @@ fn count_lines(text: &str) -> u32 {
         text.split('\n').count()
     };
     n as u32
-}
-
-/// Portable project-relative path check aligned with gitGateway.ts `portable()`.
-fn is_portable_path(value: &str) -> bool {
-    if value == "." {
-        return true;
-    }
-    if value.is_empty()
-        || value.len() > 1024
-        || value.contains('\\')
-        || value.contains(':')
-        || value.starts_with('/')
-    {
-        return false;
-    }
-    value.split('/').all(|part| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && part.len() <= 255
-            && !part
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-    })
 }
 
 /// Public error codes only (for tests and documentation).

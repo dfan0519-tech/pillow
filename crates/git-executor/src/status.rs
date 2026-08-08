@@ -430,25 +430,16 @@ fn decode_portable_path_or_directory(raw: &[u8]) -> Result<String, ParseError> {
     Ok(path.to_string())
 }
 
-/// Portable-path rules plus the single trailing separator porcelain v2 uses for
-/// a collapsed untracked/ignored directory (`vendor/`).
-///
-/// Every layer that handles a status entry path must use this rather than
-/// [`validate_portable_path`]: the parser produces the directory form, so a
-/// stricter downstream check would reject an entry the parser just accepted and
-/// fail the whole repository status. Containment is unchanged — the stem runs
-/// through the identical rules.
+/// Map the single portable-path SSoT onto porcelain parse errors.
+pub(crate) fn validate_portable_path(path: &str) -> Result<(), ParseError> {
+    crate::portable_path::validate_portable_path(path)
+        .map_err(|detail| ParseError::PathRejected { detail })
+}
+
+/// Status-entry form of the portable-path SSoT (allows one trailing `/`).
 pub(crate) fn validate_portable_path_or_directory(path: &str) -> Result<(), ParseError> {
-    let Some(stem) = path.strip_suffix('/') else {
-        return validate_portable_path(path);
-    };
-    // `/`, `vendor//` and `./` are never emitted by git and stay rejected.
-    if stem.is_empty() || stem == "." || stem.ends_with('/') {
-        return Err(ParseError::PathRejected {
-            detail: "empty or repeated trailing separator",
-        });
-    }
-    validate_portable_path(stem)
+    crate::portable_path::validate_portable_path_or_directory(path)
+        .map_err(|detail| ParseError::PathRejected { detail })
 }
 
 fn kind_from_xy(xy: [u8; 2]) -> GitStatusKind {
@@ -468,70 +459,4 @@ fn kind_from_xy(xy: [u8; 2]) -> GitStatusKind {
         }
     }
     GitStatusKind::Unknown
-}
-
-/// Accept only relative portable paths (forward slashes, no traversal/devices).
-pub(crate) fn validate_portable_path(path: &str) -> Result<(), ParseError> {
-    if path == "." {
-        return Ok(());
-    }
-    if path.is_empty() || path.len() > 4_096 {
-        return Err(ParseError::PathRejected {
-            detail: "empty or too long",
-        });
-    }
-    if path.starts_with('/') || path.starts_with('\\') || path.contains('\\') || path.contains(':')
-    {
-        return Err(ParseError::PathRejected {
-            detail: "absolute or non-portable separator",
-        });
-    }
-    for component in path.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(ParseError::PathRejected {
-                detail: "empty or traversal component",
-            });
-        }
-        if component.len() > 255 {
-            return Err(ParseError::PathRejected {
-                detail: "component too long",
-            });
-        }
-        if component.ends_with('.') || component.ends_with(' ') {
-            return Err(ParseError::PathRejected {
-                detail: "trailing dot or space",
-            });
-        }
-        if component
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-        {
-            return Err(ParseError::PathRejected {
-                detail: "illegal character",
-            });
-        }
-        if is_windows_device_component(component) {
-            return Err(ParseError::PathRejected {
-                detail: "windows device name",
-            });
-        }
-    }
-    Ok(())
-}
-
-fn is_windows_device_component(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches([' ', '.'])
-        .to_ascii_uppercase();
-    if matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
-    ) {
-        return true;
-    }
-    let bytes = stem.as_bytes();
-    bytes.len() == 4 && matches!(&bytes[..3], b"COM" | b"LPT") && matches!(bytes[3], b'1'..=b'9')
 }

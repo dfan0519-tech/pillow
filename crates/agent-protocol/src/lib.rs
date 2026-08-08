@@ -13,12 +13,18 @@
 
 mod adapter;
 mod error;
+mod governed;
 mod tool;
 mod types;
 mod validate;
 
 pub use adapter::{AgentRuntimeAdapter, EventSink};
 pub use error::RuntimeError;
+pub use governed::{
+    GovernedProcessDelivery, GovernedProcessReceipt, GovernedReadDelivery, GovernedReadReceipt,
+    GovernedWriteDelivery, GovernedWriteReceipt, ProviderProcessProposal, ProviderToolProposal,
+    ProviderWriteProposal,
+};
 pub use keeper_policy::WriteProposalState;
 pub use tool::{
     ArgumentsDigest, FsListArguments, FsListEntry, FsListOutput, FsReadArguments, FsReadOutput,

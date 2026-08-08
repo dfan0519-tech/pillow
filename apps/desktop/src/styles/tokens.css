@@ -1,8 +1,18 @@
 /**
- * Dark desktop product tokens adapted from Grok App (MIT).
- * Upstream: src/styles/tokens.css `[data-theme="dark"]` at
- * cbbbdf17bb8db1588b6707f3f42f6b00397e27f9.
- * Pillow ships a single matte dark desktop surface for C1.
+ * Pillow dark desktop product tokens — brand palette (Concept 08 «Mirage Loop»).
+ * Surfaces are layered BLACK INK / GRAPHITE, not pure #000 / #0d0d0d.
+ * Accent is the lilac family (LILAC HAZE), not the prior blue prototype.
+ * Glass tokens are container-level only (never per-row in scroll lists).
+ *
+ * Brand baseline:
+ *   LILAC HAZE  #DCCBFF
+ *   OFF-WHITE   #FAF9F7
+ *   SMOKE GRAY  #C7C7CE
+ *   GRAPHITE    #3E3E46
+ *   BLACK INK   #0E0E10
+ *
+ * Structure/control grammar still adapted from Grok App under MIT; color values
+ * are Pillow-original (see THIRD_PARTY_NOTICES.md).
  */
 :root {
   color-scheme: dark;
@@ -10,35 +20,54 @@
   color: var(--text-primary);
   background: var(--bg-app);
 
-  --bg-app: #0d0d0d;
-  --bg-sidebar: #101010;
-  --bg-sidebar-solid: #101010;
-  --bg-main: #151515;
-  --bg-aside: #101010;
-  --bg-elevated: #1a1a1a;
-  --bg-hover: rgba(255, 255, 255, 0.05);
-  --bg-active: rgba(255, 255, 255, 0.08);
-  --bg-input: #121212;
-  --bg-code: #0a0a0a;
-  --bg-user-bubble: #2a2a2e;
+  /* Brand primitives */
+  --brand-lilac: #dccbff;
+  --brand-off-white: #faf9f7;
+  --brand-smoke: #c7c7ce;
+  --brand-graphite: #3e3e46;
+  --brand-ink: #0e0e10;
 
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --border-focus: rgba(140, 170, 255, 0.55);
+  /* Layered dark surfaces — BLACK INK base, GRAPHITE-lifted panels */
+  --bg-app: #0e0e10;
+  --bg-sidebar: rgba(20, 20, 24, 0.72);
+  --bg-sidebar-solid: #141416;
+  --bg-main: #161618;
+  --bg-aside: rgba(20, 20, 24, 0.72);
+  --bg-elevated: #1c1c20;
+  --bg-hover: rgba(220, 203, 255, 0.06);
+  --bg-active: rgba(220, 203, 255, 0.1);
+  --bg-input: #121214;
+  --bg-code: #0a0a0c;
+  --bg-user-bubble: #2a2a30;
 
-  --text-primary: rgba(255, 255, 255, 0.92);
-  --text-secondary: rgba(255, 255, 255, 0.68);
-  --text-tertiary: rgba(255, 255, 255, 0.5);
-  --text-inverse: #0d0d0d;
+  --border-subtle: rgba(199, 199, 206, 0.1);
+  --border-strong: rgba(199, 199, 206, 0.2);
+  --border-focus: rgba(220, 203, 255, 0.55);
 
-  --accent: #8aa4ff;
-  --accent-muted: rgba(138, 164, 255, 0.14);
-  --accent-hover: #a0b6ff;
-  --accent-fg: #0d0d0d;
+  /* Text on dark: OFF-WHITE / SMOKE — keep ≥4.5:1 body contrast on --bg-main */
+  --text-primary: #faf9f7;
+  --text-secondary: #c7c7ce;
+  --text-tertiary: rgba(199, 199, 206, 0.72);
+  --text-inverse: #0e0e10;
+
+  /* Lilac accent family */
+  --accent: #dccbff;
+  --accent-muted: rgba(220, 203, 255, 0.14);
+  --accent-hover: #ebe0ff;
+  --accent-fg: #0e0e10;
 
   --success: #3ecf8e;
   --danger: #f07178;
   --warning: #f0993d;
+
+  /* Container-level frosted glass (sidebar, context pane, floating composer) */
+  --glass-bg: rgba(20, 20, 24, 0.68);
+  --glass-bg-strong: rgba(28, 28, 32, 0.78);
+  --glass-border: rgba(199, 199, 206, 0.14);
+  --glass-highlight: inset 0 1px 0 rgba(250, 249, 247, 0.06);
+  --glass-glow: inset 0 0 0 1px rgba(220, 203, 255, 0.04);
+  --glass-blur: 18px;
+  --glass-saturate: 1.15;
 
   --titlebar-height: 40px;
   --sidebar-width: 248px;
@@ -53,9 +82,9 @@
   --space-3: 12px;
 
   --shadow-composer:
-    0 1px 0 rgba(255, 255, 255, 0.03),
-    0 8px 28px rgba(0, 0, 0, 0.32),
-    0 2px 8px rgba(0, 0, 0, 0.18);
+    0 1px 0 rgba(255, 255, 255, 0.04),
+    0 8px 28px rgba(0, 0, 0, 0.36),
+    0 2px 8px rgba(0, 0, 0, 0.2);
 
   /* Compatibility aliases used by residual classes / window chrome */
   --canvas: var(--bg-app);
@@ -118,6 +147,39 @@ textarea:focus-visible {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* Shared frosted-glass surface — container level only */
+.surface-glass {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight), var(--glass-glow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .surface-glass,
+  .app-sidebar,
+  .resource-pane,
+  .composer-wrap--float .composer,
+  .modal-card {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .app-sidebar {
+    background: var(--bg-sidebar-solid) !important;
+  }
+
+  .resource-pane {
+    background: var(--bg-sidebar-solid) !important;
+  }
+
+  .composer-wrap--float .composer,
+  .modal-card {
+    background: var(--bg-elevated) !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

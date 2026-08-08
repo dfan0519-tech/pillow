@@ -14,6 +14,11 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+// Contract types live in `keeper-agent-protocol`; re-export for backward compatibility.
+pub use keeper_agent_protocol::{
+    GovernedWriteDelivery, GovernedWriteReceipt, ProviderWriteProposal,
+};
+
 use keeper_agent_protocol::{
     FsWriteArguments, FsWriteOutput, RunId, ToolActiveContext, ToolArguments, ToolProposal,
     WRITE_CONTENT_BYTE_CAP, WriteMode, WriteProposalRequestedPayload, WriteProposalResolvedPayload,
@@ -38,45 +43,6 @@ pub const APPROVAL_GRANT_RAW_LEN: usize = 43;
 const GRANT_RANDOM_BYTES: usize = 32;
 const BASE64URL_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-/// Provider-facing proposal after adapter normalization (no project authority).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderWriteProposal {
-    pub call_id: String,
-    pub tool_id: String,
-    pub tool_version: u16,
-    pub arguments: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GovernedWriteDelivery {
-    /// Fresh proposal executed through the live approval path.
-    Executed,
-    /// Terminal durable evidence returned without a second apply.
-    Replayed,
-}
-
-/// Provider receipt after a write proposal reaches a terminal (or interrupted) outcome.
-#[derive(Clone)]
-pub struct GovernedWriteReceipt {
-    pub delivery: GovernedWriteDelivery,
-    pub requested: Option<WriteProposalRequestedPayload>,
-    pub resolved: WriteProposalResolvedPayload,
-    pub provider_ok: Option<FsWriteOutput>,
-    pub provider_error: Option<WritePublicErrorCode>,
-}
-
-impl std::fmt::Debug for GovernedWriteReceipt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GovernedWriteReceipt")
-            .field("delivery", &self.delivery)
-            .field("requested", &self.requested)
-            .field("resolved", &self.resolved)
-            .field("provider_ok", &self.provider_ok)
-            .field("provider_error", &self.provider_error)
-            .finish()
-    }
-}
 
 /// Live conversation-facing proposal view (native list/decide DTO source).
 #[derive(Clone)]

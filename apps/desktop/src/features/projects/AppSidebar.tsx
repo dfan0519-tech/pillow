@@ -1,12 +1,12 @@
 import { useState } from "react";
 import type { ConversationDto } from "../../lib/conversationGateway";
 import type { ProjectDto } from "../../lib/projectGateway";
+import { BrandMark } from "../../components/BrandMark";
 import {
   IconChevronDown,
   IconChevronRight,
   IconCircleDot,
   IconFolder,
-  IconPillowMark,
   IconNewChat,
   IconSearch,
 } from "../../components/icons";
@@ -48,8 +48,7 @@ export function AppSidebar({
     <nav aria-label="导航" className="app-sidebar" data-testid="app-sidebar">
       <div className="sidebar-brand-row" data-tauri-drag-region>
         <div className="sidebar-brand-row__left" data-tauri-drag-region>
-          <IconPillowMark size={20} />
-          <span>Pillow</span>
+          <BrandMark size={22} showWordmark />
         </div>
         <button
           aria-label="搜索"

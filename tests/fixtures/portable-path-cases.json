@@ -1,0 +1,67 @@
+{
+  "description": "Cross-layer portable path contract. Rust keeper-git-executor and TypeScript tauriGitGateway must accept/reject the same paths. fileForm = repository id + diff target; entryForm = status entry path (allows one trailing / for collapsed directories).",
+  "fileForm": {
+    "accept": [
+      { "path": "a.txt", "note": "simple relative file" },
+      { "path": "src/lib.rs", "note": "nested relative file" },
+      { "path": ".", "note": "repository id root only" }
+    ],
+    "reject": [
+      { "path": "vendor/", "note": "directory form forbidden for repo id and diff" },
+      { "path": "/", "note": "absolute root" },
+      { "path": "//", "note": "double separator" },
+      { "path": "vendor//", "note": "empty segment via double slash" },
+      { "path": "./", "note": "dot directory form" },
+      { "path": "../escape", "note": "parent traversal" },
+      { "path": "../escape/", "note": "parent traversal directory form" },
+      { "path": "vendor/../escape/", "note": "mid-path traversal directory form" },
+      { "path": "C:/x", "note": "drive absolute" },
+      { "path": "a\\b", "note": "native backslash separator" },
+      { "path": "/absolute", "note": "posix absolute" },
+      {
+        "path": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "note": "component longer than 255"
+      },
+      { "path": "a\u0001b", "note": "control character in component" },
+      { "path": "CON", "note": "windows device name" },
+      { "path": "con.txt", "note": "windows device name with extension" },
+      { "path": "COM1", "note": "windows COM device" },
+      { "path": "NUL", "note": "windows NUL device" },
+      { "path": "src/AUX", "note": "windows device as nested component" },
+      { "path": "trailing.", "note": "trailing dot component" },
+      { "path": "trailing ", "note": "trailing space component" }
+    ]
+  },
+  "entryForm": {
+    "accept": [
+      { "path": "a.txt", "note": "simple relative file" },
+      { "path": "src/lib.rs", "note": "nested relative file" },
+      { "path": "vendor/", "note": "collapsed untracked/ignored directory only on status entries" },
+      { "path": ".", "note": "same stem rules as file form when no trailing slash" }
+    ],
+    "reject": [
+      { "path": "/", "note": "absolute root" },
+      { "path": "//", "note": "double separator" },
+      { "path": "vendor//", "note": "empty segment via double slash" },
+      { "path": "./", "note": "dot directory form" },
+      { "path": "../escape", "note": "parent traversal" },
+      { "path": "../escape/", "note": "parent traversal directory form" },
+      { "path": "vendor/../escape/", "note": "mid-path traversal directory form" },
+      { "path": "C:/x", "note": "drive absolute" },
+      { "path": "a\\b", "note": "native backslash separator" },
+      { "path": "/absolute", "note": "posix absolute" },
+      {
+        "path": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "note": "component longer than 255"
+      },
+      { "path": "a\u0001b", "note": "control character in component" },
+      { "path": "CON", "note": "windows device name" },
+      { "path": "con.txt", "note": "windows device name with extension" },
+      { "path": "COM1", "note": "windows COM device" },
+      { "path": "NUL", "note": "windows NUL device" },
+      { "path": "src/AUX", "note": "windows device as nested component" },
+      { "path": "trailing.", "note": "trailing dot component" },
+      { "path": "trailing ", "note": "trailing space component" }
+    ]
+  }
+}

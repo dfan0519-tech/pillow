@@ -1,8 +1,7 @@
 //! Strict `pillow/process_tool` normalization and provider-safe responses.
 
-use keeper_agent_protocol::ProcessRunOutput;
-use keeper_runtime_host::{
-    GovernedProcessDelivery, GovernedProcessReceipt, ProviderProcessProposal,
+use keeper_agent_protocol::{
+    GovernedProcessDelivery, GovernedProcessReceipt, ProcessRunOutput, ProviderProcessProposal,
 };
 use serde_json::{Map, Value};
 
@@ -194,9 +193,9 @@ fn bounded_identity(value: Option<&str>) -> Result<String, ProviderProcessReques
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keeper_agent_protocol::GovernedProcessDelivery;
     use keeper_agent_protocol::ProcessTerminalOutcomePayload;
     use keeper_policy::ExecProposalState;
-    use keeper_runtime_host::GovernedProcessDelivery;
     use serde_json::json;
 
     #[test]

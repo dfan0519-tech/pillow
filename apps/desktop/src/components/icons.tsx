@@ -57,9 +57,14 @@ function IconShell({
   );
 }
 
-/** Quiet product mark — geometric P monogram for the desktop shell. */
+/**
+ * Compact product mark — 2D möbius ribbon (provisional).
+ * Prefer `BrandMark` for full chrome; this keeps the IconProps call-site shape.
+ * Final 3D mark should replace the SVG when design exports land.
+ */
 export function IconPillowMark({ size = 20, title, className = "" }: IconProps) {
   const classes = ["g-icon", "g-icon--pillow-mark", className].filter(Boolean).join(" ");
+  const gradId = "pillow-icon-mark-grad";
   return (
     <span
       className={classes}
@@ -85,18 +90,16 @@ export function IconPillowMark({ size = 20, title, className = "" }: IconProps) 
         fill="none"
         aria-hidden
       >
-        <rect
-          x="3"
-          y="3"
-          width="18"
-          height="18"
-          rx="5"
-          fill="currentColor"
-          opacity="0.12"
-        />
+        <defs>
+          <linearGradient id={gradId} x1="0%" y1="30%" x2="100%" y2="70%">
+            <stop offset="0%" stopColor="#DCCBFF" />
+            <stop offset="50%" stopColor="#FAF9F7" />
+            <stop offset="100%" stopColor="#DCCBFF" />
+          </linearGradient>
+        </defs>
         <path
-          d="M8 7h4.05a3.65 3.65 0 0 1 0 7.3H10.2V17H8V7zm2.2 2v3.1h1.76a1.55 1.55 0 1 0 0-3.1H10.2z"
-          fill="currentColor"
+          d="M7.6 8.2c2.4 0 3.75 1.5 4.8 2.85.3.38.57.73.85 1.05.28-.32.55-.67.85-1.05 1.05-1.35 2.4-2.85 4.8-2.85 2.7 0 4.7 1.95 4.7 4.4s-2 4.4-4.7 4.4c-2.4 0-3.75-1.5-4.8-2.85-.3-.38-.57-.73-.85-1.05-.28.32-.55.67-.85 1.05-1.05 1.35-2.4 2.85-4.8 2.85-2.7 0-4.7-1.95-4.7-4.4s2-4.4 4.7-4.4zm0 1.7c-1.65 0-2.95 1.2-2.95 2.7s1.3 2.7 2.95 2.7c1.65 0 2.8-1.1 3.75-2.35.25-.32.48-.64.7-.95.22.31.45.63.7.95.95 1.25 2.1 2.35 3.75 2.35 1.65 0 2.95-1.2 2.95-2.7s-1.3-2.7-2.95-2.7c-1.65 0-2.8 1.1-3.75 2.35-.25.32-.48.64-.7.95-.22-.31-.45-.63-.7-.95-.95-1.25-2.1-2.35-3.75-2.35z"
+          fill={`url(#${gradId})`}
         />
       </svg>
     </span>

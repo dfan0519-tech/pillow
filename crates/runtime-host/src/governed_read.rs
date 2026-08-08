@@ -5,36 +5,16 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use keeper_agent_protocol::{
-    RunId, ToolActiveContext, ToolProposal, ValidatedToolResult, canonical_arguments_digest,
-};
+// Contract types live in `keeper-agent-protocol`; re-export for backward compatibility.
+pub use keeper_agent_protocol::{GovernedReadDelivery, GovernedReadReceipt, ProviderToolProposal};
+
+use keeper_agent_protocol::{RunId, ToolActiveContext, ToolProposal, canonical_arguments_digest};
 use keeper_tool_executor::{
     CancellationSignal, GovernedReadToolGateway, GovernedToolError, GovernedToolOutcome,
     ProjectCapability,
 };
-use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderToolProposal {
-    pub call_id: String,
-    pub tool_id: String,
-    pub tool_version: u16,
-    pub arguments: Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GovernedReadDelivery {
-    Executed,
-    Replayed,
-}
-
-#[derive(Debug, Clone)]
-pub struct GovernedReadReceipt {
-    pub result: ValidatedToolResult,
-    pub delivery: GovernedReadDelivery,
-}
 
 #[derive(Debug, Error)]
 pub enum GovernedReadBridgeError {

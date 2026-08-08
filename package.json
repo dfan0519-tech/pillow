@@ -5,8 +5,11 @@
   "private": true,
   "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "check": "node scripts/check-workspace.mjs && node scripts/check-secrets.mjs && pnpm typecheck && pnpm test && node scripts/run-cargo.mjs test --workspace && node scripts/run-cargo.mjs clippy --workspace -- -D warnings",
+    "check": "node scripts/run-worker-gate.mjs",
+    "gate": "node scripts/run-worker-gate.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
+    "check:acp-drift": "node scripts/check-acp-protocol-drift.mjs",
+    "check:acp-drift:self-test": "node scripts/check-acp-protocol-drift.mjs --self-test",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "desktop:dev": "pnpm --filter @pillow/desktop tauri dev",

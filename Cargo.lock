@@ -1948,6 +1948,8 @@ name = "keeper-git-executor"
 version = "0.1.0"
 dependencies = [
  "keeper-process-executor",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1998,6 +2000,7 @@ dependencies = [
  "keeper-policy",
  "keeper-process-executor",
  "keeper-project",
+ "keeper-runtime-host",
  "keeper-session",
  "keeper-storage-sqlite",
  "keeper-tool-executor",

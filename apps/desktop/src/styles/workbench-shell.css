@@ -84,14 +84,19 @@
   min-height: 100vh;
 }
 
-/* Continuous Grok-style left sidebar */
+/* Continuous left sidebar — frosted glass container (not per-row blur) */
 .app-sidebar {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--bg-sidebar-solid);
-  border-right: 1px solid var(--border-subtle);
-  box-shadow: inset -8px 0 12px -8px rgba(0, 0, 0, 0.035);
+  background: var(--glass-bg, var(--bg-sidebar-solid));
+  border-right: 1px solid var(--glass-border, var(--border-subtle));
+  box-shadow:
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    inset -8px 0 12px -8px rgba(0, 0, 0, 0.12);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
+    saturate(var(--glass-saturate, 1.15));
+  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
 }
 
 .sidebar-brand-row {
@@ -115,12 +120,6 @@
   font-weight: 650;
 }
 
-.sidebar-brand-row__left span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .g-icon {
   display: inline-flex;
   align-items: center;
@@ -135,7 +134,7 @@
 }
 
 .g-icon--pillow-mark {
-  color: var(--text-primary);
+  color: var(--brand-lilac, var(--accent));
 }
 
 /* Ghost navigation — never solid blue primary rows */
@@ -354,7 +353,7 @@
 .session-row--active {
   background: var(--bg-active);
   color: var(--text-primary);
-  box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.5);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 65%, transparent);
   font-weight: 550;
 }
 

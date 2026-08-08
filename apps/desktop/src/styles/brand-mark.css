@@ -1,0 +1,92 @@
+/*
+ * Pillow brand mark chrome — Concept 08 «Mirage Loop».
+ * Wordmark uses system font stack only (offline-first; no webfonts).
+ */
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.brand-mark__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.brand-symbol {
+  color: var(--brand-lilac, #dccbff);
+}
+
+.brand-symbol__svg {
+  display: block;
+  overflow: visible;
+}
+
+.brand-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 300;
+  letter-spacing: 0.1em;
+  text-transform: lowercase;
+  color: var(--text-primary);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Dotless stem + lilac tittle — brand memory point on the i */
+.brand-wordmark__i {
+  position: relative;
+  display: inline-block;
+  width: 0.28em;
+  margin: 0 0.01em;
+}
+
+.brand-wordmark__stem {
+  display: inline-block;
+  font-weight: 300;
+  letter-spacing: 0;
+}
+
+.brand-wordmark__tittle {
+  position: absolute;
+  left: 50%;
+  top: 0.08em;
+  width: 0.22em;
+  height: 0.22em;
+  border-radius: 999px;
+  background: var(--brand-lilac, #dccbff);
+  box-shadow: 0 0 6px rgba(220, 203, 255, 0.45);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.brand-mark__tagline {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--brand-smoke, #c7c7ce);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Sidebar brand row alignment when BrandMark replaces plain text */
+.sidebar-brand-row__left .brand-mark {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-brand-row__left .brand-wordmark {
+  font-size: 13.5px;
+}

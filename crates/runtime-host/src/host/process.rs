@@ -21,6 +21,11 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+// Contract types live in `keeper-agent-protocol`; re-export for backward compatibility.
+pub use keeper_agent_protocol::{
+    GovernedProcessDelivery, GovernedProcessReceipt, ProviderProcessProposal,
+};
+
 use keeper_agent_protocol::{
     ProcessProposalDecidedPayload, ProcessProposalRequestedPayload,
     ProcessRiskClass as ProtocolRiskClass, ProcessRunArguments, ProcessRunOutput,
@@ -45,39 +50,6 @@ use uuid::Uuid;
 use crate::governed_write::{generate_approval_grant, grant_digest};
 
 // ── Public types ────────────────────────────────────────────────────────────
-
-/// Provider-facing process proposal after adapter normalization (no project authority).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderProcessProposal {
-    pub call_id: String,
-    pub tool_id: String,
-    pub tool_version: u16,
-    pub arguments: Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GovernedProcessDelivery {
-    /// Fresh proposal executed through the live approval path.
-    Executed,
-    /// Terminal durable evidence returned without a second spawn.
-    Replayed,
-}
-
-/// Provider receipt after a process proposal reaches a terminal outcome.
-#[derive(Clone, Debug)]
-pub struct GovernedProcessReceipt {
-    pub delivery: GovernedProcessDelivery,
-    pub proposal_id: String,
-    pub state: ExecProposalState,
-    /// Typed protocol payloads for the caller-emits-event pattern (durable order).
-    pub requested: Option<ProcessProposalRequestedPayload>,
-    pub decided: Option<ProcessProposalDecidedPayload>,
-    pub started: Option<ProcessStartedPayload>,
-    pub terminal: Option<ProcessTerminalOutcomePayload>,
-    pub provider_ok: Option<ProcessRunOutput>,
-    pub cancelled: bool,
-    pub timed_out: bool,
-}
 
 /// Host-emitted request summary (also mirrors protocol requested payload fields).
 #[derive(Clone, Debug, PartialEq, Eq)]

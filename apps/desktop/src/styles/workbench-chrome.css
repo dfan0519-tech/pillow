@@ -13,7 +13,14 @@
 }
 
 .composer-wrap--float .composer {
-  box-shadow: var(--shadow-composer);
+  box-shadow:
+    var(--shadow-composer),
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06));
+  background: var(--glass-bg-strong, var(--bg-elevated));
+  border-color: var(--glass-border, var(--border-subtle));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
+    saturate(var(--glass-saturate, 1.15));
+  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
 }
 
 .composer {
@@ -33,7 +40,7 @@
   border-color: var(--border-strong);
   box-shadow:
     var(--shadow-composer),
-    0 0 0 1px rgba(255, 255, 255, 0.05);
+    0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .composer textarea {
@@ -164,15 +171,15 @@
   background: var(--bg-active);
 }
 
-/* Circular primary send — dark fill, not rectangular text button */
+/* Circular primary send — lilac accent fill, not rectangular text button */
 .icon-btn--primary {
-  background: var(--text-primary);
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: var(--accent-fg);
 }
 
 .icon-btn--primary:hover:not(:disabled) {
-  background: #fff;
-  color: var(--text-inverse);
+  background: var(--accent-hover);
+  color: var(--accent-fg);
 }
 
 .icon-btn--primary:disabled {
@@ -180,19 +187,23 @@
   cursor: not-allowed;
 }
 
-/* Resource pane chrome — contextual right column (browser + preview share scroll) */
+/* Resource pane chrome — frosted glass column (container blur only) */
 .resource-pane {
   display: flex;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
   padding: 12px 14px;
-  border-left: 1px solid var(--border-subtle);
-  background: var(--bg-aside);
+  border-left: 1px solid var(--glass-border, var(--border-subtle));
+  background: var(--glass-bg, var(--bg-aside));
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
+  box-shadow: var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
+    saturate(var(--glass-saturate, 1.15));
+  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
 }
 
 .resource-pane__heading {
@@ -320,11 +331,15 @@
   gap: 16px;
   padding: 20px;
   border-radius: var(--radius-lg);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
+  border: 1px solid var(--glass-border, var(--border-subtle));
+  background: var(--glass-bg-strong, var(--bg-elevated));
   box-shadow:
-    0 8px 28px rgba(0, 0, 0, 0.1),
-    0 20px 48px rgba(0, 0, 0, 0.08);
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    0 8px 28px rgba(0, 0, 0, 0.28),
+    0 20px 48px rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
+    saturate(var(--glass-saturate, 1.15));
+  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
 }
 
 .modal-card__head h2 {

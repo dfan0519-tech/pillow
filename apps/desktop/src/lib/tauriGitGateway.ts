@@ -34,8 +34,12 @@ const STATUS_KINDS: readonly GitStatusKind[] = [
 
 const DIFF_KINDS: readonly GitDiffKind[] = ["text", "binary", "unsupported"];
 
-/** Align with keeper-git-executor discovery/status/diff caps. */
-const MAX_PATH = 1_024;
+/**
+ * Align with keeper-git-executor portable_path SSoT
+ * (`PORTABLE_PATH_MAX_LEN` / discovery status entry caps).
+ */
+const MAX_PATH = 4_096;
+const MAX_COMPONENT = 255;
 const MAX_REPOSITORIES = 32;
 const MAX_FILES = 5_000;
 const MAX_DIFF_BYTES = 256 * 1024;
@@ -104,10 +108,34 @@ function enumValue<T extends string>(
 }
 
 /**
+ * Windows reserved device names (stem before first `.`), matching
+ * `keeper_git_executor::portable_path`.
+ */
+function isWindowsDeviceComponent(component: string): boolean {
+  const stem = (component.split(".")[0] ?? component)
+    .replace(/[ .]+$/g, "")
+    .toUpperCase();
+  if (
+    stem === "CON"
+    || stem === "PRN"
+    || stem === "AUX"
+    || stem === "NUL"
+    || stem === "CLOCK$"
+    || stem === "CONIN$"
+    || stem === "CONOUT$"
+  ) {
+    return true;
+  }
+  return /^(COM|LPT)[1-9]$/.test(stem);
+}
+
+/**
  * Portable project-relative path or repository id.
- * Repository id `.` is valid; all other ids and paths are `/`-separated and
- * reject absolute, native, backslash, traversal, empty segments, and control
- * characters.
+ *
+ * Mirrors `keeper_git_executor::is_portable_path` (file form). Repository id
+ * `.` is valid; directory form (`vendor/`) is not. Rejects absolute paths,
+ * native separators, traversal, empty segments, trailing dot/space, control
+ * characters, and Windows device names.
  */
 function portable(value: unknown): value is string {
   if (value === ".") return true;
@@ -122,14 +150,41 @@ function portable(value: unknown): value is string {
   ) {
     return false;
   }
-  return value.split("/").every(
-    (part) =>
-      part.length > 0
-      && part !== "."
-      && part !== ".."
-      && part.length <= 255
-      && !/[<>:"|?*\u0000-\u001f]/.test(part),
-  );
+  return value.split("/").every((part) => {
+    if (
+      part.length === 0
+      || part === "."
+      || part === ".."
+      || part.length > MAX_COMPONENT
+    ) {
+      return false;
+    }
+    if (part.endsWith(".") || part.endsWith(" ")) {
+      return false;
+    }
+    if (/[<>:"|?*\u0000-\u001f]/.test(part)) {
+      return false;
+    }
+    if (isWindowsDeviceComponent(part)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Contract-test and documentation surface for the file-form portable rule.
+ * Diff targets and repository ids use this form only.
+ */
+export function isPortablePath(value: string): boolean {
+  return portable(value);
+}
+
+/**
+ * Contract-test surface for the status-entry portable rule (allows `vendor/`).
+ */
+export function isPortableEntryPath(value: string): boolean {
+  return portableEntryPath(value);
 }
 
 function utf8Bytes(value: string): number {
@@ -168,10 +223,11 @@ function assertExpected(
 
 /**
  * Status entry paths may name a collapsed untracked/ignored directory, which
- * porcelain v2 reports with exactly one trailing `/` (`vendor/`). The host
- * carries that form through parsing and project-path mapping, so this layer
- * must accept it too — otherwise one untracked folder makes the whole status
- * response look malformed and it degrades to `git_unavailable`.
+ * porcelain v2 reports with exactly one trailing `/` (`vendor/`). Mirrors
+ * `keeper_git_executor::is_portable_entry_path`. The host carries that form
+ * through parsing and project-path mapping, so this layer must accept it too —
+ * otherwise one untracked folder makes the whole status response look
+ * malformed and it degrades to `git_unavailable`.
  *
  * Deliberately NOT used for repository ids or diff paths: a diff target must
  * still be a file. The stem runs through the identical `portable` rules, so

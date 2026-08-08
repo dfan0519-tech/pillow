@@ -2,6 +2,9 @@
  * C4 D3B4 — Tauri Git gateway invoke contract and hostile DTO rejection.
  * Proves exact command names/payloads and strict path-free public errors.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -16,6 +19,8 @@ import {
   type GitStatusView,
 } from "../src/lib/gitGateway";
 import {
+  isPortableEntryPath,
+  isPortablePath,
   normalizeGitDiff,
   normalizeGitDiscovery,
   normalizeGitStatus,
@@ -592,10 +597,9 @@ describe("public error normalization", () => {
 });
 
 describe("untracked directory entries survive DTO validation", () => {
-  // Regression: the same portable-path rule is implemented in the parser, the
-  // host project-path mapping and here. Only fixing the first two still left a
-  // collapsed untracked directory looking malformed to the renderer, which
-  // degrades the whole status to `git_unavailable`.
+  // Regression: the portable-path SSoT lives in keeper-git-executor; this layer
+  // mirrors entry-form acceptance so a collapsed untracked directory is not
+  // mistaken for a malformed DTO (which degrades status to git_unavailable).
   it("accepts a collapsed untracked directory path in status entries", () => {
     const view = normalizeGitStatus(
       {
@@ -636,5 +640,54 @@ describe("untracked directory entries survive DTO validation", () => {
         expected,
       ),
     ).toThrow();
+  });
+});
+
+/**
+ * Cross-layer contract: same JSON table as crates/git-executor portable_path_contract.
+ * Path: tests/fixtures/portable-path-cases.json (repo root).
+ */
+describe("portable path cross-layer contract", () => {
+  type PathCase = { path: string; note?: string };
+  type CaseTable = {
+    fileForm: { accept: PathCase[]; reject: PathCase[] };
+    entryForm: { accept: PathCase[]; reject: PathCase[] };
+  };
+
+  const fixturePath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../tests/fixtures/portable-path-cases.json",
+  );
+  const table = JSON.parse(readFileSync(fixturePath, "utf8")) as CaseTable;
+
+  it("fileForm accept/reject matches shared fixture", () => {
+    expect(table.fileForm.accept.length).toBeGreaterThan(0);
+    expect(table.fileForm.reject.length).toBeGreaterThan(0);
+    for (const c of table.fileForm.accept) {
+      expect(isPortablePath(c.path), `fileForm accept ${JSON.stringify(c)}`).toBe(true);
+    }
+    for (const c of table.fileForm.reject) {
+      expect(isPortablePath(c.path), `fileForm reject ${JSON.stringify(c)}`).toBe(false);
+    }
+  });
+
+  it("entryForm accept/reject matches shared fixture", () => {
+    expect(table.entryForm.accept.length).toBeGreaterThan(0);
+    expect(table.entryForm.reject.length).toBeGreaterThan(0);
+    for (const c of table.entryForm.accept) {
+      expect(isPortableEntryPath(c.path), `entryForm accept ${JSON.stringify(c)}`).toBe(
+        true,
+      );
+    }
+    for (const c of table.entryForm.reject) {
+      expect(isPortableEntryPath(c.path), `entryForm reject ${JSON.stringify(c)}`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("directory form is entry-only", () => {
+    expect(isPortablePath("vendor/")).toBe(false);
+    expect(isPortableEntryPath("vendor/")).toBe(true);
   });
 });

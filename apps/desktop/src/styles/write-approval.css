@@ -15,7 +15,7 @@
   padding: 10px 12px;
   border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.12));
   border-radius: var(--radius-md, 8px);
-  background: var(--bg-elevated, #1a1a1a);
+  background: var(--bg-elevated, #1c1c20);
   color: var(--text-primary, rgba(255, 255, 255, 0.92));
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
 }
@@ -102,12 +102,12 @@
 
 .write-approval-bar__btn--primary {
   border-color: transparent;
-  background: var(--accent, #8aa4ff);
-  color: var(--accent-fg, #0d0d0d);
+  background: var(--accent, #dccbff);
+  color: var(--accent-fg, #0e0e10);
 }
 
 .write-approval-bar__btn--primary:hover:not(:disabled) {
-  background: var(--accent-hover, #a0b6ff);
+  background: var(--accent-hover, #ebe0ff);
 }
 
 .write-diff-preview {
@@ -198,7 +198,7 @@
   padding: 8px 12px;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
   border-radius: var(--radius-sm, 6px);
-  background: var(--bg-elevated, #1a1a1a);
+  background: var(--bg-elevated, #1c1c20);
   color: var(--text-secondary, rgba(255, 255, 255, 0.68));
   font-size: 13px;
   line-height: 1.4;

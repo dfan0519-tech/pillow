@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "description": "Locked upstream ACP wire-protocol crates used by xai-org/grok-build. Pillow's adapter-grok-acp hand-implements the line protocol and does not depend on these crates; this baseline is the machine-checkable compatibility pin from the 2026-08-08 upstream audit.",
+  "source": {
+    "repository": "https://github.com/xai-org/grok-build",
+    "lockfilePath": "Cargo.lock",
+    "baselineCommit": "5da6962e4adb9c857f3def762542b52b4ec3e522",
+    "verifiedIdenticalAtHead": "afbc0fb710320c7add294c2106d447ecc3e3af2e",
+    "checkRef": "main",
+    "captured": "2026-08-08",
+    "evidence": "docs/execution/2026-08-08-upstream-grokbuild-audit.md"
+  },
+  "crates": [
+    {
+      "name": "agent-client-protocol",
+      "version": "0.10.4",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "10eeef5e80864f9c3c148a3f395c3e35a66d37ec7561c7845b2bffae8e841759"
+    },
+    {
+      "name": "agent-client-protocol-schema",
+      "version": "0.11.4",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "ca68e7e55681ce56546c0cecc6bc8f20493d24b44c6d93ec46174f310730bba2"
+    }
+  ]
+}

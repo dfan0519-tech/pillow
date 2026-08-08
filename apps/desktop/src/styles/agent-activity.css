@@ -44,7 +44,7 @@
   min-width: 0;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
   border-radius: var(--radius-sm, 6px);
-  background: var(--bg-elevated, #1a1a1a);
+  background: var(--bg-elevated, #1c1c20);
 }
 
 .agent-activity__details--concise {
@@ -87,8 +87,8 @@
 }
 
 .agent-activity__dot--live {
-  background: var(--accent, #8aa4ff);
-  box-shadow: 0 0 0 3px var(--accent-muted, rgba(138, 164, 255, 0.14));
+  background: var(--accent, #dccbff);
+  box-shadow: 0 0 0 3px var(--accent-muted, rgba(220, 203, 255, 0.14));
 }
 
 .agent-activity__dot--risk {
@@ -115,7 +115,7 @@
 }
 
 .agent-activity__status[data-status="running"] {
-  color: var(--accent, #8aa4ff);
+  color: var(--accent, #dccbff);
 }
 
 .agent-activity__body {

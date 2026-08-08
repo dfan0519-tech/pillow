@@ -46,12 +46,15 @@ function fixtureGateway(): ProjectGateway {
 }
 
 describe("grok shell visual contract", () => {
-  it("uses upstream dark tokens and rejects the old light prototype accent", () => {
+  it("uses Pillow brand dark tokens and rejects the old light prototype accent", () => {
     expect(tokensCss).toMatch(/color-scheme:\s*dark/i);
-    expect(tokensCss).toMatch(/--bg-main:\s*#151515/i);
-    expect(tokensCss).toMatch(/--accent:\s*#8aa4ff/i);
+    // Step 1d: layered BLACK INK / GRAPHITE surfaces + LILAC HAZE accent.
+    expect(tokensCss).toMatch(/--bg-main:\s*#161618/i);
+    expect(tokensCss).toMatch(/--bg-app:\s*#0e0e10/i);
+    expect(tokensCss).toMatch(/--accent:\s*#dccbff/i);
     // Token assignment only (comments are free-form).
     expect(tokensCss).not.toMatch(/--accent:\s*#1769aa/i);
+    expect(tokensCss).not.toMatch(/--accent:\s*#8aa4ff/i);
     expect(workbenchCss).not.toMatch(/#1769aa/i);
     expect(workbenchCss).not.toMatch(/--accent:\s*#1769aa/i);
   });

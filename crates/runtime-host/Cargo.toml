@@ -27,6 +27,11 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Self-dep so `cargo test -p keeper-runtime-host` enables `test-support` the same
+# way workspace feature unification does via pillow-desktop's dev-dependencies.
+# Without this, feature-gated integration tests (expiry / storage-failure seams)
+# are silently omitted when Workers run a single-package gate.
+keeper-runtime-host = { path = ".", features = ["test-support"] }
 keeper-project = { path = "../kernel-project" }
 keeper-session = { path = "../kernel-session" }
 keeper-storage-sqlite = { path = "../storage-sqlite" }
@@ -34,6 +39,7 @@ serde_json.workspace = true
 tempfile = "3"
 
 # Integration tests may use the non-default test-support expiry seam.
+# The self-dep above enables `test-support` for this package under test.
 [[test]]
 name = "governed_write_bridge"
 path = "tests/governed_write_bridge.rs"

@@ -1,7 +1,8 @@
 //! Strict `pillow/write_tool` normalization. Independent of the read normalizer.
 
-use keeper_agent_protocol::{FsWriteOutput, WritePublicErrorCode};
-use keeper_runtime_host::{GovernedWriteReceipt, ProviderWriteProposal};
+use keeper_agent_protocol::{
+    FsWriteOutput, GovernedWriteReceipt, ProviderWriteProposal, WritePublicErrorCode,
+};
 use serde_json::{Map, Value};
 
 const WRITE_METHOD: &str = "pillow/write_tool";
@@ -292,7 +293,7 @@ mod tests {
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         };
         let receipt = GovernedWriteReceipt {
-            delivery: keeper_runtime_host::GovernedWriteDelivery::Executed,
+            delivery: keeper_agent_protocol::GovernedWriteDelivery::Executed,
             requested: None,
             resolved: keeper_agent_protocol::WriteProposalResolvedPayload {
                 proposal_id: "wp".into(),

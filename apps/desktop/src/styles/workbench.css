@@ -12,6 +12,7 @@
 @import "./workbench-shell.css";
 @import "./workbench-conversation.css";
 @import "./workbench-chrome.css";
+@import "./brand-mark.css";
 
 @media (max-width: 1024px) {
   .app-shell {

@@ -42,3 +42,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# Stray cargo target dirs created by workers/gates (e.g. target-step1c-gate/)
+/target-*/
