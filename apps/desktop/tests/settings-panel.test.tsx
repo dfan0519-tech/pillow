@@ -145,10 +145,20 @@ describe("SettingsPanel", () => {
     expect(banner).toBeVisible();
     expect(banner.textContent).toMatch(/对话运行时不可用/);
     expect(banner.textContent).not.toMatch(/using fake|回落.*Fake|Fake 适配器已启用/i);
+    // Login guidance must not appear on the degraded path (distinct states).
+    expect(screen.queryByTestId("runtime-login-guidance-banner")).toBeNull();
     // Settings reachable without conversation service.
     await user.click(screen.getByTestId("runtime-degraded-open-settings"));
     expect(await screen.findByTestId("settings-panel")).toBeVisible();
     expect(screen.getByTestId("nav-open-settings")).toBeInTheDocument();
+    // Settings always carries the CLI-login claim (no account identity).
+    expect(screen.getByTestId("settings-login-guidance")).toBeVisible();
+    expect(screen.getByTestId("settings-login-guidance").textContent).toMatch(
+      /grok login/i,
+    );
+    expect(screen.getByTestId("settings-login-guidance").textContent).not.toMatch(
+      /auth\.json|@|sk-/i,
+    );
   });
 
   it("rejects secret-shaped keys on the settings wire DTO", () => {

@@ -1,5 +1,7 @@
 # Pillow Stage 1 Plan Comparison
 
+> 本文件已被 `docs/roadmap/2026-07-31-stage1-overall-status.md` 取代。
+
 Date: 2026-07-30
 
 Status: Historical comparison; current state moved to

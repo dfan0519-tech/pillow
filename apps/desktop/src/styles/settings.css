@@ -282,3 +282,72 @@
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
 }
+
+/* Grok CLI login guidance: conversation runtime is up; user needs CLI login.
+ * Same bar geometry as degraded banner — does not alter sidebar/rail layout. */
+.runtime-login-guidance-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elevated));
+  color: var(--text-primary);
+}
+
+.runtime-login-guidance-banner__body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.runtime-login-guidance-banner__body strong {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.runtime-login-guidance-banner__body p {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.runtime-login-guidance-banner button {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.runtime-login-guidance-banner button:hover {
+  background: var(--bg-hover);
+}
+
+.runtime-login-guidance-banner button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Static how-to-login note inside the settings dialog (not a layout change). */
+.settings-login-help {
+  margin: 0 16px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}

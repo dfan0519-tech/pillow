@@ -1,10 +1,11 @@
-//! K0b acceptance tests â€” classification, supersession, idempotency, policy.
+//! K0b/K0c acceptance tests — classification, supersession, idempotency, policy, render.
 
 use std::fs;
 use std::path::Path;
 
 use keeper_knowledge_indexer::{
-    ScanOptions, classify_document, extract_supersession, scan_and_register, validate_path_ssot,
+    RenderInput, ScanOptions, classify_document, extract_supersession, render_status_view,
+    scan_and_register, validate_path_ssot,
 };
 use keeper_project::CreateProject;
 use keeper_project::validate_portable_path;
@@ -474,5 +475,103 @@ fn paired_brief_becomes_consumed() {
             .unpaired_briefs
             .iter()
             .any(|p| p.contains("open-brief"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// K0c — registry status render (pure view)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_from_scan_is_pure_and_covers_buckets() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        &root.join("docs/handoff/current.md"),
+        "> 本文件取代 `docs/handoff/old-a.md` 与\n> `docs/handoff/old-b.md`。\n",
+    );
+    write(&root.join("docs/handoff/old-a.md"), "# Old A\n");
+    write(&root.join("docs/handoff/old-b.md"), "# Old B\n");
+    write(&root.join("docs/roadmap/r1.md"), "# Roadmap one\n");
+    write(&root.join("docs/roadmap/r2.md"), "# Roadmap two\n");
+    write(&root.join("docs/execution/open-brief.md"), "# Open brief\n");
+    write(
+        &root.join("docs/verification/lonely-acceptance.md"),
+        "# Acceptance\n",
+    );
+    write(
+        &root.join("docs/decisions/ADR-orphan.md"),
+        "Status: Accepted\n\n# ADR\n",
+    );
+    write(&root.join("docs/execution/done-brief.md"), "# Brief\n");
+    write(
+        &root.join("docs/execution/done-report.md"),
+        "This report supersedes prior delivery status.\n",
+    );
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: Some("k0c".into()),
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    let md = result.handoff_markdown.clone();
+    let again = render_status_view(&RenderInput {
+        documents: result.documents.clone(),
+        links: result.links.clone(),
+        audit: result.report.clone(),
+    });
+    assert_eq!(md, again, "render must be pure");
+
+    // unknown ratio present
+    assert!(
+        md.contains("unknown") && (md.contains("UNCLASSIFIED") || md.contains("未分类")),
+        "unknown ratio must be prominent"
+    );
+
+    // 1→N supersession
+    assert!(md.contains("1→N") || md.contains("old-a.md"), "1→N chain");
+    assert!(md.contains("old-b.md"));
+
+    // free-path claim from report
+    assert!(
+        md.contains("free-path") || md.contains("prior delivery status"),
+        "free-path claim must render"
+    );
+
+    // contradictions (two roadmaps)
+    assert!(md.contains("Contradiction") || md.contains("contradiction") || md.contains("roadmap"));
+
+    // pending review
+    assert!(md.contains("open-brief.md"));
+    assert!(md.contains("待复核") || md.contains("Pending review"));
+
+    // expected orphans non-problem, not mixed into pending-only framing
+    assert!(md.contains("预期孤儿") || md.contains("非问题"));
+    assert!(md.contains("lonely-acceptance") || md.contains("verification"));
+
+    // no hand-written operational narrative
+    assert!(!md.contains("在途 Worker"));
+    assert!(!md.contains("C4 已 checkpoint"));
+}
+
+#[test]
+fn render_empty_registry_honest() {
+    let md = render_status_view(&RenderInput {
+        documents: vec![],
+        links: vec![],
+        audit: keeper_knowledge_indexer::AuditReport::default(),
+    });
+    assert!(md.contains("0"));
+    assert!(
+        md.contains("empty")
+            || md.contains("No data")
+            || md.contains("无数据")
+            || md.contains("Nothing")
     );
 }

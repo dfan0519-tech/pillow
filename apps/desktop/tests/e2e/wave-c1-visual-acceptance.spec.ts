@@ -35,4 +35,14 @@ test("Wave C1 visual acceptance captures every desktop state without geometry or
   assert.match(output, /"state":"empty"/u);
   assert.match(output, /"state":"selected-project"/u);
   assert.match(output, /"state":"active-conversation"/u);
+
+  // Both skins shipped, but only the dark one had screenshot evidence, so a
+  // light-skin regression had nothing to fail against. The harness proves the
+  // surface token actually lightened before recording a capture — otherwise a
+  // dark shot filed under "light" would read as evidence.
+  assert.match(output, /"skin":"dark"/u);
+  assert.match(output, /"skin":"light"/u);
+
+  // The settings screen is reachable from the shell but no spec opened it.
+  assert.match(output, /"state":"settings"/u);
 });

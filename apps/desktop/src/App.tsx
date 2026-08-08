@@ -19,6 +19,12 @@ import {
 } from "./features/conversations/conversationReducer";
 import { AppSidebar } from "./features/projects/AppSidebar";
 import {
+  GROK_CLI_LOGIN_GUIDANCE,
+  GROK_CLI_LOGIN_TITLE,
+  isAuthenticationFailedEvent,
+  userFacingSendError,
+} from "./features/settings/loginGuidance";
+import {
   MockSettingsGateway,
   TauriSettingsGateway,
 } from "./features/settings/settingsGateway";
@@ -156,6 +162,11 @@ export function App({
   const [runtimeStartup, setRuntimeStartup] = useState<RuntimeStartupView | null>(
     null,
   );
+  /**
+   * Conversation-path login guidance (adapter health class authentication_failed).
+   * Independent of degraded startup; never reads auth files — only failure phrases.
+   */
+  const [loginGuidanceVisible, setLoginGuidanceVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -354,6 +365,18 @@ export function App({
         && targetsSelectedConversation
       ) {
         setExecProposalRefreshToken((token) => token + 1);
+      }
+
+      // Auth-class turn failure: surface fixed CLI login guidance (not raw codes).
+      // Phrase/code match only — never open auth files or show account identity.
+      if (event.kind === "turn_failed" && targetsSelectedConversation) {
+        if (isAuthenticationFailedEvent(event.payload)) {
+          setSendError(GROK_CLI_LOGIN_GUIDANCE);
+          setLoginGuidanceVisible(true);
+        }
+      }
+      if (event.kind === "turn_completed" && targetsSelectedConversation) {
+        setLoginGuidanceVisible(false);
       }
     });
   }, [conversationGateway]);
@@ -714,6 +737,7 @@ export function App({
     projectScopeGenRef.current += 1;
     dispatchConversation({ type: "conversation_selected", conversationId: null });
     setSendError(null);
+    setLoginGuidanceVisible(false);
     setRefreshWarning(null);
   }
 
@@ -873,6 +897,7 @@ export function App({
 
     setSending(true);
     setSendError(null);
+    setLoginGuidanceVisible(false);
     setRefreshWarning(null);
 
     const state = conversationStateRef.current;
@@ -930,6 +955,7 @@ export function App({
       // Accepted send: run id means the turn is durable on the gateway.
       // Refresh both durable projections. The gateway may rename a persisted
       // "新对话" from the first turn, so the rail and stage title must follow.
+      // Async auth failures arrive later via turn_failed (subscription above).
       await conversationGateway.sendTurn(conversationId, content);
 
       // Stamp list freshness at request start (same contract as project effect).
@@ -970,9 +996,13 @@ export function App({
       if (!isScopeCurrent(projectIdAtStart, generationAtStart)) {
         return;
       }
-      const message =
+      const raw =
         cause instanceof Error ? cause.message : "发送失败，请重试。";
+      const message = userFacingSendError(raw);
       setSendError(message);
+      if (message === GROK_CLI_LOGIN_GUIDANCE) {
+        setLoginGuidanceVisible(true);
+      }
       console.error("Failed to send turn.", cause);
       throw cause instanceof Error ? cause : new Error(message);
     } finally {
@@ -1057,6 +1087,32 @@ export function App({
           </div>
           <button
             data-testid="runtime-degraded-open-settings"
+            onClick={() => setSettingsOpen(true)}
+            type="button"
+          >
+            打开设置
+          </button>
+        </div>
+      ) : null}
+      {/* Login guidance only when conversation runtime is up (not degraded).
+          Degraded path points at Settings/paths; login path points at grok login. */}
+      {loginGuidanceVisible
+      && !(
+        runtimeStartup
+        && !runtimeStartup.conversationAvailable
+        && runtimeStartup.degradedCode
+      ) ? (
+        <div
+          className="runtime-login-guidance-banner"
+          data-testid="runtime-login-guidance-banner"
+          role="status"
+        >
+          <div className="runtime-login-guidance-banner__body">
+            <strong>{GROK_CLI_LOGIN_TITLE}</strong>
+            <p>{GROK_CLI_LOGIN_GUIDANCE}</p>
+          </div>
+          <button
+            data-testid="runtime-login-guidance-open-settings"
             onClick={() => setSettingsOpen(true)}
             type="button"
           >

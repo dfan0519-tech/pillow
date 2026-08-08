@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  GROK_CLI_LOGIN_SETTINGS_HELP,
+} from "./loginGuidance";
+import {
   applyDocumentTheme,
   isEnvOverride,
   parseUiThemeLabel,
@@ -216,6 +219,14 @@ export function SettingsPanel({
           </button>
         </header>
 
+        <p
+          className="settings-login-help"
+          data-testid="settings-login-guidance"
+          role="note"
+        >
+          {GROK_CLI_LOGIN_SETTINGS_HELP}
+        </p>
+
         <div className="settings-scope" role="group" aria-label="设置作用域">
           <button
             aria-pressed={scope === "global"}
@@ -357,7 +368,7 @@ export function SettingsPanel({
                 data-testid="settings-grok-executable"
                 disabled={executableLocked || saving}
                 onChange={(e) => setExecutableDraft(e.target.value)}
-                placeholder="例如 C:\\tools\\grok.exe（留空则使用 PATH）"
+                placeholder="例如 C:\tools\grok.exe（留空则使用 PATH）"
                 spellCheck={false}
                 type="text"
                 value={executableDraft}
@@ -389,7 +400,7 @@ export function SettingsPanel({
                 data-testid="settings-grok-profile"
                 disabled={profileLocked || saving}
                 onChange={(e) => setProfileDraft(e.target.value)}
-                placeholder="进程主目录（路径 only；不打开 auth 文件）"
+                placeholder="进程主目录（仅路径；不会打开 auth 文件）"
                 spellCheck={false}
                 type="text"
                 value={profileDraft}

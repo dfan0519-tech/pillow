@@ -208,8 +208,46 @@ pub fn guidance_for_runtime_error(code: &str) -> String {
         "runtime_fake_not_allowed" => "打开「设置」，将「运行时适配器」改为 Grok ACP（默认）；\
              生产构建不提供 Fake。保存后重启 Pillow。"
             .to_owned(),
+        // Adapter probe class — never opened from this module; phrase/code only
+        // on the UI path. Kept here so product copy stays one place if host maps it.
+        "authentication_failed" => guidance_for_authentication_failed(),
         _ => "打开「设置」检查运行时适配器与 Grok 路径，修正后重启 Pillow。".to_owned(),
     }
+}
+
+/// Fixed guidance when the adapter health class is `authentication_failed`.
+///
+/// Product claim: Grok login is managed by the Grok CLI; Pillow does not store
+/// that login. **Never** open, read, or display auth/token files or account id.
+pub fn guidance_for_authentication_failed() -> String {
+    "Grok 登录由 Grok CLI 管理，Pillow 不存储该登录。请在终端运行 grok login，\
+     完成后回到 Pillow 重试发送。"
+        .to_owned()
+}
+
+/// Classify free-form error text as a recognized auth failure (phrase match).
+/// Same non-secret phrases as the adapter health surface — no file I/O.
+pub fn looks_like_authentication_failure_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "unauthenticated",
+        "unauthorized",
+        "authentication required",
+        "authentication failed",
+        "authentication_failed",
+        "not authenticated",
+        "auth failed",
+        "auth_failed",
+        "login required",
+        "not logged in",
+        "invalid token",
+        "expired token",
+        "token expired",
+        "no credentials",
+        "sign in required",
+        "signin required",
+    ];
+    PATTERNS.iter().any(|p| m.contains(p))
 }
 
 /// Open the conversation service for process startup.
@@ -1272,5 +1310,72 @@ pub(crate) mod tests {
     #[test]
     fn fake_adapter_selectable_matches_debug_assertions() {
         assert_eq!(fake_adapter_selectable(), cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn authentication_failed_guidance_is_actionable_and_secret_free() {
+        let guidance = guidance_for_authentication_failed();
+        assert!(
+            guidance.contains("grok login"),
+            "must tell the user to run grok login: {guidance}"
+        );
+        assert!(
+            guidance.contains("Grok CLI") || guidance.contains("Grok 登录"),
+            "must state CLI owns login: {guidance}"
+        );
+        assert!(
+            guidance.contains("不存储"),
+            "must restate Pillow does not store login: {guidance}"
+        );
+        let lower = guidance.to_ascii_lowercase();
+        for needle in [
+            "auth.json",
+            "bearer ",
+            "sk-",
+            "api_key",
+            "userprofile",
+            "c:\\users",
+            "/home/",
+            "@",
+        ] {
+            assert!(
+                !lower.contains(needle),
+                "guidance must not leak identity/auth material ({needle}): {guidance}"
+            );
+        }
+        // Mapped through the same settings-oriented helper.
+        assert_eq!(
+            guidance_for_runtime_error("authentication_failed"),
+            guidance
+        );
+    }
+
+    #[test]
+    fn auth_failure_phrase_match_never_requires_file_io() {
+        assert!(looks_like_authentication_failure_message(
+            "acp_request_failed: unauthenticated"
+        ));
+        assert!(looks_like_authentication_failure_message("login required"));
+        assert!(looks_like_authentication_failure_message(
+            "authentication_failed"
+        ));
+        assert!(!looks_like_authentication_failure_message("timeout"));
+        assert!(!looks_like_authentication_failure_message(
+            "permission denied for write"
+        ));
+        // Degrade codes remain path/config — not auth-class by themselves.
+        assert!(!looks_like_authentication_failure_message(
+            "runtime_executable_missing"
+        ));
+    }
+
+    #[test]
+    fn degrade_and_auth_guidance_are_distinct() {
+        let degrade = guidance_for_runtime_error("runtime_executable_missing");
+        let auth = guidance_for_authentication_failed();
+        assert_ne!(degrade, auth);
+        assert!(degrade.contains("设置"));
+        assert!(!degrade.contains("grok login"));
+        assert!(auth.contains("grok login"));
     }
 }

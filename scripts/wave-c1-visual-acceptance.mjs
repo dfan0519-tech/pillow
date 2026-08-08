@@ -250,6 +250,76 @@ async function prepareState(page, state) {
   }
 }
 
+/**
+ * Read the resolved surface token so a skin switch can be proven, not assumed.
+ */
+async function readAppSurface(page) {
+  return page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-app").trim(),
+  );
+}
+
+/** Rough channel mean of `#rrggbb`; enough to tell a light skin from a dark one. */
+function channelMean(color) {
+  const hex = color.replace("#", "");
+  assert.equal(hex.length, 6, `Expected #rrggbb surface token, got "${color}".`);
+  const value = Number.parseInt(hex, 16);
+  return (((value >> 16) & 0xff) + ((value >> 8) & 0xff) + (value & 0xff)) / 3;
+}
+
+/**
+ * Light-skin capture.
+ *
+ * The dual-theme work shipped with dark-skin screenshots only, so a light-skin
+ * regression had nothing to fail against. Flipping the attribute is not enough
+ * on its own: if the light token set failed to apply, the page would still
+ * screenshot cleanly and the file would be a dark shot named "light" — the
+ * false-evidence shape this repository keeps producing. So the surface token is
+ * read before and after, and a capture is only recorded once it has actually
+ * changed and actually got lighter.
+ */
+async function captureLightSkin(page, state, viewport, captures) {
+  const dark = await readAppSurface(page);
+  await page.evaluate(() => {
+    document.documentElement.setAttribute("data-theme", "light");
+  });
+  await page.waitForFunction(
+    (previous) =>
+      getComputedStyle(document.documentElement).getPropertyValue("--bg-app").trim() !== previous,
+    dark,
+    { timeout: 5_000 },
+  );
+  const light = await readAppSurface(page);
+  assert.ok(
+    channelMean(light) > channelMean(dark) + 40,
+    `Light skin did not lighten the app surface (dark ${dark} -> light ${light}).`,
+  );
+
+  await assertGeometry(page, state, viewport);
+  const file = `${state}-light-${viewport.width}x${viewport.height}.png`;
+  await page.screenshot({ path: path.join(outputRoot, file), fullPage: false });
+  captures.push({
+    file,
+    state,
+    skin: "light",
+    surface: light,
+    viewport: `${viewport.width}x${viewport.height}`,
+  });
+}
+
+/**
+ * Settings surface capture. It is reachable from the shell but no spec opened
+ * it, so the whole settings screen shipped without visual evidence in either
+ * skin.
+ */
+async function captureSettings(page, viewport, captures) {
+  await page.locator("[data-testid='nav-open-settings']").click();
+  await page.waitForSelector("[data-testid='settings-panel']", { timeout: 10_000 });
+  const file = `settings-${viewport.width}x${viewport.height}.png`;
+  await page.screenshot({ path: path.join(outputRoot, file), fullPage: false });
+  captures.push({ file, state: "settings", viewport: `${viewport.width}x${viewport.height}` });
+}
+
 async function main() {
   await mkdir(outputRoot, { recursive: true });
   const browserPath = await resolveBrowser();
@@ -278,7 +348,12 @@ async function main() {
           await assertReducedMotion(page);
           const file = `${state}-${viewport.width}x${viewport.height}.png`;
           await page.screenshot({ path: path.join(outputRoot, file), fullPage: false });
-          captures.push({ file, state, viewport: `${viewport.width}x${viewport.height}` });
+          captures.push({ file, state, skin: "dark", viewport: `${viewport.width}x${viewport.height}` });
+
+          // Light skin last: it mutates the document, so geometry and a11y
+          // assertions above still run against the shipped default.
+          await captureLightSkin(page, state, viewport, captures);
+          if (state === "selected-project") await captureSettings(page, viewport, captures);
         } finally {
           await page.close();
         }

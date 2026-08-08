@@ -25,3 +25,29 @@ describe("Tauri custom titlebar configuration", () => {
     expect(desktopPackage.scripts.dev).toContain("--host 127.0.0.1");
   });
 });
+
+describe("Tauri delivery packaging configuration", () => {
+  it("keeps product metadata free of placeholders", () => {
+    expect(config.productName).toBe("Pillow");
+    expect(config.identifier).toBe("com.pillow.desktop");
+    expect(config.version).toBe("0.1.0");
+    expect(desktopPackage.version).toBe("0.1.0");
+    expect(config.productName).not.toMatch(/TODO|MyApp|tauri/i);
+    expect(config.identifier).not.toMatch(/com\.tauri\.dev|example/i);
+  });
+
+  it("enables NSIS bundling with WebView2 downloadBootstrapper", () => {
+    expect(config.bundle.active).toBe(true);
+    expect(config.bundle.targets).toEqual(["nsis"]);
+    expect(config.bundle.windows?.webviewInstallMode?.type).toBe(
+      "downloadBootstrapper",
+    );
+    expect(config.bundle.windows?.nsis?.installMode).toBe("currentUser");
+    // Icons are brand assets (not default Tauri blue square placeholder).
+    expect(config.bundle.icon?.length).toBeGreaterThan(0);
+    expect(config.bundle.icon).toEqual(
+      expect.arrayContaining(["icons/icon.ico", "icons/icon.icns"]),
+    );
+  });
+});
+

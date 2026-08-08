@@ -20,6 +20,7 @@ use crate::classify::{
     status_for_paired_brief,
 };
 use crate::digest::content_digest_sha256;
+use crate::render::{RenderInput, render_status_view};
 use crate::supersession::{InferredSupersession, extract_supersession};
 
 /// Options for a scan run.
@@ -77,6 +78,8 @@ pub struct ScanResult {
     pub links: Vec<KnowledgeDocumentLink>,
     pub report: AuditReport,
     pub report_markdown: String,
+    /// K0c pure registry status view (no hand-written narrative).
+    pub handoff_markdown: String,
     pub inferred_supersession: Vec<InferredSupersession>,
 }
 
@@ -225,6 +228,11 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
         inferred_supersession: all_inferred.clone(),
     });
     let report_markdown = format_audit_report(&report);
+    let handoff_markdown = render_status_view(&RenderInput {
+        documents: documents.clone(),
+        links: links.clone(),
+        audit: report.clone(),
+    });
 
     Ok(ScanResult {
         project_id,
@@ -233,6 +241,7 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
         links,
         report,
         report_markdown,
+        handoff_markdown,
         inferred_supersession: all_inferred,
     })
 }
