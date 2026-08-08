@@ -34,9 +34,9 @@ use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_para
 use crate::state::{Inner, PromptOutcome};
 use crate::turn::ProviderRequestIdentityError;
 use keeper_runtime_host::{
-    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedReadBridgeError,
-    GovernedReadDelivery, GovernedWriteBridgeError, GovernedWriteDelivery, GovernedWriteReceipt,
-    execute_governed_process, execute_governed_read, execute_governed_write,
+    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle,
+    GovernedReadBridgeError, GovernedReadDelivery, GovernedWriteBridgeError, GovernedWriteDelivery,
+    GovernedWriteReceipt, execute_governed_process, execute_governed_read, execute_governed_write,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -656,62 +656,95 @@ fn handle_process_tool(
         }
     };
 
-    let receipt = match execute_governed_process(run_id, normalized.proposal, cancel, |requested| {
-        let payload = ProcessProposalRequestedPayload {
-            proposal_id: requested.proposal_id.clone(),
-            program: requested.program.clone(),
-            argv: requested.argv.clone(),
-            portable_cwd: requested.portable_cwd.clone(),
-            summary: requested.summary.clone(),
-            risk_class: requested.risk_class.into(),
-            expires_at: requested.expires_at,
+    // Track lifecycle kinds already emitted in-flight so post-return only
+    // fills remaining kinds (typically terminal). Double-emit is a failure.
+    let decided_emitted = AtomicBool::new(false);
+    let started_emitted = AtomicBool::new(false);
+    let receipt =
+        match execute_governed_process(run_id, normalized.proposal, cancel, |event| match event {
+            GovernedProcessLifecycle::Requested(requested) => {
+                let payload = ProcessProposalRequestedPayload {
+                    proposal_id: requested.proposal_id.clone(),
+                    program: requested.program.clone(),
+                    argv: requested.argv.clone(),
+                    portable_cwd: requested.portable_cwd.clone(),
+                    summary: requested.summary.clone(),
+                    risk_class: requested.risk_class.into(),
+                    expires_at: requested.expires_at,
+                };
+                emit_process_event(
+                    inner,
+                    sink,
+                    run_id,
+                    RuntimeEventKind::ProcessProposalRequested,
+                    payload,
+                )
+                .map_err(|_| GovernedProcessBridgeError::Gateway)
+            }
+            GovernedProcessLifecycle::Decided(decided) => {
+                emit_process_event(
+                    inner,
+                    sink,
+                    run_id,
+                    RuntimeEventKind::ProcessProposalDecided,
+                    decided,
+                )
+                .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+                decided_emitted.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            GovernedProcessLifecycle::Started(started) => {
+                emit_process_event(
+                    inner,
+                    sink,
+                    run_id,
+                    RuntimeEventKind::ProcessStarted,
+                    started,
+                )
+                .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+                started_emitted.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }) {
+            Ok(receipt) => receipt,
+            Err(GovernedProcessBridgeError::InvalidProposal) => {
+                rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
+                return Ok(());
+            }
+            Err(GovernedProcessBridgeError::ReservationConflict) => {
+                let (code, message) = ProviderProcessResponseError::Conflict.rpc_error();
+                rpc.respond_error(id, code, message)?;
+                return Ok(());
+            }
+            Err(GovernedProcessBridgeError::Busy) => {
+                let (code, message) = ProviderProcessResponseError::Busy.rpc_error();
+                rpc.respond_error(id, code, message)?;
+                return Ok(());
+            }
+            Err(
+                GovernedProcessBridgeError::RunNotRegistered
+                | GovernedProcessBridgeError::InvalidContext
+                | GovernedProcessBridgeError::Gateway
+                | GovernedProcessBridgeError::NotLive
+                | GovernedProcessBridgeError::OwnershipMismatch
+                | GovernedProcessBridgeError::DecisionDenied
+                | GovernedProcessBridgeError::Expired
+                | GovernedProcessBridgeError::Cancelled
+                | GovernedProcessBridgeError::Interrupted
+                | GovernedProcessBridgeError::ShutDown
+                | GovernedProcessBridgeError::CleanupUnproven,
+            ) => {
+                rpc.respond_error(id, -32000, "governed_process_unavailable")?;
+                return Ok(());
+            }
         };
-        emit_process_event(
-            inner,
-            sink,
-            run_id,
-            RuntimeEventKind::ProcessProposalRequested,
-            payload,
-        )
-        .map_err(|_| GovernedProcessBridgeError::Gateway)
-    }) {
-        Ok(receipt) => receipt,
-        Err(GovernedProcessBridgeError::InvalidProposal) => {
-            rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
-            return Ok(());
-        }
-        Err(GovernedProcessBridgeError::ReservationConflict) => {
-            let (code, message) = ProviderProcessResponseError::Conflict.rpc_error();
-            rpc.respond_error(id, code, message)?;
-            return Ok(());
-        }
-        Err(GovernedProcessBridgeError::Busy) => {
-            let (code, message) = ProviderProcessResponseError::Busy.rpc_error();
-            rpc.respond_error(id, code, message)?;
-            return Ok(());
-        }
-        Err(
-            GovernedProcessBridgeError::RunNotRegistered
-            | GovernedProcessBridgeError::InvalidContext
-            | GovernedProcessBridgeError::Gateway
-            | GovernedProcessBridgeError::NotLive
-            | GovernedProcessBridgeError::OwnershipMismatch
-            | GovernedProcessBridgeError::DecisionDenied
-            | GovernedProcessBridgeError::Expired
-            | GovernedProcessBridgeError::Cancelled
-            | GovernedProcessBridgeError::Interrupted
-            | GovernedProcessBridgeError::ShutDown
-            | GovernedProcessBridgeError::CleanupUnproven,
-        ) => {
-            rpc.respond_error(id, -32000, "governed_process_unavailable")?;
-            return Ok(());
-        }
-    };
 
-    // A fresh execution's durable receipt contains the post-request lifecycle.
+    // Post-return: emit only kinds not already delivered in-flight.
     // Replays return existing terminal evidence and must not duplicate events.
     if receipt.delivery == GovernedProcessDelivery::Executed {
-        if let Some(decided) = receipt.decided.as_ref() {
+        if let Some(decided) = receipt.decided.as_ref()
+            && !decided_emitted.load(Ordering::SeqCst)
+        {
             emit_process_event(
                 inner,
                 sink,
@@ -720,7 +753,9 @@ fn handle_process_tool(
                 decided,
             )?;
         }
-        if let Some(started) = receipt.started.as_ref() {
+        if let Some(started) = receipt.started.as_ref()
+            && !started_emitted.load(Ordering::SeqCst)
+        {
             emit_process_event(
                 inner,
                 sink,

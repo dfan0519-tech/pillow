@@ -34,7 +34,7 @@ use keeper_process_executor::{
 };
 use keeper_storage_sqlite::{ExecDecisionOutcome, StoredExecProposal};
 use keeper_tool_executor::{
-    GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
+    ClaimedObserver, GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
     GovernedProcessToolGateway, LiveProcessOutput, ProcessOutputChunk as GatewayOutputChunk,
     ProcessOutputStream as GatewayOutputStream, ProjectCapability, SealedProcessSpec,
 };
@@ -89,6 +89,18 @@ pub struct ProcessProposalRequestedView {
     pub summary: String,
     pub risk_class: ProcessRiskClass,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Waiter-thread lifecycle notifications for the caller-emits pattern.
+///
+/// Fired only after the corresponding durable step: requested after reserve,
+/// decided after decide commit, started only after claim `Claimed` (`Running`).
+/// Terminal remains on the post-return receipt (not this enum).
+#[derive(Debug)]
+pub enum GovernedProcessLifecycle<'a> {
+    Requested(&'a ProcessProposalRequestedView),
+    Decided(&'a ProcessProposalDecidedPayload),
+    Started(&'a ProcessStartedPayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +259,13 @@ struct LiveProcessEntry {
     process_cancel: ProcessCancellationSignal,
     output_chunks: Vec<ProcessOutputChunk>,
     decided_payload: Option<ProcessProposalDecidedPayload>,
+    /// Claim-confirmed only. Pre-claim drafts must never set this.
     started_payload: Option<ProcessStartedPayload>,
+    /// True only after durable `claim_run` → `Claimed` (`Running`).
+    started_confirmed: bool,
+    /// Once-only waiter delivery flags (in-flight emit path).
+    decided_delivered: bool,
+    started_delivered: bool,
     waiter_notified: bool,
 }
 
@@ -624,9 +642,15 @@ fn map_seal_error(error: GovernedProcessError) -> GovernedProcessBridgeError {
 
 /// Execute one adapter-normalized `process.run@1` proposal for an active run.
 ///
-/// Ordering: durable `pending_approval` reserve, then `on_requested` callback,
-/// then condition wait for approve/reject/expire/cancel/interrupt. Approve
-/// claims once and spawns through the gateway; busy/replay never spawn again.
+/// Ordering: durable `pending_approval` reserve, then lifecycle callback for
+/// requested, then condition wait for approve/reject/expire/cancel/interrupt.
+/// Approve claims once and spawns through the gateway; busy/replay never spawn
+/// again.
+///
+/// Lifecycle callbacks fire on the waiter thread after each durable step
+/// becomes eligible (decided after decide commit; started only after claim
+/// `Claimed`; terminal remains on the post-return receipt). Callers that emit
+/// protocol events must de-duplicate against the receipt's post-return path.
 ///
 /// Typed process event payloads on the receipt follow
 /// reserve → requested → decided → started → terminal (reject/expire omit start).
@@ -634,9 +658,7 @@ pub fn execute_governed_process(
     run_id: RunId,
     provider: ProviderProcessProposal,
     cancellation: &AtomicBool,
-    mut on_requested: impl FnMut(
-        &ProcessProposalRequestedView,
-    ) -> Result<(), GovernedProcessBridgeError>,
+    mut on_lifecycle: impl FnMut(GovernedProcessLifecycle<'_>) -> Result<(), GovernedProcessBridgeError>,
 ) -> Result<GovernedProcessReceipt, GovernedProcessBridgeError> {
     if provider.tool_id != "process.run" || provider.tool_version != 1 {
         return Err(GovernedProcessBridgeError::InvalidProposal);
@@ -808,17 +830,27 @@ pub fn execute_governed_process(
                 output_chunks: Vec::new(),
                 decided_payload: None,
                 started_payload: None,
+                started_confirmed: false,
+                decided_delivered: false,
+                started_delivered: false,
                 waiter_notified: false,
             },
         );
     }
 
-    if let Err(error) = on_requested(&requested) {
+    if let Err(error) = on_lifecycle(GovernedProcessLifecycle::Requested(&requested)) {
         fail_closed_after_reserve(&proposal_id, &bound);
         return Err(error);
     }
 
-    wait_for_resolution(run_id, &proposal_id, &bound, cancellation, requested)
+    wait_for_resolution(
+        run_id,
+        &proposal_id,
+        &bound,
+        cancellation,
+        requested,
+        &mut on_lifecycle,
+    )
 }
 
 fn wait_for_resolution(
@@ -827,6 +859,9 @@ fn wait_for_resolution(
     bound: &BoundProcessRun,
     cancellation: &AtomicBool,
     requested: ProcessProposalRequestedView,
+    on_lifecycle: &mut impl FnMut(
+        GovernedProcessLifecycle<'_>,
+    ) -> Result<(), GovernedProcessBridgeError>,
 ) -> Result<GovernedProcessReceipt, GovernedProcessBridgeError> {
     let coord = coordinator();
     loop {
@@ -843,6 +878,40 @@ fn wait_for_resolution(
             entry.process_cancel.cancel();
         }
 
+        // In-flight decided: after durable decide, before (or with) terminal.
+        let pending_decided = guard.live.get(proposal_id).and_then(|entry| {
+            if !entry.decided_delivered {
+                entry.decided_payload.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(decided) = pending_decided {
+            if let Some(entry) = guard.live.get_mut(proposal_id) {
+                entry.decided_delivered = true;
+            }
+            drop(guard);
+            on_lifecycle(GovernedProcessLifecycle::Decided(&decided))?;
+            continue;
+        }
+
+        // In-flight started: only after claim_run Claimed (started_confirmed).
+        let pending_started = guard.live.get(proposal_id).and_then(|entry| {
+            if !entry.started_delivered && entry.started_confirmed {
+                entry.started_payload.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(started) = pending_started {
+            if let Some(entry) = guard.live.get_mut(proposal_id) {
+                entry.started_delivered = true;
+            }
+            drop(guard);
+            on_lifecycle(GovernedProcessLifecycle::Started(&started))?;
+            continue;
+        }
+
         let entry = match guard.live.get(proposal_id) {
             Some(entry) => entry,
             None => return Err(GovernedProcessBridgeError::Gateway),
@@ -851,7 +920,12 @@ fn wait_for_resolution(
         if let Some(terminal_row) = entry.terminal.clone() {
             let provider_ok = entry.provider_ok.clone();
             let decided = entry.decided_payload.clone();
-            let started = entry.started_payload.clone();
+            // Receipt.started only when claim was confirmed (never pre-claim draft).
+            let started = if entry.started_confirmed {
+                entry.started_payload.clone()
+            } else {
+                None
+            };
             let cancelled = terminal_row.cancelled.unwrap_or(false)
                 || terminal_row.state == ExecProposalState::Cancelled;
             let timed_out = terminal_row.timed_out.unwrap_or(false);
@@ -1129,7 +1203,14 @@ fn publish_terminal_for_waiter(
             entry.provider_ok = provider_ok;
             entry.raw_grant.clear();
             entry.decided_payload = decided;
-            entry.started_payload = started;
+            if let Some(s) = started {
+                entry.started_payload = Some(s);
+                entry.started_confirmed = true;
+            } else if !entry.started_confirmed {
+                // Never invent a start on non-claim paths; keep claim-confirmed
+                // payload if the post-claim hook already recorded one.
+                entry.started_payload = None;
+            }
             if let Some(live) = live_output {
                 entry.output_chunks = map_gateway_chunks(&live);
             }
@@ -1370,6 +1451,8 @@ pub fn decide_process_proposal(
                 decision: ExecDecision::Reject,
                 state: row.state,
             };
+            // Durable reject first; mark decided eligibility + terminal, notify
+            // waiter (no EventSink here — waiter owns emit callbacks).
             publish_terminal_for_waiter(proposal_id, row.clone(), None, None, Some(decided), None);
             Ok(view_from_stored(&row, &argv, cwd, false))
         }
@@ -1387,13 +1470,22 @@ pub fn decide_process_proposal(
                 portable_cwd: cwd.clone(),
             };
 
+            // After durable decide only: record decided eligibility and wake
+            // waiter. Do NOT mark started yet — claim may still return Busy /
+            // Expired / Conflict without a legitimate start.
             if let Ok(mut guard) = coordinator().state.lock()
                 && let Some(entry) = guard.live.get_mut(proposal_id)
             {
                 entry.metadata.state = ExecProposalState::Approved;
                 entry.decided_payload = Some(decided.clone());
-                entry.started_payload = Some(started.clone());
+                entry.started_payload = None;
+                entry.started_confirmed = false;
             }
+            coordinator().cv.notify_all();
+
+            // Test-only seam: run after durable approve, before claim/execute.
+            #[cfg(any(test, feature = "test-support"))]
+            take_pre_claim_hook_for_tests(proposal_id);
 
             // One-shot claim → spawn. Busy/terminal never re-spawn.
             let observer_owner = owner;
@@ -1407,6 +1499,23 @@ pub fn decide_process_proposal(
                     chunk,
                 );
             });
+            // Post-claim only: confirm started eligibility after durable Running.
+            let claim_owner = owner;
+            let claim_conversation = conversation_id.to_owned();
+            let claim_proposal = proposal_id.to_owned();
+            let claim_started = started.clone();
+            let on_claimed: ClaimedObserver = Box::new(move || {
+                if let Ok(mut guard) = coordinator().state.lock()
+                    && let Some(entry) = guard.live.get_mut(&claim_proposal)
+                    && entry.owner == claim_owner
+                    && entry.conversation_id == claim_conversation
+                    && entry.terminal.is_none()
+                {
+                    entry.started_payload = Some(claim_started);
+                    entry.started_confirmed = true;
+                }
+                coordinator().cv.notify_all();
+            });
             let exec: Result<GovernedProcessExecution, GovernedProcessError> =
                 bound.gateway.execute_with_observer(
                     &bound.capability,
@@ -1414,6 +1523,7 @@ pub fn decide_process_proposal(
                     &sealed,
                     process_cancel,
                     Some(observer),
+                    Some(on_claimed),
                 );
 
             match exec {
@@ -1425,15 +1535,18 @@ pub fn decide_process_proposal(
                         return Err(GovernedProcessBridgeError::Busy);
                     }
                     let provider_ok = provider_output_from_row(&row);
-                    // Replay/busy from execute must not create a second start —
-                    // started payload already recorded only for this claim path.
+                    // Non-Claimed / non-spawn outcomes must not advertise start.
                     let started_out = match &execution.outcome {
                         GovernedProcessOutcome::Busy(_)
                         | GovernedProcessOutcome::Terminal(_)
                         | GovernedProcessOutcome::Rejected(_)
                         | GovernedProcessOutcome::Expired(_)
                         | GovernedProcessOutcome::Conflict(_) => None,
-                        _ => Some(started),
+                        _ => {
+                            // Prefer claim-confirmed payload already on the live
+                            // entry; fall back to local only when claim succeeded.
+                            Some(started)
+                        }
                     };
                     publish_terminal_for_waiter(
                         proposal_id,
@@ -1609,4 +1722,38 @@ pub fn force_live_process_expiry_for_tests(owner: Uuid, proposal_id: &str) -> bo
         return true;
     }
     false
+}
+
+/// Test seam: run after durable approve, before one-shot claim/execute.
+///
+/// Used to force claim Busy/Conflict without changing the decide blocking model.
+/// One-shot: taken and cleared on the next approve path.
+#[cfg(any(test, feature = "test-support"))]
+static PRE_CLAIM_HOOK: Mutex<Option<Box<dyn FnMut(&str) + Send>>> = Mutex::new(None);
+
+/// Install a one-shot pre-claim hook (test builds only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_pre_claim_hook_for_tests(hook: Box<dyn FnMut(&str) + Send>) {
+    if let Ok(mut guard) = PRE_CLAIM_HOOK.lock() {
+        *guard = Some(hook);
+    }
+}
+
+/// Clear any installed pre-claim hook (test builds only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_pre_claim_hook_for_tests() {
+    if let Ok(mut guard) = PRE_CLAIM_HOOK.lock() {
+        *guard = None;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn take_pre_claim_hook_for_tests(proposal_id: &str) {
+    let mut hook = match PRE_CLAIM_HOOK.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(_) => None,
+    };
+    if let Some(ref mut hook) = hook {
+        hook(proposal_id);
+    }
 }

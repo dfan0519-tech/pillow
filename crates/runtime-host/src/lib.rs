@@ -29,15 +29,18 @@ pub use governed_write::{
     list_write_proposals, open_write_proposal_diff, recover_write_proposals,
     recover_write_proposals_with_roots,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use host::force_live_process_expiry_for_tests;
 pub use host::{
     DEFAULT_MAX_CONCURRENT_TURNS, GovernedProcessBridgeError, GovernedProcessDelivery,
-    GovernedProcessReceipt, HostConfig, LiveProcessProposalView, ProcessOrigin, ProcessOutputChunk,
-    ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass,
-    ProviderProcessProposal, RuntimeHost, SpawnedTurn, decide_process_proposal,
-    execute_governed_process, list_process_proposals, live_process_authority_count,
-    normalize_max_concurrent_turns, open_process_output, pending_process_run_count,
-    recover_process_proposals, workspace_fixture_path,
+    GovernedProcessLifecycle, GovernedProcessReceipt, HostConfig, LiveProcessProposalView,
+    ProcessOrigin, ProcessOutputChunk, ProcessOutputStream, ProcessOutputView,
+    ProcessProposalRequestedView, ProcessRiskClass, ProviderProcessProposal, RuntimeHost,
+    SpawnedTurn, decide_process_proposal, execute_governed_process, list_process_proposals,
+    live_process_authority_count, normalize_max_concurrent_turns, open_process_output,
+    pending_process_run_count, recover_process_proposals, workspace_fixture_path,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use host::{
+    clear_pre_claim_hook_for_tests, force_live_process_expiry_for_tests,
+    set_pre_claim_hook_for_tests,
 };
 pub use sink::{BoundedDeliverySink, CollectingSink, ProtocolGuardSink, TerminalGuardSink};

@@ -67,6 +67,13 @@ const DENIED_LABELS: &[&str] = &[
 
 const DENIED_EXTENSIONS: &[&str] = &[".cmd", ".bat", ".ps1", ".vbs", ".js", ".wsf", ".vbe"];
 
+/// Invoked once after a durable one-shot claim commits (`Approved` → `Running`).
+///
+/// Side-channel only: has no authority over claim, spawn, cancel, or terminal
+/// outcomes. Hosts use this to mark protocol "started" eligibility after
+/// persistence — never before `claim_run` returns `Claimed`.
+pub type ClaimedObserver = Box<dyn FnOnce() + Send>;
+
 /// Default process timeout (matches process.run@1 manifest).
 pub const PROCESS_TIMEOUT: Duration = Duration::from_millis(60_000);
 
@@ -728,13 +735,17 @@ impl GovernedProcessToolGateway {
         sealed: &SealedProcessSpec,
         cancellation: ProcessCancellationSignal,
     ) -> Result<GovernedProcessExecution, GovernedProcessError> {
-        self.execute_with_observer(capability, proposal_id, sealed, cancellation, None)
+        self.execute_with_observer(capability, proposal_id, sealed, cancellation, None, None)
     }
 
-    /// Execute using a data-only observer of retained display chunks.
+    /// Execute using a data-only observer of retained display chunks and an
+    /// optional post-claim side channel.
     ///
     /// Claiming, spawning, cancellation and terminal persistence are identical
-    /// to [`Self::execute`]; the observer has no authority over any outcome.
+    /// to [`Self::execute`]; neither the output observer nor `on_claimed` has
+    /// authority over any outcome. `on_claimed` fires only after a durable
+    /// `Claimed` (`Running`) commit and never on Busy / Expired / Conflict /
+    /// Terminal claim outcomes.
     pub fn execute_with_observer(
         &self,
         capability: &ProjectCapability,
@@ -742,6 +753,7 @@ impl GovernedProcessToolGateway {
         sealed: &SealedProcessSpec,
         cancellation: ProcessCancellationSignal,
         observer: Option<OutputObserver>,
+        on_claimed: Option<ClaimedObserver>,
     ) -> Result<GovernedProcessExecution, GovernedProcessError> {
         if capability.project_id().is_empty() {
             return Err(GovernedProcessError::InvalidProjectRoot);
@@ -767,7 +779,14 @@ impl GovernedProcessToolGateway {
         let claim = self.store.claim_run(proposal_id, &owner, lease_ms, now)?;
 
         let _claimed = match claim {
-            ExecRunClaimOutcome::Claimed(row) => row,
+            ExecRunClaimOutcome::Claimed(row) => {
+                // Post-claim signal only: durable Running is already committed.
+                // Callers (runtime-host waiter) may mark started-eligible here.
+                if let Some(hook) = on_claimed {
+                    hook();
+                }
+                row
+            }
             ExecRunClaimOutcome::Busy(row) => {
                 return Ok(GovernedProcessExecution::without_output(
                     GovernedProcessOutcome::Busy(row),
@@ -1707,6 +1726,154 @@ mod unit_tests {
             .unwrap();
         assert!(matches!(outcome.outcome, GovernedProcessOutcome::Busy(_)));
         store.interrupt_run(&id, "owner-a", Utc::now()).unwrap();
+    }
+
+    /// B2: `on_claimed` fires only after durable Claimed — never on Busy.
+    #[test]
+    fn on_claimed_observer_fires_only_after_claimed_not_on_busy() {
+        use keeper_storage_sqlite::ExecRunClaimOutcome;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let db = temp.path().join("claimed-obs.db");
+        let projects = keeper_storage_sqlite::SqliteProjectRepository::open(&db).unwrap();
+        let project = projects
+            .create(keeper_project::CreateProject {
+                name: "P".into(),
+                root_path: root.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        let sessions = keeper_storage_sqlite::SqliteConversationRepository::open(&db).unwrap();
+        let conversation = sessions
+            .create_conversation(keeper_session::NewConversation {
+                project_id: project.id,
+                title: Some("c".into()),
+            })
+            .unwrap();
+        let run = sessions
+            .create_run(keeper_session::NewRun {
+                conversation_id: conversation.id,
+                user_message: "r".into(),
+            })
+            .unwrap();
+        let cap = ProjectCapability::new(project.id.0.to_string(), &root).unwrap();
+        let gateway = GovernedProcessToolGateway::open(&db).unwrap();
+        let sealed =
+            GovernedProcessToolGateway::seal(&cap, "node", &["--version".into()], Some("."))
+                .unwrap();
+        let prepared = gateway
+            .reserve(
+                &cap,
+                &conversation.id.0.to_string(),
+                RunId(run.id.0),
+                "call-claimed-obs",
+                &sealed,
+            )
+            .unwrap();
+        let grant = {
+            let hex = Sha256::digest(b"grant-claimed-obs");
+            format!(
+                "sha256:{}",
+                hex.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )
+        };
+        gateway
+            .decide(
+                &prepared.metadata.proposal_id,
+                &conversation.id.0.to_string(),
+                ExecDecision::ApproveOnce,
+                &grant,
+                sealed.proposal_fingerprint(),
+            )
+            .unwrap();
+        let id = prepared.metadata.proposal_id.clone();
+
+        // Path A: first Claimed invokes on_claimed.
+        let claimed_fires = std::sync::Arc::new(AtomicUsize::new(0));
+        let claimed_fires_hook = std::sync::Arc::clone(&claimed_fires);
+        let first = gateway
+            .execute_with_observer(
+                &cap,
+                &id,
+                &sealed,
+                ProcessCancellationSignal::new(),
+                None,
+                Some(Box::new(move || {
+                    claimed_fires_hook.fetch_add(1, AtomicOrdering::SeqCst);
+                })),
+            )
+            .unwrap();
+        assert!(
+            !matches!(
+                first.outcome,
+                GovernedProcessOutcome::Busy(_) | GovernedProcessOutcome::Conflict(_)
+            ),
+            "first claim must succeed: {first:?}"
+        );
+        assert_eq!(
+            claimed_fires.load(AtomicOrdering::SeqCst),
+            1,
+            "on_claimed must fire exactly once after Claimed"
+        );
+
+        // Path B: fresh proposal stolen to Running → gateway claim Busy → no on_claimed.
+        let prepared2 = gateway
+            .reserve(
+                &cap,
+                &conversation.id.0.to_string(),
+                RunId(run.id.0),
+                "call-claimed-obs-busy",
+                &sealed,
+            )
+            .unwrap();
+        let grant2 = {
+            let hex = Sha256::digest(b"grant-claimed-obs-busy");
+            format!(
+                "sha256:{}",
+                hex.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )
+        };
+        gateway
+            .decide(
+                &prepared2.metadata.proposal_id,
+                &conversation.id.0.to_string(),
+                ExecDecision::ApproveOnce,
+                &grant2,
+                sealed.proposal_fingerprint(),
+            )
+            .unwrap();
+        let id2 = prepared2.metadata.proposal_id.clone();
+        let store = gateway.store();
+        let stolen = store
+            .claim_run(&id2, "owner-thief", 60_000, Utc::now())
+            .unwrap();
+        assert!(matches!(stolen, ExecRunClaimOutcome::Claimed(_)));
+
+        let busy_fires = std::sync::Arc::new(AtomicUsize::new(0));
+        let busy_fires_hook = std::sync::Arc::clone(&busy_fires);
+        let second = gateway
+            .execute_with_observer(
+                &cap,
+                &id2,
+                &sealed,
+                ProcessCancellationSignal::new(),
+                None,
+                Some(Box::new(move || {
+                    busy_fires_hook.fetch_add(1, AtomicOrdering::SeqCst);
+                })),
+            )
+            .unwrap();
+        assert!(matches!(second.outcome, GovernedProcessOutcome::Busy(_)));
+        assert_eq!(
+            busy_fires.load(AtomicOrdering::SeqCst),
+            0,
+            "on_claimed must not fire when claim returns Busy"
+        );
+        store
+            .interrupt_run(&id2, "owner-thief", Utc::now())
+            .unwrap();
     }
 
     #[test]

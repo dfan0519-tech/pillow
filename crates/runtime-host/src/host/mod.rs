@@ -23,15 +23,18 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_TURNS, HostConfig, normalize_max_concurrent_turns,
     workspace_fixture_path,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use process::force_live_process_expiry_for_tests;
 pub use process::{
-    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessReceipt,
-    LiveProcessProposalView, ProcessOrigin, ProcessOutputChunk, ProcessOutputStream,
-    ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass, ProviderProcessProposal,
-    decide_process_proposal, execute_governed_process, list_process_proposals,
-    live_process_authority_count, open_process_output, pending_process_run_count,
-    recover_process_proposals,
+    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle,
+    GovernedProcessReceipt, LiveProcessProposalView, ProcessOrigin, ProcessOutputChunk,
+    ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass,
+    ProviderProcessProposal, decide_process_proposal, execute_governed_process,
+    list_process_proposals, live_process_authority_count, open_process_output,
+    pending_process_run_count, recover_process_proposals,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use process::{
+    clear_pre_claim_hook_for_tests, force_live_process_expiry_for_tests,
+    set_pre_claim_hook_for_tests,
 };
 pub use spawned::SpawnedTurn;
 

@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -21,8 +21,8 @@ use keeper_agent_protocol::{
 use keeper_policy::{ExecDecision, ExecProposalState};
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
-    GovernedProcessBridgeError, GovernedProcessDelivery, HostConfig, ProviderProcessProposal,
-    RuntimeHost, execute_governed_process,
+    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle, HostConfig,
+    ProviderProcessProposal, RuntimeHost, execute_governed_process,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
@@ -264,10 +264,12 @@ fn provider_proposal_receives_host_owned_identity() {
         fx.run_id,
         provider_node_version("call-id-inject"),
         &cancel,
-        |requested| {
-            assert!(!requested.proposal_id.is_empty());
-            assert_eq!(requested.program, "node");
-            assert_eq!(requested.argv, vec!["--version".to_string()]);
+        |event| {
+            if let GovernedProcessLifecycle::Requested(requested) = event {
+                assert!(!requested.proposal_id.is_empty());
+                assert_eq!(requested.program, "node");
+                assert_eq!(requested.argv, vec!["--version".to_string()]);
+            }
             Ok(())
         },
     )
@@ -374,10 +376,18 @@ fn one_pending_process_action_per_owning_run() {
 
     let barrier_w = Arc::clone(&barrier);
     let waiter = thread::spawn(move || {
-        execute_governed_process(run_id, provider_node_version("call-first"), &cancel, |_| {
-            barrier_w.wait();
-            Ok(())
-        })
+        execute_governed_process(
+            run_id,
+            provider_node_version("call-first"),
+            &cancel,
+            |event| {
+                // Barrier only on requested — decided/started must not re-enter wait.
+                if matches!(event, GovernedProcessLifecycle::Requested(_)) {
+                    barrier_w.wait();
+                }
+                Ok(())
+            },
+        )
     });
 
     barrier.wait();
@@ -948,6 +958,243 @@ fn force_expiry_seam_is_cfg_gated_not_ordinary_product_export() {
         mod_src.contains("#[cfg(any(test, feature = \"test-support\"))]"),
         "mod re-export must be cfg-gated"
     );
+}
+
+// ── B2: in-flight lifecycle emit (decided / started before terminal) ────────
+
+#[test]
+fn in_flight_started_is_observable_before_terminal() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+
+    let terminal_returned = Arc::new(AtomicBool::new(false));
+    let started_before_terminal = Arc::new(AtomicBool::new(false));
+    let started_count = Arc::new(AtomicUsize::new(0));
+    let decided_count = Arc::new(AtomicUsize::new(0));
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::ApproveOnce)
+            .unwrap()
+    });
+
+    let tr = Arc::clone(&terminal_returned);
+    let sbt = Arc::clone(&started_before_terminal);
+    let sc = Arc::clone(&started_count);
+    let dc = Arc::clone(&decided_count);
+    let ord = Arc::clone(&order);
+
+    let receipt = execute_governed_process(
+        fx.run_id,
+        // Sleep so claim-confirmed started can surface before process exit.
+        provider_node_slow_print("call-inflight-started", "B2_INFLIGHT"),
+        &cancel,
+        |event| {
+            match event {
+                GovernedProcessLifecycle::Decided(_) => {
+                    dc.fetch_add(1, Ordering::SeqCst);
+                    ord.lock().expect("order").push("decided");
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    // Must fire while execute_governed_process has not returned.
+                    assert!(
+                        !tr.load(Ordering::SeqCst),
+                        "ProcessStarted must arrive before terminal return"
+                    );
+                    sbt.store(true, Ordering::SeqCst);
+                    sc.fetch_add(1, Ordering::SeqCst);
+                    ord.lock().expect("order").push("started");
+                }
+                GovernedProcessLifecycle::Requested(_) => {
+                    ord.lock().expect("order").push("requested");
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    terminal_returned.store(true, Ordering::SeqCst);
+    decide.join().unwrap();
+
+    assert!(
+        started_before_terminal.load(Ordering::SeqCst),
+        "started callback must fire mid-flight before terminal return"
+    );
+    assert_eq!(decided_count.load(Ordering::SeqCst), 1);
+    assert_eq!(started_count.load(Ordering::SeqCst), 1);
+    assert!(receipt.terminal.is_some());
+    assert!(receipt.started.is_some());
+    assert_eq!(receipt.state, ExecProposalState::Succeeded);
+
+    let lifecycle = order.lock().expect("order").clone();
+    assert_eq!(
+        lifecycle,
+        vec!["requested", "decided", "started"],
+        "in-flight order must be requested → decided → started"
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn in_flight_lifecycle_does_not_double_emit_on_waiter() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+
+    let decided_count = Arc::new(AtomicUsize::new(0));
+    let started_count = Arc::new(AtomicUsize::new(0));
+
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::ApproveOnce)
+            .unwrap()
+    });
+
+    let dc = Arc::clone(&decided_count);
+    let sc = Arc::clone(&started_count);
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_print("call-no-double", "B2_NODBL"),
+        &cancel,
+        |event| {
+            match event {
+                GovernedProcessLifecycle::Decided(_) => {
+                    dc.fetch_add(1, Ordering::SeqCst);
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    sc.fetch_add(1, Ordering::SeqCst);
+                }
+                GovernedProcessLifecycle::Requested(_) => {}
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    // Waiter delivers each kind once; receipt still carries payloads for
+    // post-return callers that de-duplicate (adapter).
+    assert_eq!(decided_count.load(Ordering::SeqCst), 1);
+    assert_eq!(started_count.load(Ordering::SeqCst), 1);
+    assert!(receipt.decided.is_some());
+    assert!(receipt.started.is_some());
+    assert!(receipt.terminal.is_some());
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn replay_path_emits_zero_lifecycle_callbacks() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::ApproveOnce)
+            .unwrap()
+    });
+
+    let first = execute_governed_process(
+        fx.run_id,
+        provider_node_print("call-replay-lc", "B2_REPLAY"),
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+    assert_eq!(first.delivery, GovernedProcessDelivery::Executed);
+
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let cc = Arc::clone(&callback_count);
+    let replay = execute_governed_process(
+        fx.run_id,
+        provider_node_print("call-replay-lc", "B2_REPLAY"),
+        &cancel,
+        |_event| {
+            cc.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(replay.delivery, GovernedProcessDelivery::Replayed);
+    assert_eq!(
+        callback_count.load(Ordering::SeqCst),
+        0,
+        "Replayed must not invoke any lifecycle callback"
+    );
+    assert!(replay.requested.is_none());
+    assert!(replay.decided.is_none());
+    assert!(replay.started.is_none());
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn lifecycle_order_is_decided_then_started_then_terminal() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::ApproveOnce)
+            .unwrap()
+    });
+
+    let ord = Arc::clone(&order);
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_print("call-order", "B2_ORDER"),
+        &cancel,
+        |event| {
+            match event {
+                GovernedProcessLifecycle::Requested(_) => {}
+                GovernedProcessLifecycle::Decided(d) => {
+                    // Decided payload reflects durable Approved (or terminal reject).
+                    assert!(matches!(
+                        d.state,
+                        ExecProposalState::Approved | ExecProposalState::Rejected
+                    ));
+                    ord.lock().expect("order").push("decided");
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    ord.lock().expect("order").push("started");
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    assert!(receipt.terminal.is_some());
+    order.lock().expect("order").push("terminal");
+    assert_eq!(
+        *order.lock().expect("order"),
+        vec!["decided", "started", "terminal"]
+    );
+    assert!(receipt.decided.is_some());
+    assert!(receipt.started.is_some());
+    host.shutdown().unwrap();
 }
 
 #[test]

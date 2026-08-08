@@ -3,7 +3,7 @@ mod write;
 mod write_diff;
 
 pub use process::{
-    CLEANUP_UNPROVEN_PUBLIC_ERROR, GovernedProcessError, GovernedProcessExecution,
+    CLEANUP_UNPROVEN_PUBLIC_ERROR, ClaimedObserver, GovernedProcessError, GovernedProcessExecution,
     GovernedProcessOutcome, GovernedProcessToolGateway, LiveProcessOutput, PROCESS_CATALOG,
     PROCESS_OUTPUT_BYTE_CAP, PROCESS_RUN_ARGV_BYTE_CAP, PROCESS_RUN_ARGV_COUNT_CAP,
     PROCESS_TIMEOUT, PreparedExecProposal, ProcessOutputChunk, ProcessOutputStream,

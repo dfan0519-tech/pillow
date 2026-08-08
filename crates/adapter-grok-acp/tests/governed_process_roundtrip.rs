@@ -321,3 +321,171 @@ fn output_bounds_script_emits_one_lifecycle_with_bound_flags() {
                 == Some("governed-process-output-bounds-ok")
     }));
 }
+
+// ── B2: in-flight ProcessStarted + no double-emit + replay ──────────────────
+
+/// Approve a long-running process and assert `ProcessStarted` reaches the sink
+/// before `ProcessTerminalOutcome` (flight-period observability).
+#[test]
+fn in_flight_process_started_arrives_before_terminal() {
+    let harness = harness("governed-process-approve");
+    let host = Arc::clone(&harness.host);
+    let conversation_id = harness.conversation_id.clone();
+    let events = Arc::new(Mutex::new(CollectingSink::default()));
+    let events_probe = Arc::clone(&events);
+
+    // Slow enough that started can land before terminal if emission is mid-flight.
+    // The fake script still uses a short node process; host-side post-claim emit
+    // is what makes started observable before decide returns.
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_pending(&host, &conversation_id);
+        // Poll sink until ProcessStarted appears, or decide completes.
+        let host_d = host;
+        let cid = conversation_id;
+        let decide_thread = thread::spawn(move || {
+            host_d
+                .decide_process_proposal(&cid, &proposal_id, ExecDecision::ApproveOnce)
+                .unwrap();
+        });
+        // While decide is blocked on process completion, started should already
+        // be in the sink (in-flight emit after claim).
+        let mut saw_started_before_decide_return = false;
+        for _ in 0..500 {
+            let kinds: Vec<_> = events_probe
+                .lock()
+                .expect("sink")
+                .events
+                .iter()
+                .map(|e| e.kind)
+                .collect();
+            let has_started = kinds.contains(&RuntimeEventKind::ProcessStarted);
+            let has_terminal = kinds.contains(&RuntimeEventKind::ProcessTerminalOutcome);
+            if has_started && !has_terminal {
+                saw_started_before_decide_return = true;
+                break;
+            }
+            if has_terminal {
+                break;
+            }
+            if decide_thread.is_finished() {
+                // Re-check once more after decide returns.
+                let kinds: Vec<_> = events_probe
+                    .lock()
+                    .expect("sink")
+                    .events
+                    .iter()
+                    .map(|e| e.kind)
+                    .collect();
+                if kinds.contains(&RuntimeEventKind::ProcessStarted)
+                    && !kinds.contains(&RuntimeEventKind::ProcessTerminalOutcome)
+                {
+                    saw_started_before_decide_return = true;
+                }
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        decide_thread.join().unwrap();
+        saw_started_before_decide_return
+    });
+
+    let mut sink = SharedSink {
+        inner: Arc::clone(&events),
+    };
+    harness
+        .host
+        .send_turn(
+            SendTurn {
+                session_id: harness.session_id,
+                run_id: harness.run_id,
+                content: "run process".into(),
+            },
+            &mut sink,
+        )
+        .unwrap();
+    let saw_started_before_terminal = decide.join().unwrap();
+    harness.host.shutdown().unwrap();
+
+    let final_events = events.lock().unwrap().events.clone();
+    let lifecycle = process_lifecycle(&final_events);
+    assert_eq!(
+        lifecycle,
+        vec![
+            RuntimeEventKind::ProcessProposalRequested,
+            RuntimeEventKind::ProcessProposalDecided,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessTerminalOutcome,
+        ]
+    );
+    // Count uniqueness (no double-emit).
+    assert_eq!(
+        final_events
+            .iter()
+            .filter(|e| e.kind == RuntimeEventKind::ProcessStarted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_events
+            .iter()
+            .filter(|e| e.kind == RuntimeEventKind::ProcessProposalDecided)
+            .count(),
+        1
+    );
+    assert!(
+        saw_started_before_terminal,
+        "ProcessStarted must reach the sink before ProcessTerminalOutcome during a blocking decide"
+    );
+}
+
+#[test]
+fn executed_path_emits_each_lifecycle_kind_exactly_once() {
+    let events = send_with_decision("governed-process-approve", ExecDecision::ApproveOnce);
+    let lifecycle = process_lifecycle(&events);
+    assert_eq!(
+        lifecycle,
+        vec![
+            RuntimeEventKind::ProcessProposalRequested,
+            RuntimeEventKind::ProcessProposalDecided,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessTerminalOutcome,
+        ]
+    );
+    for kind in [
+        RuntimeEventKind::ProcessProposalRequested,
+        RuntimeEventKind::ProcessProposalDecided,
+        RuntimeEventKind::ProcessStarted,
+        RuntimeEventKind::ProcessTerminalOutcome,
+    ] {
+        assert_eq!(
+            events.iter().filter(|e| e.kind == kind).count(),
+            1,
+            "{kind:?} must appear exactly once (no in-flight + post-return double emit)"
+        );
+    }
+}
+
+#[test]
+fn replay_provider_path_does_not_grow_lifecycle_beyond_first_execution() {
+    // Fake script `governed-process-replay` reuses call identity; second reserve
+    // is Replayed and must not append another decided/started/terminal set.
+    let events = send_with_decision("governed-process-replay", ExecDecision::ApproveOnce);
+    let lifecycle = process_lifecycle(&events);
+    assert_eq!(
+        lifecycle,
+        vec![
+            RuntimeEventKind::ProcessProposalRequested,
+            RuntimeEventKind::ProcessProposalDecided,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessTerminalOutcome,
+        ],
+        "replay must not emit a second lifecycle multiset"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == RuntimeEventKind::ProcessStarted)
+            .count(),
+        1
+    );
+}
