@@ -198,6 +198,56 @@ Worker 把集成测试放那里是合理判断,不算越界 —— 是我漏写�
 
 ---
 
+### 4.9 Round 11:主题持久化 + **自锁缺陷修复**(四路并行)
+
+门 0 / E2E 10-10(合并树)。
+
+**主题持久化(grok3)**:`ui.theme` 复用**既有** `settings_entries` 表与优先级链,
+没另开存储路径 —— 这单的真实目的就是检验设置层能否装第二类配置,通过了。
+`PILLOW_THEME` 作为 allow-list 覆盖。浅色 `--text-tertiary` 改到 `#686872`,
+总控复算 **4.63:1**(原 3.57:1)。
+残留:防闪烁用 `html:not([data-theme-ready]){visibility:hidden}`,
+测试 setup 补打该标记以保住 `toBeVisible()` —— 不算弱化断言,但
+**防闪烁机制自身无测试覆盖**,而它是个能让整个文档不可见的开关。
+
+🔴 **4.9.1 自锁缺陷(总控在 S0b 验收时漏掉,由交付调研挖出)**
+
+**用户能用产品自带的设置把产品锁死,且产品内无自救路径。**
+
+链条(已核实到代码行):`upsert_path` 只校验非空 + 长度,**不检查路径存在** →
+UI 明写"重启后生效" → 重启时 `require_executable_file` 失败 →
+`lib.rs:119` 的 `open_conversation_service(...)?` 抛出 `setup` → **应用起不来** →
+Release 是 windows 子系统无控制台,**近似静默** →
+**能改回来的设置界面就在那个打不开的应用里**。
+
+门与 E2E 当时全绿,因为**没有任何测试覆盖"存了坏路径再重启"**。
+**这是本项目反复出现的同一族:绿不代表没问题,只代表测试看不见这个失败模式。**
+
+修复分两层:
+
+1. **保存时硬拒绝**不存在的文件/目录(总控定的取舍:代价是不能"先配路径再装 Grok",
+   相比锁死产品可接受;**不做仅警告**)。
+2. **启动降级**:`RuntimeOpenOutcome::{Ready, Degraded}`。
+   `Degraded` **结构上不携带 service 字段** —— "降级偷偷开了个 Fake"
+   在类型层面不可能发生,不是靠断言。
+   降级白名单只有四个码(`runtime_executable_missing` / `runtime_profile_invalid` /
+   `runtime_profile_missing` / `runtime_fake_not_allowed`);
+   **SQLite 失败仍 fatal**,有 `sqlite_open_failure_remains_fatal_not_degraded` 证明没过度降级。
+
+同时修掉 **Fake 未按 ADR-0003 Q2 门控**:`fake_adapter_selectable()` = `cfg!(debug_assertions)`,
+**但 `PILLOW_RUNTIME=fake` 在任何构建都继续有效**(E2E 生命线)。
+生产构建读到存量 `fake` → `runtime_fake_not_allowed` → 走同一条降级恢复通道,
+**不静默改写用户数据**。
+
+### 4.10 两份只读调研 + 一份 Codex 提案(与写码单真并行,零构建争用)
+
+- `docs/research/2026-08-08-knowledge-layer-research.md`(grok1)—— Stage 2 红线证据,见 §2
+- `docs/research/2026-08-08-desktop-delivery-research.md`(grok2)—— **挖出 §4.9.1**
+- `docs/execution/2026-08-08-adapter-decoupling-proposal.md`(Codex Sol)——
+  817 行,分 10 步增量方案,建议 **D 阶段前做**,自我界定为 `proposed` 而非 accepted
+
+---
+
 ## 5. Round 8/9 成果与验收结论
 
 ### 5.1 UI 环境光晕 + 磨砂玻璃(grok3,**已验收**)
@@ -293,14 +343,42 @@ Worker 把集成测试放那里是合理判断,不算越界 —— 是我漏写�
    N 个并行 Worker = N 份并发构建抢同一 `target/`,已造成 LNK1104 与多次误报失败。
    **尚未系统化解决**(可选:门运行串行化,或每 Worker 独立 `CARGO_TARGET_DIR`)。
 
+   **可用的绕法(已验证)**:**同时只跑 1 个写码单,其余全部派只读单**。
+   只读单不编译、不跑门、只产文档,与写码单**零争用**。
+   简报里必须写死:禁止改任何源码、**禁止任何 cargo / pnpm build / 门 / 测试 / E2E 命令**,
+   并说明理由(否则 Worker 会"顺手"跑门来自证)。
+   这样 4 路可以真并行:1 写 + 2 只读调研 + 1 Codex 只读分析。
+
 ---
 
 ## 8. 操作手册(Worker 派发)
 
-### 8.1 Grok(4 槽位,4 个独立账号)
+### 8.1 Grok(实为 5 槽位,grok5 不可用)
 
 **槽位固定、账号流动**,只引用槽位名不写死邮箱。权威文档:
 `<workspace>/VaultSystem\vault\wiki\system\grok-usage.md`
+
+实测槽位清单(`GET /api/agent-runtimes`):**grok1–grok4 可用,grok5 `unavailable`**,
+`concurrency: 8` = 4 槽 × 每槽 2 实例。
+
+🔴 **容器映射:slot `grokN` ↔ 容器 `~/.grokN`,N = 1..4。**
+
+> 本文件早前写的"grok1 = 默认容器 `~/.grok`"**是错的**,已更正。
+> 证据:`~/.grok1`、`~/.grok2` 各有 8 / 19 个历史会话(来自共用同一 Keeper 池的
+> 另一个项目),而默认 `~/.grok` 只有 3 个。若照旧文档把 grok1 跑进 `~/.grok`,
+> 就会在 Keeper 以为是 grok1 的时候实际用了另一个账号。
+
+🔴 **同槽两实例 = 同一账号并发,消耗翻倍。不要用。**
+`claim` 会**先填满一个槽的 2 个实例才换槽**,所以连续 claim 很可能拿到同一个 slotId。
+**每次 claim 后必须检查 `slotId`**;要跨槽就用**占位 claim 顶掉再释放**:
+
+```text
+claim → grok3(占位,已占用)   claim → grok1#2(占位)
+claim → grok2 ✓(目标)        然后释放两个占位租约
+```
+
+**派发后必做路由验证**:确认三条 grok 落在**不同容器、不同 session id**
+(`~/.grokN/.grok/sessions/<repo>/`)。
 
 ```bash
 # 取 capability(claim/release 需要)
@@ -324,17 +402,28 @@ curl -s -X POST "http://127.0.0.1:7890/api/agent-runtimes/grok-cli/release" \
 
 `<USER>` = 本机用户名,**不写进仓库**(密钥闸会拦);实际值见上面那份 vault 文档。
 
-```bash
-# grok1(默认容器)
-/c/Users/<USER>/.grok/bin/grok.exe --cwd <repo> -m grok-4.5 \
-  --always-approve --effort high --prompt-file '<绝对路径简报>' > <log> 2>&1
+**grok1–grok4 一律用同一种写法**,只把 `N` 换成槽号 —— **没有"默认容器"特例**。
+可执行文件始终是 `~/.grok/bin/grok.exe`(那只是二进制位置),
+**容器由三个环境变量决定**。在 bash 里用 `$USERPROFILE` 拼接,不要写死用户名:
 
-# grok2/3/4(复制 wrapper 的三重容器重定向,只改 cwd)
+```bash
+USERPROFILE="$USERPROFILE\\.grokN" \
+APPDATA="$USERPROFILE\\.grokN\\AppData\\Roaming" \
+LOCALAPPDATA="$USERPROFILE\\.grokN\\AppData\\Local" \
+"$HOME/.grok/bin/grok.exe" --cwd <repo> -m grok-4.5 \
+  --always-approve --effort high --prompt-file '<绝对路径简报>' > <log> 2>&1
+```
+
+<details><summary>旧写法(含字面路径,仅供理解结构)</summary>
+
+```bash
 USERPROFILE='C:\Users\<USER>\.grokN' \
 APPDATA='C:\Users\<USER>\.grokN\AppData\Roaming' \
 LOCALAPPDATA='C:\Users\<USER>\.grokN\AppData\Local' \
 /c/Users/<USER>/.grok/bin/grok.exe --cwd <repo> ...
 ```
+
+</details>
 
 ⚠️ **绝不只设 `GROK_HOME`** —— 血训:会导致两进程跑同一主号、双倍消耗打到 402。
 ⚠️ `--effort` 最高是 `high`,**没有 xhigh**。

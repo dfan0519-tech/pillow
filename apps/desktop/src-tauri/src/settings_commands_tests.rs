@@ -6,14 +6,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use keeper_storage_sqlite::{
-    ENV_GROK_EXECUTABLE, ENV_RUNTIME_ADAPTER, KEY_GROK_EXECUTABLE, RuntimeAdapterSetting,
-    SettingScope, SettingSource, SettingsUpdatedBy, SqliteSettingsRepository,
+    ENV_GROK_EXECUTABLE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE, KEY_UI_THEME,
+    RuntimeAdapterSetting, SettingScope, SettingSource, SettingsUpdatedBy,
+    SqliteSettingsRepository, UiThemeSetting,
 };
 use serde_json::Value;
 
 use crate::app_state::AppState;
-use crate::runtime_composition::tests::env_lock;
-use crate::settings_commands::{RuntimeSettingsDto, runtime_settings_dto_field_names, to_dto};
+use crate::runtime_composition::{fake_adapter_selectable, tests::env_lock};
+use crate::settings_commands::{
+    RuntimeSettingsDto, RuntimeStartupState, ThemeSettingsDto, runtime_settings_dto_field_names,
+    theme_to_dto, to_dto,
+};
 
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -79,6 +83,14 @@ impl Harness {
             .expect("resolve");
         to_dto(resolved, project_id.map(str::to_owned))
     }
+
+    fn resolve_theme_dto(&self, env: &HashMap<String, String>) -> ThemeSettingsDto {
+        let resolved = self
+            .settings
+            .resolve_theme(None, env)
+            .expect("resolve theme");
+        theme_to_dto(resolved)
+    }
 }
 
 fn empty_env() -> HashMap<String, String> {
@@ -91,7 +103,8 @@ fn empty_env() -> HashMap<String, String> {
 
 #[test]
 fn runtime_settings_dto_has_no_secret_fields() {
-    let h = Harness::new("dto-secrets");
+    // Label must not contain forbidden substrings (path is embedded in DTO values).
+    let h = Harness::new("dto-surface");
     h.settings
         .upsert_runtime_adapter(
             SettingScope::Global,
@@ -100,12 +113,14 @@ fn runtime_settings_dto_has_no_secret_fields() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
+    let exe = h._temp.join("tools-grok.exe");
+    fs::write(&exe, b"").unwrap();
     h.settings
         .upsert_path(
             SettingScope::Global,
             None,
             KEY_GROK_EXECUTABLE,
-            r"C:\tools\grok.exe",
+            &exe.to_string_lossy(),
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -146,13 +161,24 @@ fn runtime_settings_dto_has_no_secret_fields() {
 
     // Allowed surface only (structural allow-list).
     let top = json.as_object().expect("object");
-    let allowed_top = ["adapter", "grokExecutable", "grokProfile", "projectId"];
+    let allowed_top = [
+        "adapter",
+        "grokExecutable",
+        "grokProfile",
+        "projectId",
+        "fakeAdapterSelectable",
+    ];
     for key in top.keys() {
         assert!(
             allowed_top.contains(&key.as_str()),
             "unexpected top-level DTO field `{key}`"
         );
     }
+    assert_eq!(
+        dto.fake_adapter_selectable,
+        fake_adapter_selectable(),
+        "DTO must surface host Fake gate"
+    );
     for field in ["adapter", "grokExecutable", "grokProfile"] {
         let obj = top.get(field).and_then(Value::as_object).expect(field);
         for key in obj.keys() {
@@ -180,12 +206,14 @@ fn env_override_wins_over_stored_and_marks_source_env() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
+    let stored_exe = h._temp.join("stored-grok.exe");
+    fs::write(&stored_exe, b"").unwrap();
     h.settings
         .upsert_path(
             SettingScope::Project,
             Some(&h.project_id),
             KEY_GROK_EXECUTABLE,
-            r"C:\stored\grok.exe",
+            &stored_exe.to_string_lossy(),
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -282,12 +310,15 @@ fn global_and_project_writes_round_trip() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
+    let global_exe = h._temp.join("global-grok.exe");
+    fs::write(&global_exe, b"").unwrap();
+    let global_exe_str = global_exe.to_string_lossy().into_owned();
     h.settings
         .upsert_path(
             SettingScope::Global,
             None,
             KEY_GROK_EXECUTABLE,
-            r"C:\global\grok.exe",
+            &global_exe_str,
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -297,7 +328,7 @@ fn global_and_project_writes_round_trip() {
     assert_eq!(global.adapter.source, "global");
     assert_eq!(
         global.grok_executable.value.as_deref(),
-        Some(r"C:\global\grok.exe")
+        Some(global_exe_str.as_str())
     );
 
     let project = h.resolve_dto(Some(&h.project_id), &empty_env());
@@ -305,9 +336,37 @@ fn global_and_project_writes_round_trip() {
     assert_eq!(project.adapter.source, "project");
     assert_eq!(
         project.grok_executable.value.as_deref(),
-        Some(r"C:\global\grok.exe")
+        Some(global_exe_str.as_str())
     );
     assert_eq!(project.grok_executable.source, "global");
+}
+
+#[test]
+fn startup_state_degraded_reports_not_available_and_not_fake() {
+    let state = RuntimeStartupState::degraded(
+        "runtime_executable_missing",
+        "Grok executable is not a file: missing.exe".to_owned(),
+        "打开「设置」修正路径".to_owned(),
+    );
+    let dto = state.to_dto();
+    assert!(!dto.conversation_available);
+    assert!(dto.selection.is_none());
+    assert_eq!(
+        dto.degraded_code.as_deref(),
+        Some("runtime_executable_missing")
+    );
+    assert!(dto.degraded_guidance.as_ref().unwrap().contains("设置"));
+    // Explicit: degraded is not Fake.
+    assert_ne!(dto.selection.as_deref(), Some("fake"));
+}
+
+#[test]
+fn startup_state_ready_reports_selection() {
+    use crate::runtime_composition::RuntimeSelection;
+    let dto = RuntimeStartupState::ready(RuntimeSelection::GrokAcp).to_dto();
+    assert!(dto.conversation_available);
+    assert_eq!(dto.selection.as_deref(), Some("grok-acp"));
+    assert!(dto.degraded_code.is_none());
 }
 
 #[test]
@@ -367,4 +426,131 @@ fn process_env_map_still_wins_when_live() {
     unsafe {
         std::env::remove_var(ENV_RUNTIME_ADAPTER);
     }
+}
+
+// ---------------------------------------------------------------------------
+// ui.theme command DTO surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn theme_settings_dto_has_no_secret_fields() {
+    let h = Harness::new("theme-dto-secrets");
+    h.settings
+        .upsert_ui_theme(
+            SettingScope::Global,
+            None,
+            UiThemeSetting::Light,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let dto = h.resolve_theme_dto(&empty_env());
+    let json = serde_json::to_value(&dto).expect("serialize");
+    let blob = json.to_string().to_ascii_lowercase();
+    for needle in [
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "api_key",
+        "apikey",
+        "auth",
+        "private_key",
+        "bearer",
+    ] {
+        assert!(
+            !blob.contains(needle),
+            "ThemeSettingsDto must not contain secret-like substring `{needle}`: {blob}"
+        );
+    }
+    let top = json.as_object().expect("object");
+    assert_eq!(top.keys().count(), 1);
+    assert!(top.contains_key("theme"));
+    let theme = top.get("theme").and_then(Value::as_object).expect("theme");
+    for key in theme.keys() {
+        assert!(
+            matches!(key.as_str(), "value" | "source" | "envVar"),
+            "unexpected nested field `theme.{key}`"
+        );
+    }
+}
+
+#[test]
+fn theme_env_override_wins_and_marks_source_env() {
+    let h = Harness::new("theme-env-wins");
+    h.settings
+        .upsert_ui_theme(
+            SettingScope::Global,
+            None,
+            UiThemeSetting::Dark,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(ENV_UI_THEME.to_owned(), "light".to_owned());
+    let dto = h.resolve_theme_dto(&env);
+    assert_eq!(dto.theme.value.as_deref(), Some("light"));
+    assert_eq!(dto.theme.source, "env");
+    assert_eq!(dto.theme.env_var.as_deref(), Some("PILLOW_THEME"));
+}
+
+#[test]
+fn theme_default_and_global_round_trip() {
+    let h = Harness::new("theme-roundtrip");
+    let default = h.resolve_theme_dto(&empty_env());
+    assert_eq!(default.theme.value.as_deref(), Some("dark"));
+    assert_eq!(default.theme.source, "default");
+    assert!(default.theme.env_var.is_none());
+
+    h.settings
+        .upsert_ui_theme(
+            SettingScope::Global,
+            None,
+            UiThemeSetting::Light,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let stored = h.resolve_theme_dto(&empty_env());
+    assert_eq!(stored.theme.value.as_deref(), Some("light"));
+    assert_eq!(stored.theme.source, "global");
+}
+
+#[test]
+fn illegal_theme_fails_closed_never_dark() {
+    for label in ["system", "auto", "not-a-theme"] {
+        let err = UiThemeSetting::parse(label).unwrap_err();
+        assert_eq!(err.code(), "invalid_theme_selection");
+        assert!(!matches!(
+            UiThemeSetting::parse(label),
+            Ok(UiThemeSetting::Dark)
+        ));
+    }
+
+    let h = Harness::new("theme-illegal-env");
+    let mut env = HashMap::new();
+    env.insert(ENV_UI_THEME.to_owned(), "system".to_owned());
+    let err = h.settings.resolve_theme(None, &env).unwrap_err();
+    assert_eq!(err.code(), "invalid_theme_selection");
+}
+
+#[test]
+fn theme_key_is_known_for_clear_path() {
+    // clear_runtime_setting validate_known_key includes ui.theme (same store).
+    let h = Harness::new("theme-clear");
+    h.settings
+        .upsert_ui_theme(
+            SettingScope::Global,
+            None,
+            UiThemeSetting::Light,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    assert!(
+        h.settings
+            .delete(SettingScope::Global, None, KEY_UI_THEME)
+            .unwrap()
+    );
+    let dto = h.resolve_theme_dto(&empty_env());
+    assert_eq!(dto.theme.value.as_deref(), Some("dark"));
+    assert_eq!(dto.theme.source, "default");
 }

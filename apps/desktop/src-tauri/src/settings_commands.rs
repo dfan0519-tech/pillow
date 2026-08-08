@@ -1,18 +1,22 @@
 //! S0 non-secret settings Tauri commands.
 //!
-//! Read / write global and project runtime settings. Renderer DTOs carry only
-//! non-secret fields (adapter enum label, path strings, source attribution).
-//! No secret, token, credential, or auth fields exist in S0 — asserted in tests.
+//! Read / write global and project runtime settings, plus global UI theme.
+//! Renderer DTOs carry only non-secret fields (adapter enum label, path strings,
+//! theme label, source attribution). No secret, token, credential, or auth
+//! fields exist in S0 — asserted in tests.
+
+use std::sync::Arc;
 
 use keeper_storage_sqlite::{
-    KEY_GROK_EXECUTABLE, KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, ResolvedRuntimeSettings,
-    RuntimeAdapterSetting, SettingScope, SettingSource, SettingsError, SettingsUpdatedBy,
-    SqliteSettingsRepository, process_env_map,
+    KEY_GROK_EXECUTABLE, KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME,
+    ResolvedRuntimeSettings, ResolvedSetting, RuntimeAdapterSetting, SettingScope, SettingSource,
+    SettingsError, SettingsUpdatedBy, SqliteSettingsRepository, UiThemeSetting, process_env_map,
 };
 use serde::Serialize;
 use tauri::State;
 
 use crate::app_state::{AppState, CommandError};
+use crate::runtime_composition::{RuntimeOpenOutcome, RuntimeSelection, fake_adapter_selectable};
 
 // ---------------------------------------------------------------------------
 // Public DTOs (renderer-facing; camelCase; no secret fields)
@@ -34,7 +38,8 @@ pub struct ResolvedSettingDto {
 
 /// Effective S0 runtime settings for the settings surface.
 ///
-/// **No secret fields.** S0 only exposes adapter + two path strings + sources.
+/// **No secret fields.** S0 only exposes adapter + two path strings + sources
+/// + whether Fake is selectable in this build (ADR-0003 Q2).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsDto {
@@ -43,6 +48,94 @@ pub struct RuntimeSettingsDto {
     pub grok_profile: ResolvedSettingDto,
     /// Scope context used for resolution (`project` when project_id provided).
     pub project_id: Option<String>,
+    /// Host authority: Fake may appear in the adapter dropdown (dev builds).
+    /// Renderer must not hard-code env detection — filter options from this flag.
+    pub fake_adapter_selectable: bool,
+}
+
+/// Process-startup conversation runtime status for the shell.
+///
+/// When degraded, conversation is unavailable but Settings remains reachable.
+/// **Never** reports a silent Fake fallback.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStartupDto {
+    /// True when a conversation service was composed successfully.
+    pub conversation_available: bool,
+    /// Effective selection when available: `grok-acp` | `fake`.
+    pub selection: Option<String>,
+    /// Stable error code when degraded (e.g. `runtime_executable_missing`).
+    pub degraded_code: Option<String>,
+    /// Technical message when degraded.
+    pub degraded_message: Option<String>,
+    /// User-facing guidance pointing at Settings fields.
+    pub degraded_guidance: Option<String>,
+}
+
+/// Managed process state: conversation open result (ready or degraded).
+///
+/// Populated once in `lib::run` setup. ConversationService is only managed
+/// when ready; degraded mode deliberately does **not** open Fake.
+#[derive(Debug, Clone)]
+pub struct RuntimeStartupState {
+    pub conversation_available: bool,
+    pub selection: Option<RuntimeSelection>,
+    pub degraded_code: Option<&'static str>,
+    pub degraded_message: Option<String>,
+    pub degraded_guidance: Option<String>,
+}
+
+impl RuntimeStartupState {
+    pub fn ready(selection: RuntimeSelection) -> Self {
+        Self {
+            conversation_available: true,
+            selection: Some(selection),
+            degraded_code: None,
+            degraded_message: None,
+            degraded_guidance: None,
+        }
+    }
+
+    pub fn degraded(code: &'static str, message: String, guidance: String) -> Self {
+        Self {
+            conversation_available: false,
+            selection: None,
+            degraded_code: Some(code),
+            degraded_message: Some(message),
+            degraded_guidance: Some(guidance),
+        }
+    }
+
+    pub fn from_outcome(outcome: &RuntimeOpenOutcome) -> Self {
+        match outcome {
+            RuntimeOpenOutcome::Ready { selection, .. } => Self::ready(*selection),
+            RuntimeOpenOutcome::Degraded {
+                code,
+                message,
+                guidance,
+            } => Self::degraded(code, message.clone(), guidance.clone()),
+        }
+    }
+
+    pub fn to_dto(&self) -> RuntimeStartupDto {
+        RuntimeStartupDto {
+            conversation_available: self.conversation_available,
+            selection: self.selection.map(|s| s.as_str().to_owned()),
+            degraded_code: self.degraded_code.map(str::to_owned),
+            degraded_message: self.degraded_message.clone(),
+            degraded_guidance: self.degraded_guidance.clone(),
+        }
+    }
+}
+
+/// Effective UI theme (`ui.theme`) for the settings surface and shell.
+///
+/// Same `settings_entries` store and precedence as runtime settings.
+/// **No secret fields.**
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeSettingsDto {
+    pub theme: ResolvedSettingDto,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +156,14 @@ pub fn get_runtime_settings(
     Ok(to_dto(resolved, project_ref.map(str::to_owned)))
 }
 
+/// Process-startup runtime status (ready vs degraded). Shell always available.
+#[tauri::command]
+pub fn get_runtime_startup(
+    startup: State<'_, Arc<RuntimeStartupState>>,
+) -> Result<RuntimeStartupDto, CommandError> {
+    Ok(startup.to_dto())
+}
+
 /// Upsert runtime adapter at global or project scope. Returns fresh resolution.
 #[tauri::command]
 pub fn set_runtime_adapter(
@@ -74,6 +175,16 @@ pub fn set_runtime_adapter(
 ) -> Result<RuntimeSettingsDto, CommandError> {
     let (scope, project_ref) = parse_scope(&scope, project_id.as_deref(), &app)?;
     let parsed = RuntimeAdapterSetting::parse(&adapter).map_err(map_settings_error)?;
+    // ADR-0003 Q2: refuse storing Fake when this build does not expose it.
+    // Does not rewrite existing stored Fake rows (fail-closed on read/open).
+    if parsed == RuntimeAdapterSetting::Fake && !fake_adapter_selectable() {
+        return Err(settings_error(
+            "runtime_fake_not_allowed",
+            "Fake adapter is only available in development builds. \
+             Choose Grok ACP, or set PILLOW_RUNTIME=fake for automation. \
+             Existing stored values are not modified by this rejection.",
+        ));
+    }
     settings
         .upsert_runtime_adapter(scope, project_ref, parsed, SettingsUpdatedBy::User)
         .map_err(map_settings_error)?;
@@ -132,6 +243,41 @@ pub fn clear_runtime_setting(
         .resolve_runtime(project_ref, &process_env_map())
         .map_err(map_settings_error)?;
     Ok(to_dto(resolved, project_ref.map(str::to_owned)))
+}
+
+/// Resolve effective UI theme (env → project → global → default).
+///
+/// Product UI only exposes global scope for edits; resolution still uses the
+/// shared precedence chain so env/`PILLOW_THEME` wins for deterministic E2E.
+#[tauri::command]
+pub fn get_theme_settings(
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<ThemeSettingsDto, CommandError> {
+    let project_ref = normalize_project_id(project_id.as_deref(), &app)?;
+    let resolved = settings
+        .resolve_theme(project_ref, &process_env_map())
+        .map_err(map_settings_error)?;
+    Ok(theme_to_dto(resolved))
+}
+
+/// Upsert UI theme at **global** scope only. Returns fresh resolution.
+///
+/// Project-scoped theme is intentionally not exposed (visual contract stability).
+#[tauri::command]
+pub fn set_ui_theme(
+    settings: State<'_, SqliteSettingsRepository>,
+    theme: String,
+) -> Result<ThemeSettingsDto, CommandError> {
+    let parsed = UiThemeSetting::parse(&theme).map_err(map_settings_error)?;
+    settings
+        .upsert_ui_theme(SettingScope::Global, None, parsed, SettingsUpdatedBy::User)
+        .map_err(map_settings_error)?;
+    let resolved = settings
+        .resolve_theme(None, &process_env_map())
+        .map_err(map_settings_error)?;
+    Ok(theme_to_dto(resolved))
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +347,7 @@ fn normalize_project_id<'a>(
 
 fn validate_known_key(key: &str) -> Result<(), CommandError> {
     match key {
-        KEY_RUNTIME_ADAPTER | KEY_GROK_EXECUTABLE | KEY_GROK_PROFILE => Ok(()),
+        KEY_RUNTIME_ADAPTER | KEY_GROK_EXECUTABLE | KEY_GROK_PROFILE | KEY_UI_THEME => Ok(()),
         other => Err(settings_error(
             "settings_unknown_key",
             &format!("Unknown settings key `{other}`."),
@@ -230,6 +376,7 @@ pub(crate) fn to_dto(
             env_var: env_var_for(resolved.grok_profile.source, "PILLOW_GROK_PROFILE"),
         },
         project_id,
+        fake_adapter_selectable: fake_adapter_selectable(),
     }
 }
 
@@ -242,6 +389,16 @@ fn env_var_for(source: SettingSource, name: &str) -> Option<String> {
         Some(name.to_owned())
     } else {
         None
+    }
+}
+
+pub(crate) fn theme_to_dto(resolved: ResolvedSetting<UiThemeSetting>) -> ThemeSettingsDto {
+    ThemeSettingsDto {
+        theme: ResolvedSettingDto {
+            value: Some(resolved.value.as_str().to_owned()),
+            source: source_str(resolved.source).to_owned(),
+            env_var: env_var_for(resolved.source, "PILLOW_THEME"),
+        },
     }
 }
 

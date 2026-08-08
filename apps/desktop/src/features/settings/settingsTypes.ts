@@ -4,6 +4,9 @@ export type SettingSource = "env" | "project" | "global" | "default";
 /** Constrained runtime adapter labels (matches RuntimeAdapterSetting). */
 export type RuntimeAdapterLabel = "grok-acp" | "fake";
 
+/** Constrained UI theme labels (matches UiThemeSetting). No `system`. */
+export type UiThemeLabel = "dark" | "light";
+
 export type SettingsScope = "global" | "project";
 
 export type ResolvedSettingView = {
@@ -22,10 +25,37 @@ export type RuntimeSettingsView = {
   grokExecutable: ResolvedSettingView;
   grokProfile: ResolvedSettingView;
   projectId: string | null;
+  /**
+   * Host authority (ADR-0003 Q2): whether Fake may appear in the adapter
+   * select. Renderer must filter options from this flag — never hard-code
+   * import.meta.env / NODE_ENV detection.
+   */
+  fakeAdapterSelectable: boolean;
+};
+
+/**
+ * Process-startup conversation runtime status.
+ * When degraded, conversation is off but Settings remains reachable.
+ */
+export type RuntimeStartupView = {
+  conversationAvailable: boolean;
+  selection: string | null;
+  degradedCode: string | null;
+  degradedMessage: string | null;
+  degradedGuidance: string | null;
+};
+
+/**
+ * Renderer-facing theme settings. Same settings store + precedence as runtime;
+ * no secret fields.
+ */
+export type ThemeSettingsView = {
+  theme: ResolvedSettingView;
 };
 
 export type SettingsGatewayErrorCode =
   | "invalid_runtime_selection"
+  | "invalid_theme_selection"
   | "settings_invalid_scope"
   | "settings_scope_shape"
   | "settings_unknown_key"
@@ -34,6 +64,7 @@ export type SettingsGatewayErrorCode =
   | "settings_invalid_value_json"
   | "settings_sqlite"
   | "settings_lock_poisoned"
+  | "runtime_fake_not_allowed"
   | "project_not_found"
   | "invalid_settings_response"
   | "settings_command_failed";
@@ -55,6 +86,8 @@ export class SettingsGatewayError extends Error {
 
 export interface SettingsGateway {
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView>;
+  /** Optional: process startup ready/degraded status (Tauri host). */
+  getRuntimeStartup?(): Promise<RuntimeStartupView>;
   setRuntimeAdapter(
     scope: SettingsScope,
     projectId: string | null,
@@ -73,8 +106,26 @@ export interface SettingsGateway {
   clearRuntimeSetting(
     scope: SettingsScope,
     projectId: string | null,
-    key: "runtime.adapter" | "runtime.grok.executable" | "runtime.grok.profile",
+    key:
+      | "runtime.adapter"
+      | "runtime.grok.executable"
+      | "runtime.grok.profile"
+      | "ui.theme",
   ): Promise<RuntimeSettingsView>;
+  getThemeSettings(projectId?: string | null): Promise<ThemeSettingsView>;
+  /** Global-only write. Product UI does not expose project-scoped theme. */
+  setUiTheme(theme: UiThemeLabel): Promise<ThemeSettingsView>;
+}
+
+/** Apply resolved theme to the document before paint-sensitive UI. */
+export function applyDocumentTheme(theme: UiThemeLabel): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-theme", theme);
+  document.documentElement.setAttribute("data-theme-ready", "");
+}
+
+export function parseUiThemeLabel(value: string | null | undefined): UiThemeLabel {
+  return value === "light" ? "light" : "dark";
 }
 
 export function isEnvOverride(setting: ResolvedSettingView): boolean {

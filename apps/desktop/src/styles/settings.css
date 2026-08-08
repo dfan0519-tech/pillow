@@ -221,3 +221,64 @@
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
 }
+
+/* Runtime config degraded: shell stays up; conversation off. Does not alter
+ * sidebar/rail geometry — sits above the project shell as a full-width bar. */
+.runtime-degraded-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--warning) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated));
+  color: var(--text-primary);
+}
+
+.runtime-degraded-banner__body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.runtime-degraded-banner__body strong {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.runtime-degraded-banner__body p {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.runtime-degraded-banner__detail {
+  color: var(--text-secondary) !important;
+  font-weight: 500;
+}
+
+.runtime-degraded-banner button {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.runtime-degraded-banner button:hover {
+  background: var(--bg-hover);
+}
+
+.runtime-degraded-banner button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}

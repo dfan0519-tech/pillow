@@ -21,10 +21,10 @@
  *   GRAPHITE    #3E3E46
  *   BLACK INK   #0E0E10
  *
- * Theme switch (dev / visual QA only — no persistence, no settings UI):
- *   document.documentElement.setAttribute("data-theme", "light")
- *   document.documentElement.setAttribute("data-theme", "dark")
- *   document.documentElement.removeAttribute("data-theme")  // → dark default
+ * Theme persistence (settings layer key `ui.theme`, values dark|light only):
+ *   document.documentElement.setAttribute("data-theme", "light"|"dark")
+ *   document.documentElement.setAttribute("data-theme-ready", "")
+ * App stamps both before revealing paint (FOUC guard below). No `system`.
  *
  * Structure/control grammar still adapted from Grok App under MIT; color values
  * are Pillow-original (see THIRD_PARTY_NOTICES.md).
@@ -163,7 +163,8 @@
   /* GRAPHITE body; secondary darkened from SMOKE for ≥4.5:1 (raw SMOKE fails) */
   --text-primary: #3e3e46;
   --text-secondary: #5c5c66;
-  --text-tertiary: #7a7a84;
+  /* Tertiary: was #7a7a84 (3.57:1 on --bg-main); #686872 is ≥4.5:1 body text */
+  --text-tertiary: #686872;
   --text-inverse: #faf9f7;
 
   /* Lilac accent — fills/highlights only, not body copy */
@@ -218,6 +219,17 @@ body,
   min-height: 100%;
   height: 100%;
   margin: 0;
+}
+
+/*
+ * FOUC guard: hide the document until App applies the resolved theme.
+ * Prevents a dark flash when the durable preference (or PILLOW_THEME) is light.
+ * Tests that set data-theme without going through App may also set
+ * data-theme-ready, or rely on computed style reads (visibility does not
+ * affect CSS custom properties).
+ */
+html:not([data-theme-ready]) {
+  visibility: hidden;
 }
 
 button,

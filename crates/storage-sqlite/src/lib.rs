@@ -17,10 +17,10 @@ pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
 };
 pub use settings::{
-    ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, KEY_GROK_EXECUTABLE,
-    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, ResolvedRuntimeSettings, ResolvedSetting,
+    ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,
+    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, ResolvedRuntimeSettings, ResolvedSetting,
     RuntimeAdapterSetting, SettingScope, SettingSource, SettingsError, SettingsUpdatedBy,
-    SqliteSettingsRepository, StoredSetting, UpsertSetting, process_env_map,
+    SqliteSettingsRepository, StoredSetting, UiThemeSetting, UpsertSetting, process_env_map,
 };
 pub use tool_call::{
     SqliteToolCallRepository, StoredToolCall, ToolCallReservationOutcome, ToolCallStoreError,

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { WindowControls } from "./components/WindowControls";
 import {
   conversationBelongsToProject,
@@ -15,7 +23,12 @@ import {
   TauriSettingsGateway,
 } from "./features/settings/settingsGateway";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
-import type { SettingsGateway } from "./features/settings/settingsTypes";
+import {
+  applyDocumentTheme,
+  parseUiThemeLabel,
+  type RuntimeStartupView,
+  type SettingsGateway,
+} from "./features/settings/settingsTypes";
 import type { GitChangesPaneModel } from "./features/workbench/ResourcePane";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
@@ -139,6 +152,10 @@ export function App({
   const [loading, setLoading] = useState(true);
   const [shellReady, setShellReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** Runtime config degrade (bad Grok path etc.) — shell up, conversation off. */
+  const [runtimeStartup, setRuntimeStartup] = useState<RuntimeStartupView | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -220,6 +237,66 @@ export function App({
       active = false;
     };
   }, [gateway]);
+
+  /**
+   * Theme must land before first meaningful paint (no dark→light flash).
+   * Resolve via the settings gateway (env → global → default), apply
+   * `data-theme` + `data-theme-ready` in layout effect. CSS hides the document
+   * until `data-theme-ready` is set (see tokens.css).
+   */
+  useLayoutEffect(() => {
+    let cancelled = false;
+    void settingsGateway.getThemeSettings(null).then(
+      (view) => {
+        if (cancelled) return;
+        applyDocumentTheme(parseUiThemeLabel(view.theme.value));
+      },
+      () => {
+        if (cancelled) return;
+        // Fail closed to product default so the shell still becomes visible.
+        applyDocumentTheme("dark");
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsGateway]);
+
+  // Degraded runtime (bad path / release stored Fake): surface banner + keep
+  // Settings reachable. Conversation stays unavailable until restart after fix.
+  useEffect(() => {
+    if (!settingsGateway.getRuntimeStartup) {
+      setRuntimeStartup({
+        conversationAvailable: true,
+        selection: null,
+        degradedCode: null,
+        degradedMessage: null,
+        degradedGuidance: null,
+      });
+      return;
+    }
+    let cancelled = false;
+    void settingsGateway.getRuntimeStartup().then(
+      (status) => {
+        if (cancelled) return;
+        setRuntimeStartup(status);
+      },
+      () => {
+        if (cancelled) return;
+        // Missing status command: assume available (unit mocks without the method).
+        setRuntimeStartup({
+          conversationAvailable: true,
+          selection: null,
+          degradedCode: null,
+          degradedMessage: null,
+          degradedGuidance: null,
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsGateway]);
 
   useEffect(() => {
     if (!shellReady || readinessSent.current || !onProjectLauncherReady) return;
@@ -958,6 +1035,35 @@ export function App({
       >
         设置
       </button>
+      {runtimeStartup
+      && !runtimeStartup.conversationAvailable
+      && runtimeStartup.degradedCode ? (
+        <div
+          className="runtime-degraded-banner"
+          data-testid="runtime-degraded-banner"
+          role="alert"
+        >
+          <div className="runtime-degraded-banner__body">
+            <strong>对话运行时不可用</strong>
+            <p>
+              {runtimeStartup.degradedGuidance
+                ?? "请打开设置检查 Grok 路径与运行时适配器，修正后重启 Pillow。"}
+            </p>
+            {runtimeStartup.degradedMessage ? (
+              <p className="runtime-degraded-banner__detail">
+                {runtimeStartup.degradedMessage}
+              </p>
+            ) : null}
+          </div>
+          <button
+            data-testid="runtime-degraded-open-settings"
+            onClick={() => setSettingsOpen(true)}
+            type="button"
+          >
+            打开设置
+          </button>
+        </div>
+      ) : null}
       {error ? (
         <p className="app-error" role="alert">
           <span>{error.message}</span>
@@ -1004,6 +1110,7 @@ export function App({
         <SettingsPanel
           gateway={settingsGateway}
           onClose={() => setSettingsOpen(false)}
+          onThemeChanged={applyDocumentTheme}
           projectId={activeProject?.id ?? null}
         />
       ) : null}

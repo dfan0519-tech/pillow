@@ -49,10 +49,10 @@ use resource_commands::{
     list_project_resources, list_recent_project_resources, preview_project_resource,
     read_project_resource, search_project_resources,
 };
-use runtime_composition::open_conversation_service;
+use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degrade};
 use settings_commands::{
-    clear_runtime_setting, get_runtime_settings, set_grok_executable, set_grok_profile,
-    set_runtime_adapter,
+    RuntimeStartupState, clear_runtime_setting, get_runtime_settings, get_runtime_startup,
+    get_theme_settings, set_grok_executable, set_grok_profile, set_runtime_adapter, set_ui_theme,
 };
 use tauri::Manager;
 use write_commands::{decide_write_proposal, list_write_proposals, open_write_proposal_diff};
@@ -91,10 +91,13 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         get_git_status,
         open_git_diff,
         get_runtime_settings,
+        get_runtime_startup,
         set_runtime_adapter,
         set_grok_executable,
         set_grok_profile,
-        clear_runtime_setting
+        clear_runtime_setting,
+        get_theme_settings,
+        set_ui_theme
     ])
 }
 
@@ -114,16 +117,35 @@ pub fn run() {
             // Production default: GrokAcpAdapter. Fake only when explicitly
             // selected via env or stored settings (env wins). Never silent-
             // fallback from a missing Grok install to Fake.
-            let (conversations, selection) = open_conversation_service(&db_path, emitter)?;
-            eprintln!("Pillow runtime selection: {}", selection.as_str());
-            let conversations = Arc::new(conversations);
-            let recovered = conversations.recover_inflight()?;
-            if recovered > 0 {
-                eprintln!("Pillow recovered {recovered} interrupted run(s) as Interrupted");
+            //
+            // Runtime-config failures (bad exe/profile paths, release stored
+            // Fake) degrade: shell + Settings stay up; conversation stays off.
+            // SQLite / non-config failures remain fatal (not user-fixable).
+            let outcome = open_conversation_service_or_degrade(&db_path, emitter)
+                .map_err(|error| format!("runtime open failed: {error}"))?;
+            let startup = RuntimeStartupState::from_outcome(&outcome);
+            match outcome {
+                RuntimeOpenOutcome::Ready { service, selection } => {
+                    eprintln!("Pillow runtime selection: {}", selection.as_str());
+                    let conversations = Arc::new(service);
+                    let recovered = conversations.recover_inflight()?;
+                    if recovered > 0 {
+                        eprintln!("Pillow recovered {recovered} interrupted run(s) as Interrupted");
+                    }
+                    app.manage(conversations);
+                }
+                RuntimeOpenOutcome::Degraded { code, message, .. } => {
+                    eprintln!(
+                        "Pillow runtime degraded ({code}): {message}. Settings remain available."
+                    );
+                    // Deliberately do not manage ConversationService and do not
+                    // open Fake. Conversation commands fail closed until restart
+                    // after the user fixes Settings.
+                }
             }
             app.manage(state);
             app.manage(settings);
-            app.manage(conversations);
+            app.manage(Arc::new(startup));
             app.manage(GitCommandState::new());
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));
             Ok(())

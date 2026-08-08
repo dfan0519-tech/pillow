@@ -12,7 +12,7 @@
 //! and never silently fall back to Fake.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
@@ -26,6 +26,8 @@ pub const KEY_RUNTIME_ADAPTER: &str = "runtime.adapter";
 pub const KEY_GROK_EXECUTABLE: &str = "runtime.grok.executable";
 /// S0 key: Grok process-home / profile directory (`PILLOW_GROK_PROFILE`).
 pub const KEY_GROK_PROFILE: &str = "runtime.grok.profile";
+/// UI theme preference (`PILLOW_THEME`). Values: `dark` | `light` only.
+pub const KEY_UI_THEME: &str = "ui.theme";
 
 /// Allow-listed env override for [`KEY_RUNTIME_ADAPTER`].
 pub const ENV_RUNTIME_ADAPTER: &str = "PILLOW_RUNTIME";
@@ -33,6 +35,8 @@ pub const ENV_RUNTIME_ADAPTER: &str = "PILLOW_RUNTIME";
 pub const ENV_GROK_EXECUTABLE: &str = "PILLOW_GROK_EXECUTABLE";
 /// Allow-listed env override for [`KEY_GROK_PROFILE`].
 pub const ENV_GROK_PROFILE: &str = "PILLOW_GROK_PROFILE";
+/// Allow-listed env override for [`KEY_UI_THEME`].
+pub const ENV_UI_THEME: &str = "PILLOW_THEME";
 
 const VALUE_KIND_ENUM: &str = "enum";
 const VALUE_KIND_PATH: &str = "path";
@@ -118,6 +122,37 @@ impl RuntimeAdapterSetting {
     }
 }
 
+/// Constrained UI theme enum. Intentionally no `system` (E2E screenshot determinism).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiThemeSetting {
+    Dark,
+    Light,
+}
+
+impl UiThemeSetting {
+    /// Parse theme label. Unknown values fail closed (no silent dark fallback).
+    pub fn parse(raw: &str) -> Result<Self, SettingsError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "dark" => Ok(Self::Dark),
+            "light" => Ok(Self::Light),
+            other => Err(SettingsError::InvalidThemeSelection {
+                value: other.to_owned(),
+            }),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn default_value() -> Self {
+        Self::Dark
+    }
+}
+
 /// Durable settings row (non-secret only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSetting {
@@ -189,6 +224,8 @@ pub enum SettingsError {
     UnknownKey { key: String },
     #[error("invalid runtime selection `{value}` (fail-closed; never falls back to Fake)")]
     InvalidRuntimeSelection { value: String },
+    #[error("invalid theme selection `{value}` (fail-closed; never falls back to dark)")]
+    InvalidThemeSelection { value: String },
     #[error("invalid path setting value for key {key}")]
     InvalidPathValue { key: String },
     #[error("invalid settings value kind `{kind}` for key {key}")]
@@ -210,6 +247,7 @@ impl SettingsError {
             Self::ScopeShape => "settings_scope_shape",
             Self::UnknownKey { .. } => "settings_unknown_key",
             Self::InvalidRuntimeSelection { .. } => "invalid_runtime_selection",
+            Self::InvalidThemeSelection { .. } => "invalid_theme_selection",
             Self::InvalidPathValue { .. } => "settings_invalid_path",
             Self::InvalidValueKind { .. } => "settings_invalid_value_kind",
             Self::InvalidValueJson { .. } => "settings_invalid_value_json",
@@ -431,6 +469,24 @@ impl SqliteSettingsRepository {
         })
     }
 
+    /// Convenience: set UI theme at a scope (same `settings_entries` table as runtime).
+    pub fn upsert_ui_theme(
+        &self,
+        scope: SettingScope,
+        project_id: Option<&str>,
+        theme: UiThemeSetting,
+        updated_by: SettingsUpdatedBy,
+    ) -> Result<StoredSetting, SettingsError> {
+        self.upsert(UpsertSetting {
+            scope,
+            project_id: project_id.map(str::to_owned),
+            key: KEY_UI_THEME.to_owned(),
+            value_kind: VALUE_KIND_ENUM.to_owned(),
+            value_json: json_string(theme.as_str()),
+            updated_by,
+        })
+    }
+
     /// Delete one key at a scope.
     pub fn delete(
         &self,
@@ -480,7 +536,7 @@ impl SqliteSettingsRepository {
     /// Resolve S0 runtime settings with documented precedence.
     ///
     /// `env` is the allow-list source (tests inject a map; production uses
-    /// [`process_env_map`]). Only the three S0 env names are consulted.
+    /// [`process_env_map`]). Only the allow-listed env names are consulted.
     pub fn resolve_runtime(
         &self,
         project_id: Option<&str>,
@@ -500,6 +556,48 @@ impl SqliteSettingsRepository {
                 project_id,
                 env,
             )?,
+        })
+    }
+
+    /// Resolve `ui.theme` with the same precedence chain as runtime settings:
+    /// `env → project → global → default`.
+    ///
+    /// Product UI only exposes global scope for theme, but resolution reuses the
+    /// full key/scope/precedence machinery (no parallel theme store).
+    pub fn resolve_theme(
+        &self,
+        project_id: Option<&str>,
+        env: &HashMap<String, String>,
+    ) -> Result<ResolvedSetting<UiThemeSetting>, SettingsError> {
+        if let Some(raw) = env.get(ENV_UI_THEME) {
+            let value = UiThemeSetting::parse(raw)?;
+            return Ok(ResolvedSetting {
+                value,
+                source: SettingSource::Env,
+            });
+        }
+
+        if let Some(project_id) = project_id
+            && let Some(row) = self.get(SettingScope::Project, Some(project_id), KEY_UI_THEME)?
+        {
+            let value = parse_stored_theme(&row)?;
+            return Ok(ResolvedSetting {
+                value,
+                source: SettingSource::Project,
+            });
+        }
+
+        if let Some(row) = self.get(SettingScope::Global, None, KEY_UI_THEME)? {
+            let value = parse_stored_theme(&row)?;
+            return Ok(ResolvedSetting {
+                value,
+                source: SettingSource::Global,
+            });
+        }
+
+        Ok(ResolvedSetting {
+            value: UiThemeSetting::default_value(),
+            source: SettingSource::Default,
         })
     }
 
@@ -593,13 +691,18 @@ impl SqliteSettingsRepository {
     }
 }
 
-/// Snapshot of the three S0 allow-listed env vars from the process environment.
+/// Snapshot of allow-listed settings env vars from the process environment.
 ///
 /// Only these names are read; presence (even empty) is recorded so resolve can
 /// treat them as explicit overrides.
 pub fn process_env_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for name in [ENV_RUNTIME_ADAPTER, ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE] {
+    for name in [
+        ENV_RUNTIME_ADAPTER,
+        ENV_GROK_EXECUTABLE,
+        ENV_GROK_PROFILE,
+        ENV_UI_THEME,
+    ] {
         if let Ok(value) = std::env::var(name) {
             map.insert(name.to_owned(), value);
         }
@@ -636,6 +739,22 @@ fn validate_known_key_write(input: &UpsertSetting) -> Result<(), SettingsError> 
             let _ = RuntimeAdapterSetting::parse(&label)?;
             Ok(())
         }
+        KEY_UI_THEME => {
+            if input.value_kind != VALUE_KIND_ENUM {
+                return Err(SettingsError::InvalidValueKind {
+                    key: input.key.clone(),
+                    kind: input.value_kind.clone(),
+                });
+            }
+            let label = parse_json_string(&input.value_json).map_err(|_| {
+                SettingsError::InvalidValueJson {
+                    key: input.key.clone(),
+                }
+            })?;
+            // Fail closed on write; never store free-form or system themes.
+            let _ = UiThemeSetting::parse(&label)?;
+            Ok(())
+        }
         KEY_GROK_EXECUTABLE | KEY_GROK_PROFILE => {
             if input.value_kind != VALUE_KIND_PATH {
                 return Err(SettingsError::InvalidValueKind {
@@ -648,12 +767,7 @@ fn validate_known_key_write(input: &UpsertSetting) -> Result<(), SettingsError> 
                     key: input.key.clone(),
                 }
             })?;
-            if path.trim().is_empty() || path.len() > 4096 {
-                return Err(SettingsError::InvalidPathValue {
-                    key: input.key.clone(),
-                });
-            }
-            Ok(())
+            validate_path_setting_value(&input.key, &path)
         }
         other => Err(SettingsError::UnknownKey {
             key: other.to_owned(),
@@ -676,6 +790,21 @@ fn parse_stored_adapter(row: &StoredSetting) -> Result<RuntimeAdapterSetting, Se
     RuntimeAdapterSetting::parse(&label)
 }
 
+fn parse_stored_theme(row: &StoredSetting) -> Result<UiThemeSetting, SettingsError> {
+    if row.value_kind != VALUE_KIND_ENUM {
+        return Err(SettingsError::InvalidValueKind {
+            key: row.key.clone(),
+            kind: row.value_kind.clone(),
+        });
+    }
+    let label =
+        parse_json_string(&row.value_json).map_err(|_| SettingsError::InvalidValueJson {
+            key: row.key.clone(),
+        })?;
+    // Hard requirement: illegal stored enum fails closed; never silent dark.
+    UiThemeSetting::parse(&label)
+}
+
 fn parse_stored_path(row: &StoredSetting) -> Result<String, SettingsError> {
     if row.value_kind != VALUE_KIND_PATH {
         return Err(SettingsError::InvalidValueKind {
@@ -692,6 +821,59 @@ fn parse_stored_path(row: &StoredSetting) -> Result<String, SettingsError> {
         });
     }
     Ok(path)
+}
+
+/// Hard-reject path writes that would brick startup after restart.
+///
+/// - `runtime.grok.executable`: must be an **existing file**
+/// - `runtime.grok.profile`: must be an **existing directory**
+///
+/// Empty / oversize paths keep the existing `settings_invalid_path` code.
+/// Existence failures use the same code with an actionable message (expected
+/// vs current). Intentionally not a soft warning — see product self-brick fix.
+fn validate_path_setting_value(key: &str, raw: &str) -> Result<(), SettingsError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 4096 {
+        return Err(SettingsError::InvalidPathValue {
+            key: key.to_owned(),
+        });
+    }
+    let path = PathBuf::from(trimmed);
+    match key {
+        KEY_GROK_EXECUTABLE => {
+            if path.is_file() {
+                Ok(())
+            } else {
+                Err(SettingsError::Coded {
+                    code: "settings_invalid_path",
+                    message: format!(
+                        "Grok executable path must be an existing file. \
+                         Expected: a file on disk that Pillow can launch. \
+                         Current value: `{trimmed}` (not an existing file). \
+                         Install the Grok CLI or choose the correct path, then save again."
+                    ),
+                })
+            }
+        }
+        KEY_GROK_PROFILE => {
+            if path.is_dir() {
+                Ok(())
+            } else {
+                Err(SettingsError::Coded {
+                    code: "settings_invalid_path",
+                    message: format!(
+                        "Grok profile path must be an existing directory. \
+                         Expected: a process-home directory that already exists. \
+                         Current value: `{trimmed}` (not an existing directory). \
+                         Create the directory or choose an existing profile path, then save again."
+                    ),
+                })
+            }
+        }
+        _ => Err(SettingsError::InvalidPathValue {
+            key: key.to_owned(),
+        }),
+    }
 }
 
 fn json_string(value: &str) -> String {
@@ -780,5 +962,65 @@ mod unit_tests {
         // Fail-closed: Result is Err, never Ok(Fake).
         assert!(RuntimeAdapterSetting::parse("codex").is_err());
         assert!(RuntimeAdapterSetting::parse("auto").is_err());
+    }
+
+    #[test]
+    fn theme_parse_accepts_dark_and_light_only() {
+        assert_eq!(UiThemeSetting::parse("dark").unwrap(), UiThemeSetting::Dark);
+        assert_eq!(
+            UiThemeSetting::parse("LIGHT").unwrap(),
+            UiThemeSetting::Light
+        );
+        assert_eq!(UiThemeSetting::default_value(), UiThemeSetting::Dark);
+    }
+
+    #[test]
+    fn theme_parse_rejects_system_and_unknown_without_dark_fallback() {
+        let err = UiThemeSetting::parse("system").unwrap_err();
+        assert!(matches!(err, SettingsError::InvalidThemeSelection { .. }));
+        assert_eq!(err.code(), "invalid_theme_selection");
+        assert!(UiThemeSetting::parse("auto").is_err());
+        assert!(UiThemeSetting::parse("").is_err());
+        // Fail-closed: Result is Err, never Ok(Dark) for illegal input.
+        assert!(!matches!(
+            UiThemeSetting::parse("system"),
+            Ok(UiThemeSetting::Dark)
+        ));
+    }
+
+    #[test]
+    fn path_validation_rejects_missing_executable_file() {
+        let err = validate_path_setting_value(
+            KEY_GROK_EXECUTABLE,
+            r"C:\no-such-pillow-grok-binary-xyz.exe",
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "settings_invalid_path");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(msg.contains("existing file"), "{msg}");
+        assert!(msg.contains("no-such-pillow-grok-binary-xyz"), "{msg}");
+    }
+
+    #[test]
+    fn path_validation_rejects_missing_profile_directory() {
+        let err =
+            validate_path_setting_value(KEY_GROK_PROFILE, r"C:\no-such-pillow-profile-dir-xyz")
+                .unwrap_err();
+        assert_eq!(err.code(), "settings_invalid_path");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(msg.contains("existing directory"), "{msg}");
+        assert!(msg.contains("no-such-pillow-profile-dir-xyz"), "{msg}");
+    }
+
+    #[test]
+    fn path_validation_accepts_existing_file_and_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("grok-placeholder.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let profile = temp.path().join("profile-home");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        validate_path_setting_value(KEY_GROK_EXECUTABLE, &exe.to_string_lossy()).unwrap();
+        validate_path_setting_value(KEY_GROK_PROFILE, &profile.to_string_lossy()).unwrap();
     }
 }

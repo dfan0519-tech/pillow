@@ -17,8 +17,8 @@ use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
 use keeper_agent_protocol::AgentRuntimeAdapter;
 use keeper_runtime_host::HostConfig;
 use keeper_storage_sqlite::{
-    ResolvedRuntimeSettings, RuntimeAdapterSetting, SettingsError, SqliteSettingsRepository,
-    process_env_map,
+    ResolvedRuntimeSettings, RuntimeAdapterSetting, SettingSource, SettingsError,
+    SqliteSettingsRepository, process_env_map,
 };
 
 use crate::conversation_events::RuntimeEventEmitter;
@@ -142,6 +142,76 @@ fn map_settings_error(error: SettingsError) -> ConversationCommandError {
     ConversationCommandError::new(error.code(), error.to_string())
 }
 
+/// Whether the Fake adapter may be chosen from stored settings / UI.
+///
+/// ADR-0003 Q2: Fake is **dev builds only**. Env override
+/// (`PILLOW_RUNTIME=fake`) still works in any build (E2E life-line).
+pub fn fake_adapter_selectable() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Error codes that are **runtime configuration** failures the user can fix
+/// in Settings. These degrade the shell instead of aborting setup.
+///
+/// Other failures (SQLite, illegal parse outside this set when not settings-
+/// fixable, etc.) remain fatal. **Never** maps to Fake.
+pub fn is_degradable_runtime_error(code: &str) -> bool {
+    matches!(
+        code,
+        "runtime_executable_missing"
+            | "runtime_profile_invalid"
+            | "runtime_profile_missing"
+            | "runtime_fake_not_allowed"
+    )
+}
+
+/// Outcome of desktop conversation runtime open at process startup.
+pub enum RuntimeOpenOutcome {
+    /// Real conversation service is available (Grok ACP or explicit Fake).
+    Ready {
+        service: ConversationService,
+        selection: RuntimeSelection,
+    },
+    /// Runtime config is broken; shell must still start with Settings reachable.
+    /// Conversation is off. Selection is never Fake as a silent fallback.
+    Degraded {
+        code: &'static str,
+        message: String,
+        /// User-facing guidance that points at Settings fields (not raw codes).
+        guidance: String,
+    },
+}
+
+impl RuntimeOpenOutcome {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded { .. })
+    }
+}
+
+/// Build short guidance that points the user at the settings surface.
+pub fn guidance_for_runtime_error(code: &str) -> String {
+    match code {
+        "runtime_executable_missing" => {
+            "打开「设置」，将「Grok 可执行文件路径」改为本机已存在的 Grok CLI 文件，\
+             或清空该字段以便使用 PATH；保存后重启 Pillow。"
+                .to_owned()
+        }
+        "runtime_profile_invalid" | "runtime_profile_missing" => {
+            "打开「设置」，将「Grok profile 路径」改为已存在的目录（进程主目录），\
+             或清空该字段以使用当前用户主目录；保存后重启 Pillow。"
+                .to_owned()
+        }
+        "runtime_fake_not_allowed" => "打开「设置」，将「运行时适配器」改为 Grok ACP（默认）；\
+             生产构建不提供 Fake。保存后重启 Pillow。"
+            .to_owned(),
+        _ => "打开「设置」检查运行时适配器与 Grok 路径，修正后重启 Pillow。".to_owned(),
+    }
+}
+
 /// Open the conversation service for process startup.
 ///
 /// Reads resolved settings (env → global → default). Production path composes
@@ -152,6 +222,31 @@ pub fn open_conversation_service(
 ) -> Result<(ConversationService, RuntimeSelection), ConversationCommandError> {
     let (selection, resolved) = resolve_runtime_selection_from_store(db_path.as_ref())?;
     open_conversation_service_with_resolved(db_path, emitter, selection, &resolved)
+}
+
+/// Startup open that **degrades** on fixable runtime-config errors instead of
+/// aborting the whole desktop process.
+///
+/// - `Ok(Ready)` — conversation available
+/// - `Ok(Degraded)` — shell may start; conversation off; **not Fake**
+/// - `Err` — non-degradable failure (caller must keep fatal behaviour)
+pub fn open_conversation_service_or_degrade(
+    db_path: impl AsRef<Path>,
+    emitter: Arc<dyn RuntimeEventEmitter>,
+) -> Result<RuntimeOpenOutcome, ConversationCommandError> {
+    match open_conversation_service(db_path, emitter) {
+        Ok((service, selection)) => Ok(RuntimeOpenOutcome::Ready { service, selection }),
+        Err(error) if is_degradable_runtime_error(error.code) => {
+            // Hard rule: degradation never opens Fake.
+            debug_assert_ne!(error.code, "using_fake");
+            Ok(RuntimeOpenOutcome::Degraded {
+                code: error.code,
+                message: error.message.clone(),
+                guidance: guidance_for_runtime_error(error.code),
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Compose with an explicit selection (tests / controlled harnesses).
@@ -183,6 +278,16 @@ fn open_conversation_service_with_resolved(
 ) -> Result<(ConversationService, RuntimeSelection), ConversationCommandError> {
     match selection {
         RuntimeSelection::Fake => {
+            // ADR-0003 Q2: stored Fake only in dev builds. Env (`PILLOW_RUNTIME=fake`)
+            // remains the E2E life-line in every build. Never rewrite stored data.
+            if resolved.adapter.source != SettingSource::Env && !fake_adapter_selectable() {
+                return Err(ConversationCommandError::new(
+                    "runtime_fake_not_allowed",
+                    "Stored Fake adapter is not available in this build. \
+                     Open Settings and choose Grok ACP, or set PILLOW_RUNTIME=fake \
+                     for explicit development / automation. User data was not modified.",
+                ));
+            }
             let service = ConversationService::open(db_path, emitter, true)?;
             Ok((service, RuntimeSelection::Fake))
         }
@@ -951,5 +1056,221 @@ pub(crate) mod tests {
         assert_eq!(config.max_concurrent_turns, 1);
         assert!(!config.honor_fixture_delays);
         assert_eq!(config.event_queue_capacity, 64);
+    }
+
+    /// Core self-brick fix: bad stored executable must not abort the process
+    /// composition path as Fake, and must degrade so Settings can fix it.
+    #[test]
+    fn bad_stored_executable_degrades_not_fake_and_not_fatal() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        let db = temp.path().join("keeper.db");
+        let missing = temp.path().join("missing-grok-for-degrade.exe");
+        let profile = temp.path().join("ok-profile");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        // Store a path that once existed (or was injected) then is gone — models
+        // the pre-validation self-brick chain without relying on write rejection.
+        let once = temp.path().join("once-was-grok.exe");
+        std::fs::write(&once, b"").unwrap();
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        repo.upsert_runtime_adapter(
+            SettingScope::Global,
+            None,
+            RuntimeAdapterSetting::GrokAcp,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &once.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            keeper_storage_sqlite::KEY_GROK_PROFILE,
+            &profile.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        drop(repo);
+        std::fs::remove_file(&once).unwrap();
+        assert!(!missing.exists());
+        assert!(!once.exists());
+
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_SELECTION);
+            std::env::remove_var(ENV_GROK_EXECUTABLE);
+            std::env::remove_var(ENV_GROK_PROFILE);
+        }
+
+        let emitter = Arc::new(RecordingEmitter::new());
+        let outcome = open_conversation_service_or_degrade(&db, emitter as Arc<_>)
+            .expect("degradable runtime error must not be fatal Err");
+        match outcome {
+            RuntimeOpenOutcome::Degraded {
+                code,
+                message,
+                guidance,
+            } => {
+                assert_eq!(code, "runtime_executable_missing");
+                assert!(
+                    !message.to_ascii_lowercase().contains("using fake")
+                        && !message.to_ascii_lowercase().contains("falling back"),
+                    "degrade must not mention Fake fallback: {message}"
+                );
+                assert!(
+                    guidance.contains("设置") || guidance.to_ascii_lowercase().contains("settings"),
+                    "guidance must point at settings: {guidance}"
+                );
+            }
+            RuntimeOpenOutcome::Ready { selection, .. } => {
+                panic!("must not open Ready (selection={selection:?}); would brick or Fake")
+            }
+        }
+
+        // Direct open still fails closed (no Fake) — degrade wrapper is the product path.
+        let emitter2 = Arc::new(RecordingEmitter::new());
+        let direct = match open_conversation_service(&db, emitter2 as Arc<_>) {
+            Ok(_) => panic!("direct open must fail closed for missing executable"),
+            Err(error) => error,
+        };
+        assert_eq!(direct.code, "runtime_executable_missing");
+    }
+
+    #[test]
+    fn bad_stored_profile_degrades_not_fake() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        let db = temp.path().join("keeper.db");
+        let exe = write_placeholder_executable(temp.path());
+        let once_profile = temp.path().join("once-profile");
+        std::fs::create_dir_all(&once_profile).unwrap();
+
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        repo.upsert_runtime_adapter(
+            SettingScope::Global,
+            None,
+            RuntimeAdapterSetting::GrokAcp,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &exe.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            keeper_storage_sqlite::KEY_GROK_PROFILE,
+            &once_profile.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        drop(repo);
+        std::fs::remove_dir_all(&once_profile).unwrap();
+
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_SELECTION);
+            std::env::remove_var(ENV_GROK_EXECUTABLE);
+            std::env::remove_var(ENV_GROK_PROFILE);
+        }
+
+        let emitter = Arc::new(RecordingEmitter::new());
+        let outcome = open_conversation_service_or_degrade(&db, emitter as Arc<_>)
+            .expect("profile config errors degrade");
+        match outcome {
+            RuntimeOpenOutcome::Degraded { code, message, .. } => {
+                assert_eq!(code, "runtime_profile_invalid");
+                assert!(!message.to_ascii_lowercase().contains("using fake"));
+            }
+            RuntimeOpenOutcome::Ready { .. } => panic!("must degrade, not Ready"),
+        }
+    }
+
+    #[test]
+    fn degrade_outcome_is_never_fake_selection() {
+        // Structural: Degraded has no selection field and Ready with Fake only
+        // comes from explicit Fake open (env/store), never from missing Grok.
+        assert!(is_degradable_runtime_error("runtime_executable_missing"));
+        assert!(is_degradable_runtime_error("runtime_profile_invalid"));
+        assert!(is_degradable_runtime_error("runtime_profile_missing"));
+        assert!(is_degradable_runtime_error("runtime_fake_not_allowed"));
+        assert!(!is_degradable_runtime_error("settings_sqlite"));
+        assert!(!is_degradable_runtime_error("invalid_runtime_selection"));
+    }
+
+    #[test]
+    fn env_fake_still_opens_ready_not_degraded() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        let db = temp.path().join("keeper.db");
+        // Store Grok so without env we would try real path; env fake must win.
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        repo.upsert_runtime_adapter(
+            SettingScope::Global,
+            None,
+            RuntimeAdapterSetting::GrokAcp,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        drop(repo);
+        unsafe {
+            std::env::set_var(ENV_RUNTIME_SELECTION, "fake");
+            std::env::remove_var(ENV_GROK_EXECUTABLE);
+            std::env::remove_var(ENV_GROK_PROFILE);
+        }
+        let emitter = Arc::new(RecordingEmitter::new());
+        let outcome = open_conversation_service_or_degrade(&db, emitter as Arc<_>)
+            .expect("PILLOW_RUNTIME=fake is the E2E life-line");
+        match outcome {
+            RuntimeOpenOutcome::Ready { service, selection } => {
+                assert_eq!(selection, RuntimeSelection::Fake);
+                let probe = service.probe().unwrap();
+                assert_eq!(probe.adapter_name, "fake");
+                service.shutdown().unwrap();
+            }
+            RuntimeOpenOutcome::Degraded { code, .. } => {
+                panic!("env fake must not degrade: {code}")
+            }
+        }
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_SELECTION);
+        }
+    }
+
+    #[test]
+    fn sqlite_open_failure_remains_fatal_not_degraded() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        // Point "db" at a directory so rusqlite open fails (not a runtime config path).
+        let bad_db = temp.path().join("not-a-sqlite-file");
+        std::fs::create_dir_all(&bad_db).unwrap();
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_SELECTION);
+        }
+        let emitter = Arc::new(RecordingEmitter::new());
+        let err = match open_conversation_service_or_degrade(&bad_db, emitter as Arc<_>) {
+            Ok(RuntimeOpenOutcome::Degraded { code, .. }) => {
+                panic!("SQLite failure must not degrade: {code}")
+            }
+            Ok(RuntimeOpenOutcome::Ready { .. }) => panic!("SQLite failure must not open Ready"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code, "settings_sqlite");
+        assert!(!is_degradable_runtime_error(err.code));
+    }
+
+    #[test]
+    fn fake_adapter_selectable_matches_debug_assertions() {
+        assert_eq!(fake_adapter_selectable(), cfg!(debug_assertions));
     }
 }

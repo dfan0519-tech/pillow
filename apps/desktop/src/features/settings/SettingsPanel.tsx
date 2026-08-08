@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  applyDocumentTheme,
   isEnvOverride,
+  parseUiThemeLabel,
   sourceLabel,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type SettingsGateway,
   type SettingsScope,
+  type ThemeSettingsView,
+  type UiThemeLabel,
 } from "./settingsTypes";
 import "../../styles/settings.css";
 
@@ -14,15 +18,36 @@ export type SettingsPanelProps = {
   /** Active project id when a project is selected; enables project scope. */
   projectId: string | null;
   onClose: () => void;
+  /** Called after a successful theme write so the shell can re-apply. */
+  onThemeChanged?: (theme: UiThemeLabel) => void;
 };
 
-const ADAPTER_OPTIONS: { value: RuntimeAdapterLabel; label: string }[] = [
+const ADAPTER_OPTIONS_BASE: { value: RuntimeAdapterLabel; label: string }[] = [
   { value: "grok-acp", label: "Grok ACP（默认）" },
-  { value: "fake", label: "Fake（开发/测试）" },
+];
+
+const ADAPTER_OPTION_FAKE: { value: RuntimeAdapterLabel; label: string } = {
+  value: "fake",
+  label: "Fake（开发/测试）",
+};
+
+/** Build adapter options from host flag (ADR-0003 Q2). Never hard-code env. */
+export function adapterOptionsForBuild(
+  fakeAdapterSelectable: boolean,
+): { value: RuntimeAdapterLabel; label: string }[] {
+  if (fakeAdapterSelectable) {
+    return [...ADAPTER_OPTIONS_BASE, ADAPTER_OPTION_FAKE];
+  }
+  return [...ADAPTER_OPTIONS_BASE];
+}
+
+const THEME_OPTIONS: { value: UiThemeLabel; label: string }[] = [
+  { value: "dark", label: "深色（默认）" },
+  { value: "light", label: "浅色" },
 ];
 
 /**
- * S0 settings surface: runtime adapter + Grok paths only.
+ * S0 settings surface: runtime adapter + Grok paths + global UI theme.
  * Env overrides are visible and read-only (ADR-0003).
  * Content form — high contrast, small radius, no per-row glass.
  */
@@ -30,10 +55,15 @@ export function SettingsPanel({
   gateway,
   projectId,
   onClose,
+  onThemeChanged,
 }: SettingsPanelProps) {
   const [scope, setScope] = useState<SettingsScope>("global");
   const [settings, setSettings] = useState<RuntimeSettingsView | null>(null);
+  const [themeSettings, setThemeSettings] = useState<ThemeSettingsView | null>(
+    null,
+  );
   const [adapterDraft, setAdapterDraft] = useState<RuntimeAdapterLabel>("grok-acp");
+  const [themeDraft, setThemeDraft] = useState<UiThemeLabel>("dark");
   const [executableDraft, setExecutableDraft] = useState("");
   const [profileDraft, setProfileDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -51,12 +81,23 @@ export function SettingsPanel({
     setProfileDraft(view.grokProfile.value ?? "");
   }, []);
 
+  const applyThemeView = useCallback((view: ThemeSettingsView) => {
+    setThemeSettings(view);
+    setThemeDraft(parseUiThemeLabel(view.theme.value));
+  }, []);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const view = await gateway.getRuntimeSettings(effectiveProjectId);
+      const [view, themeView] = await Promise.all([
+        gateway.getRuntimeSettings(effectiveProjectId),
+        // Theme is global-only in the product UI; resolve without project so
+        // project-scoped rows (if any) do not affect the editor value.
+        gateway.getThemeSettings(null),
+      ]);
       applyView(view);
+      applyThemeView(themeView);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "加载设置失败。";
@@ -64,7 +105,7 @@ export function SettingsPanel({
     } finally {
       setLoading(false);
     }
-  }, [applyView, effectiveProjectId, gateway]);
+  }, [applyThemeView, applyView, effectiveProjectId, gateway]);
 
   useEffect(() => {
     void reload();
@@ -112,8 +153,16 @@ export function SettingsPanel({
           );
         }
       }
+      // Theme is always global scope in the UI (never project).
+      if (themeSettings && !isEnvOverride(themeSettings.theme)) {
+        const themeView = await gateway.setUiTheme(themeDraft);
+        applyThemeView(themeView);
+        const applied = parseUiThemeLabel(themeView.theme.value);
+        applyDocumentTheme(applied);
+        onThemeChanged?.(applied);
+      }
       applyView(view);
-      setNotice("已保存。运行时适配器与 Grok 路径在重启 Pillow 后生效。");
+      setNotice("已保存。主题立即生效；运行时适配器与 Grok 路径在重启 Pillow 后生效。");
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "保存设置失败。";
@@ -128,6 +177,20 @@ export function SettingsPanel({
     ? isEnvOverride(settings.grokExecutable)
     : false;
   const profileLocked = settings ? isEnvOverride(settings.grokProfile) : false;
+  const themeLocked = themeSettings
+    ? isEnvOverride(themeSettings.theme)
+    : false;
+
+  const adapterOptions = adapterOptionsForBuild(
+    settings?.fakeAdapterSelectable ?? false,
+  );
+  // If stored value is fake but host no longer offers it, keep showing the
+  // current value so the user can change it (fail-closed, no silent rewrite).
+  const adapterSelectOptions =
+    adapterDraft === "fake"
+    && !adapterOptions.some((opt) => opt.value === "fake")
+      ? [...adapterOptions, ADAPTER_OPTION_FAKE]
+      : adapterOptions;
 
   return (
     <div
@@ -188,6 +251,50 @@ export function SettingsPanel({
           <form className="settings-form" onSubmit={(e) => void handleSave(e)}>
             <label className="settings-field">
               <span className="settings-field__label">
+                外观主题
+                {themeSettings ? (
+                  <SourceBadge
+                    envVar={themeSettings.theme.envVar}
+                    source={themeSettings.theme.source}
+                  />
+                ) : null}
+              </span>
+              <select
+                aria-label="外观主题"
+                className="settings-field__control"
+                data-testid="settings-theme"
+                disabled={themeLocked || saving || scope === "project"}
+                onChange={(e) =>
+                  setThemeDraft(e.target.value as UiThemeLabel)
+                }
+                title={
+                  scope === "project"
+                    ? "主题仅支持全局设置"
+                    : undefined
+                }
+                value={themeDraft}
+              >
+                {THEME_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              {scope === "project" && !themeLocked ? (
+                <p className="settings-env-note" role="status">
+                  主题仅支持全局设置；切换到「全局」作用域可编辑。
+                </p>
+              ) : null}
+              {themeLocked ? (
+                <EnvOverrideNote
+                  envVar={themeSettings?.theme.envVar ?? "PILLOW_THEME"}
+                  testId="settings-theme-env-override"
+                />
+              ) : null}
+            </label>
+
+            <label className="settings-field">
+              <span className="settings-field__label">
                 运行时适配器
                 {settings ? (
                   <SourceBadge
@@ -206,7 +313,7 @@ export function SettingsPanel({
                 }
                 value={adapterDraft}
               >
-                {ADAPTER_OPTIONS.map((opt) => (
+                {adapterSelectOptions.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
@@ -217,6 +324,19 @@ export function SettingsPanel({
                   envVar={settings?.adapter.envVar ?? "PILLOW_RUNTIME"}
                   testId="settings-adapter-env-override"
                 />
+              ) : null}
+              {settings
+              && settings.adapter.value === "fake"
+              && !settings.fakeAdapterSelectable
+              && !adapterLocked ? (
+                <p
+                  className="settings-env-note"
+                  data-testid="settings-fake-not-selectable"
+                  role="status"
+                >
+                  当前构建不提供 Fake 适配器（仅开发构建可选）。请改为 Grok
+                  ACP 后保存并重启。已存值不会被静默改写。
+                </p>
               ) : null}
             </label>
 
@@ -302,7 +422,12 @@ export function SettingsPanel({
                 disabled={
                   saving
                   || loading
-                  || (adapterLocked && executableLocked && profileLocked)
+                  || (
+                    adapterLocked
+                    && executableLocked
+                    && profileLocked
+                    && (themeLocked || scope === "project")
+                  )
                 }
                 type="submit"
               >

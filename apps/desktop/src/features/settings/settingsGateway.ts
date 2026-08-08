@@ -3,9 +3,12 @@ import {
   SettingsGatewayError,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
+  type RuntimeStartupView,
   type SettingSource,
   type SettingsGateway,
   type SettingsScope,
+  type ThemeSettingsView,
+  type UiThemeLabel,
 } from "./settingsTypes";
 
 const INVALID_RESPONSE = "Pillow received an invalid settings response.";
@@ -111,6 +114,45 @@ function parseRuntimeSettings(value: unknown): RuntimeSettingsView {
       typeof value.projectId === "string" && value.projectId.trim().length > 0
         ? value.projectId
         : null,
+    // Host is the authority; default true only when the field is omitted so
+    // older mock fixtures in unit tests keep working. Production Tauri always
+    // sends an explicit boolean from cfg!(debug_assertions).
+    fakeAdapterSelectable:
+      typeof value.fakeAdapterSelectable === "boolean"
+        ? value.fakeAdapterSelectable
+        : true,
+  };
+}
+
+function parseRuntimeStartup(value: unknown): RuntimeStartupView {
+  assertNoSecretFields(value);
+  if (!isRecord(value)) {
+    throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
+  }
+  return {
+    conversationAvailable: value.conversationAvailable === true,
+    selection:
+      typeof value.selection === "string" && value.selection.trim().length > 0
+        ? value.selection
+        : null,
+    degradedCode:
+      typeof value.degradedCode === "string" ? value.degradedCode : null,
+    degradedMessage:
+      typeof value.degradedMessage === "string" ? value.degradedMessage : null,
+    degradedGuidance:
+      typeof value.degradedGuidance === "string"
+        ? value.degradedGuidance
+        : null,
+  };
+}
+
+function parseThemeSettings(value: unknown): ThemeSettingsView {
+  assertNoSecretFields(value);
+  if (!isRecord(value)) {
+    throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
+  }
+  return {
+    theme: parseResolvedSetting(value.theme, "theme"),
   };
 }
 
@@ -144,12 +186,35 @@ async function invokeSettings(
   }
 }
 
+async function invokeThemeSettings(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<ThemeSettingsView> {
+  try {
+    const payload = args
+      ? await invoke<unknown>(command, args)
+      : await invoke<unknown>(command);
+    return parseThemeSettings(payload);
+  } catch (error) {
+    throw normalizeSettingsError(error);
+  }
+}
+
 /** Tauri settings gateway — host owns storage; renderer never touches the DB. */
 export class TauriSettingsGateway implements SettingsGateway {
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView> {
     return invokeSettings("get_runtime_settings", {
       projectId: projectId ?? null,
     });
+  }
+
+  async getRuntimeStartup(): Promise<RuntimeStartupView> {
+    try {
+      const payload = await invoke<unknown>("get_runtime_startup");
+      return parseRuntimeStartup(payload);
+    } catch (error) {
+      throw normalizeSettingsError(error);
+    }
   }
 
   setRuntimeAdapter(
@@ -191,7 +256,11 @@ export class TauriSettingsGateway implements SettingsGateway {
   clearRuntimeSetting(
     scope: SettingsScope,
     projectId: string | null,
-    key: "runtime.adapter" | "runtime.grok.executable" | "runtime.grok.profile",
+    key:
+      | "runtime.adapter"
+      | "runtime.grok.executable"
+      | "runtime.grok.profile"
+      | "ui.theme",
   ): Promise<RuntimeSettingsView> {
     return invokeSettings("clear_runtime_setting", {
       scope,
@@ -199,13 +268,29 @@ export class TauriSettingsGateway implements SettingsGateway {
       key,
     });
   }
+
+  getThemeSettings(projectId?: string | null): Promise<ThemeSettingsView> {
+    return invokeThemeSettings("get_theme_settings", {
+      projectId: projectId ?? null,
+    });
+  }
+
+  setUiTheme(theme: UiThemeLabel): Promise<ThemeSettingsView> {
+    return invokeThemeSettings("set_ui_theme", { theme });
+  }
 }
 
 /** In-memory gateway for unit tests (no Tauri). */
 export class MockSettingsGateway implements SettingsGateway {
   private state: RuntimeSettingsView;
+  private themeState: ThemeSettingsView;
+  private startup: RuntimeStartupView;
 
-  constructor(initial?: Partial<RuntimeSettingsView>) {
+  constructor(
+    initial?: Partial<RuntimeSettingsView>,
+    themeInitial?: Partial<ThemeSettingsView>,
+    startupInitial?: Partial<RuntimeStartupView>,
+  ) {
     this.state = {
       adapter: {
         value: "grok-acp",
@@ -215,16 +300,51 @@ export class MockSettingsGateway implements SettingsGateway {
       grokExecutable: { value: null, source: "default", envVar: null },
       grokProfile: { value: null, source: "default", envVar: null },
       projectId: null,
+      // Unit tests run as "dev": Fake is selectable unless a fixture overrides.
+      fakeAdapterSelectable: true,
       ...initial,
     };
+    this.themeState = {
+      theme: { value: "dark", source: "default", envVar: null },
+      ...themeInitial,
+    };
+    this.startup = {
+      conversationAvailable: true,
+      selection: "grok-acp",
+      degradedCode: null,
+      degradedMessage: null,
+      degradedGuidance: null,
+      ...startupInitial,
+    };
+  }
+
+  /** Test seam: force degraded conversation runtime (not Fake). */
+  setDegradedStartup(code: string, message: string, guidance: string): void {
+    this.startup = {
+      conversationAvailable: false,
+      selection: null,
+      degradedCode: code,
+      degradedMessage: message,
+      degradedGuidance: guidance,
+    };
+  }
+
+  async getRuntimeStartup(): Promise<RuntimeStartupView> {
+    return structuredClone(this.startup);
   }
 
   /** Test seam: force env override presentation. */
   setEnvOverride(
-    field: "adapter" | "grokExecutable" | "grokProfile",
+    field: "adapter" | "grokExecutable" | "grokProfile" | "theme",
     value: string,
     envVar: string,
   ): void {
+    if (field === "theme") {
+      this.themeState = {
+        theme: { value, source: "env", envVar },
+      };
+      return;
+    }
     this.state = {
       ...this.state,
       [field]: { value, source: "env", envVar },
@@ -233,6 +353,10 @@ export class MockSettingsGateway implements SettingsGateway {
 
   getSnapshot(): RuntimeSettingsView {
     return structuredClone(this.state);
+  }
+
+  getThemeSnapshot(): ThemeSettingsView {
+    return structuredClone(this.themeState);
   }
 
   async getRuntimeSettings(
@@ -302,7 +426,11 @@ export class MockSettingsGateway implements SettingsGateway {
   async clearRuntimeSetting(
     _scope: SettingsScope,
     projectId: string | null,
-    key: "runtime.adapter" | "runtime.grok.executable" | "runtime.grok.profile",
+    key:
+      | "runtime.adapter"
+      | "runtime.grok.executable"
+      | "runtime.grok.profile"
+      | "ui.theme",
   ): Promise<RuntimeSettingsView> {
     if (key === "runtime.adapter" && this.state.adapter.source !== "env") {
       this.state = {
@@ -328,6 +456,28 @@ export class MockSettingsGateway implements SettingsGateway {
         grokProfile: { value: null, source: "default" },
       };
     }
+    if (key === "ui.theme" && this.themeState.theme.source !== "env") {
+      this.themeState = {
+        theme: { value: "dark", source: "default", envVar: null },
+      };
+    }
     return this.getRuntimeSettings(projectId);
+  }
+
+  async getThemeSettings(
+    _projectId?: string | null,
+  ): Promise<ThemeSettingsView> {
+    return structuredClone(this.themeState);
+  }
+
+  async setUiTheme(theme: UiThemeLabel): Promise<ThemeSettingsView> {
+    if (this.themeState.theme.source === "env") {
+      // Env still wins for effective view (read-only in UI).
+      return this.getThemeSettings();
+    }
+    this.themeState = {
+      theme: { value: theme, source: "global", envVar: null },
+    };
+    return this.getThemeSettings();
   }
 }

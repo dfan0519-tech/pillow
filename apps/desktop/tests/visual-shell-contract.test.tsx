@@ -311,6 +311,16 @@ describe("grok shell visual contract", () => {
       contrastRatio(lightMap.get("--text-secondary")!, lightMap.get("--bg-main")!),
     ).toBeGreaterThanOrEqual(4.5);
 
+    // Light tertiary was #7a7a84 (3.57:1) — strengthened to body-size ≥4.5:1.
+    // Dark tertiary already ≥4.5:1; do not weaken.
+    const lightTertiary = lightMap.get("--text-tertiary")!.toLowerCase();
+    expect(lightTertiary).toBe("#686872");
+    expect(
+      contrastRatio(lightTertiary, lightMap.get("--bg-main")!),
+    ).toBeGreaterThanOrEqual(4.5);
+    // Strengthening only: must not regress to the failing legacy value.
+    expect(lightTertiary).not.toBe("#7a7a84");
+
     // color-scheme switches with theme.
     expect(darkCombined || darkBody).toMatch(/color-scheme:\s*dark/i);
     expect(

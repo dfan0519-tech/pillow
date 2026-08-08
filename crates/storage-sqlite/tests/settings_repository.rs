@@ -4,9 +4,10 @@ use std::collections::HashMap;
 
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
-    ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, KEY_GROK_EXECUTABLE,
-    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, RuntimeAdapterSetting, SettingScope, SettingSource,
-    SettingsError, SettingsUpdatedBy, SqliteProjectRepository, SqliteSettingsRepository,
+    ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,
+    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, RuntimeAdapterSetting, SettingScope,
+    SettingSource, SettingsError, SettingsUpdatedBy, SqliteProjectRepository,
+    SqliteSettingsRepository, UiThemeSetting,
 };
 use rusqlite::Connection;
 
@@ -36,6 +37,23 @@ fn env_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect()
+}
+
+/// Create an empty placeholder file so path write validation accepts it.
+fn existing_file(temp: &tempfile::TempDir, name: &str) -> String {
+    let path = temp.path().join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, b"").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// Create a directory so profile path write validation accepts it.
+fn existing_dir(temp: &tempfile::TempDir, name: &str) -> String {
+    let path = temp.path().join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    path.to_string_lossy().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +220,7 @@ fn precedence_default_wins_when_nothing_set() {
 fn precedence_global_wins_over_default() {
     let temp = tempfile::tempdir().unwrap();
     let repo = open_settings(&temp);
+    let exe = existing_file(&temp, "tools/grok.exe");
 
     repo.upsert_runtime_adapter(
         SettingScope::Global,
@@ -214,7 +233,7 @@ fn precedence_global_wins_over_default() {
         SettingScope::Global,
         None,
         KEY_GROK_EXECUTABLE,
-        r"C:\tools\grok.exe",
+        &exe,
         SettingsUpdatedBy::User,
     )
     .unwrap();
@@ -224,7 +243,7 @@ fn precedence_global_wins_over_default() {
     assert_eq!(resolved.adapter.source, SettingSource::Global);
     assert_eq!(
         resolved.grok_executable.value.as_deref(),
-        Some(r"C:\tools\grok.exe")
+        Some(exe.as_str())
     );
     assert_eq!(resolved.grok_executable.source, SettingSource::Global);
 }
@@ -234,6 +253,8 @@ fn precedence_project_wins_over_global() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = seed_project(&temp, "proj-a");
     let repo = open_settings(&temp);
+    let global_profile = existing_dir(&temp, "global-profile");
+    let project_profile = existing_dir(&temp, "project-profile");
 
     repo.upsert_runtime_adapter(
         SettingScope::Global,
@@ -246,7 +267,7 @@ fn precedence_project_wins_over_global() {
         SettingScope::Global,
         None,
         KEY_GROK_PROFILE,
-        r"C:\global-profile",
+        &global_profile,
         SettingsUpdatedBy::User,
     )
     .unwrap();
@@ -262,7 +283,7 @@ fn precedence_project_wins_over_global() {
         SettingScope::Project,
         Some(&project_id),
         KEY_GROK_PROFILE,
-        r"C:\project-profile",
+        &project_profile,
         SettingsUpdatedBy::User,
     )
     .unwrap();
@@ -274,7 +295,7 @@ fn precedence_project_wins_over_global() {
     assert_eq!(resolved.adapter.source, SettingSource::Project);
     assert_eq!(
         resolved.grok_profile.value.as_deref(),
-        Some(r"C:\project-profile")
+        Some(project_profile.as_str())
     );
     assert_eq!(resolved.grok_profile.source, SettingSource::Project);
 
@@ -284,7 +305,7 @@ fn precedence_project_wins_over_global() {
     assert_eq!(global_only.adapter.source, SettingSource::Global);
     assert_eq!(
         global_only.grok_profile.value.as_deref(),
-        Some(r"C:\global-profile")
+        Some(global_profile.as_str())
     );
     assert_eq!(global_only.grok_profile.source, SettingSource::Global);
 }
@@ -309,11 +330,16 @@ fn precedence_env_wins_over_project_and_global() {
         SettingsUpdatedBy::User,
     )
     .unwrap();
+    let project_exe = existing_file(&temp, "project/grok.exe");
+    let global_profile = existing_dir(&temp, "global-profile-env");
+    // Env resolve does not existence-check; values are opaque overrides.
+    let env_exe = r"C:\env\grok.exe";
+    let env_profile = r"C:\env\profile";
     repo.upsert_path(
         SettingScope::Project,
         Some(&project_id),
         KEY_GROK_EXECUTABLE,
-        r"C:\project\grok.exe",
+        &project_exe,
         SettingsUpdatedBy::User,
     )
     .unwrap();
@@ -321,29 +347,23 @@ fn precedence_env_wins_over_project_and_global() {
         SettingScope::Global,
         None,
         KEY_GROK_PROFILE,
-        r"C:\global-profile",
+        &global_profile,
         SettingsUpdatedBy::User,
     )
     .unwrap();
 
     let env = env_with(&[
         (ENV_RUNTIME_ADAPTER, "grok-acp"),
-        (ENV_GROK_EXECUTABLE, r"C:\env\grok.exe"),
-        (ENV_GROK_PROFILE, r"C:\env\profile"),
+        (ENV_GROK_EXECUTABLE, env_exe),
+        (ENV_GROK_PROFILE, env_profile),
     ]);
     let resolved = repo.resolve_runtime(Some(&project_id), &env).unwrap();
 
     assert_eq!(resolved.adapter.value, RuntimeAdapterSetting::GrokAcp);
     assert_eq!(resolved.adapter.source, SettingSource::Env);
-    assert_eq!(
-        resolved.grok_executable.value.as_deref(),
-        Some(r"C:\env\grok.exe")
-    );
+    assert_eq!(resolved.grok_executable.value.as_deref(), Some(env_exe));
     assert_eq!(resolved.grok_executable.source, SettingSource::Env);
-    assert_eq!(
-        resolved.grok_profile.value.as_deref(),
-        Some(r"C:\env\profile")
-    );
+    assert_eq!(resolved.grok_profile.value.as_deref(), Some(env_profile));
     assert_eq!(resolved.grok_profile.source, SettingSource::Env);
 }
 
@@ -418,6 +438,13 @@ fn settings_survive_repository_reopen() {
             .to_string()
     };
 
+    let recovered_exe = {
+        let path = temp.path().join("recovered").join("grok.exe");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        path.to_string_lossy().into_owned()
+    };
+
     {
         let repo = SqliteSettingsRepository::open(&db).unwrap();
         repo.upsert_runtime_adapter(
@@ -431,7 +458,7 @@ fn settings_survive_repository_reopen() {
             SettingScope::Project,
             Some(&project_id),
             KEY_GROK_EXECUTABLE,
-            r"D:\recovered\grok.exe",
+            &recovered_exe,
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -446,7 +473,7 @@ fn settings_survive_repository_reopen() {
     assert_eq!(resolved.adapter.source, SettingSource::Global);
     assert_eq!(
         resolved.grok_executable.value.as_deref(),
-        Some(r"D:\recovered\grok.exe")
+        Some(recovered_exe.as_str())
     );
     assert_eq!(resolved.grok_executable.source, SettingSource::Project);
 
@@ -556,13 +583,15 @@ fn upsert_get_delete_and_list_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = seed_project(&temp, "proj-crud");
     let repo = open_settings(&temp);
+    let profile_a = existing_dir(&temp, "profiles/a");
+    let profile_b = existing_dir(&temp, "profiles/b");
 
     let written = repo
         .upsert_path(
             SettingScope::Project,
             Some(&project_id),
             KEY_GROK_PROFILE,
-            r"C:\profiles\a",
+            &profile_a,
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -574,7 +603,7 @@ fn upsert_get_delete_and_list_roundtrip() {
             SettingScope::Project,
             Some(&project_id),
             KEY_GROK_PROFILE,
-            r"C:\profiles\b",
+            &profile_b,
             SettingsUpdatedBy::User,
         )
         .unwrap();
@@ -584,7 +613,11 @@ fn upsert_get_delete_and_list_roundtrip() {
         .get(SettingScope::Project, Some(&project_id), KEY_GROK_PROFILE)
         .unwrap()
         .unwrap();
-    assert!(got.value_json.contains("profiles\\\\b") || got.value_json.contains(r"profiles\b"));
+    assert!(
+        got.value_json.contains("profiles") && got.value_json.contains("b"),
+        "value_json={}",
+        got.value_json
+    );
 
     let listed = repo.list(SettingScope::Project, Some(&project_id)).unwrap();
     assert_eq!(listed.len(), 1);
@@ -606,6 +639,7 @@ fn delete_project_scope_removes_all_project_keys() {
     let project_id = seed_project(&temp, "proj-del");
     let repo = open_settings(&temp);
 
+    let project_exe = existing_file(&temp, "x/grok.exe");
     repo.upsert_runtime_adapter(
         SettingScope::Project,
         Some(&project_id),
@@ -617,7 +651,7 @@ fn delete_project_scope_removes_all_project_keys() {
         SettingScope::Project,
         Some(&project_id),
         KEY_GROK_EXECUTABLE,
-        r"C:\x\grok.exe",
+        &project_exe,
         SettingsUpdatedBy::User,
     )
     .unwrap();
@@ -652,11 +686,282 @@ fn unknown_key_rejected_on_write() {
         .upsert(keeper_storage_sqlite::UpsertSetting {
             scope: SettingScope::Global,
             project_id: None,
-            key: "ui.theme".into(),
+            key: "ui.unknown.freeform".into(),
             value_kind: "enum".into(),
-            value_json: "\"dark\"".into(),
+            value_json: "\"x\"".into(),
             updated_by: SettingsUpdatedBy::User,
         })
         .unwrap_err();
     assert!(matches!(err, SettingsError::UnknownKey { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// Save-time path existence (self-brick prevention)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upsert_rejects_missing_executable_file_with_actionable_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    let missing = temp
+        .path()
+        .join("no-such-file-xyz.exe")
+        .to_string_lossy()
+        .into_owned();
+    let err = repo
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &missing,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "settings_invalid_path");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(msg.contains("existing file"), "{msg}");
+    assert!(msg.contains("no-such-file-xyz"), "{msg}");
+    // Must not store the bad value.
+    assert!(
+        repo.get(SettingScope::Global, None, KEY_GROK_EXECUTABLE)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn upsert_rejects_missing_profile_directory_with_actionable_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    let missing = temp
+        .path()
+        .join("no-such-profile-dir-xyz")
+        .to_string_lossy()
+        .into_owned();
+    let err = repo
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_PROFILE,
+            &missing,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "settings_invalid_path");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(msg.contains("existing directory"), "{msg}");
+    assert!(msg.contains("no-such-profile-dir-xyz"), "{msg}");
+    assert!(
+        repo.get(SettingScope::Global, None, KEY_GROK_PROFILE)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn upsert_rejects_directory_as_executable_and_file_as_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    let dir = existing_dir(&temp, "a-dir");
+    let file = existing_file(&temp, "a-file.txt");
+
+    let err_exe = repo
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &dir,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap_err();
+    assert_eq!(err_exe.code(), "settings_invalid_path");
+
+    let err_profile = repo
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_PROFILE,
+            &file,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap_err();
+    assert_eq!(err_profile.code(), "settings_invalid_path");
+}
+
+// ---------------------------------------------------------------------------
+// ui.theme — second consumer of the same key/scope/precedence store
+// ---------------------------------------------------------------------------
+
+#[test]
+fn theme_precedence_default_global_project_env() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "proj-theme");
+    let repo = open_settings(&temp);
+
+    // Default layer.
+    let d = repo.resolve_theme(Some(&project_id), &empty_env()).unwrap();
+    assert_eq!(d.value, UiThemeSetting::Dark);
+    assert_eq!(d.source, SettingSource::Default);
+
+    // Global wins over default.
+    repo.upsert_ui_theme(
+        SettingScope::Global,
+        None,
+        UiThemeSetting::Light,
+        SettingsUpdatedBy::User,
+    )
+    .unwrap();
+    let g = repo.resolve_theme(Some(&project_id), &empty_env()).unwrap();
+    assert_eq!(g.value, UiThemeSetting::Light);
+    assert_eq!(g.source, SettingSource::Global);
+
+    // Project wins over global (store supports both scopes; UI only writes global).
+    repo.upsert_ui_theme(
+        SettingScope::Project,
+        Some(&project_id),
+        UiThemeSetting::Dark,
+        SettingsUpdatedBy::User,
+    )
+    .unwrap();
+    let p = repo.resolve_theme(Some(&project_id), &empty_env()).unwrap();
+    assert_eq!(p.value, UiThemeSetting::Dark);
+    assert_eq!(p.source, SettingSource::Project);
+
+    // Env wins over project.
+    let env = env_with(&[(ENV_UI_THEME, "light")]);
+    let e = repo.resolve_theme(Some(&project_id), &env).unwrap();
+    assert_eq!(e.value, UiThemeSetting::Light);
+    assert_eq!(e.source, SettingSource::Env);
+}
+
+#[test]
+fn theme_env_wins_over_stored_global() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    repo.upsert_ui_theme(
+        SettingScope::Global,
+        None,
+        UiThemeSetting::Dark,
+        SettingsUpdatedBy::User,
+    )
+    .unwrap();
+
+    let env = env_with(&[(ENV_UI_THEME, "light")]);
+    let resolved = repo.resolve_theme(None, &env).unwrap();
+    assert_eq!(resolved.value, UiThemeSetting::Light);
+    assert_eq!(resolved.source, SettingSource::Env);
+
+    let without = repo.resolve_theme(None, &empty_env()).unwrap();
+    assert_eq!(without.value, UiThemeSetting::Dark);
+    assert_eq!(without.source, SettingSource::Global);
+}
+
+#[test]
+fn illegal_theme_env_fails_closed_no_dark_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    for bad in ["system", "auto", "not-a-theme", ""] {
+        let env = env_with(&[(ENV_UI_THEME, bad)]);
+        let err = repo.resolve_theme(None, &env).unwrap_err();
+        assert_eq!(
+            err.code(),
+            "invalid_theme_selection",
+            "bad={bad:?} err={err:?}"
+        );
+        assert!(!matches!(
+            repo.resolve_theme(None, &env),
+            Ok(r) if r.value == UiThemeSetting::Dark
+        ));
+    }
+}
+
+#[test]
+fn illegal_stored_theme_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    drop(repo);
+
+    let connection = Connection::open(temp.path().join("keeper.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO settings_entries (
+                setting_id, scope, project_id, key, value_kind, value_json, updated_at, updated_by
+             ) VALUES (
+                'bad-theme', 'global', NULL, ?1, 'enum', '\"system\"',
+                '2026-08-08T00:00:00Z', 'user'
+             )",
+            [KEY_UI_THEME],
+        )
+        .unwrap();
+    drop(connection);
+
+    let repo = open_settings(&temp);
+    let err = repo
+        .resolve_theme(None, &empty_env())
+        .expect_err("illegal stored theme must fail closed");
+    assert_eq!(err.code(), "invalid_theme_selection");
+}
+
+#[test]
+fn theme_survives_repository_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+
+    {
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        repo.upsert_ui_theme(
+            SettingScope::Global,
+            None,
+            UiThemeSetting::Light,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        drop(repo);
+    }
+
+    let repo = SqliteSettingsRepository::open(&db).unwrap();
+    let resolved = repo.resolve_theme(None, &empty_env()).unwrap();
+    assert_eq!(resolved.value, UiThemeSetting::Light);
+    assert_eq!(resolved.source, SettingSource::Global);
+
+    let row = repo
+        .get(SettingScope::Global, None, KEY_UI_THEME)
+        .unwrap()
+        .expect("global theme row restored");
+    assert_eq!(row.key, KEY_UI_THEME);
+}
+
+#[test]
+fn theme_uses_same_settings_entries_table_not_parallel_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    repo.upsert_ui_theme(
+        SettingScope::Global,
+        None,
+        UiThemeSetting::Light,
+        SettingsUpdatedBy::User,
+    )
+    .unwrap();
+    drop(repo);
+
+    let connection = Connection::open(temp.path().join("keeper.db")).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM settings_entries WHERE key = ?1",
+            [KEY_UI_THEME],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // No dedicated theme table.
+    let theme_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name LIKE '%theme%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(theme_tables, 0);
 }
