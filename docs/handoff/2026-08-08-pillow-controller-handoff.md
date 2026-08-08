@@ -164,6 +164,38 @@ S0b 必须收敛为单一事实源,并加**跨层测试**让漂移被机械捕�
 Worker 把集成测试放那里是合理判断,不算越界 —— 是我漏写。
 **下次简报:凡要求测试,必须同时白名单测试目录。**
 
+### 4.8 S0b 设置 UI + composition 接线(grok3,已验收)
+
+简报:`.superpowers/round10/BRIEF_S0B_settings_ui.md`
+报告:`docs/execution/2026-08-08-settings-s0b-report.md`
+
+门 0 / desktop build 0 / **E2E 10-10**。E2E 在这单是决定性的:
+它改了 **composition root**,而全部 E2E 靠 `PILLOW_RUNTIME=fake` 注入 ——
+**若 DB 值压过 env,十条会一起挂,而且会挂得像是别的原因。** 生命线守住了。
+
+**parser 已收敛(任务 #16 完成)**:`RuntimeSelection::parse` 现在委托给
+`RuntimeAdapterSetting::parse`,desktop 侧只做类型映射。
+
+⚠️ 但要如实界定 `runtime_selection_parse_matches_storage_adapter_parse` 这个测试:
+既然已经是委托,**接受集只剩一个实现,该测试对"接受集漂移"是恒真的**。
+它真正守住的是 `from_adapter` 映射、错误码映射,以及**将来有人重新引入独立实现**。
+这仍然有价值,但不要把它说成"在两个实现之间抓漂移"。
+
+**env 优先级测试**做到了服务组装层(`open_service_respects_env_fake_over_stored_grok`),
+不是只在 parse 层打转 —— 深度正确。另有 `env_path_overrides_win_over_stored_paths`、
+`no_stored_settings_behaves_like_env_only_default`(向后兼容)。
+
+**UI 覆盖态**:徽标"已被环境变量覆盖" + `title` 指明具体变量 + 字段只读并给出理由。
+这条是 ADR-0003 的硬要求 —— 界面显示一个值、进程实际用另一个值,
+正是本轮刚踩过的同一类陷阱。
+
+**残留(不阻塞)**:
+
+1. **设置面板本身无截图证据** —— 没有 E2E spec 会打开它。
+2. "设置"入口紧贴系统窗口控件(最小化/最大化)左侧,是 Windows 上常见误点区。
+   属观感/交互打磨,非缺陷。
+3. 连同 §5.1 的浅色皮肤截图缺口,**证据缺口现在有三处**,应一并补。
+
 ---
 
 ## 5. Round 8/9 成果与验收结论
@@ -236,11 +268,10 @@ Worker 把集成测试放那里是合理判断,不算越界 —— 是我漏写�
 4. ~~提交推送~~ **已完成**
 5. ~~在干净树上派 Codex 做 storage barrier 实验~~ **已完成并验收**,见 §4.6
 6. ~~S0a 设置层存储 + 解析服务~~ **已完成并验收**,见 §4.7
-7. **下一步:S0b —— UI + `runtime_composition` 接线**
-   口径见 **ADR-0003**。**必须带上 §4.7 那条收敛要求**(重复 parser)。
-   **S0 按串行两片走,不并行** —— 坑 #1(白名单重叠)与坑 #2(抢 `target/`)
-   都是并行切出来的。
-8. 再之后:双皮肤持久化(顺带补浅色截图证据)→ 知识层设计(需先拍 §2 两条红线)
+7. ~~S0b UI + `runtime_composition` 接线 + parser 收敛~~ **已完成并验收**,见 §4.8
+8. **下一步:双皮肤持久化** —— 设置层已经就位,主题偏好可以落库了。
+   顺带补两项证据缺口:**浅色皮肤截图** 与 **设置面板截图**(见 §4.8 残留)。
+9. 再之后:知识层设计(**需先拍 §2 两条红线**,用户尚未逐条确认)
 
 ⚠️ 用户明确要求:**两个 codex 槽位保证能正常调用,不得违规操作让账号有风险**。
 派 codex 前必须先确认全机没有在跑的 `codex exec`(按命令行查,**不要按进程名杀**)。

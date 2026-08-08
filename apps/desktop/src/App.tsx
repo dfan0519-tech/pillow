@@ -10,6 +10,12 @@ import {
   selectConversationsForProject,
 } from "./features/conversations/conversationReducer";
 import { AppSidebar } from "./features/projects/AppSidebar";
+import {
+  MockSettingsGateway,
+  TauriSettingsGateway,
+} from "./features/settings/settingsGateway";
+import { SettingsPanel } from "./features/settings/SettingsPanel";
+import type { SettingsGateway } from "./features/settings/settingsTypes";
 import type { GitChangesPaneModel } from "./features/workbench/ResourcePane";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
@@ -47,6 +53,8 @@ type AppProps = {
    * and passes `gitChanges={null}` so existing resource/diff/terminal modes stay.
    */
   gitGateway?: GitGateway;
+  /** S0 settings gateway. Defaults to in-memory mock; desktop main injects Tauri. */
+  settingsGateway?: SettingsGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
@@ -104,6 +112,7 @@ export function App({
   writeApprovalGateway,
   execGateway,
   gitGateway,
+  settingsGateway: settingsGatewayProp,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
@@ -111,12 +120,25 @@ export function App({
     () => conversationGatewayProp ?? new MockConversationGateway({ stepDelayMs: 35 }),
     [conversationGatewayProp],
   );
+  const settingsGateway = useMemo(() => {
+    if (settingsGatewayProp) return settingsGatewayProp;
+    // Desktop shell: use Tauri when the IPC bridge is present (no main.tsx
+    // dependency for S0b mount). Tests / story renderers stay on the mock.
+    if (
+      typeof window !== "undefined"
+      && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      return new TauriSettingsGateway();
+    }
+    return new MockSettingsGateway();
+  }, [settingsGatewayProp]);
   const isMockRuntime = conversationGateway instanceof MockConversationGateway;
 
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [shellReady, setShellReady] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -927,6 +949,15 @@ export function App({
   return (
     <div className="app-shell">
       <WindowControls />
+      <button
+        aria-label="打开设置"
+        className="settings-open-btn"
+        data-testid="nav-open-settings"
+        onClick={() => setSettingsOpen(true)}
+        type="button"
+      >
+        设置
+      </button>
       {error ? (
         <p className="app-error" role="alert">
           <span>{error.message}</span>
@@ -969,6 +1000,13 @@ export function App({
           onGitChangesActive={setGitChangesRequestProjectId}
         />
       </div>
+      {settingsOpen ? (
+        <SettingsPanel
+          gateway={settingsGateway}
+          onClose={() => setSettingsOpen(false)}
+          projectId={activeProject?.id ?? null}
+        />
+      ) : null}
     </div>
   );
 }

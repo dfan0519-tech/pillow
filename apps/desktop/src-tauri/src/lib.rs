@@ -10,6 +10,7 @@ pub mod path_scope;
 mod project_commands;
 mod resource_commands;
 pub mod runtime_composition;
+mod settings_commands;
 mod write_commands;
 
 #[cfg(test)]
@@ -18,6 +19,8 @@ mod exec_commands_tests;
 mod git_commands_tests;
 #[cfg(test)]
 mod resource_commands_tests;
+#[cfg(test)]
+mod settings_commands_tests;
 #[cfg(test)]
 mod write_commands_tests;
 
@@ -37,6 +40,7 @@ use desktop_lifecycle::{
 };
 use exec_commands::{decide_exec_proposal, list_exec_proposals, open_exec_output};
 use git_commands::{GitCommandState, discover_git_repositories, get_git_status, open_git_diff};
+use keeper_storage_sqlite::SqliteSettingsRepository;
 use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
@@ -46,6 +50,10 @@ use resource_commands::{
     read_project_resource, search_project_resources,
 };
 use runtime_composition::open_conversation_service;
+use settings_commands::{
+    clear_runtime_setting, get_runtime_settings, set_grok_executable, set_grok_profile,
+    set_runtime_adapter,
+};
 use tauri::Manager;
 use write_commands::{decide_write_proposal, list_write_proposals, open_write_proposal_diff};
 
@@ -81,7 +89,12 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         open_exec_output,
         discover_git_repositories,
         get_git_status,
-        open_git_diff
+        open_git_diff,
+        get_runtime_settings,
+        set_runtime_adapter,
+        set_grok_executable,
+        set_grok_profile,
+        clear_runtime_setting
     ])
 }
 
@@ -95,10 +108,12 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir)?;
             let db_path = app_data_dir.join("keeper.db");
             let state = AppState::open(&db_path)?;
+            let settings = SqliteSettingsRepository::open(&db_path)
+                .map_err(|error| format!("settings store open failed: {error}"))?;
             let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
-            // Production default: GrokAcpAdapter. Fake only when
-            // PILLOW_RUNTIME=fake (explicit development / test selection).
-            // Never silent-fallback from a missing Grok install to Fake.
+            // Production default: GrokAcpAdapter. Fake only when explicitly
+            // selected via env or stored settings (env wins). Never silent-
+            // fallback from a missing Grok install to Fake.
             let (conversations, selection) = open_conversation_service(&db_path, emitter)?;
             eprintln!("Pillow runtime selection: {}", selection.as_str());
             let conversations = Arc::new(conversations);
@@ -107,6 +122,7 @@ pub fn run() {
                 eprintln!("Pillow recovered {recovered} interrupted run(s) as Interrupted");
             }
             app.manage(state);
+            app.manage(settings);
             app.manage(conversations);
             app.manage(GitCommandState::new());
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));
