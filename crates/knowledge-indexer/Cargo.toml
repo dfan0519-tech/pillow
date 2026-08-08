@@ -1,0 +1,23 @@
+[package]
+name = "keeper-knowledge-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "K0b: scan docs/, register into knowledge tables, audit-only report"
+
+[[bin]]
+name = "knowledge-indexer"
+path = "src/bin/knowledge_indexer.rs"
+
+[dependencies]
+chrono.workspace = true
+keeper-project = { path = "../kernel-project" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+keeper-project = { path = "../kernel-project" }
+keeper-storage-sqlite = { path = "../storage-sqlite" }
+tempfile = "3"

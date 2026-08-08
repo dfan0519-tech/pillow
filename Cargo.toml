@@ -9,6 +9,7 @@ members = [
   "crates/kernel-project",
   "crates/kernel-resource",
   "crates/kernel-session",
+  "crates/knowledge-indexer",
   "crates/process-executor",
   "crates/runtime-host",
   "crates/storage-sqlite",

@@ -1954,6 +1954,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-knowledge-indexer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-project",
+ "keeper-storage-sqlite",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "keeper-policy"
 version = "0.1.0"
 dependencies = [
