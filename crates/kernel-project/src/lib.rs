@@ -1,3 +1,10 @@
+mod portable_path;
+
+pub use portable_path::{
+    PORTABLE_COMPONENT_MAX_LEN, PORTABLE_PATH_MAX_LEN, PathRejectDetail, is_portable_entry_path,
+    is_portable_path, validate_portable_path, validate_portable_path_or_directory,
+};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

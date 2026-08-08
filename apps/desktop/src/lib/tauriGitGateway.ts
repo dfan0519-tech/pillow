@@ -108,8 +108,11 @@ function enumValue<T extends string>(
 }
 
 /**
- * Windows reserved device names (stem before first `.`), matching
- * `keeper_git_executor::portable_path`.
+ * Windows reserved device names (stem before first `.`), matching the strict
+ * SSoT in `keeper_project::portable_path` (re-exported by git-executor).
+ *
+ * Includes COM0–COM9 / LPT0–LPT9 and superscript COM¹–COM³ / LPT¹–LPT³
+ * (U+00B9/B2/B3). COM0/LPT0 are fail-closed (see portable-path converge report).
  */
 function isWindowsDeviceComponent(component: string): boolean {
   const stem = (component.split(".")[0] ?? component)
@@ -126,7 +129,19 @@ function isWindowsDeviceComponent(component: string): boolean {
   ) {
     return true;
   }
-  return /^(COM|LPT)[1-9]$/.test(stem);
+  // ASCII COM0–COM9 / LPT0–LPT9
+  if (/^(COM|LPT)[0-9]$/.test(stem)) {
+    return true;
+  }
+  // Windows treats ISO-8859-1 superscripts ¹²³ as device digits.
+  return (
+    stem === "COM\u00B9"
+    || stem === "COM\u00B2"
+    || stem === "COM\u00B3"
+    || stem === "LPT\u00B9"
+    || stem === "LPT\u00B2"
+    || stem === "LPT\u00B3"
+  );
 }
 
 /**

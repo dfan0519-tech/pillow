@@ -690,4 +690,21 @@ describe("portable path cross-layer contract", () => {
     expect(isPortablePath("vendor/")).toBe(false);
     expect(isPortableEntryPath("vendor/")).toBe(true);
   });
+
+  it("rejects superscript COM/LPT device stems", () => {
+    const cases = [
+      "COM\u00B9",
+      "COM\u00B2",
+      "COM\u00B3",
+      "LPT\u00B9",
+      "LPT\u00B2",
+      "LPT\u00B3",
+      "COM0",
+      "LPT0",
+    ];
+    for (const path of cases) {
+      expect(isPortablePath(path), `file form reject ${path}`).toBe(false);
+      expect(isPortableEntryPath(path), `entry form reject ${path}`).toBe(false);
+    }
+  });
 });

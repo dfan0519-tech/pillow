@@ -355,63 +355,11 @@ fn revalidate_root(capability: &ProjectResourceCapability) -> Result<PathBuf, Re
 }
 
 /// Accept only relative portable paths. Root is exclusively `.`.
+///
+/// Grammar is the shared strict SSoT in [`keeper_project`]. External error
+/// remains [`ResourceError::PathRejected`] (no detail payload).
 fn validate_portable_path(path: &str) -> Result<(), ResourceError> {
-    if path == "." {
-        return Ok(());
-    }
-    if path.is_empty() || path.len() > 4_096 {
-        return Err(ResourceError::PathRejected);
-    }
-    if path.starts_with('/') || path.starts_with('\\') || path.contains('\\') || path.contains(':')
-    {
-        return Err(ResourceError::PathRejected);
-    }
-    for component in path.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(ResourceError::PathRejected);
-        }
-        if component.len() > 255 {
-            return Err(ResourceError::PathRejected);
-        }
-        if component.ends_with('.') || component.ends_with(' ') {
-            return Err(ResourceError::PathRejected);
-        }
-        if component.chars().any(|character| {
-            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
-        }) {
-            return Err(ResourceError::PathRejected);
-        }
-        if is_windows_device_component(component) {
-            return Err(ResourceError::PathRejected);
-        }
-    }
-    Ok(())
-}
-
-fn is_windows_device_component(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches([' ', '.'])
-        .to_ascii_uppercase();
-    if matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
-    ) {
-        return true;
-    }
-    let bytes = stem.as_bytes();
-    (bytes.len() == 4 && matches!(&bytes[..3], b"COM" | b"LPT") && matches!(bytes[3], b'1'..=b'9'))
-        || matches!(
-            stem.as_str(),
-            "COM\u{00b9}"
-                | "COM\u{00b2}"
-                | "COM\u{00b3}"
-                | "LPT\u{00b9}"
-                | "LPT\u{00b2}"
-                | "LPT\u{00b3}"
-        )
+    keeper_project::validate_portable_path(path).map_err(|_| ResourceError::PathRejected)
 }
 
 /// Resolve a portable relative path under `root`, rejecting symlinks/reparse
@@ -585,4 +533,48 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 #[cfg(not(windows))]
 fn is_reparse_point(_: &Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod portable_path_tests {
+    use super::validate_portable_path;
+
+    #[test]
+    fn accepts_repo_root_and_nested_files() {
+        assert!(validate_portable_path(".").is_ok());
+        assert!(validate_portable_path("a.txt").is_ok());
+        assert!(validate_portable_path("src/lib.rs").is_ok());
+    }
+
+    #[test]
+    fn rejects_directory_form_and_traversal() {
+        assert!(validate_portable_path("vendor/").is_err());
+        assert!(validate_portable_path("../escape").is_err());
+        assert!(validate_portable_path("a\\b").is_err());
+        assert!(validate_portable_path("CON").is_err());
+    }
+
+    #[test]
+    fn rejects_superscript_com_lpt_devices() {
+        for name in [
+            "COM\u{00b9}",
+            "COM\u{00b2}",
+            "COM\u{00b3}",
+            "LPT\u{00b9}",
+            "LPT\u{00b2}",
+            "LPT\u{00b3}",
+            "com\u{00b9}.txt",
+        ] {
+            assert!(
+                validate_portable_path(name).is_err(),
+                "kernel-resource must reject superscript device {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_com0_lpt0() {
+        assert!(validate_portable_path("COM0").is_err());
+        assert!(validate_portable_path("LPT0").is_err());
+    }
 }

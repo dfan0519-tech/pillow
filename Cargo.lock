@@ -1948,6 +1948,7 @@ name = "keeper-git-executor"
 version = "0.1.0"
 dependencies = [
  "keeper-process-executor",
+ "keeper-project",
  "serde",
  "serde_json",
 ]
@@ -1976,6 +1977,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "uuid",
 ]
 

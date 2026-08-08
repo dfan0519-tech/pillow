@@ -7,6 +7,7 @@ description = "Read-only Git porcelain parser, bounds, and hardened Git runner f
 
 [dependencies]
 keeper-process-executor = { path = "../process-executor" }
+keeper-project = { path = "../kernel-project" }
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }

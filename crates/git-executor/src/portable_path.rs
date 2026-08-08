@@ -1,55 +1,24 @@
-//! Single source of truth for portable project-relative path grammar.
+//! Portable path surface for Git layers.
 //!
-//! All Git layers (porcelain parse, discovery mapping, command gate, and the
-//! mirrored TypeScript DTO checks) must use this rule set. Directory form
-//! (`vendor/`) is only valid for status *entry* paths; repository ids and
-//! diff targets stay file-form via [`is_portable_path`].
+//! Grammar lives in [`keeper_project`]. This module re-exports the public API
+//! and keeps the crate-local `PathRejectDetail` alias so porcelain / runner
+//! mapping to [`crate::status::ParseError`] stays unchanged.
 
 /// Maximum full path length (`str::len` bytes).
-pub const PORTABLE_PATH_MAX_LEN: usize = 4_096;
+pub use keeper_project::PORTABLE_PATH_MAX_LEN;
 
 /// Maximum single path component length.
-pub const PORTABLE_COMPONENT_MAX_LEN: usize = 255;
+pub use keeper_project::PORTABLE_COMPONENT_MAX_LEN;
 
 /// Reject detail for internal mapping to parse / read errors.
-pub(crate) type PathRejectDetail = &'static str;
+pub(crate) type PathRejectDetail = keeper_project::PathRejectDetail;
 
 /// Accept only relative portable paths (forward slashes, no traversal/devices).
 ///
 /// Repository ids and diff targets use this form. The repository root id `.`
 /// is accepted; a trailing directory separator is not.
 pub(crate) fn validate_portable_path(path: &str) -> Result<(), PathRejectDetail> {
-    if path == "." {
-        return Ok(());
-    }
-    if path.is_empty() || path.len() > PORTABLE_PATH_MAX_LEN {
-        return Err("empty or too long");
-    }
-    if path.starts_with('/') || path.starts_with('\\') || path.contains('\\') || path.contains(':')
-    {
-        return Err("absolute or non-portable separator");
-    }
-    for component in path.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err("empty or traversal component");
-        }
-        if component.len() > PORTABLE_COMPONENT_MAX_LEN {
-            return Err("component too long");
-        }
-        if component.ends_with('.') || component.ends_with(' ') {
-            return Err("trailing dot or space");
-        }
-        if component
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-        {
-            return Err("illegal character");
-        }
-        if is_windows_device_component(component) {
-            return Err("windows device name");
-        }
-    }
-    Ok(())
+    keeper_project::validate_portable_path(path)
 }
 
 /// Portable-path rules plus the single trailing separator porcelain v2 uses for
@@ -61,41 +30,17 @@ pub(crate) fn validate_portable_path(path: &str) -> Result<(), PathRejectDetail>
 /// fail the whole repository status. Containment is unchanged — the stem runs
 /// through the identical rules.
 pub(crate) fn validate_portable_path_or_directory(path: &str) -> Result<(), PathRejectDetail> {
-    let Some(stem) = path.strip_suffix('/') else {
-        return validate_portable_path(path);
-    };
-    // `/`, `vendor//` and `./` are never emitted by git and stay rejected.
-    if stem.is_empty() || stem == "." || stem.ends_with('/') {
-        return Err("empty or repeated trailing separator");
-    }
-    validate_portable_path(stem)
+    keeper_project::validate_portable_path_or_directory(path)
 }
 
 /// Public bool form of [`validate_portable_path`] for command gates and tests.
 pub fn is_portable_path(path: &str) -> bool {
-    validate_portable_path(path).is_ok()
+    keeper_project::is_portable_path(path)
 }
 
 /// Public bool form of [`validate_portable_path_or_directory`].
 pub fn is_portable_entry_path(path: &str) -> bool {
-    validate_portable_path_or_directory(path).is_ok()
-}
-
-fn is_windows_device_component(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches([' ', '.'])
-        .to_ascii_uppercase();
-    if matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
-    ) {
-        return true;
-    }
-    let bytes = stem.as_bytes();
-    bytes.len() == 4 && matches!(&bytes[..3], b"COM" | b"LPT") && matches!(bytes[3], b'1'..=b'9')
+    keeper_project::is_portable_entry_path(path)
 }
 
 #[cfg(test)]
@@ -123,5 +68,29 @@ mod tests {
         assert!(is_portable_entry_path("a.txt"));
         assert!(!is_portable_entry_path("vendor//"));
         assert!(!is_portable_entry_path("./"));
+    }
+
+    #[test]
+    fn rejects_superscript_device_names() {
+        for name in [
+            "COM\u{00b9}",
+            "COM\u{00b2}",
+            "COM\u{00b3}",
+            "LPT\u{00b9}",
+            "LPT\u{00b2}",
+            "LPT\u{00b3}",
+        ] {
+            assert!(!is_portable_path(name), "git-executor must reject {name}");
+            assert!(
+                !is_portable_entry_path(name),
+                "git-executor entry form must reject {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_com0_lpt0() {
+        assert!(!is_portable_path("COM0"));
+        assert!(!is_portable_path("LPT0"));
     }
 }

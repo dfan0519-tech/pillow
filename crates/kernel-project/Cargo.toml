@@ -8,3 +8,7 @@ license.workspace = true
 chrono.workspace = true
 serde.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
