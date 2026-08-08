@@ -4,6 +4,10 @@
  * Selectors and cascade order preserved (loaded after shell, before chrome).
  */
 
+/*
+ * Content stage: solid calm surface — no blur, high contrast.
+ * Ambient field lives under chrome; dense conversation stays opaque.
+ */
 .conversation-surface {
   display: grid;
   grid-template-rows: auto 1fr auto;

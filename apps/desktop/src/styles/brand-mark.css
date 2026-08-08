@@ -1,6 +1,9 @@
 /*
  * Pillow brand mark chrome — Concept 08 «Mirage Loop».
  * Wordmark uses system font stack only (offline-first; no webfonts).
+ *
+ * Symbol geometry lives in BrandMark.tsx (layered SVG). Final 3D mark assets
+ * should be exported from design source and replace the inline SVG.
  */
 
 .brand-mark {
@@ -26,6 +29,15 @@
 .brand-symbol__svg {
   display: block;
   overflow: visible;
+}
+
+/* Size ladders — geometry is in SVG; CSS only tunes bloom strength if needed */
+.brand-symbol--compact .brand-symbol__bloom {
+  opacity: 0.2;
+}
+
+.brand-symbol--hero .brand-symbol__bloom {
+  opacity: 0.36;
 }
 
 .brand-wordmark {

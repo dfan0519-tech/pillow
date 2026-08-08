@@ -15,12 +15,13 @@
 .composer-wrap--float .composer {
   box-shadow:
     var(--shadow-composer),
-    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06));
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    var(--glass-glow, inset 0 0 0 1px rgba(255, 255, 255, 0.03));
   background: var(--glass-bg-strong, var(--bg-elevated));
   border-color: var(--glass-border, var(--border-subtle));
-  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
-    saturate(var(--glass-saturate, 1.15));
-  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 22px))
+    saturate(var(--glass-saturate, 1.25));
+  backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 1.25));
 }
 
 .composer {
@@ -200,10 +201,12 @@
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
-  box-shadow: var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06));
-  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
-    saturate(var(--glass-saturate, 1.15));
-  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
+  box-shadow:
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    var(--glass-glow, inset 0 0 0 1px rgba(255, 255, 255, 0.03));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 22px))
+    saturate(var(--glass-saturate, 1.25));
+  backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 1.25));
 }
 
 .resource-pane__heading {
@@ -330,16 +333,17 @@
   display: grid;
   gap: 16px;
   padding: 20px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-panel, 16px);
   border: 1px solid var(--glass-border, var(--border-subtle));
   background: var(--glass-bg-strong, var(--bg-elevated));
   box-shadow:
     var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    var(--glass-glow, inset 0 0 0 1px rgba(255, 255, 255, 0.03)),
     0 8px 28px rgba(0, 0, 0, 0.28),
     0 20px 48px rgba(0, 0, 0, 0.22);
-  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
-    saturate(var(--glass-saturate, 1.15));
-  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 22px))
+    saturate(var(--glass-saturate, 1.25));
+  backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 1.25));
 }
 
 .modal-card__head h2 {

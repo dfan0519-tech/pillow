@@ -288,8 +288,45 @@ async function waitForCdpPortReleased(port, timeoutMs = 15_000, label = "cdp") {
   throw new Error(`${label}: CDP port ${port} still bound after host exit`);
 }
 
-function snapshotWindowsProcessesWithCommandLine() {
+/**
+ * Hard upper bound for a single WMI/CIM process snapshot. Outer poll loops
+ * must pass a smaller per-call timeout from remaining budget so a deadline
+ * is a real interruptible limit (spawnSync cannot be aborted by performance.now()).
+ */
+const DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS = 3_000;
+/** Per-scan cap inside a short readiness poll (must stay below outer budget). */
+const MARKER_SCAN_MAX_MS = 1_500;
+/** Consecutive snapshot environment failures before fail-closed. */
+const MARKER_SCAN_MAX_CONSECUTIVE_ENV_FAILURES = 3;
+
+/**
+ * Environment-class process snapshot failure (timeout / abort / spawn error).
+ * Must not be treated as "zero matching processes".
+ */
+class ProcessSnapshotError extends Error {
+  /**
+   * @param {string} message
+   * @param {Record<string, unknown>} [details]
+   */
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "ProcessSnapshotError";
+    /** @type {true} */
+    this.isEnvironmentFailure = true;
+    this.details = details;
+  }
+}
+
+/**
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
+ */
+function snapshotWindowsProcessesWithCommandLine(options = {}) {
   if (process.platform !== "win32") return [];
+  const timeoutMs = Math.max(
+    1,
+    Math.floor(options.timeoutMs ?? DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS),
+  );
   const command = [
     "Get-CimInstance Win32_Process |",
     "ForEach-Object { [PSCustomObject]@{",
@@ -302,8 +339,48 @@ function snapshotWindowsProcessesWithCommandLine() {
   const result = spawnSync(
     "powershell.exe",
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+    {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+      timeout: timeoutMs,
+    },
   );
+  // spawnSync timeout: error.code === "ETIMEDOUT", status null, signal set.
+  // Never treat that as an empty process list — that masks environment stalls.
+  if (result.error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (result.error).code;
+    const isTimeout =
+      code === "ETIMEDOUT"
+      || result.error.killed === true
+      || /ETIMEDOUT|timed out/i.test(String(result.error.message ?? ""));
+    throw new ProcessSnapshotError(
+      isTimeout
+        ? `WMI/CIM process snapshot timed out after ${timeoutMs} ms`
+        : `WMI/CIM process snapshot failed to start/run: ${result.error.message}`,
+      {
+        kind: isTimeout ? "timeout" : "spawn_error",
+        timeoutMs,
+        errorCode: code ?? null,
+        status: result.status,
+        signal: result.signal,
+        stderr: String(result.stderr ?? "").slice(0, 400),
+      },
+    );
+  }
+  if (result.status === null) {
+    throw new ProcessSnapshotError(
+      `WMI/CIM process snapshot aborted (status=null, signal=${result.signal ?? "none"}) `
+      + `within ${timeoutMs} ms budget`,
+      {
+        kind: "aborted",
+        timeoutMs,
+        status: null,
+        signal: result.signal,
+        stderr: String(result.stderr ?? "").slice(0, 400),
+      },
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
       `CommandLine process snapshot failed with code ${result.status}: ${result.stderr}`,
@@ -423,8 +500,12 @@ async function waitForKnownPidsNaturalExit(supervisor, graceMs, label, scope) {
   );
 }
 
-function findMarkedNodeProcesses(markers) {
-  const processes = snapshotWindowsProcessesWithCommandLine();
+/**
+ * @param {string[]} markers
+ * @param {{ timeoutMs?: number }} [options]
+ */
+function findMarkedNodeProcesses(markers, options = {}) {
+  const processes = snapshotWindowsProcessesWithCommandLine(options);
   return processes.filter((entry) => {
     const name = String(entry.name ?? "").toLowerCase();
     if (name !== "node.exe" && name !== "node") return false;
@@ -433,12 +514,59 @@ function findMarkedNodeProcesses(markers) {
   });
 }
 
+/**
+ * @param {unknown} err
+ * @returns {err is ProcessSnapshotError}
+ */
+function isProcessSnapshotEnvironmentFailure(err) {
+  return Boolean(
+    err
+    && typeof err === "object"
+    && (
+      /** @type {{ isEnvironmentFailure?: boolean, name?: string }} */ (err)
+        .isEnvironmentFailure === true
+      || /** @type {{ name?: string }} */ (err).name === "ProcessSnapshotError"
+    ),
+  );
+}
+
 async function waitForMarkedNodeProcessesGone(markers, timeoutMs, label) {
   const deadline = performance.now() + timeoutMs;
   let last = [];
+  let consecutiveEnvFailures = 0;
+  /** @type {Array<object>} */
+  const envErrors = [];
   while (performance.now() < deadline) {
-    last = findMarkedNodeProcesses(markers);
-    if (last.length === 0) return { residual: 0 };
+    const remainingMs = Math.max(0, Math.floor(deadline - performance.now()));
+    if (remainingMs < 50) break;
+    const scanTimeoutMs = Math.min(DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS, remainingMs);
+    try {
+      last = findMarkedNodeProcesses(markers, { timeoutMs: scanTimeoutMs });
+      consecutiveEnvFailures = 0;
+      if (last.length === 0) return { residual: 0 };
+    } catch (err) {
+      if (isProcessSnapshotEnvironmentFailure(err)) {
+        consecutiveEnvFailures += 1;
+        envErrors.push({
+          message: err instanceof Error ? err.message : String(err),
+          details: /** @type {ProcessSnapshotError} */ (err).details ?? null,
+          remainingMs,
+          scanTimeoutMs,
+        });
+        if (consecutiveEnvFailures >= MARKER_SCAN_MAX_CONSECUTIVE_ENV_FAILURES) {
+          throw new Error(
+            `${label}: process snapshot environment failure `
+            + `(${consecutiveEnvFailures} consecutive WMI/CIM scan timeouts/aborts); `
+            + `cannot complete residual forensics. last=${
+              err instanceof Error ? err.message : String(err)
+            }; envErrors=${JSON.stringify(envErrors.slice(-3))}`,
+          );
+        }
+        await delay(50);
+        continue;
+      }
+      throw err;
+    }
     await delay(100);
   }
   throw new Error(
@@ -1309,27 +1437,136 @@ async function scenarioCancelTree({ page }) {
   // markers to be present first, but markers strengthen cleanup proof.
   // Sample cancel visibility during the poll — historical RED may be cancel
   // vanishing between after-approve and cancelOwningRun.
+  //
+  // Critical: each WMI scan has a hard spawnSync timeout smaller than the
+  // remaining outer budget. A performance.now() deadline alone cannot interrupt
+  // an unbounded spawnSync; under load that stall could exceed the product 60s
+  // process limit and leave composer-cancel already unmounted when we resume.
   let before = [];
   /** @type {Array<object>} */
   const markerPollSamples = [];
-  const markerDeadline = performance.now() + 5_000;
+  /** @type {Array<object>} */
+  const markerScanErrors = [];
+  let successfulScans = 0;
+  let consecutiveEnvFailures = 0;
+  const markerPollBudgetMs = 5_000;
+  const markerDeadline = performance.now() + markerPollBudgetMs;
   while (performance.now() < markerDeadline) {
-    before = findMarkedNodeProcesses(["c4p-child"]);
-    const cancelCount = await page.getByTestId("composer-cancel").count();
-    const cancelVisible =
-      cancelCount > 0
-      && (await page.getByTestId("composer-cancel").isVisible().catch(() => false));
-    markerPollSamples.push({
-      tMs: Math.round(performance.now() - approveAt),
-      markers: before.length,
-      cancelVisible,
-      cancelCount,
-    });
-    if (before.length > 0) break;
+    const remainingMs = Math.max(0, Math.floor(markerDeadline - performance.now()));
+    // Need room for one scan; stop cleanly rather than starting a scan that
+    // would still be forced to the full remaining ms as its only budget.
+    if (remainingMs < 50) break;
+    const scanTimeoutMs = Math.min(MARKER_SCAN_MAX_MS, remainingMs);
+    try {
+      before = findMarkedNodeProcesses(["c4p-child"], { timeoutMs: scanTimeoutMs });
+      successfulScans += 1;
+      consecutiveEnvFailures = 0;
+      const cancelCount = await page.getByTestId("composer-cancel").count();
+      const cancelVisible =
+        cancelCount > 0
+        && (await page.getByTestId("composer-cancel").isVisible().catch(() => false));
+      markerPollSamples.push({
+        tMs: Math.round(performance.now() - approveAt),
+        markers: before.length,
+        cancelVisible,
+        cancelCount,
+        scanTimeoutMs,
+        scanOk: true,
+      });
+      if (before.length > 0) break;
+    } catch (err) {
+      if (isProcessSnapshotEnvironmentFailure(err)) {
+        consecutiveEnvFailures += 1;
+        const sample = {
+          tMs: Math.round(performance.now() - approveAt),
+          kind: "environment",
+          message: err instanceof Error ? err.message : String(err),
+          details: /** @type {ProcessSnapshotError} */ (err).details ?? null,
+          remainingMs,
+          scanTimeoutMs,
+          consecutiveEnvFailures,
+        };
+        markerScanErrors.push(sample);
+        markerPollSamples.push({
+          tMs: sample.tMs,
+          markers: null,
+          cancelVisible: null,
+          cancelCount: null,
+          scanTimeoutMs,
+          scanOk: false,
+          environmentFailure: true,
+          message: sample.message,
+        });
+        // Fail closed: continuous WMI stalls prevent forensics and can push
+        // cancel past the product 60s process limit. Do not fall through to a
+        // misleading composer-cancel wait.
+        if (
+          consecutiveEnvFailures >= MARKER_SCAN_MAX_CONSECUTIVE_ENV_FAILURES
+          || remainingMs <= scanTimeoutMs
+        ) {
+          await writeTimeline("red-marker-scan-environment", {
+            failPhase: "marker-poll-before-cancel",
+            msSinceApprove: Math.round(performance.now() - approveAt),
+            markerPollBudgetMs,
+            successfulScans,
+            consecutiveEnvFailures,
+            markerScanErrors,
+            markerPollSamples,
+          });
+          throw new Error(
+            `cancel-tree: process marker scan environment failure `
+            + `(WMI/CIM snapshot unavailable within ${markerPollBudgetMs} ms budget); `
+            + `not a product cancel failure. last=${sample.message}; `
+            + `successfulScans=${successfulScans}; consecutiveEnvFailures=${consecutiveEnvFailures}`,
+          );
+        }
+        await delay(50);
+        continue;
+      }
+      throw err;
+    }
     await delay(100);
   }
-  if (before.length === 0) {
-    before = findMarkedNodeProcesses(["c4p-child"]);
+  // Optional final sample only if budget remains and prior scans worked.
+  if (before.length === 0 && successfulScans > 0) {
+    const remainingMs = Math.max(0, Math.floor(markerDeadline - performance.now()));
+    if (remainingMs >= 50) {
+      try {
+        before = findMarkedNodeProcesses(["c4p-child"], {
+          timeoutMs: Math.min(MARKER_SCAN_MAX_MS, remainingMs),
+        });
+        successfulScans += 1;
+      } catch (err) {
+        if (isProcessSnapshotEnvironmentFailure(err)) {
+          markerScanErrors.push({
+            tMs: Math.round(performance.now() - approveAt),
+            kind: "environment",
+            phase: "final-sample",
+            message: err instanceof Error ? err.message : String(err),
+            details: /** @type {ProcessSnapshotError} */ (err).details ?? null,
+          });
+          // Final sample is best-effort; only fail if we never had a success
+          // (handled below). Keep before=[] from last success.
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+  if (successfulScans === 0) {
+    await writeTimeline("red-marker-scan-environment", {
+      failPhase: "marker-poll-no-successful-scan",
+      msSinceApprove: Math.round(performance.now() - approveAt),
+      markerPollBudgetMs,
+      successfulScans,
+      markerScanErrors,
+      markerPollSamples,
+    });
+    throw new Error(
+      `cancel-tree: process marker scan environment failure `
+      + `(no successful WMI/CIM snapshot within ${markerPollBudgetMs} ms budget); `
+      + `not a product cancel failure. errors=${JSON.stringify(markerScanErrors)}`,
+    );
   }
   await pushPhase("before-cancelOwningRun");
 
@@ -1349,6 +1586,8 @@ async function scenarioCancelTree({ page }) {
       msApproveToCancelStart,
       markersBefore: before.length,
       markerPollSamples,
+      markerScanErrors,
+      successfulScans,
       failDump,
       msSinceApproveAtFail: Math.round(performance.now() - approveAt),
     });
@@ -1382,6 +1621,8 @@ async function scenarioCancelTree({ page }) {
     msApproveToCancelStart,
     markersBefore: before.length,
     markerPollSamples,
+    markerScanErrors,
+    successfulScans,
     cancelClicks: cancelResult?.clicks ?? null,
   });
 
@@ -1396,6 +1637,8 @@ async function scenarioCancelTree({ page }) {
       msApproveToCancelStart,
       cancelClicks: cancelResult?.clicks ?? null,
       markerPollSamples,
+      markerScanErrors,
+      successfulScans,
     },
   };
 }

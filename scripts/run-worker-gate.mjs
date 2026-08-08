@@ -91,6 +91,20 @@ async function main() {
       run: () => run(node, [join("scripts", "check-secrets.mjs")]),
     },
     {
+      // Cheap and compile-free, so it runs before anything that builds. The gate
+      // previously had clippy but no rustfmt, which let unformatted Rust through
+      // a green worker gate and only surfaced in the controller's own pass.
+      name: "cargo-fmt",
+      run: () =>
+        run(node, [
+          join("scripts", "run-cargo.mjs"),
+          "fmt",
+          "--all",
+          "--",
+          "--check",
+        ]),
+    },
+    {
       name: "typecheck",
       run: () => runPnpm(["typecheck"]),
     },

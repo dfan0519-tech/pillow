@@ -308,8 +308,41 @@ async function waitForCdpPortReleased(port, timeoutMs = 15_000, label = "cdp") {
   throw new Error(`${label}: CDP port ${port} still bound after host exit`);
 }
 
-function snapshotWindowsProcessesWithCommandLine() {
+/**
+ * Hard upper bound for a single WMI/CIM process snapshot. spawnSync is
+ * synchronous and cannot be interrupted by an outer performance.now() deadline
+ * without an explicit `timeout` option.
+ */
+const DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS = 3_000;
+
+/**
+ * Environment-class process snapshot failure (timeout / abort / spawn error).
+ * Must not be treated as an empty process list.
+ */
+class ProcessSnapshotError extends Error {
+  /**
+   * @param {string} message
+   * @param {Record<string, unknown>} [details]
+   */
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "ProcessSnapshotError";
+    /** @type {true} */
+    this.isEnvironmentFailure = true;
+    this.details = details;
+  }
+}
+
+/**
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
+ */
+function snapshotWindowsProcessesWithCommandLine(options = {}) {
   if (process.platform !== "win32") return [];
+  const timeoutMs = Math.max(
+    1,
+    Math.floor(options.timeoutMs ?? DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS),
+  );
   const command = [
     "Get-CimInstance Win32_Process |",
     "ForEach-Object { [PSCustomObject]@{",
@@ -322,8 +355,48 @@ function snapshotWindowsProcessesWithCommandLine() {
   const result = spawnSync(
     "powershell.exe",
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+    {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+      timeout: timeoutMs,
+    },
   );
+  // spawnSync timeout: error.code === "ETIMEDOUT", status null, signal set.
+  // Never treat that as an empty process list — that masks environment stalls.
+  if (result.error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (result.error).code;
+    const isTimeout =
+      code === "ETIMEDOUT"
+      || result.error.killed === true
+      || /ETIMEDOUT|timed out/i.test(String(result.error.message ?? ""));
+    throw new ProcessSnapshotError(
+      isTimeout
+        ? `WMI/CIM process snapshot timed out after ${timeoutMs} ms`
+        : `WMI/CIM process snapshot failed to start/run: ${result.error.message}`,
+      {
+        kind: isTimeout ? "timeout" : "spawn_error",
+        timeoutMs,
+        errorCode: code ?? null,
+        status: result.status,
+        signal: result.signal,
+        stderr: String(result.stderr ?? "").slice(0, 400),
+      },
+    );
+  }
+  if (result.status === null) {
+    throw new ProcessSnapshotError(
+      `WMI/CIM process snapshot aborted (status=null, signal=${result.signal ?? "none"}) `
+      + `within ${timeoutMs} ms budget`,
+      {
+        kind: "aborted",
+        timeoutMs,
+        status: null,
+        signal: result.signal,
+        stderr: String(result.stderr ?? "").slice(0, 400),
+      },
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
       `CommandLine process snapshot failed with code ${result.status}: ${result.stderr}`,

@@ -6,10 +6,12 @@
 //! restart interruption, zero residual authority, and no storage side channel.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use keeper_agent_protocol::{
@@ -147,6 +149,30 @@ fn provider_node_slow_print(call_id: &str, text: &str) -> ProviderProcessProposa
             &format!("process.stdout.write({text:?}); setTimeout(() => process.exit(0), 700)"),
         ],
     )
+}
+
+/// Print marker immediately, then hold until `sentinel` exists (or 60s).
+///
+/// Used by live-output tests so marker visibility is not a race against a
+/// fixed child exit timer. The test controls exit by creating the sentinel
+/// after observing live chunks.
+fn provider_node_print_hold_until_sentinel(
+    call_id: &str,
+    text: &str,
+    sentinel: &Path,
+) -> ProviderProcessProposal {
+    let text_json = serde_json::to_string(text).expect("marker json");
+    let sentinel_json =
+        serde_json::to_string(&sentinel.to_string_lossy()).expect("sentinel path json");
+    // Busy-wait with a short spin so we do not depend on child_process or
+    // SharedArrayBuffer flags. Child self-exits after 60s if the test aborts
+    // without creating the sentinel (fail-safe residual bound).
+    let script = format!(
+        r#"const fs=require("fs");process.stdout.write({text});const s={sentinel};const d=Date.now()+60000;function sleep(ms){{const e=Date.now()+ms;while(Date.now()<e){{}}}}while(!fs.existsSync(s)){{if(Date.now()>d)process.exit(2);sleep(20);}}process.exit(0);"#,
+        text = text_json,
+        sentinel = sentinel_json,
+    );
+    provider_node(call_id, vec!["-e", &script])
 }
 
 fn host_for(fx: &Fixture) -> RuntimeHost {
@@ -597,19 +623,48 @@ fn approve_surfaces_actual_stdout_chunks_on_live_output() {
 
 #[test]
 fn slow_output_is_visible_live_and_reopens_after_waiter_consumes_terminal() {
+    // Handshake design (not a larger fixed sleep):
+    // 1. Child writes the marker then holds open until a test-owned sentinel.
+    // 2. Waiter lifecycle channel signals claim-confirmed ProcessStarted.
+    // 3. Only after Started do we condition-wait for the marker in open_output.
+    // 4. Assert visibility while the waiter is still in-flight (pre-terminal).
+    // 5. Create the sentinel to release the child, then prove retained reopen.
+    //
+    // Why not "just raise the 1s poll": the old loop started before approve /
+    // claim / spawn / reader, so high load burned the budget on pre-chunk
+    // work. Starting after Started measures the real post-claim path; the
+    // sentinel proves live (not retained-after-exit). The post-Started deadline
+    // is an environment bound for hung spawn/node, not a race against exit.
     let fx = fixture();
     let host = Arc::new(host_for(&fx));
     register(&host, &fx);
     let conversation_id = fx.conversation_id.clone();
     let run_id = fx.run_id;
+    let marker = "D3AR2_LIVE_MARKER";
+    let sentinel: PathBuf = fx.root.join("slow_output_release.sentinel");
+    let _ = fs::remove_file(&sentinel);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let started_tx = Mutex::new(Some(started_tx));
+    let sentinel_for_child = sentinel.clone();
     let waiter = thread::spawn(move || {
         execute_governed_process(
             run_id,
-            provider_node_slow_print("call-live", "D3AR2_LIVE_MARKER"),
+            provider_node_print_hold_until_sentinel("call-live", marker, &sentinel_for_child),
             &AtomicBool::new(false),
-            |_| Ok(()),
+            |event| {
+                if matches!(event, GovernedProcessLifecycle::Started(_)) {
+                    if let Ok(mut guard) = started_tx.lock()
+                        && let Some(tx) = guard.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                }
+                Ok(())
+            },
         )
     });
+
     let proposal_id = wait_live_pending(&host, &conversation_id);
     let host_for_decide = Arc::clone(&host);
     let cid_for_decide = conversation_id.clone();
@@ -621,22 +676,73 @@ fn slow_output_is_visible_live_and_reopens_after_waiter_consumes_terminal() {
             ExecDecision::ApproveOnce,
         )
     });
+
+    // Phase handshake: do not spend observation budget before claim/start.
+    if let Err(err) = started_rx.recv_timeout(Duration::from_secs(30)) {
+        let _ = fs::write(&sentinel, b"release");
+        let _ = decide.join();
+        let _ = waiter.join();
+        let _ = host.shutdown();
+        panic!("timed out waiting for ProcessStarted lifecycle (claim/spawn handshake): {err:?}");
+    }
+
+    // Post-Started: wait for the real stdout marker while child is held open.
+    // Budget covers Windows suspended spawn + Node boot under parallel load;
+    // it is not racing a fixed child exit timer.
+    let marker_deadline = Instant::now() + Duration::from_secs(15);
     let mut live = None;
-    for _ in 0..100 {
+    while Instant::now() < marker_deadline {
         let output = host
             .open_process_output(&conversation_id, &proposal_id)
             .unwrap();
         if output
             .chunks
             .iter()
-            .any(|chunk| chunk.text.contains("D3AR2_LIVE_MARKER"))
+            .any(|chunk| chunk.text.contains(marker))
         {
             live = Some(output);
             break;
         }
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(live.expect("live output").live_retained);
+    // Final recheck after the last sleep so a late chunk is not lost solely
+    // because the loop body slept past the deadline without one more open.
+    if live.is_none() {
+        let output = host
+            .open_process_output(&conversation_id, &proposal_id)
+            .unwrap();
+        if output
+            .chunks
+            .iter()
+            .any(|chunk| chunk.text.contains(marker))
+        {
+            live = Some(output);
+        }
+    }
+
+    let live = match live {
+        Some(output) => output,
+        None => {
+            let _ = fs::write(&sentinel, b"release");
+            let _ = decide.join();
+            let _ = waiter.join();
+            let _ = host.shutdown();
+            panic!(
+                "live output marker not observed after ProcessStarted handshake \
+                 (post-Started budget elapsed while child was held open by sentinel)"
+            );
+        }
+    };
+    assert!(
+        live.live_retained,
+        "marker must be retained/live when first observed"
+    );
+    assert!(
+        !waiter.is_finished(),
+        "marker must be observed while process is still live (before waiter terminal)"
+    );
+
+    fs::write(&sentinel, b"release").expect("create sentinel to release slow child");
     decide.join().unwrap().unwrap();
     let receipt = waiter.join().unwrap().unwrap();
     assert_eq!(receipt.state, ExecProposalState::Succeeded);
@@ -648,7 +754,7 @@ fn slow_output_is_visible_live_and_reopens_after_waiter_consumes_terminal() {
         reopened
             .chunks
             .iter()
-            .any(|chunk| chunk.text.contains("D3AR2_LIVE_MARKER"))
+            .any(|chunk| chunk.text.contains(marker))
     );
     host.release_governed_process_run(fx.run_id);
     assert!(

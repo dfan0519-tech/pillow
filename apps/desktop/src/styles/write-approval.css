@@ -3,6 +3,7 @@
  * Conversation remains the visual center; one bar, no historical card stack.
  */
 
+/* Chrome surface — container-level glass (not content rows / diffs) */
 .write-approval-bar {
   display: flex;
   flex-wrap: wrap;
@@ -13,11 +14,17 @@
   max-width: 42rem;
   margin: 0 auto;
   padding: 10px 12px;
-  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.12));
-  border-radius: var(--radius-md, 8px);
-  background: var(--bg-elevated, #1c1c20);
+  border: 1px solid var(--glass-border, var(--border-strong, rgba(255, 255, 255, 0.12)));
+  border-radius: var(--radius-panel, 16px);
+  background: var(--glass-bg-strong, var(--bg-elevated, #2c2c36));
   color: var(--text-primary, rgba(255, 255, 255, 0.92));
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow:
+    var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.1)),
+    var(--glass-glow, inset 0 0 0 1px rgba(255, 255, 255, 0.03)),
+    0 4px 16px rgba(0, 0, 0, 0.2);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 22px))
+    saturate(var(--glass-saturate, 1.25));
+  backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 1.25));
 }
 
 .write-approval-bar__meta {

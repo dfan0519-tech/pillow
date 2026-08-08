@@ -6,13 +6,35 @@
  * Conversation/timeline/run-activity live in workbench-conversation.css.
  */
 
+/*
+ * Ambient LILAC HAZE field under all chrome. Three static radial orbs —
+ * no animation, no image assets. Glass panels (sidebar / resource / composer)
+ * refract this field; content surfaces stay opaque and calm.
+ */
 .app-shell {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 100%;
   min-width: 1024px;
-  background: var(--bg-app);
+  background-color: var(--bg-app);
+  background-image:
+    radial-gradient(
+      ellipse 78% 58% at 92% 6%,
+      var(--ambient-orb-a),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 68% 52% at 6% 94%,
+      var(--ambient-orb-b),
+      transparent 68%
+    ),
+    radial-gradient(
+      ellipse 48% 40% at 72% 72%,
+      var(--ambient-orb-c),
+      transparent 65%
+    );
+  background-repeat: no-repeat;
   color: var(--text-primary);
 }
 
@@ -46,6 +68,24 @@
   min-height: 100vh;
   place-items: center;
   color: var(--text-secondary);
+  background-color: var(--bg-app);
+  background-image:
+    radial-gradient(
+      ellipse 78% 58% at 92% 6%,
+      var(--ambient-orb-a),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 68% 52% at 6% 94%,
+      var(--ambient-orb-b),
+      transparent 68%
+    ),
+    radial-gradient(
+      ellipse 48% 40% at 72% 72%,
+      var(--ambient-orb-c),
+      transparent 65%
+    );
+  background-repeat: no-repeat;
 }
 
 .app-error {
@@ -93,10 +133,11 @@
   border-right: 1px solid var(--glass-border, var(--border-subtle));
   box-shadow:
     var(--glass-highlight, inset 0 1px 0 rgba(250, 249, 247, 0.06)),
+    var(--glass-glow, inset 0 0 0 1px rgba(255, 255, 255, 0.03)),
     inset -8px 0 12px -8px rgba(0, 0, 0, 0.12);
-  -webkit-backdrop-filter: blur(var(--glass-blur, 18px))
-    saturate(var(--glass-saturate, 1.15));
-  backdrop-filter: blur(var(--glass-blur, 18px)) saturate(var(--glass-saturate, 1.15));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 22px))
+    saturate(var(--glass-saturate, 1.25));
+  backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 1.25));
 }
 
 .sidebar-brand-row {
@@ -381,13 +422,16 @@
   font-size: 13px;
 }
 
-/* ── Main stage ── */
+/*
+ * Main stage shell stays transparent so ambient orbs paint through the
+ * resource-pane glass column. Conversation surface owns the calm solid stage.
+ */
 .workbench {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  background: var(--bg-main);
+  background: transparent;
 }
 
 .workbench.has-resources {

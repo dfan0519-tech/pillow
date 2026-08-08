@@ -1,8 +1,18 @@
 /**
- * Pillow dark desktop product tokens — brand palette (Concept 08 «Mirage Loop»).
- * Surfaces are layered BLACK INK / GRAPHITE, not pure #000 / #0d0d0d.
- * Accent is the lilac family (LILAC HAZE), not the prior blue prototype.
+ * Pillow dual-theme desktop product tokens — brand palette (Concept 08 «Mirage Loop»).
+ *
+ * Two complete, same-name token sets:
+ *   [data-theme="dark"]  — default (also applied on bare :root)
+ *   [data-theme="light"] — OFF-WHITE base, GRAPHITE body text
+ *
+ * Surfaces: dark uses BLACK INK / GRAPHITE layering; light uses OFF-WHITE /
+ * warm gray layering (never pure #fff as the app canvas). Accent is the lilac
+ * family (LILAC HAZE) in both skins — never as light-mode body/small text.
  * Glass tokens are container-level only (never per-row in scroll lists).
+ *
+ * Ambient orbs (LILAC HAZE field) sit under chrome so frosted glass has color
+ * to refract. Hover/active washes are neutral — lilac only for CTA, selection
+ * indicator, focus ring, and brand mark.
  *
  * Brand baseline:
  *   LILAC HAZE  #DCCBFF
@@ -11,40 +21,71 @@
  *   GRAPHITE    #3E3E46
  *   BLACK INK   #0E0E10
  *
+ * Theme switch (dev / visual QA only — no persistence, no settings UI):
+ *   document.documentElement.setAttribute("data-theme", "light")
+ *   document.documentElement.setAttribute("data-theme", "dark")
+ *   document.documentElement.removeAttribute("data-theme")  // → dark default
+ *
  * Structure/control grammar still adapted from Grok App under MIT; color values
  * are Pillow-original (see THIRD_PARTY_NOTICES.md).
  */
 :root {
-  color-scheme: dark;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--text-primary);
   background: var(--bg-app);
 
-  /* Brand primitives */
+  /* Brand primitives — identical in both skins */
   --brand-lilac: #dccbff;
   --brand-off-white: #faf9f7;
   --brand-smoke: #c7c7ce;
   --brand-graphite: #3e3e46;
   --brand-ink: #0e0e10;
 
+  /* Layout metrics — theme-invariant */
+  --titlebar-height: 40px;
+  --sidebar-width: 248px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  /* Chrome panels (composer / modal / approval) — not content rows */
+  --radius-panel: 16px;
+  --radius-composer: 18px;
+
+  --text-sm: 13px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+}
+
+/*
+ * Dark skin (default).
+ * Applied on bare :root and when data-theme="dark" is set explicitly.
+ * Layered BLACK INK / GRAPHITE surfaces + LILAC HAZE accent.
+ * Surface ladder targets ≥1.15:1 adjacent contrast (app → main → elevated).
+ */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
   /* Layered dark surfaces — BLACK INK base, GRAPHITE-lifted panels */
   --bg-app: #0e0e10;
-  --bg-sidebar: rgba(20, 20, 24, 0.72);
-  --bg-sidebar-solid: #141416;
-  --bg-main: #161618;
-  --bg-aside: rgba(20, 20, 24, 0.72);
-  --bg-elevated: #1c1c20;
-  --bg-hover: rgba(220, 203, 255, 0.06);
-  --bg-active: rgba(220, 203, 255, 0.1);
-  --bg-input: #121214;
+  --bg-sidebar: rgba(14, 14, 16, 0.55);
+  --bg-sidebar-solid: #16161a;
+  --bg-main: #1e1e24;
+  --bg-aside: rgba(14, 14, 16, 0.55);
+  --bg-elevated: #2c2c36;
+  /* Neutral washes — lilac reserved for CTA / selection indicator / focus / brand */
+  --bg-hover: rgba(250, 249, 247, 0.06);
+  --bg-active: rgba(250, 249, 247, 0.1);
+  --bg-input: #141418;
   --bg-code: #0a0a0c;
-  --bg-user-bubble: #2a2a30;
+  --bg-user-bubble: #32323c;
 
-  --border-subtle: rgba(199, 199, 206, 0.1);
-  --border-strong: rgba(199, 199, 206, 0.2);
+  --border-subtle: rgba(199, 199, 206, 0.14);
+  --border-strong: rgba(199, 199, 206, 0.26);
   --border-focus: rgba(220, 203, 255, 0.55);
 
-  /* Text on dark: OFF-WHITE / SMOKE — keep ≥4.5:1 body contrast on --bg-main */
+  /* Text on dark: OFF-WHITE / SMOKE — body ≥4.5:1 on --bg-main */
   --text-primary: #faf9f7;
   --text-secondary: #c7c7ce;
   --text-tertiary: rgba(199, 199, 206, 0.72);
@@ -60,33 +101,102 @@
   --danger: #f07178;
   --warning: #f0993d;
 
+  /* Ambient LILAC HAZE orbs — low opacity, large radius (static) */
+  --ambient-orb-a: rgba(220, 203, 255, 0.16);
+  --ambient-orb-b: rgba(190, 170, 240, 0.11);
+  --ambient-orb-c: rgba(220, 203, 255, 0.08);
+
   /* Container-level frosted glass (sidebar, context pane, floating composer) */
-  --glass-bg: rgba(20, 20, 24, 0.68);
-  --glass-bg-strong: rgba(28, 28, 32, 0.78);
-  --glass-border: rgba(199, 199, 206, 0.14);
-  --glass-highlight: inset 0 1px 0 rgba(250, 249, 247, 0.06);
-  --glass-glow: inset 0 0 0 1px rgba(220, 203, 255, 0.04);
-  --glass-blur: 18px;
-  --glass-saturate: 1.15;
-
-  --titlebar-height: 40px;
-  --sidebar-width: 248px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-composer: 18px;
-
-  --text-sm: 13px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
+  --glass-bg: rgba(14, 14, 16, 0.58);
+  --glass-bg-strong: rgba(30, 30, 38, 0.72);
+  --glass-border: rgba(199, 199, 206, 0.16);
+  --glass-highlight: inset 0 1px 0 rgba(250, 249, 247, 0.1);
+  /* Neutral edge ring — no lilac wash on structural glass */
+  --glass-glow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --glass-blur: 22px;
+  --glass-saturate: 1.25;
 
   --shadow-composer:
-    0 1px 0 rgba(255, 255, 255, 0.04),
-    0 8px 28px rgba(0, 0, 0, 0.36),
-    0 2px 8px rgba(0, 0, 0, 0.2);
+    0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 28px rgba(0, 0, 0, 0.4),
+    0 2px 8px rgba(0, 0, 0, 0.22);
 
-  /* Compatibility aliases used by residual classes / window chrome */
+  /* Compatibility aliases used by residual classes / legacy chrome */
+  --canvas: var(--bg-app);
+  --panel: var(--bg-main);
+  --panel-muted: var(--bg-sidebar-solid);
+  --line: var(--border-subtle);
+  --line-strong: var(--border-strong);
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --accent-soft: var(--accent-muted);
+}
+
+/*
+ * Light skin.
+ * OFF-WHITE canvas, GRAPHITE body, SMOKE-derived borders, LILAC accent only
+ * (never body/small text). Warm gray layers — not pure white canvas.
+ * Ambient orbs are paler; glass blur is lighter to avoid muddiness.
+ */
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* OFF-WHITE base + warm gray hierarchy (not pure #fff canvas) */
+  --bg-app: #faf9f7;
+  --bg-sidebar: rgba(250, 249, 247, 0.62);
+  --bg-sidebar-solid: #eeebe6;
+  --bg-main: #eeebe6;
+  --bg-aside: rgba(250, 249, 247, 0.62);
+  --bg-elevated: #ffffff;
+  /* Neutral washes — no lilac hover/active */
+  --bg-hover: rgba(62, 62, 70, 0.06);
+  --bg-active: rgba(62, 62, 70, 0.1);
+  --bg-input: #fffeff;
+  --bg-code: #e6e3dc;
+  --bg-user-bubble: #ebe4f7;
+
+  /* SMOKE / GRAPHITE-tinted borders for soft separation */
+  --border-subtle: rgba(62, 62, 70, 0.12);
+  --border-strong: rgba(62, 62, 70, 0.2);
+  --border-focus: rgba(140, 110, 200, 0.55);
+
+  /* GRAPHITE body; secondary darkened from SMOKE for ≥4.5:1 (raw SMOKE fails) */
+  --text-primary: #3e3e46;
+  --text-secondary: #5c5c66;
+  --text-tertiary: #7a7a84;
+  --text-inverse: #faf9f7;
+
+  /* Lilac accent — fills/highlights only, not body copy */
+  --accent: #dccbff;
+  --accent-muted: rgba(220, 203, 255, 0.4);
+  --accent-hover: #c9b4f5;
+  --accent-fg: #0e0e10;
+
+  /* Status hues deepened for body-size contrast on light surfaces */
+  --success: #187a50;
+  --danger: #b83a42;
+  --warning: #a85a10;
+
+  /* Ambient orbs — softer so light glass does not muddy */
+  --ambient-orb-a: rgba(220, 203, 255, 0.2);
+  --ambient-orb-b: rgba(200, 185, 235, 0.12);
+  --ambient-orb-c: rgba(220, 203, 255, 0.08);
+
+  /* Frosted glass — lighter blur/saturate on light skin */
+  --glass-bg: rgba(250, 249, 247, 0.58);
+  --glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --glass-border: rgba(62, 62, 70, 0.12);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --glass-glow: inset 0 0 0 1px rgba(62, 62, 70, 0.04);
+  --glass-blur: 14px;
+  --glass-saturate: 1.1;
+
+  --shadow-composer:
+    0 1px 0 rgba(255, 255, 255, 0.9),
+    0 8px 28px rgba(62, 62, 70, 0.12),
+    0 2px 8px rgba(62, 62, 70, 0.06);
+
+  /* Compatibility aliases (same names as dark) */
   --canvas: var(--bg-app);
   --panel: var(--bg-main);
   --panel-muted: var(--bg-sidebar-solid);
@@ -149,7 +259,10 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-/* Shared frosted-glass surface — container level only */
+/*
+ * Shared frosted-glass surface — container level only.
+ * Never apply to list rows, tree items, or dense content cells.
+ */
 .surface-glass {
   background: var(--glass-bg);
   border-color: var(--glass-border);
@@ -163,7 +276,8 @@ textarea:focus-visible {
   .app-sidebar,
   .resource-pane,
   .composer-wrap--float .composer,
-  .modal-card {
+  .modal-card,
+  .write-approval-bar {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
   }
@@ -177,7 +291,8 @@ textarea:focus-visible {
   }
 
   .composer-wrap--float .composer,
-  .modal-card {
+  .modal-card,
+  .write-approval-bar {
     background: var(--bg-elevated) !important;
   }
 }

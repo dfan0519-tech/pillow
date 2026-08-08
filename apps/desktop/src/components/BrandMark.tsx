@@ -2,7 +2,9 @@
  * Pillow brand mark — Concept 08 «Mirage Loop».
  *
  * The design source is a 3D-rendered möbius-style ribbon. This component is a
- * clean 2D vector interpretation (gradient + soft glow) for product chrome.
+ * layered 2D SVG approximation (multi-path faces, cross depth, specular rim,
+ * soft bloom) for product chrome only.
+ *
  * Final 3D mark assets should be exported from design source and replace this
  * SVG; do not treat the inline paths as production-final brand art.
  */
@@ -24,6 +26,59 @@ export type BrandMarkProps = {
 /** Unique-ish id suffix so multiple marks on one page do not clash gradients. */
 let markSeq = 0;
 
+/** Detail ladder: compact for sidebar, standard for about/chrome, hero for icons. */
+type MarkDetail = "compact" | "standard" | "hero";
+
+function markDetail(size: number): MarkDetail {
+  if (size < 28) return "compact";
+  if (size < 80) return "standard";
+  return "hero";
+}
+
+/**
+ * Asymmetric ∞ centerline segments (viewBox 0 0 100 55).
+ *
+ * Topology (continuous ribbon):
+ *   left apex → left top → overpass (NW→SE) → right bottom → right apex
+ *   → right top → underpass (NE→SW) → left bottom → left apex
+ *
+ * Left lobe: smaller + rounder. Right lobe: larger + flatter.
+ * Band width ~14–18% of mark height via stroke widths (face-on wider, side narrower).
+ */
+const PATH = {
+  /** Left apex → NW of cross (light face, face-on width). */
+  leftTop:
+    "M17 27.5 C17.5 18 24 11.5 33 12.2 C39 12.8 42.5 16.2 45 19.5",
+  /** Overpass NW→SE (on top of underpass). */
+  overpass: "M45 19.5 C48 23.8 52 31.2 55 35.5",
+  /** SE → right apex (silver / smoke face). */
+  rightBottom:
+    "M55 35.5 C59.5 39.5 68 42.5 78 40.2 C84.5 38.5 88.5 33.2 90 27.5",
+  /** Right apex → NE (dark face after outer twist). */
+  rightTop:
+    "M90 27.5 C88.5 21.8 84 16.2 76 14.2 C68 12.2 60.5 14.2 55 19.5",
+  /** Underpass NE→SW (drawn under overpass). */
+  underpass: "M55 19.5 C52 23.8 48 31.2 45 35.5",
+  /** SW → left apex (dark → lilac transition). */
+  leftBottom:
+    "M45 35.5 C41.5 39.5 34 43.5 26 41.5 C20 39.8 17.5 33.5 17 27.5",
+  /** Compact: full left lobe (NW → left apex → SW). */
+  leftLoop:
+    "M45 19.5 C42.5 16.2 39 12.8 33 12.2 C24 11.5 17.5 18 17 27.5 C17.5 33.5 20 39.8 26 41.5 C34 43.5 41.5 39.5 45 35.5",
+  /** Compact: full right lobe (SE → right apex → NE). */
+  rightLoop:
+    "M55 35.5 C59.5 39.5 68 42.5 78 40.2 C84.5 38.5 88.5 33.2 90 27.5 C88.5 21.8 84 16.2 76 14.2 C68 12.2 60.5 14.2 55 19.5",
+  /** Compact hue wash along light path (lilac → white → smoke). */
+  hueWash:
+    "M17 27.5 C17.5 18 24 11.5 33 12.2 C39 12.8 42.5 16.2 45 19.5 C48 23.8 52 31.2 55 35.5 C59.5 39.5 68 42.5 78 40.2 C84.5 38.5 88.5 33.2 90 27.5",
+  /** Soft bloom silhouette (filled, blurred). Asymmetric double lobe. */
+  glowSilhouette:
+    "M18 27.5 C18 15.5 28.5 9.5 40 14.5 C45 17.2 47.5 22.5 50 27.5 C52.5 22.5 55 17.2 60 14.5 C73 8.5 90.5 14 90.5 27.5 C90.5 41 73 46.5 60 40.5 C55 37.8 52.5 32.5 50 27.5 C47.5 32.5 45 37.8 40 40.5 C28.5 45.5 18 39.5 18 27.5 Z",
+  /** Outer-edge specular hints (arc tops where faces turn). */
+  rimLeft: "M20 18.5 C24 13.5 30 11.2 36 12.5 C40 13.5 43 16 44.5 18.5",
+  rimRight: "M55.5 18.5 C58 15.5 65 12.5 74 13.5 C82 14.5 87.5 19 89 24",
+} as const;
+
 /**
  * 2D möbius / infinity ribbon — provisional product chrome only.
  * Replace with design-exported 3D mark when available.
@@ -39,9 +94,36 @@ export function BrandSymbol({
 }) {
   markSeq += 1;
   const uid = `pillow-mark-${markSeq}`;
-  const gradId = `${uid}-grad`;
-  const glowId = `${uid}-glow`;
-  const classes = ["brand-symbol", className].filter(Boolean).join(" ");
+  const detail = markDetail(size);
+  const classes = ["brand-symbol", `brand-symbol--${detail}`, className]
+    .filter(Boolean)
+    .join(" ");
+
+  const g = {
+    light: `${uid}-light`,
+    dark: `${uid}-dark`,
+    lilac: `${uid}-lilac`,
+    smoke: `${uid}-smoke`,
+    pathHue: `${uid}-path`,
+    glow: `${uid}-glow`,
+    bloom: `${uid}-bloom`,
+    crossShadow: `${uid}-xshadow`,
+  };
+
+  // Stroke widths: face-on ≈ 16% of viewBox height (55 → ~8.8), side ~14% → ~5.5
+  const w = {
+    face: detail === "compact" ? 9.2 : detail === "hero" ? 8.8 : 8.6,
+    side: detail === "compact" ? 6.4 : detail === "hero" ? 5.8 : 6.0,
+    cross: detail === "compact" ? 6.8 : 6.2,
+    rim: detail === "compact" ? 0 : detail === "hero" ? 0.55 : 0.45,
+    shadow: detail === "compact" ? 8.2 : 7.6,
+  };
+
+  const strokeCommon = {
+    fill: "none" as const,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
 
   return (
     <span
@@ -65,24 +147,90 @@ export function BrandSymbol({
       <svg
         width={size}
         height={size * 0.55}
-        viewBox="0 0 48 26"
+        viewBox="0 0 100 55"
         fill="none"
         aria-hidden
         className="brand-symbol__svg"
       >
         <defs>
-          <linearGradient id={gradId} x1="0%" y1="20%" x2="100%" y2="80%">
+          {/* Path hue: lilac → near-white → smoke → lilac */}
+          <linearGradient id={g.pathHue} x1="8%" y1="35%" x2="92%" y2="65%">
             <stop offset="0%" stopColor="#DCCBFF" />
-            <stop offset="42%" stopColor="#FAF9F7" />
-            <stop offset="58%" stopColor="#EDE4FF" />
+            <stop offset="28%" stopColor="#FAF9F7" />
+            <stop offset="55%" stopColor="#C7C7CE" />
+            <stop offset="82%" stopColor="#E4D8F8" />
             <stop offset="100%" stopColor="#DCCBFF" />
           </linearGradient>
+          {/* Light ribbon face (near-white / silver). */}
+          <linearGradient id={g.light} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#F5F2FF" />
+            <stop offset="45%" stopColor="#FAF9F7" />
+            <stop offset="100%" stopColor="#E8E4F0" />
+          </linearGradient>
+          {/* Dark ribbon face (lavender → grey-purple). */}
+          <linearGradient id={g.dark} x1="100%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#B8A8D0" />
+            <stop offset="50%" stopColor="#8E869C" />
+            <stop offset="100%" stopColor="#6E6878" />
+          </linearGradient>
+          <linearGradient id={g.lilac} x1="0%" y1="50%" x2="100%" y2="50%">
+            <stop offset="0%" stopColor="#DCCBFF" />
+            <stop offset="100%" stopColor="#EDE4FF" />
+          </linearGradient>
+          <linearGradient id={g.smoke} x1="0%" y1="40%" x2="100%" y2="70%">
+            <stop offset="0%" stopColor="#D4D0DC" />
+            <stop offset="55%" stopColor="#C7C7CE" />
+            <stop offset="100%" stopColor="#A8A4B0" />
+          </linearGradient>
+          {/* Soft purple bloom (large blur, low opacity). */}
           <filter
-            id={glowId}
-            x="-40%"
+            id={g.bloom}
+            x="-50%"
             y="-80%"
-            width="180%"
+            width="200%"
             height="260%"
+            colorInterpolationFilters="sRGB"
+          >
+            <feGaussianBlur
+              in="SourceGraphic"
+              stdDeviation={detail === "hero" ? 3.2 : detail === "standard" ? 2.4 : 1.6}
+              result="blur"
+            />
+            <feColorMatrix
+              in="blur"
+              type="matrix"
+              values="0.85 0 0 0 0.08
+                      0.75 0 0 0 0.05
+                      1    0 0 0 0.12
+                      0    0 0 0.55 0"
+              result="tint"
+            />
+            <feMerge>
+              <feMergeNode in="tint" />
+            </feMerge>
+          </filter>
+          {/* Mild glow merge for body accents. */}
+          <filter
+            id={g.glow}
+            x="-30%"
+            y="-50%"
+            width="160%"
+            height="200%"
+            colorInterpolationFilters="sRGB"
+          >
+            <feGaussianBlur in="SourceGraphic" stdDeviation="0.9" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          {/* Contact shadow under the overpass (purple-deep grey, not pure black). */}
+          <filter
+            id={g.crossShadow}
+            x="-40%"
+            y="-60%"
+            width="180%"
+            height="220%"
             colorInterpolationFilters="sRGB"
           >
             <feGaussianBlur in="SourceGraphic" stdDeviation="1.1" result="blur" />
@@ -92,26 +240,136 @@ export function BrandSymbol({
             </feMerge>
           </filter>
         </defs>
-        {/* Soft ambient glow layer */}
+
+        {/* ── 1. Bloom (lowest) ─────────────────────────────────────────── */}
         <path
-          d="M8.5 13c0-4.2 3.1-7.2 7.2-7.2 2.6 0 4.6 1.1 6.3 2.9L24 11l2-2.3c1.7-1.8 3.7-2.9 6.3-2.9 4.1 0 7.2 3 7.2 7.2s-3.1 7.2-7.2 7.2c-2.6 0-4.6-1.1-6.3-2.9L24 15l-2 2.3c-1.7 1.8-3.7 2.9-6.3 2.9-4.1 0-7.2-3-7.2-7.2z"
-          fill={`url(#${gradId})`}
-          opacity="0.28"
-          filter={`url(#${glowId})`}
+          d={PATH.glowSilhouette}
+          className="brand-symbol__bloom"
+          fill="#DCCBFF"
+          opacity={detail === "compact" ? 0.22 : 0.32}
+          filter={`url(#${g.bloom})`}
         />
-        {/* Band body — continuous infinity ribbon with thickness */}
+
+        {/* ── 2. Underpass + contact shadow (back strand) ───────────────── */}
         <path
-          d="M15.7 5.8c4.55 0 7.1 2.85 9.05 5.35.55.7 1.05 1.35 1.55 1.95l.2.25c.5-.6 1-1.25 1.55-1.95C29.85 8.65 32.4 5.8 36.95 5.8c5.05 0 8.85 3.7 8.85 8.2s-3.8 8.2-8.85 8.2c-4.55 0-7.1-2.85-9.05-5.35-.55-.7-1.05-1.35-1.55-1.95l-.2-.25c-.5.6-1 1.25-1.55 1.95-1.95 2.5-4.5 5.35-9.05 5.35-5.05 0-8.85-3.7-8.85-8.2s3.8-8.2 8.85-8.2zm0 3.15c-3.05 0-5.5 2.2-5.5 5.05s2.45 5.05 5.5 5.05c3.05 0 5.15-2.05 6.95-4.35.45-.55.85-1.1 1.25-1.6.4.5.8 1.05 1.25 1.6 1.8 2.3 3.9 4.35 6.95 4.35 3.05 0 5.5-2.2 5.5-5.05s-2.45-5.05-5.5-5.05c-3.05 0-5.15 2.05-6.95 4.35-.45.55-.85 1.1-1.25 1.6-.4-.5-.8-1.05-1.25-1.6-1.8-2.3-3.9-4.35-6.95-4.35z"
-          fill={`url(#${gradId})`}
+          d={PATH.underpass}
+          {...strokeCommon}
+          stroke="#4A4458"
+          strokeWidth={w.shadow}
+          opacity={detail === "compact" ? 0.5 : 0.62}
+          filter={`url(#${g.crossShadow})`}
+          className="brand-symbol__cross-shadow"
         />
-        {/* Twist highlight — implies band torsion without 3D mesh */}
         <path
-          d="M22.2 11.4c.55.7 1.05 1.35 1.55 1.95.1.12.2.12.3 0 .5-.6 1-1.25 1.55-1.95"
+          d={PATH.underpass}
+          {...strokeCommon}
+          stroke={`url(#${g.dark})`}
+          strokeWidth={w.cross}
+          className="brand-symbol__underpass"
+        />
+
+        {detail === "compact" ? (
+          <>
+            {/* Compact: two lobe bodies + path hue; still over/under at cross */}
+            <path
+              d={PATH.leftLoop}
+              {...strokeCommon}
+              stroke={`url(#${g.lilac})`}
+              strokeWidth={w.face}
+              className="brand-symbol__left-loop"
+            />
+            <path
+              d={PATH.rightLoop}
+              {...strokeCommon}
+              stroke={`url(#${g.smoke})`}
+              strokeWidth={w.face * 0.95}
+              className="brand-symbol__right-loop"
+            />
+          </>
+        ) : (
+          <>
+            {/* ── 3. Dark faces (möbius underside) ─────────────────────── */}
+            <path
+              d={PATH.leftBottom}
+              {...strokeCommon}
+              stroke={`url(#${g.dark})`}
+              strokeWidth={w.face * 0.92}
+              className="brand-symbol__face-dark brand-symbol__left-bottom"
+            />
+            <path
+              d={PATH.rightTop}
+              {...strokeCommon}
+              stroke={`url(#${g.dark})`}
+              strokeWidth={w.side}
+              className="brand-symbol__face-dark brand-symbol__right-top"
+            />
+
+            {/* ── 4. Light / silver faces ──────────────────────────────── */}
+            <path
+              d={PATH.leftTop}
+              {...strokeCommon}
+              stroke={`url(#${g.light})`}
+              strokeWidth={w.face}
+              filter={detail === "hero" ? `url(#${g.glow})` : undefined}
+              className="brand-symbol__face-light brand-symbol__left-top"
+            />
+            <path
+              d={PATH.rightBottom}
+              {...strokeCommon}
+              stroke={`url(#${g.smoke})`}
+              strokeWidth={w.face * 0.96}
+              className="brand-symbol__face-light brand-symbol__right-bottom"
+            />
+          </>
+        )}
+
+        {/* ── 5. Overpass (front strand — establishes depth) ──────────── */}
+        <path
+          d={PATH.overpass}
+          {...strokeCommon}
+          stroke={`url(#${g.light})`}
+          strokeWidth={w.cross}
+          className="brand-symbol__overpass"
+        />
+        {/* Thin bright edge on overpass for specular catch */}
+        <path
+          d={PATH.overpass}
+          {...strokeCommon}
           stroke="#FAF9F7"
-          strokeWidth="1.35"
-          strokeLinecap="round"
-          opacity="0.55"
+          strokeWidth={w.cross * 0.38}
+          opacity={0.55}
+          className="brand-symbol__overpass-spec"
         />
+
+        {/* ── 6. Specular rim on outer arc tops (face turn) ────────────── */}
+        {w.rim > 0 ? (
+          <g className="brand-symbol__rim" opacity={detail === "hero" ? 0.75 : 0.55}>
+            <path
+              d={PATH.rimLeft}
+              {...strokeCommon}
+              stroke="#FFFFFF"
+              strokeWidth={w.rim}
+            />
+            <path
+              d={PATH.rimRight}
+              {...strokeCommon}
+              stroke="#FFFFFF"
+              strokeWidth={w.rim}
+            />
+          </g>
+        ) : null}
+
+        {/* Compact: subtle path-hue wash so lilac→white→smoke reads at 22px */}
+        {detail === "compact" ? (
+          <path
+            d={PATH.hueWash}
+            {...strokeCommon}
+            stroke={`url(#${g.pathHue})`}
+            strokeWidth={w.face * 0.35}
+            opacity={0.45}
+            className="brand-symbol__hue-wash"
+          />
+        ) : null}
       </svg>
     </span>
   );
