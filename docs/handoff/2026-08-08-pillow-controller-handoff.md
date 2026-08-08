@@ -105,8 +105,35 @@ Round 4 验收抓出四个此前所有门都漏掉的缺陷,其中一个 Critica
 | --- | --- | --- |
 | `cancel-tree` | **高置信,harness bug**:`spawnSync` 无 `timeout`,阻塞越过产品 60s 时限,`composer-cancel` 合法卸载 | **已修**(未提交) |
 | `slow_output` | 高 ~0.88,测试缺阶段握手 | **已修**(未提交) |
-| `storage_failure_after_live` | **0.95,产品邻近竞态**:主线程 `reconcile_expired_for_owner` 与 waiter `finalize_expire` 都在离锁后调同一 transition helper → 同一次过期被转换两次 | **待验证**(见 §6) |
+| `storage_failure_after_live` | **0.95,产品邻近竞态**:主线程 `reconcile_expired_for_owner` 与 waiter `finalize_expire` 都在离锁后调同一 transition helper → 同一次过期被转换两次 | **已坐实并修复**(见 §4.6) |
 | `two-project-isolation` | 机制中置信 / 归因低置信,**证据不足** | 保持观察,等 RED 现场 |
+
+### 4.6 storage 双 transition:barrier 实验坐实并修复
+
+报告:`docs/execution/2026-08-08-storage-barrier-verdict.md`(Codex Sol / max)。
+
+**这是"用确定性实验取代概率观察"的范例,值得复用。**
+此前我跑过 30 次串行循环全绿,零信息量 —— 因为**连续全绿不能推翻内部竞态**。
+决定性做法是加一个**仅测试可见的 proposal-scoped barrier**,强制两条路径都越过
+expiry 判断,再看有几笔 transition。
+
+- **修复前**:`main-list` 与 `waiter-expiry` 都过 barrier,两笔 transition,`delta=2`,
+  测试按既有语义失败(`left: 2, right: 1`)。
+- **反向控制**:用 channel 暂停 waiter → `delta=1`,排除了主线程链内重试与第三写入口。
+- **修复**:runtime-host live coordinator 里给 terminal transition 墓碑加
+  **proposal-scoped single-flight**;winner 离锁后执行唯一一次 SQLite transition,
+  loser 在既有 condvar 上等待且**只接受真实 durable terminal**,否则返回 opaque `Gateway`。
+  SQLite schema、transition 校验、持久化顺序、对外 receipt/error 映射**均未改变**。
+- **修复后(总控独立复跑)**:两条路径仍都过 barrier,但只剩一笔 transition,`delta=1`,
+  两个调用方都拿到 `Gateway`;durable row 仍为 `PendingApproval`,不伪造 terminal。
+
+**生产不可见性(总控独立核验,未采信自报)**:插桩的字段、类型、方法、
+甚至 `transition_source: &str` **函数参数本身**都被 `#[cfg(any(test, feature = "test-support"))]`
+门控;1005 行附近可见成对的 `#[cfg(not(...))]` 生产分支直接调用原 `store.transition(...)`。
+另按 crate 单独 `cargo check`(不启用 `test-support`)通过。
+
+⚠️ 总控修了它遗留的一处 clippy `collapsible_if`(`governed_write.rs:1005`)。
+Codex 的门当时被 §9.8 那条 secrets 挡在编译之前,所以它没机会看到这个 lint。
 
 ---
 
@@ -178,12 +205,16 @@ Round 4 验收抓出四个此前所有门都漏掉的缺陷,其中一个 Critica
    `git diff --check` 0;`cargo fmt --check` 曾 exit 1,已修并把该步骤补进门(§5.3)
 3. ~~人工看截图验收视觉~~ **已完成**,结论与残留见 §5.1
 4. ~~提交推送~~ **已完成**
-5. **在干净树上派 Codex** 做 storage barrier 实验:
-   简报已备好 `.superpowers/round10/_CODEX_STORAGE_BARRIER.md`
-   —— 授权是**条件式**:坐实则实施最小修复,证伪则停下报告。
-   ⚠️ 用户明确要求:**两个 codex 槽位保证能正常调用,不得违规操作让账号有风险**。
-6. 之后:S0 设置切片 → 双皮肤持久化(顺带补浅色截图证据)→ 知识层设计
-   (需先拍 §2 两条红线)
+5. ~~在干净树上派 Codex 做 storage barrier 实验~~ **已完成并验收**,见 §4.6
+6. **下一步:S0a 设置层存储 + 解析服务**(Rust,不含 UI)
+   简报已备好:`.superpowers/round10/BRIEF_S0A_settings_storage.md`
+   口径已由 **ADR-0003** 拍死(Q1–Q9 全部有结论,Q4/Q6 明确推到 S1)。
+   **S0 按串行两片走,不并行** —— 坑 #1(白名单重叠)与坑 #2(抢 `target/`)
+   都是并行切出来的。S0b(UI + `runtime_composition` 接线)等 S0a 收工再派。
+7. 再之后:双皮肤持久化(顺带补浅色截图证据)→ 知识层设计(需先拍 §2 两条红线)
+
+⚠️ 用户明确要求:**两个 codex 槽位保证能正常调用,不得违规操作让账号有风险**。
+派 codex 前必须先确认全机没有在跑的 `codex exec`(按命令行查,**不要按进程名杀**)。
 
 ---
 
@@ -191,7 +222,8 @@ Round 4 验收抓出四个此前所有门都漏掉的缺陷,其中一个 Critica
 
 1. **`two-project-isolation` 归因未知**。取证已就位,下次 RED 是第一次真正机会。
    **无 RED 前不要改产品 cancel/approval 路径。**
-2. **`storage_failure_after_live` 竞态未验证**(0.95 置信但未做 barrier 实验)。
+2. ~~`storage_failure_after_live` 竞态未验证~~ **已坐实并修复**(§4.6)。
+   残留:跨进程同时写同一 SQLite 不在本次进程内 coordinator 实验范围内。
 3. **adapter 仍依赖 `runtime-host`**。契约类型已搬到 `agent-protocol`,
    但 adapter 还要调 `execute_governed_*`。彻底解耦需把治理操作做成注入的 trait。
    **D 阶段接第二个 runtime 前应做掉。**
@@ -230,16 +262,18 @@ curl -s -X POST "http://127.0.0.1:7890/api/agent-runtimes/grok-cli/release" \
 
 **启动**(wrapper 硬编码了 denglou-ui 的 cwd,且 `--cwd` 不可重复,所以直接调):
 
+`<USER>` = 本机用户名,**不写进仓库**(密钥闸会拦);实际值见上面那份 vault 文档。
+
 ```bash
 # grok1(默认容器)
-%USERPROFILE%/.grok/bin/grok.exe --cwd <repo> -m grok-4.5 \
+/c/Users/<USER>/.grok/bin/grok.exe --cwd <repo> -m grok-4.5 \
   --always-approve --effort high --prompt-file '<绝对路径简报>' > <log> 2>&1
 
 # grok2/3/4(复制 wrapper 的三重容器重定向,只改 cwd)
-USERPROFILE='%USERPROFILE%\.grokN' \
-APPDATA='%USERPROFILE%\.grokN\AppData\Roaming' \
-LOCALAPPDATA='%USERPROFILE%\.grokN\AppData\Local' \
-%USERPROFILE%/.grok/bin/grok.exe --cwd <repo> ...
+USERPROFILE='C:\Users\<USER>\.grokN' \
+APPDATA='C:\Users\<USER>\.grokN\AppData\Roaming' \
+LOCALAPPDATA='C:\Users\<USER>\.grokN\AppData\Local' \
+/c/Users/<USER>/.grok/bin/grok.exe --cwd <repo> ...
 ```
 
 ⚠️ **绝不只设 `GROK_HOME`** —— 血训:会导致两进程跑同一主号、双倍消耗打到 402。
@@ -304,6 +338,21 @@ codex exec --cd <repo> --dangerously-bypass-approvals-and-sandbox \
    `C:\Program Files\nodejs\node.exe` 在空格处截断,**把通过的步骤误报成 FAILED**。
    shell 只给 `.cmd` shim 用。
 
+8. **绿门源于"扫描器看不见",而不是源于干净**(本轮亲手踩,已修)。
+   `check-secrets.mjs` 原来只扫 `git ls-files`(**已跟踪**文件)。交接手册带着
+   `C:\Users\<真实用户名>\.grokN` 一路 untracked,**两次跑门都是绿的**;
+   我一提交,门立刻在 main 上变红,而机器路径已经推到远程了。
+   —— 扫描范围现改为 `--cached --others --exclude-standard`,即
+   **"将会被提交的集合"**,`.gitignore` 仍然生效。
+
+   同时补了第二个盲点:`user-profile-path` 只认盘符写法 `C:\Users\<name>`,
+   **不认 MSYS 写法 `/c/Users/<name>`** —— 我们全程在 Git Bash 下工作,
+   后者才是常见的那种。
+   扩面后**立刻**在 Codex 报告里抓到一条二次泄漏(它把该值原样引用进了报告)。
+
+   > 这是坑 #4 的同一族:**先问"扫描器能不能看见它",再看它报没报**。
+   > 每条模式现在都带多个已知阳性样本,任一分支失效即 fail-closed。
+
 ---
 
 ## 10. 环境注记
@@ -322,9 +371,11 @@ codex exec --cd <repo> --dangerously-bypass-approvals-and-sandbox \
 ## 11. 交接完成状态
 
 - 在途 Worker:**0**;Codex 进程:**0**
-- Round 8/9 成果已提交推送;暂存区空,HEAD = 远程
-- 门 / E2E / fmt / diff 四项全绿(§6.2)
-- Codex barrier 简报已备好,**干净树条件已满足,可随时派发**
+- Round 8/9/10 成果已提交推送;暂存区空,HEAD = 远程
+- 门 / E2E(10/10)/ fmt / diff 四项全绿;barrier 实验总控独立复跑 `delta=1`
+- **下一单已备好**:S0a 设置层(`.superpowers/round10/BRIEF_S0A_settings_storage.md`),
+  口径见 ADR-0003
 - Stage 2 的两条红线**尚未获用户逐条确认**,设计前需再问
-- 未决:`two-project-isolation` 归因(等 RED)、adapter 与 runtime-host 解耦、
-  门与并发派单的 `target/` 争用、浅色皮肤截图证据
+- 未决:`two-project-isolation` 归因(等 RED;本轮 E2E 它是绿的)、
+  adapter 与 runtime-host 解耦、门与并发派单的 `target/` 争用、
+  浅色皮肤截图证据、浅色 `--text-tertiary` 3.57:1

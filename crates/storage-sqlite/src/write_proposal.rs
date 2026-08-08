@@ -7,7 +7,11 @@
 use std::path::Path;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{Arc, Condvar};
 use std::sync::{Mutex, MutexGuard};
+#[cfg(any(test, feature = "test-support"))]
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use keeper_agent_protocol::{RunId, WRITE_CONTENT_BYTE_CAP, WriteMode};
@@ -180,6 +184,98 @@ pub struct SqliteWriteProposalRepository {
     /// Counts mutating entry points (including forced failures) for tests.
     #[cfg(any(test, feature = "test-support"))]
     write_attempts: AtomicUsize,
+    /// Proposal-scoped rendezvous immediately before a terminal transition.
+    #[cfg(any(test, feature = "test-support"))]
+    transition_barrier: Mutex<Option<(String, Arc<TransitionBarrierForTests>)>>,
+    /// Sources that crossed the pre-transition barrier for deterministic tests.
+    #[cfg(any(test, feature = "test-support"))]
+    transition_barrier_trace: Mutex<Vec<(String, String)>>,
+    /// Sources that actually entered the SQLite transition mutation.
+    #[cfg(any(test, feature = "test-support"))]
+    transition_attempt_trace: Mutex<Vec<(String, String)>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct TransitionBarrierForTests {
+    participants: usize,
+    preferred_source: Option<String>,
+    timeout: StdDuration,
+    state: Mutex<TransitionBarrierStateForTests>,
+    cv: Condvar,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct TransitionBarrierStateForTests {
+    arrivals: usize,
+    released: bool,
+    preferred_completed: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TransitionBarrierForTests {
+    fn new(participants: usize, preferred_source: Option<&str>, timeout: StdDuration) -> Self {
+        assert!(participants > 0, "transition barrier needs participants");
+        Self {
+            participants,
+            preferred_source: preferred_source.map(str::to_owned),
+            timeout,
+            state: Mutex::new(TransitionBarrierStateForTests {
+                arrivals: 0,
+                released: false,
+                preferred_completed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn wait(&self, proposal_id: &str, source: &str) {
+        let mut state = self.state.lock().expect("transition barrier state");
+        if state.released {
+            return;
+        }
+        state.arrivals += 1;
+        if state.arrivals >= self.participants {
+            state.released = true;
+            self.cv.notify_all();
+        } else {
+            let (waited, _) = self
+                .cv
+                .wait_timeout_while(state, self.timeout, |state| !state.released)
+                .expect("transition barrier arrival wait");
+            state = waited;
+        }
+        assert!(
+            state.released,
+            "transition barrier timed out for proposal {proposal_id} source {source}: {}/{} arrivals",
+            state.arrivals, self.participants
+        );
+
+        if self
+            .preferred_source
+            .as_deref()
+            .is_some_and(|preferred| preferred != source)
+        {
+            let (waited, _) = self
+                .cv
+                .wait_timeout_while(state, self.timeout, |state| !state.preferred_completed)
+                .expect("preferred transition completion wait");
+            state = waited;
+            assert!(
+                state.preferred_completed,
+                "preferred transition source did not complete proposal {proposal_id} before {source}"
+            );
+        }
+    }
+
+    fn mark_complete(&self, source: &str) {
+        if self.preferred_source.as_deref() != Some(source) {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.preferred_completed = true;
+            self.cv.notify_all();
+        }
+    }
 }
 
 impl SqliteWriteProposalRepository {
@@ -195,6 +291,12 @@ impl SqliteWriteProposalRepository {
             fail_writes: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             write_attempts: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            transition_barrier: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            transition_barrier_trace: Mutex::new(Vec::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            transition_attempt_trace: Mutex::new(Vec::new()),
         })
     }
 
@@ -208,6 +310,130 @@ impl SqliteWriteProposalRepository {
     #[cfg(any(test, feature = "test-support"))]
     pub fn write_attempt_count_for_tests(&self) -> usize {
         self.write_attempts.load(Ordering::SeqCst)
+    }
+
+    /// Test-only: install a proposal-scoped barrier before terminal transition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_transition_barrier_for_tests(
+        &self,
+        proposal_id: impl Into<String>,
+        participants: usize,
+        preferred_source: Option<&str>,
+        timeout: StdDuration,
+    ) {
+        if let Ok(mut guard) = self.transition_barrier.lock() {
+            *guard = Some((
+                proposal_id.into(),
+                Arc::new(TransitionBarrierForTests::new(
+                    participants,
+                    preferred_source,
+                    timeout,
+                )),
+            ));
+        }
+    }
+
+    /// Test-only: clear the proposal-scoped terminal-transition barrier.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_transition_barrier_for_tests(&self) {
+        if let Ok(mut guard) = self.transition_barrier.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Test-only: clear barrier arrivals and actual transition-attempt traces.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_transition_traces_for_tests(&self) {
+        if let Ok(mut trace) = self.transition_barrier_trace.lock() {
+            trace.clear();
+        }
+        if let Ok(mut trace) = self.transition_attempt_trace.lock() {
+            trace.clear();
+        }
+    }
+
+    /// Test-only: snapshot proposal/source pairs that crossed the barrier.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transition_barrier_trace_for_tests(&self) -> Vec<(String, String)> {
+        self.transition_barrier_trace
+            .lock()
+            .map(|trace| trace.clone())
+            .unwrap_or_default()
+    }
+
+    /// Test-only: snapshot proposal/source pairs that attempted SQLite transition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transition_attempt_trace_for_tests(&self) -> Vec<(String, String)> {
+        self.transition_attempt_trace
+            .lock()
+            .map(|trace| trace.clone())
+            .unwrap_or_default()
+    }
+
+    /// Test-only: record a source after its expiry decision and rendezvous with
+    /// any configured peer before either source may arbitrate the transition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_at_transition_barrier_for_tests(&self, proposal_id: &str, source: &str) {
+        let barrier = self
+            .transition_barrier
+            .lock()
+            .ok()
+            .and_then(|guard| match guard.as_ref() {
+                Some((target, barrier)) if target == proposal_id => Some(Arc::clone(barrier)),
+                _ => None,
+            });
+        let Some(barrier) = barrier else {
+            return;
+        };
+
+        if let Ok(mut trace) = self.transition_barrier_trace.lock() {
+            trace.push((proposal_id.to_owned(), source.to_owned()));
+        }
+        eprintln!("STORAGE_BARRIER_REACHED proposal_id={proposal_id} source={source}");
+        barrier.wait(proposal_id, source);
+    }
+
+    /// Test-only: label the exact source that enters `transition`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transition_with_source_for_tests(
+        &self,
+        proposal_id: &str,
+        next: WriteProposalState,
+        now: DateTime<Utc>,
+        source: &str,
+    ) -> Result<StoredWriteProposal, WriteProposalStoreError> {
+        let barrier = self
+            .transition_barrier
+            .lock()
+            .ok()
+            .and_then(|guard| match guard.as_ref() {
+                Some((target, barrier)) if target == proposal_id => Some(Arc::clone(barrier)),
+                _ => None,
+            });
+        if barrier.is_some() {
+            if let Ok(mut trace) = self.transition_attempt_trace.lock() {
+                trace.push((proposal_id.to_owned(), source.to_owned()));
+            }
+            eprintln!("STORAGE_TRANSITION_ATTEMPT proposal_id={proposal_id} source={source}");
+        }
+        self.transition(proposal_id, next, now)
+    }
+
+    /// Test-only: release a source held behind a preferred transition after the
+    /// preferred caller has finished its live-entry publication/removal work.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn complete_transition_source_for_tests(&self, proposal_id: &str, source: &str) {
+        let barrier = self
+            .transition_barrier
+            .lock()
+            .ok()
+            .and_then(|guard| match guard.as_ref() {
+                Some((target, barrier)) if target == proposal_id => Some(Arc::clone(barrier)),
+                _ => None,
+            });
+        if let Some(barrier) = barrier {
+            barrier.mark_complete(source);
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]

@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -1008,6 +1010,66 @@ fn secrets_absent_from_debug_and_store_metadata() {
 #[test]
 #[cfg(feature = "test-support")]
 fn storage_failure_after_live_never_fabricates_terminal() {
+    let barrier = run_storage_failure_barrier_case();
+    let control = run_storage_failure_waiter_paused_control();
+
+    assert_eq!(barrier.barrier_trace.len(), 2);
+    assert!(
+        barrier
+            .barrier_trace
+            .iter()
+            .all(|(proposal_id, _)| proposal_id == &barrier.proposal_id)
+    );
+    let mut barrier_sources = barrier
+        .barrier_trace
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    barrier_sources.sort_unstable();
+    assert_eq!(barrier_sources, ["main-list", "waiter-expiry"]);
+
+    assert_eq!(
+        barrier.transition_trace.len(),
+        1,
+        "the two expiry initiators must single-flight one SQLite transition"
+    );
+    assert_eq!(barrier.transition_trace[0].0, barrier.proposal_id);
+    assert!(matches!(
+        barrier.transition_trace[0].1.as_str(),
+        "main-list" | "waiter-expiry"
+    ));
+    assert_eq!(
+        barrier.attempts_after,
+        barrier.attempts_before + 1,
+        "exactly one failed transition attempt; no second write/retry"
+    );
+
+    assert_eq!(
+        control.barrier_trace,
+        vec![(control.proposal_id.clone(), "main-list".to_owned())]
+    );
+    assert_eq!(
+        control.transition_trace,
+        vec![(control.proposal_id.clone(), "main-list".to_owned())]
+    );
+    assert_eq!(
+        control.attempts_after,
+        control.attempts_before + 1,
+        "pausing the waiter must isolate exactly one main-list transition"
+    );
+}
+
+#[cfg(feature = "test-support")]
+struct StorageFailureObservation {
+    proposal_id: String,
+    attempts_before: usize,
+    attempts_after: usize,
+    barrier_trace: Vec<(String, String)>,
+    transition_trace: Vec<(String, String)>,
+}
+
+#[cfg(feature = "test-support")]
+fn run_storage_failure_barrier_case() -> StorageFailureObservation {
     let fx = fixture();
     let host = Arc::new(host_for(&fx));
     register(&host, &fx);
@@ -1046,18 +1108,22 @@ fn storage_failure_after_live_never_fabricates_terminal() {
 
     let gateway = host2.write_gateway().expect("write gateway");
     let attempts_before = gateway.store().write_attempt_count_for_tests();
+    gateway.store().clear_transition_traces_for_tests();
+    gateway.store().set_transition_barrier_for_tests(
+        proposal_id.clone(),
+        2,
+        None,
+        Duration::from_secs(5),
+    );
     gateway.store().set_fail_writes_for_tests(true);
 
-    // Force expiry reconciliation through list — must not invent Expired.
+    // Force both expiry initiators past their coordinator-locked eligibility
+    // checks before either may enter SQLite transition.
     assert!(host2.force_live_expiry_for_tests(&proposal_id));
     let list_err = host2
         .list_write_proposals(&conversation_id)
         .expect_err("list must fail closed on storage fault");
     assert!(matches!(list_err, GovernedWriteBridgeError::Gateway));
-
-    let attempts_after = gateway.store().write_attempt_count_for_tests();
-    // Exactly one failed transition attempt; no second write/retry.
-    assert_eq!(attempts_after, attempts_before + 1);
 
     for _ in 0..200 {
         if woke.load(Ordering::SeqCst) {
@@ -1071,6 +1137,15 @@ fn storage_failure_after_live_never_fabricates_terminal() {
     assert!(
         matches!(err, GovernedWriteBridgeError::Gateway),
         "provider must get opaque unavailable, got {err:?}"
+    );
+
+    let attempts_after = gateway.store().write_attempt_count_for_tests();
+    let barrier_trace = gateway.store().transition_barrier_trace_for_tests();
+    let transition_trace = gateway.store().transition_attempt_trace_for_tests();
+    gateway.store().clear_transition_barrier_for_tests();
+    eprintln!(
+        "STORAGE_BARRIER_RESULT proposal_id={proposal_id} barrier_trace={barrier_trace:?} transition_trace={transition_trace:?} attempts_before={attempts_before} attempts_after={attempts_after} delta={} list_error=Gateway waiter_error=Gateway",
+        attempts_after - attempts_before
     );
 
     // Grant/content/diff must not remain actionable after quarantine.
@@ -1103,6 +1178,246 @@ fn storage_failure_after_live_never_fabricates_terminal() {
             assert!(row.diff.is_none());
         }
     }
+    host.shutdown().unwrap();
+
+    StorageFailureObservation {
+        proposal_id,
+        attempts_before,
+        attempts_after,
+        barrier_trace,
+        transition_trace,
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn run_storage_failure_waiter_paused_control() -> StorageFailureObservation {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+    let (requested_tx, requested_rx) = mpsc::sync_channel::<String>(1);
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+
+    let waiter = {
+        let run_id = fx.run_id;
+        thread::spawn(move || {
+            execute_governed_write(
+                run_id,
+                provider_create(
+                    "call-store-fail-control",
+                    "fail-control.txt",
+                    "secret-control-body\n",
+                ),
+                &cancel,
+                |requested| {
+                    requested_tx
+                        .send(requested.proposal_id.clone())
+                        .map_err(|_| GovernedWriteBridgeError::Gateway)?;
+                    release_rx
+                        .recv()
+                        .map_err(|_| GovernedWriteBridgeError::Gateway)?;
+                    Ok(())
+                },
+            )
+        })
+    };
+
+    let proposal_id = requested_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter must pause after publishing the requested proposal");
+    let (listed_proposal_id, grant) = wait_live_pending(&host2, &conversation_id);
+    let gateway = host2.write_gateway().expect("write gateway");
+    let attempts_before = gateway.store().write_attempt_count_for_tests();
+    gateway.store().clear_transition_traces_for_tests();
+    gateway.store().set_transition_barrier_for_tests(
+        proposal_id.clone(),
+        1,
+        None,
+        Duration::from_secs(5),
+    );
+    gateway.store().set_fail_writes_for_tests(true);
+
+    let expiry_forced = host2.force_live_expiry_for_tests(&proposal_id);
+    let list_result = host2.list_write_proposals(&conversation_id);
+
+    let attempts_before_release = gateway.store().write_attempt_count_for_tests();
+    let diff_result = host2.open_write_proposal_diff(&conversation_id, &proposal_id);
+    let decide_result = host2.decide_write_proposal(
+        &conversation_id,
+        &proposal_id,
+        &grant,
+        WriteDecision::ApproveOnce,
+    );
+    let durable_before_release = gateway.store().get(&proposal_id);
+    let list_after_quarantine_before_release = host2.list_write_proposals(&conversation_id);
+    let barrier_trace_before_release = gateway.store().transition_barrier_trace_for_tests();
+    let transition_trace_before_release = gateway.store().transition_attempt_trace_for_tests();
+
+    release_tx
+        .send(())
+        .expect("release paused waiter after quarantine assertions");
+    let waiter_result = waiter.join().expect("paused waiter thread");
+
+    assert_eq!(listed_proposal_id, proposal_id);
+    assert!(is_canonical_grant(&grant));
+    assert!(expiry_forced);
+    let list_err = list_result.expect_err("list must fail closed on storage fault");
+    assert!(matches!(list_err, GovernedWriteBridgeError::Gateway));
+    assert_eq!(attempts_before_release, attempts_before + 1);
+    assert!(
+        matches!(diff_result, Err(GovernedWriteBridgeError::NotLive)),
+        "quarantine must remove the actionable diff before waiter release"
+    );
+    assert!(
+        matches!(decide_result, Err(GovernedWriteBridgeError::NotLive)),
+        "quarantine must remove approval authority before waiter release"
+    );
+    let durable_before_release = durable_before_release
+        .expect("durable read before waiter release")
+        .expect("durable proposal before waiter release");
+    assert_eq!(
+        durable_before_release.state,
+        WriteProposalState::PendingApproval
+    );
+    assert!(!is_terminal_list_state(durable_before_release.state));
+    let list_after_quarantine_before_release =
+        list_after_quarantine_before_release.expect("durable list after quarantine");
+    for row in &list_after_quarantine_before_release {
+        if row.proposal_id == proposal_id {
+            assert!(row.approval_grant.is_none());
+            assert!(row.diff.is_none());
+        }
+    }
+    let waiter_err = waiter_result.expect_err("waiter must receive opaque storage failure");
+    assert!(
+        matches!(waiter_err, GovernedWriteBridgeError::Gateway),
+        "provider must get opaque unavailable, got {waiter_err:?}"
+    );
+
+    let attempts_after = gateway.store().write_attempt_count_for_tests();
+    assert_eq!(attempts_after, attempts_before_release);
+    let barrier_trace = gateway.store().transition_barrier_trace_for_tests();
+    let transition_trace = gateway.store().transition_attempt_trace_for_tests();
+    assert_eq!(barrier_trace, barrier_trace_before_release);
+    assert_eq!(transition_trace, transition_trace_before_release);
+    gateway.store().clear_transition_barrier_for_tests();
+    eprintln!(
+        "STORAGE_CONTROL_RESULT proposal_id={proposal_id} barrier_trace={barrier_trace:?} transition_trace={transition_trace:?} attempts_before={attempts_before} attempts_after={attempts_after} delta={} list_error=Gateway waiter_error=Gateway quarantine_before_release=true durable_before_release=pending_approval",
+        attempts_after - attempts_before
+    );
+
+    gateway.store().set_fail_writes_for_tests(false);
+    let durable = gateway.store().get(&proposal_id).unwrap().unwrap();
+    assert_eq!(durable.state, WriteProposalState::PendingApproval);
+    assert!(!is_terminal_list_state(durable.state));
+    let list = host2.list_write_proposals(&conversation_id).unwrap();
+    for row in &list {
+        if row.proposal_id == proposal_id {
+            assert!(row.approval_grant.is_none());
+            assert!(row.diff.is_none());
+        }
+    }
+    host.shutdown().unwrap();
+
+    StorageFailureObservation {
+        proposal_id,
+        attempts_before,
+        attempts_after,
+        barrier_trace,
+        transition_trace,
+    }
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn expiry_single_flight_waiter_winner_survives_live_removal() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let conversation_id = fx.conversation_id.clone();
+
+    let waiter = {
+        let run_id = fx.run_id;
+        thread::spawn(move || {
+            execute_governed_write(
+                run_id,
+                provider_create(
+                    "call-expiry-single-flight",
+                    "expiry-single-flight.txt",
+                    "body\n",
+                ),
+                &cancel,
+                |_| Ok(()),
+            )
+        })
+    };
+
+    let (proposal_id, grant) = wait_live_pending(&host, &conversation_id);
+    assert!(is_canonical_grant(&grant));
+    let gateway = host.write_gateway().expect("write gateway");
+    let attempts_before = gateway.store().write_attempt_count_for_tests();
+    gateway.store().clear_transition_traces_for_tests();
+    gateway.store().set_transition_barrier_for_tests(
+        proposal_id.clone(),
+        2,
+        Some("waiter-expiry"),
+        Duration::from_secs(5),
+    );
+
+    assert!(host.force_live_expiry_for_tests(&proposal_id));
+    let list = host.list_write_proposals(&conversation_id).unwrap();
+    let receipt = waiter.join().unwrap().unwrap();
+    let attempts_after = gateway.store().write_attempt_count_for_tests();
+    let barrier_trace = gateway.store().transition_barrier_trace_for_tests();
+    let transition_trace = gateway.store().transition_attempt_trace_for_tests();
+    gateway.store().clear_transition_barrier_for_tests();
+
+    assert_eq!(barrier_trace.len(), 2);
+    assert!(
+        barrier_trace
+            .iter()
+            .all(|(traced_proposal, _)| traced_proposal == &proposal_id)
+    );
+    let mut sources = barrier_trace
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    sources.sort_unstable();
+    assert_eq!(sources, ["main-list", "waiter-expiry"]);
+    assert_eq!(
+        transition_trace,
+        vec![(proposal_id.clone(), "waiter-expiry".to_owned())]
+    );
+    assert_eq!(attempts_after, attempts_before + 1);
+
+    assert_eq!(receipt.resolved.state, WriteProposalState::Expired);
+    assert_eq!(
+        receipt.provider_error,
+        Some(WritePublicErrorCode::ApprovalExpired)
+    );
+    let row = list
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+        .expect("durable expired row after waiter removes live entry");
+    assert_eq!(row.state, WriteProposalState::Expired);
+    assert!(row.approval_grant.is_none());
+    assert!(row.diff.is_none());
+    let durable = gateway.store().get(&proposal_id).unwrap().unwrap();
+    assert_eq!(durable.state, WriteProposalState::Expired);
+    assert_eq!(
+        gateway.store().history(&proposal_id).unwrap(),
+        vec![
+            WriteProposalState::PendingApproval,
+            WriteProposalState::Expired
+        ]
+    );
+    eprintln!(
+        "STORAGE_SUCCESS_SINGLE_FLIGHT proposal_id={proposal_id} barrier_trace={barrier_trace:?} transition_trace={transition_trace:?} attempts_before={attempts_before} attempts_after={attempts_after} delta={} waiter_removed_live=true list_state=expired",
+        attempts_after - attempts_before
+    );
     host.shutdown().unwrap();
 }
 

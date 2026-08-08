@@ -148,6 +148,8 @@ struct LiveWriteEntry {
     provider_ok: Option<FsWriteOutput>,
     cancelled: bool,
     interrupted: bool,
+    /// True while one caller owns the only durable terminal transition attempt.
+    terminal_transition_in_progress: bool,
     #[allow(dead_code)]
     waiter_notified: bool,
 }
@@ -685,6 +687,7 @@ pub fn execute_governed_write(
                         provider_ok: None,
                         cancelled: false,
                         interrupted: false,
+                        terminal_transition_in_progress: false,
                         waiter_notified: false,
                     },
                 );
@@ -783,6 +786,8 @@ fn finalize_expire(
         requested,
         WriteProposalState::Expired,
         WritePublicErrorCode::ApprovalExpired,
+        #[cfg(any(test, feature = "test-support"))]
+        "waiter-expiry",
     )
 }
 
@@ -797,6 +802,8 @@ fn finalize_cancel(
         requested,
         WriteProposalState::Cancelled,
         WritePublicErrorCode::Cancelled,
+        #[cfg(any(test, feature = "test-support"))]
+        "waiter-cancel",
     )
 }
 
@@ -811,6 +818,8 @@ fn finalize_interrupt(
         requested,
         WriteProposalState::Interrupted,
         WritePublicErrorCode::Interrupted,
+        #[cfg(any(test, feature = "test-support"))]
+        "waiter-interrupt",
     )
 }
 
@@ -824,13 +833,20 @@ fn finalize_requested_terminal(
     requested: WriteProposalRequestedPayload,
     requested_state: WriteProposalState,
     requested_error: WritePublicErrorCode,
+    #[cfg(any(test, feature = "test-support"))] transition_source: &str,
 ) -> Result<GovernedWriteReceipt, GovernedWriteBridgeError> {
     let now = Utc::now();
-    match read_durable_terminal_after_transition(
-        bound.gateway.store(),
+    let store = bound.gateway.store();
+    #[cfg(any(test, feature = "test-support"))]
+    store.wait_at_transition_barrier_for_tests(proposal_id, transition_source);
+    let result = match read_durable_terminal_after_transition(
+        store,
         proposal_id,
+        bound.owner,
         requested_state,
         now,
+        #[cfg(any(test, feature = "test-support"))]
+        transition_source,
     ) {
         Ok(row) => {
             let error_code = if row.state == requested_state {
@@ -839,7 +855,7 @@ fn finalize_requested_terminal(
                 terminal_error(&row)
             };
             let resolved = resolved_payload(&row, error_code);
-            take_live_entry(proposal_id);
+            take_live_entry_for_owner(proposal_id, bound.owner);
             Ok(GovernedWriteReceipt {
                 delivery: GovernedWriteDelivery::Executed,
                 requested: Some(requested),
@@ -848,22 +864,64 @@ fn finalize_requested_terminal(
                 provider_error: error_code,
             })
         }
-        Err(()) => {
-            quarantine_live_on_storage_failure(proposal_id);
-            Err(GovernedWriteBridgeError::Gateway)
-        }
-    }
+        Err(()) => Err(GovernedWriteBridgeError::Gateway),
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    store.complete_transition_source_for_tests(proposal_id, transition_source);
+    result
 }
 
-/// One transition write, then at most one read. Never invents a row. Returns
-/// the durable terminal row only when storage confirms a terminal state.
+/// Proposal-scoped terminal single-flight. Both callers qualify under the
+/// coordinator before entering here; exactly one winner performs one transition
+/// write and at most one recovery read. Losers wait without holding the mutex
+/// and may only accept a real durable terminal row. Failure quarantines live
+/// authority and wakes every loser without fabricating a terminal state.
 fn read_durable_terminal_after_transition(
     store: &keeper_storage_sqlite::SqliteWriteProposalRepository,
     proposal_id: &str,
+    expected_owner: Uuid,
     next: WriteProposalState,
     now: DateTime<Utc>,
+    #[cfg(any(test, feature = "test-support"))] transition_source: &str,
 ) -> Result<StoredWriteProposal, ()> {
-    match store.transition(proposal_id, next, now) {
+    let should_transition = {
+        let coord = coordinator();
+        let mut guard = coord.state.lock().map_err(|_| ())?;
+        loop {
+            match guard.live.get_mut(proposal_id) {
+                Some(entry) if entry.owner != expected_owner => return Err(()),
+                // Other durable paths publish a terminal marker without always
+                // replacing live metadata. Observe storage instead of trusting
+                // a possibly stale PendingApproval row.
+                Some(entry) if entry.terminal.is_some() => break false,
+                Some(entry) if !entry.terminal_transition_in_progress => {
+                    entry.terminal_transition_in_progress = true;
+                    break true;
+                }
+                Some(_) => {}
+                None => break false,
+            }
+            guard = coord.cv.wait(guard).map_err(|_| ())?;
+        }
+    };
+
+    // A winner may have published and removed the live entry before this loser
+    // reacquires the coordinator. Durable terminal is the only valid recovery;
+    // a missing/non-terminal row remains an opaque storage failure.
+    if !should_transition {
+        return match store.get(proposal_id) {
+            Ok(Some(row)) if is_terminal_state(row.state) => Ok(row),
+            _ => Err(()),
+        };
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    let transition =
+        store.transition_with_source_for_tests(proposal_id, next, now, transition_source);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let transition = store.transition(proposal_id, next, now);
+
+    let durable = match transition {
         Ok(row) if is_terminal_state(row.state) => Ok(row),
         Ok(_) => Err(()),
         Err(_) => match store.get(proposal_id) {
@@ -871,13 +929,37 @@ fn read_durable_terminal_after_transition(
             Ok(Some(row)) if is_terminal_state(row.state) => Ok(row),
             _ => Err(()),
         },
+    };
+
+    match durable {
+        Ok(row) => {
+            let resolved = resolved_payload(&row, terminal_error(&row));
+            if let Ok(mut guard) = coordinator().state.lock() {
+                if let Some(entry) = guard
+                    .live
+                    .get_mut(proposal_id)
+                    .filter(|entry| entry.owner == expected_owner)
+                {
+                    entry.metadata = row.clone();
+                    entry.terminal = Some(resolved);
+                    entry.terminal_transition_in_progress = false;
+                    entry.waiter_notified = true;
+                }
+                coordinator().cv.notify_all();
+            }
+            Ok(row)
+        }
+        Err(()) => {
+            quarantine_live_on_storage_failure(proposal_id, expected_owner);
+            Err(())
+        }
     }
 }
 
 /// Drop live secrets/waiter state without publishing a fabricated terminal.
 /// Restart recovery may later reconcile the durable non-terminal row.
-fn quarantine_live_on_storage_failure(proposal_id: &str) {
-    take_live_entry(proposal_id);
+fn quarantine_live_on_storage_failure(proposal_id: &str, expected_owner: Uuid) {
+    take_live_entry_for_owner(proposal_id, expected_owner);
 }
 
 /// Fail closed after durable reserve and before normal waiting: durable
@@ -912,10 +994,18 @@ fn publish_terminal_for_waiter(
     }
 }
 
-/// Fully drop a live entry after the waiting execute path has taken the receipt.
-fn take_live_entry(proposal_id: &str) {
+/// Fully drop the expected owner's live entry after its waiter takes the receipt.
+/// A stale caller must not remove a replacement entry owned by another host.
+fn take_live_entry_for_owner(proposal_id: &str, expected_owner: Uuid) {
     if let Ok(mut guard) = coordinator().state.lock() {
-        if let Some(entry) = guard.live.remove(proposal_id) {
+        let matches_owner = guard
+            .live
+            .get(proposal_id)
+            .is_some_and(|entry| entry.owner == expected_owner);
+        if matches_owner
+            && let Some(entry) = guard.live.remove(proposal_id)
+            && guard.pending_by_run.get(&entry.run_id).map(String::as_str) == Some(proposal_id)
+        {
             guard.pending_by_run.remove(&entry.run_id);
         }
         coordinator().cv.notify_all();
@@ -1002,7 +1092,12 @@ pub fn list_write_proposals(
     conversation_id: &str,
     gateway: Option<&GovernedWriteToolGateway>,
 ) -> Result<Vec<LiveWriteProposalView>, GovernedWriteBridgeError> {
-    reconcile_expired_for_owner(owner, Some(conversation_id))?;
+    reconcile_expired_for_owner(
+        owner,
+        Some(conversation_id),
+        #[cfg(any(test, feature = "test-support"))]
+        "main-list",
+    )?;
 
     let mut views = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1049,7 +1144,12 @@ pub fn open_write_proposal_diff(
     proposal_id: &str,
 ) -> Result<WriteDiffView, GovernedWriteBridgeError> {
     // Expire first so a direct diff open at/past deadline never exposes bytes.
-    reconcile_expired_for_owner(owner, Some(conversation_id))?;
+    reconcile_expired_for_owner(
+        owner,
+        Some(conversation_id),
+        #[cfg(any(test, feature = "test-support"))]
+        "main-diff",
+    )?;
 
     let guard = coordinator()
         .state
@@ -1096,7 +1196,12 @@ pub fn decide_write_proposal(
     }
 
     // Expire first if past due so listing/decision never act on a stale grant.
-    reconcile_expired_for_owner(owner, Some(conversation_id))?;
+    reconcile_expired_for_owner(
+        owner,
+        Some(conversation_id),
+        #[cfg(any(test, feature = "test-support"))]
+        "main-decision",
+    )?;
 
     let (bound, fingerprint, grant_digest, sealed) = {
         let guard = coordinator()
@@ -1172,7 +1277,7 @@ pub fn decide_write_proposal(
                     Err(error) => {
                         // Never leave a live waiter pending until TTL, and never
                         // invent a terminal success/expired/cancelled receipt.
-                        quarantine_live_on_storage_failure(proposal_id);
+                        quarantine_live_on_storage_failure(proposal_id, owner);
                         return Err(map_gateway_error(error));
                     }
                 };
@@ -1227,6 +1332,7 @@ pub fn decide_write_proposal(
 fn reconcile_expired_for_owner(
     owner: Uuid,
     conversation_id: Option<&str>,
+    #[cfg(any(test, feature = "test-support"))] transition_source: &str,
 ) -> Result<(), GovernedWriteBridgeError> {
     let now = Utc::now();
     let mut to_expire: Vec<(String, Arc<BoundWriteRun>)> = Vec::new();
@@ -1257,36 +1363,25 @@ fn reconcile_expired_for_owner(
     }
 
     for (proposal_id, bound) in to_expire {
-        match read_durable_terminal_after_transition(
-            bound.gateway.store(),
+        #[cfg(any(test, feature = "test-support"))]
+        bound
+            .gateway
+            .store()
+            .wait_at_transition_barrier_for_tests(&proposal_id, transition_source);
+        let store = bound.gateway.store();
+        let result = read_durable_terminal_after_transition(
+            store,
             &proposal_id,
+            owner,
             WriteProposalState::Expired,
             now,
-        ) {
-            Ok(row) => {
-                let error_code = if row.state == WriteProposalState::Expired {
-                    Some(WritePublicErrorCode::ApprovalExpired)
-                } else {
-                    terminal_error(&row)
-                };
-                let resolved = resolved_payload(&row, error_code);
-                // Update live metadata state and wake exact waiter; entry removal
-                // stays with the waiter path after it observes the terminal marker.
-                if let Ok(mut guard) = coordinator().state.lock() {
-                    if let Some(entry) = guard.live.get_mut(&proposal_id)
-                        && entry.owner == owner
-                    {
-                        entry.metadata = row;
-                        entry.terminal = Some(resolved);
-                        entry.waiter_notified = true;
-                    }
-                    coordinator().cv.notify_all();
-                }
-            }
-            Err(()) => {
-                quarantine_live_on_storage_failure(&proposal_id);
-                return Err(GovernedWriteBridgeError::Gateway);
-            }
+            #[cfg(any(test, feature = "test-support"))]
+            transition_source,
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        store.complete_transition_source_for_tests(&proposal_id, transition_source);
+        if result.is_err() {
+            return Err(GovernedWriteBridgeError::Gateway);
         }
     }
     Ok(())
@@ -1426,6 +1521,7 @@ pub fn force_live_expiry_for_tests(owner: Uuid, proposal_id: &str) -> bool {
         && entry.owner == owner
     {
         entry.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        coordinator().cv.notify_all();
         return true;
     }
     false
@@ -1511,6 +1607,7 @@ mod grant_tests {
             provider_ok: None,
             cancelled: false,
             interrupted: false,
+            terminal_transition_in_progress: false,
             waiter_notified: false,
         };
         let debug = format!("{entry:?}");
@@ -1564,6 +1661,7 @@ mod grant_tests {
             provider_ok: None,
             cancelled: false,
             interrupted: false,
+            terminal_transition_in_progress: false,
             waiter_notified: false,
         };
         // Past-due listing must never include the grant.

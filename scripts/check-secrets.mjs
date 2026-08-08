@@ -74,8 +74,17 @@ const RULES = [
   {
     id: "user-profile-path",
     scope: "block",
-    re: /[A-Za-z]:[\\/]Users[\\/](?!Alice\b)[A-Za-z0-9._-]+/u,
-    sample: String.raw`%USERPROFILE%\.cargo`,
+    // Three notations for the same leak. The drive-letter form was the only one
+    // covered until a handoff doc shipped `/c/Users/<name>/...` straight through
+    // the gate — we work in Git Bash, so the MSYS form is the *common* one.
+    // A single letter between separators is required, so `src/Users/...` and
+    // `https://host/Users/...` do not match.
+    re: /(?:[A-Za-z]:|\/(?:cygdrive\/)?[a-z])[\\/]Users[\\/](?!Alice\b)[A-Za-z0-9._-]+/u,
+    sample: [
+      String.raw`C:\Users\someone\.cargo`,
+      "/c/Users/someone/.grok/bin/grok.exe",
+      "/cygdrive/c/Users/someone/.grok",
+    ],
     why: "host user-profile path",
   },
   {
@@ -128,10 +137,16 @@ const ALLOW = new Map([
 function selfTest() {
   const broken = [];
   for (const rule of RULES) {
-    const m = rule.sample.match(rule.re);
-    const detected = Boolean(m) && (!rule.verify || rule.verify(m[0]));
-    if (!detected) {
-      broken.push(`${rule.id}: failed to detect its own sample`);
+    // A rule may carry several samples when one regex covers several notations;
+    // every one of them has to be proven, or the untested branch is a blind spot
+    // wearing a passing self-test.
+    const samples = Array.isArray(rule.sample) ? rule.sample : [rule.sample];
+    for (const sample of samples) {
+      const m = sample.match(rule.re);
+      const detected = Boolean(m) && (!rule.verify || rule.verify(m[0]));
+      if (!detected) {
+        broken.push(`${rule.id}: failed to detect its own sample (${sample})`);
+      }
     }
   }
   // A pattern that matches everything is equally useless.
@@ -150,11 +165,23 @@ function selfTest() {
   return RULES.length;
 }
 
-function trackedFiles() {
-  return execFileSync("git", ["ls-files", "-z"], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  })
+/**
+ * Everything that would end up in a commit: tracked files *and* untracked files
+ * git does not ignore.
+ *
+ * Tracked-only was a real blind spot. A handoff doc carrying a machine path sat
+ * untracked through two green gate runs and only failed the gate *after* it was
+ * committed and pushed — the gate could not see the leak until it was too late
+ * to be useful. Scanning the would-be-committed set catches it while it is still
+ * a local edit. `--exclude-standard` keeps `.gitignore` honored, so
+ * `.superpowers/`, `target/` and friends stay out.
+ */
+function scannableFiles() {
+  return execFileSync(
+    "git",
+    ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  )
     .split("\0")
     .filter(Boolean);
 }
@@ -162,7 +189,7 @@ function trackedFiles() {
 const patternCount = selfTest();
 
 const findings = [];
-for (const file of trackedFiles()) {
+for (const file of scannableFiles()) {
   if (ALLOW.has(file)) continue;
   let text;
   try {
@@ -197,5 +224,5 @@ if (findings.length) {
 }
 
 console.log(
-  `secret gate ok — ${patternCount} patterns self-tested, no findings in tracked files`,
+  `secret gate ok — ${patternCount} patterns self-tested, no findings in tracked or untracked-not-ignored files`,
 );
