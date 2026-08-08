@@ -1,6 +1,7 @@
 mod conversation;
 mod conversation_rows;
 mod exec_proposal;
+mod knowledge;
 mod migrations;
 mod resource_recent;
 mod settings;
@@ -12,6 +13,11 @@ pub use exec_proposal::{
     EXEC_RESULT_JSON_BYTE_CAP, ExecDecisionOutcome, ExecProposalReserveInput,
     ExecProposalStoreError, ExecReservationOutcome, ExecRunClaimOutcome, ExecTerminalReceipt,
     MAX_RUN_LEASE_MS, SqliteExecProposalRepository, StoredExecProposal,
+};
+pub use knowledge::{
+    AddDocumentLink, DocumentLinkRel, DocumentRole, DocumentStatus, KnowledgeDocument,
+    KnowledgeDocumentLink, KnowledgeError, RegisterDocument, RegisteredBy,
+    SqliteKnowledgeRepository, UpdateDocument,
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
