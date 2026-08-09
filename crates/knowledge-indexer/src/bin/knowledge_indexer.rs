@@ -90,6 +90,9 @@ fn run_scan(args: &[String]) -> ExitCode {
         "docs/execution/2026-08-09-k0c-render-report.md".to_owned(),
         "docs/execution/2026-08-09-k0d-ledger-report.md".to_owned(),
         "docs/execution/2026-08-09-k0e-ledger-cli-report.md".to_owned(),
+        "docs/execution/2026-08-09-k1a-retirement-report.md".to_owned(),
+        "docs/execution/2026-08-09-k1b-handoff-render-report.md".to_owned(),
+        "docs/research/2026-08-09-handoff-renderability-matrix.md".to_owned(),
     ];
     for rp in [&report_path, &handoff_path].into_iter().flatten() {
         let rp_str = rp.to_string_lossy().replace('\\', "/");

@@ -12,6 +12,7 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
 };
+use keeper_governance_port::testkit::PanicGovernedExecutionPort;
 
 struct CollectingSink {
     events: Vec<RuntimeEvent>,
@@ -61,7 +62,11 @@ fn base_config(script: &str) -> GrokAcpConfig {
 }
 
 fn adapter_with_script(script: &str) -> GrokAcpAdapter {
-    GrokAcpAdapter::new(base_config(script)).expect("adapter")
+    GrokAcpAdapter::new(base_config(script), panic_governance()).expect("adapter")
+}
+
+fn panic_governance() -> Arc<PanicGovernedExecutionPort> {
+    Arc::new(PanicGovernedExecutionPort)
 }
 
 fn cwd() -> String {
@@ -334,7 +339,7 @@ fn malformed_output_fails_turn() {
 fn oversized_line_fails_closed() {
     let mut cfg = base_config("oversized-line");
     cfg.max_line_bytes = 1024;
-    let adapter = GrokAcpAdapter::new(cfg).unwrap();
+    let adapter = GrokAcpAdapter::new(cfg, panic_governance()).unwrap();
     let session = start(&adapter);
     let run_id = RunId::new();
     let mut sink = CollectingSink::new();
@@ -426,7 +431,7 @@ fn load_replay_suppressed_until_prompt() {
 fn timeout_prompt_fails_or_cancels() {
     let mut cfg = base_config("timeout-prompt");
     cfg.request_timeout = Duration::from_millis(300);
-    let adapter = GrokAcpAdapter::new(cfg).unwrap();
+    let adapter = GrokAcpAdapter::new(cfg, panic_governance()).unwrap();
     let session = start(&adapter);
     let run_id = RunId::new();
     let mut sink = CollectingSink::new();
@@ -507,7 +512,7 @@ fn shutdown_kills_descendant_spawned_immediately_after_resume() {
         "KEEPER_FAKE_ACP_DESCENDANT_PID_FILE".into(),
         descendant_pid_path.to_string_lossy().into_owned(),
     ));
-    let adapter = GrokAcpAdapter::new(cfg).unwrap();
+    let adapter = GrokAcpAdapter::new(cfg, panic_governance()).unwrap();
     let _ = start(&adapter);
 
     // The fake parent records the immediate descendant it starts as its first work after resume.

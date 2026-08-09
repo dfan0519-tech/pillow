@@ -9,9 +9,14 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use keeper_agent_protocol::{
     EventSink, GovernedProcessDelivery, GovernedReadDelivery, GovernedWriteDelivery,
-    GovernedWriteReceipt, ProcessProposalRequestedPayload, RuntimeError, RuntimeEvent,
-    RuntimeEventKind, SendTurn, WriteProposalRequestedPayload, WriteProposalState,
-    WritePublicErrorCode,
+    GovernedWriteReceipt, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
+    WriteProposalState, WritePublicErrorCode,
+};
+use keeper_governance_port::{
+    CancellationProbe, CheckedGovernedOutcome, GovernedExecutionPort,
+    GovernedProcessExecutionError, GovernedProcessLifecycle, GovernedProcessObserver,
+    GovernedReadExecutionError, GovernedWriteExecutionError, GovernedWriteLifecycle,
+    GovernedWriteObserver, LifecycleObserverError,
 };
 
 use crate::config::GrokAcpConfig;
@@ -35,17 +40,12 @@ use crate::provider_writes::{
 use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_params};
 use crate::state::{Inner, PromptOutcome};
 use crate::turn::ProviderRequestIdentityError;
-use keeper_governance_port::CancellationProbe;
-use keeper_runtime_host::{
-    GovernedProcessBridgeError, GovernedProcessLifecycle, GovernedReadBridgeError,
-    GovernedWriteBridgeError, execute_governed_process, execute_governed_read,
-    execute_governed_write,
-};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_prompt_loop(
     inner: &Mutex<Inner>,
     config: &GrokAcpConfig,
+    governance: &dyn GovernedExecutionPort,
     request: &SendTurn,
     acp_session_id: &str,
     cancel: &Arc<AtomicBool>,
@@ -99,7 +99,7 @@ pub(crate) fn run_prompt_loop(
         match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(msg) => {
                 if !matches!(&msg, Incoming::Response { .. })
-                    && let Some(o) = handle_incoming(msg, inner, config, sink, cancel)?
+                    && let Some(o) = handle_incoming(msg, inner, config, governance, sink, cancel)?
                 {
                     match o {
                         PromptOutcome::Err(e) => {
@@ -128,7 +128,7 @@ pub(crate) fn run_prompt_loop(
                     if matches!(msg, Incoming::Response { .. }) {
                         continue;
                     }
-                    let _ = handle_incoming(msg, inner, config, sink, cancel)?;
+                    let _ = handle_incoming(msg, inner, config, governance, sink, cancel)?;
                 }
                 let stop = value
                     .get("stopReason")
@@ -146,7 +146,9 @@ pub(crate) fn run_prompt_loop(
             Err(mpsc::TryRecvError::Disconnected) => {
                 if outcome.is_none() {
                     if let Ok(msg) = rx.try_recv() {
-                        if let Some(o) = handle_incoming(msg, inner, config, sink, cancel)? {
+                        if let Some(o) =
+                            handle_incoming(msg, inner, config, governance, sink, cancel)?
+                        {
                             outcome = Some(o);
                         }
                     } else {
@@ -173,7 +175,7 @@ pub(crate) fn run_prompt_loop(
         if matches!(msg, Incoming::Response { .. }) {
             continue;
         }
-        let _ = handle_incoming(msg, inner, config, sink, cancel)?;
+        let _ = handle_incoming(msg, inner, config, governance, sink, cancel)?;
     }
     if !cancel_cleanup_failed && let Ok(final_res) = done_rx.try_recv() {
         match final_res {
@@ -286,6 +288,7 @@ fn handle_incoming(
     incoming: Incoming,
     inner: &Mutex<Inner>,
     config: &GrokAcpConfig,
+    governance: &dyn GovernedExecutionPort,
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
 ) -> Result<Option<PromptOutcome>, RuntimeError> {
@@ -302,7 +305,7 @@ fn handle_incoming(
             Err(e) => Ok(Some(PromptOutcome::Err(e))),
         },
         Incoming::ServerRequest { id, method, params } => {
-            handle_server_request(inner, sink, cancel, id, &method, &params)?;
+            handle_server_request(inner, governance, sink, cancel, id, &method, &params)?;
             Ok(None)
         }
         Incoming::Notification { method, params } => {
@@ -317,6 +320,7 @@ fn handle_incoming(
 
 fn handle_server_request(
     inner: &Mutex<Inner>,
+    governance: &dyn GovernedExecutionPort,
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
     id: serde_json::Value,
@@ -342,12 +346,12 @@ fn handle_server_request(
 
     // Strict write entrypoint — never routed through the read normalizer.
     if method == "pillow/write_tool" {
-        return handle_write_tool(inner, sink, cancel, id, params);
+        return handle_write_tool(inner, governance, sink, cancel, id, params);
     }
 
     // Strict process entrypoint â€” never routed through governed reads.
     if method == "pillow/process_tool" {
-        return handle_process_tool(inner, sink, cancel, id, params);
+        return handle_process_tool(inner, governance, sink, cancel, id, params);
     }
 
     let (run_id, session_id, project_root, rpc) = {
@@ -425,22 +429,23 @@ fn handle_server_request(
     }
     // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
     let cancel_probe: &dyn CancellationProbe = cancel;
-    let receipt = match execute_governed_read(run_id, normalized.proposal, cancel_probe) {
-        Ok(receipt) => receipt,
+    let receipt = match governance.execute_read(run_id, normalized.proposal, cancel_probe) {
+        Ok(outcome) => outcome.into_receipt(),
         Err(
-            GovernedReadBridgeError::InvalidProposal | GovernedReadBridgeError::ReservationConflict,
+            GovernedReadExecutionError::InvalidProposal
+            | GovernedReadExecutionError::ReservationConflict,
         ) => {
             rpc.respond_error(id, -32602, "invalid_governed_read_request")?;
             return Ok(());
         }
-        Err(GovernedReadBridgeError::InProgress) => {
+        Err(GovernedReadExecutionError::InProgress) => {
             rpc.respond_error(id, -32010, "governed_read_in_progress")?;
             return Ok(());
         }
         Err(
-            GovernedReadBridgeError::RunNotRegistered
-            | GovernedReadBridgeError::InvalidContext
-            | GovernedReadBridgeError::Gateway,
+            GovernedReadExecutionError::RunNotBound
+            | GovernedReadExecutionError::InvalidContext
+            | GovernedReadExecutionError::Unavailable,
         ) => {
             rpc.respond_error(id, -32000, "governed_read_unavailable")?;
             return Ok(());
@@ -476,8 +481,118 @@ fn handle_server_request(
     }
 }
 
+struct WriteLifecycleEmitter<'a> {
+    inner: &'a Mutex<Inner>,
+    sink: &'a mut dyn EventSink,
+    run_id: RunId,
+    requested_sequence: &'a mut Option<u64>,
+}
+
+impl GovernedWriteObserver for WriteLifecycleEmitter<'_> {
+    fn observe(&mut self, event: GovernedWriteLifecycle<'_>) -> Result<(), LifecycleObserverError> {
+        let GovernedWriteLifecycle::Requested(requested) = event;
+        let sequence = {
+            let mut guard = self.inner.lock().expect("inner lock");
+            let Some(active) = guard
+                .turns
+                .active_mut()
+                .filter(|active| active.run_id == self.run_id && active.live)
+            else {
+                return Err(LifecycleObserverError::RunNoLongerLive);
+            };
+            active.sequence = active.sequence.saturating_add(1);
+            active.sequence
+        };
+        *self.requested_sequence = Some(sequence);
+        let event = RuntimeEvent::new(
+            self.run_id,
+            sequence,
+            RuntimeEventKind::WriteProposalRequested,
+            requested.clone(),
+            Utc::now(),
+        )
+        .map_err(|_| LifecycleObserverError::DeliveryFailed)?;
+        self.sink
+            .emit(event)
+            .map_err(|_| LifecycleObserverError::DeliveryFailed)
+    }
+}
+
+struct ProcessLifecycleEmitter<'a> {
+    inner: &'a Mutex<Inner>,
+    sink: &'a mut dyn EventSink,
+    run_id: RunId,
+    decided_emitted: &'a AtomicBool,
+    started_emitted: &'a AtomicBool,
+}
+
+impl GovernedProcessObserver for ProcessLifecycleEmitter<'_> {
+    fn observe(
+        &mut self,
+        event: GovernedProcessLifecycle<'_>,
+    ) -> Result<(), LifecycleObserverError> {
+        match event {
+            GovernedProcessLifecycle::Requested(requested) => emit_process_lifecycle_event(
+                self.inner,
+                self.sink,
+                self.run_id,
+                RuntimeEventKind::ProcessProposalRequested,
+                requested,
+            ),
+            GovernedProcessLifecycle::Decided(decided) => {
+                emit_process_lifecycle_event(
+                    self.inner,
+                    self.sink,
+                    self.run_id,
+                    RuntimeEventKind::ProcessProposalDecided,
+                    decided,
+                )?;
+                self.decided_emitted.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            GovernedProcessLifecycle::Started(started) => {
+                emit_process_lifecycle_event(
+                    self.inner,
+                    self.sink,
+                    self.run_id,
+                    RuntimeEventKind::ProcessStarted,
+                    started,
+                )?;
+                self.started_emitted.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn emit_process_lifecycle_event(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    run_id: RunId,
+    kind: RuntimeEventKind,
+    payload: impl serde::Serialize,
+) -> Result<(), LifecycleObserverError> {
+    let sequence = {
+        let mut guard = inner.lock().expect("inner lock");
+        let Some(active) = guard
+            .turns
+            .active_mut()
+            .filter(|active| active.run_id == run_id && active.live)
+        else {
+            return Err(LifecycleObserverError::RunNoLongerLive);
+        };
+        active.sequence = active.sequence.saturating_add(1);
+        active.sequence
+    };
+    let event = RuntimeEvent::new(run_id, sequence, kind, payload, Utc::now())
+        .map_err(|_| LifecycleObserverError::DeliveryFailed)?;
+    sink.emit(event)
+        .map_err(|_| LifecycleObserverError::DeliveryFailed)
+}
+
 fn handle_write_tool(
     inner: &Mutex<Inner>,
+    governance: &dyn GovernedExecutionPort,
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
     id: serde_json::Value,
@@ -518,61 +633,35 @@ fn handle_write_tool(
     let mut requested_sequence = None;
     // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
     let cancel_probe: &dyn CancellationProbe = cancel;
-    let receipt = match execute_governed_write(
-        run_id,
-        normalized.proposal,
-        cancel_probe,
-        |requested: &WriteProposalRequestedPayload| {
-            let sequence = {
-                let mut guard = inner.lock().expect("inner lock");
-                let Some(active) = guard
-                    .turns
-                    .active_mut()
-                    .filter(|active| active.run_id == run_id && active.live)
-                else {
-                    return Err(GovernedWriteBridgeError::RunNotRegistered);
-                };
-                active.sequence = active.sequence.saturating_add(1);
-                active.sequence
-            };
-            requested_sequence = Some(sequence);
-            let event = RuntimeEvent::new(
-                run_id,
-                sequence,
-                RuntimeEventKind::WriteProposalRequested,
-                requested.clone(),
-                Utc::now(),
-            )
-            .map_err(|_| GovernedWriteBridgeError::Gateway)?;
-            sink.emit(event)
-                .map_err(|_| GovernedWriteBridgeError::Gateway)?;
-            Ok(())
-        },
-    ) {
-        Ok(receipt) => receipt,
+    let execution = {
+        let mut observer = WriteLifecycleEmitter {
+            inner,
+            sink,
+            run_id,
+            requested_sequence: &mut requested_sequence,
+        };
+        governance.execute_write(run_id, normalized.proposal, cancel_probe, &mut observer)
+    };
+    let receipt = match execution {
+        Ok(outcome) => outcome.into_receipt(),
         Err(
-            GovernedWriteBridgeError::InvalidProposal
-            | GovernedWriteBridgeError::ReservationConflict,
+            GovernedWriteExecutionError::InvalidProposal
+            | GovernedWriteExecutionError::ReservationConflict,
         ) => {
             rpc.respond_error(id, -32602, "invalid_governed_write_request")?;
             return Ok(());
         }
-        Err(GovernedWriteBridgeError::Busy) => {
+        Err(GovernedWriteExecutionError::Busy) => {
             rpc.respond_error(id, -32010, "governed_write_in_progress")?;
             return Ok(());
         }
         Err(
-            GovernedWriteBridgeError::RunNotRegistered
-            | GovernedWriteBridgeError::InvalidContext
-            | GovernedWriteBridgeError::Gateway
-            | GovernedWriteBridgeError::ShutDown
-            | GovernedWriteBridgeError::NotLive
-            | GovernedWriteBridgeError::OwnershipMismatch
-            | GovernedWriteBridgeError::InvalidGrant
-            | GovernedWriteBridgeError::DecisionDenied
-            | GovernedWriteBridgeError::Expired
-            | GovernedWriteBridgeError::Cancelled
-            | GovernedWriteBridgeError::Interrupted,
+            GovernedWriteExecutionError::RunNotBound
+            | GovernedWriteExecutionError::InvalidContext
+            | GovernedWriteExecutionError::NotLive
+            | GovernedWriteExecutionError::ShuttingDown
+            | GovernedWriteExecutionError::LifecycleDeliveryFailed
+            | GovernedWriteExecutionError::Unavailable,
         ) => {
             rpc.respond_error(id, -32000, "governed_write_unavailable")?;
             return Ok(());
@@ -626,6 +715,7 @@ fn handle_write_tool(
 
 fn handle_process_tool(
     inner: &Mutex<Inner>,
+    governance: &dyn GovernedExecutionPort,
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
     id: serde_json::Value,
@@ -669,86 +759,45 @@ fn handle_process_tool(
     let started_emitted = AtomicBool::new(false);
     // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
     let cancel_probe: &dyn CancellationProbe = cancel;
-    let receipt =
-        match execute_governed_process(run_id, normalized.proposal, cancel_probe, |event| {
-            match event {
-                GovernedProcessLifecycle::Requested(requested) => {
-                    let payload = ProcessProposalRequestedPayload {
-                        proposal_id: requested.proposal_id.clone(),
-                        program: requested.program.clone(),
-                        argv: requested.argv.clone(),
-                        portable_cwd: requested.portable_cwd.clone(),
-                        summary: requested.summary.clone(),
-                        risk_class: requested.risk_class.into(),
-                        expires_at: requested.expires_at,
-                    };
-                    emit_process_event(
-                        inner,
-                        sink,
-                        run_id,
-                        RuntimeEventKind::ProcessProposalRequested,
-                        payload,
-                    )
-                    .map_err(|_| GovernedProcessBridgeError::Gateway)
-                }
-                GovernedProcessLifecycle::Decided(decided) => {
-                    emit_process_event(
-                        inner,
-                        sink,
-                        run_id,
-                        RuntimeEventKind::ProcessProposalDecided,
-                        decided,
-                    )
-                    .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-                    decided_emitted.store(true, Ordering::SeqCst);
-                    Ok(())
-                }
-                GovernedProcessLifecycle::Started(started) => {
-                    emit_process_event(
-                        inner,
-                        sink,
-                        run_id,
-                        RuntimeEventKind::ProcessStarted,
-                        started,
-                    )
-                    .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-                    started_emitted.store(true, Ordering::SeqCst);
-                    Ok(())
-                }
-            }
-        }) {
-            Ok(receipt) => receipt,
-            Err(GovernedProcessBridgeError::InvalidProposal) => {
-                rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
-                return Ok(());
-            }
-            Err(GovernedProcessBridgeError::ReservationConflict) => {
-                let (code, message) = ProviderProcessResponseError::Conflict.rpc_error();
-                rpc.respond_error(id, code, message)?;
-                return Ok(());
-            }
-            Err(GovernedProcessBridgeError::Busy) => {
-                let (code, message) = ProviderProcessResponseError::Busy.rpc_error();
-                rpc.respond_error(id, code, message)?;
-                return Ok(());
-            }
-            Err(
-                GovernedProcessBridgeError::RunNotRegistered
-                | GovernedProcessBridgeError::InvalidContext
-                | GovernedProcessBridgeError::Gateway
-                | GovernedProcessBridgeError::NotLive
-                | GovernedProcessBridgeError::OwnershipMismatch
-                | GovernedProcessBridgeError::DecisionDenied
-                | GovernedProcessBridgeError::Expired
-                | GovernedProcessBridgeError::Cancelled
-                | GovernedProcessBridgeError::Interrupted
-                | GovernedProcessBridgeError::ShutDown
-                | GovernedProcessBridgeError::CleanupUnproven,
-            ) => {
-                rpc.respond_error(id, -32000, "governed_process_unavailable")?;
-                return Ok(());
-            }
+    let execution = {
+        let mut observer = ProcessLifecycleEmitter {
+            inner,
+            sink,
+            run_id,
+            decided_emitted: &decided_emitted,
+            started_emitted: &started_emitted,
         };
+        governance.execute_process(run_id, normalized.proposal, cancel_probe, &mut observer)
+    };
+    let receipt = match execution {
+        Ok(outcome) => outcome.into_receipt(),
+        Err(GovernedProcessExecutionError::InvalidProposal) => {
+            rpc.respond_error(id, -32602, "invalid_governed_process_request")?;
+            return Ok(());
+        }
+        Err(GovernedProcessExecutionError::ReservationConflict) => {
+            let (code, message) = ProviderProcessResponseError::Conflict.rpc_error();
+            rpc.respond_error(id, code, message)?;
+            return Ok(());
+        }
+        Err(GovernedProcessExecutionError::Busy) => {
+            let (code, message) = ProviderProcessResponseError::Busy.rpc_error();
+            rpc.respond_error(id, code, message)?;
+            return Ok(());
+        }
+        Err(
+            GovernedProcessExecutionError::RunNotBound
+            | GovernedProcessExecutionError::InvalidContext
+            | GovernedProcessExecutionError::NotLive
+            | GovernedProcessExecutionError::ShuttingDown
+            | GovernedProcessExecutionError::CleanupUnproven
+            | GovernedProcessExecutionError::LifecycleDeliveryFailed
+            | GovernedProcessExecutionError::Unavailable,
+        ) => {
+            rpc.respond_error(id, -32000, "governed_process_unavailable")?;
+            return Ok(());
+        }
+    };
 
     // Post-return: emit only kinds not already delivered in-flight.
     // Replays return existing terminal evidence and must not duplicate events.

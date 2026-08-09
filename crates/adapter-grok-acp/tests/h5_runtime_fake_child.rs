@@ -11,6 +11,7 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
 };
+use keeper_governance_port::testkit::PanicGovernedExecutionPort;
 
 struct CollectingSink {
     events: Arc<Mutex<Vec<RuntimeEvent>>>,
@@ -36,6 +37,10 @@ fn config(script: &str) -> GrokAcpConfig {
         ("KEEPER_FAKE_ACP_DELAY_MS".into(), "0".into()),
     ];
     config
+}
+
+fn panic_governance() -> Arc<PanicGovernedExecutionPort> {
+    Arc::new(PanicGovernedExecutionPort)
 }
 
 fn config_with_cleanup_failure(script: &str) -> GrokAcpConfig {
@@ -132,7 +137,9 @@ fn assert_single_terminal(
 
 #[test]
 fn concurrent_session_operation_keeps_active_prompt_events_attached() {
-    let adapter = Arc::new(GrokAcpAdapter::new(config("race-session-operation")).unwrap());
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(config("race-session-operation"), panic_governance()).unwrap(),
+    );
     let session = start(&adapter);
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
@@ -191,7 +198,8 @@ fn concurrent_session_operation_keeps_active_prompt_events_attached() {
 
 #[test]
 fn ignored_cancel_escalates_within_grace_and_leaves_adapter_unavailable() {
-    let adapter = Arc::new(GrokAcpAdapter::new(config("ignore-cancel")).unwrap());
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config("ignore-cancel"), panic_governance()).unwrap());
     let session = start(&adapter);
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
@@ -252,8 +260,13 @@ fn ignored_cancel_escalates_within_grace_and_leaves_adapter_unavailable() {
 
 #[test]
 fn ignored_cancel_cleanup_failure_is_failed_terminal_and_clears_runtime_state() {
-    let adapter =
-        Arc::new(GrokAcpAdapter::new(config_with_cleanup_failure("ignore-cancel")).unwrap());
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(
+            config_with_cleanup_failure("ignore-cancel"),
+            panic_governance(),
+        )
+        .unwrap(),
+    );
     let session = start(&adapter);
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
@@ -325,10 +338,10 @@ fn ignored_cancel_cleanup_failure_is_failed_terminal_and_clears_runtime_state() 
 fn rpc_error_after_cancel_terminates_provider_before_cancelled_terminal() {
     let parent_pid_path = unique_pid_path("rpc-error-cleanup");
     let adapter = Arc::new(
-        GrokAcpAdapter::new(config_with_parent_pid(
-            "error-after-cancel",
-            &parent_pid_path,
-        ))
+        GrokAcpAdapter::new(
+            config_with_parent_pid("error-after-cancel", &parent_pid_path),
+            panic_governance(),
+        )
         .unwrap(),
     );
     let session = start(&adapter);
@@ -388,8 +401,13 @@ fn rpc_error_after_cancel_terminates_provider_before_cancelled_terminal() {
 
 #[test]
 fn rpc_error_after_cancel_cleanup_failure_is_failed_terminal_and_clears_state() {
-    let adapter =
-        Arc::new(GrokAcpAdapter::new(config_with_cleanup_failure("error-after-cancel")).unwrap());
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(
+            config_with_cleanup_failure("error-after-cancel"),
+            panic_governance(),
+        )
+        .unwrap(),
+    );
     let session = start(&adapter);
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
@@ -447,10 +465,10 @@ fn rpc_error_after_cancel_cleanup_failure_is_failed_terminal_and_clears_state() 
 fn cooperative_cancel_keeps_reusable_provider_process_alive() {
     let parent_pid_path = unique_pid_path("cooperative-cancel");
     let adapter = Arc::new(
-        GrokAcpAdapter::new(config_with_parent_pid(
-            "hang-until-cancel",
-            &parent_pid_path,
-        ))
+        GrokAcpAdapter::new(
+            config_with_parent_pid("hang-until-cancel", &parent_pid_path),
+            panic_governance(),
+        )
         .unwrap(),
     );
     let session = start(&adapter);

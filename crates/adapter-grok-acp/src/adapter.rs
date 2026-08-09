@@ -11,6 +11,7 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RunStartedPayload, RuntimeError, RuntimeEvent,
     RuntimeEventKind, RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn, StartSession,
 };
+use keeper_governance_port::GovernedExecutionPort;
 
 use crate::config::GrokAcpConfig;
 use crate::error::internal;
@@ -24,6 +25,7 @@ use crate::turn::TurnRegistry;
 /// Grok Build ACP adapter. Provider wire state stays private to this type.
 pub struct GrokAcpAdapter {
     config: GrokAcpConfig,
+    governance: Arc<dyn GovernedExecutionPort>,
     /// ACP has one global event sink and accepts one prompt at a time.
     operation_gate: Mutex<()>,
     inner: Mutex<Inner>,
@@ -31,10 +33,14 @@ pub struct GrokAcpAdapter {
 }
 
 impl GrokAcpAdapter {
-    pub fn new(config: GrokAcpConfig) -> Result<Self, RuntimeError> {
+    pub fn new(
+        config: GrokAcpConfig,
+        governance: Arc<dyn GovernedExecutionPort>,
+    ) -> Result<Self, RuntimeError> {
         config.validate()?;
         Ok(Self {
             config,
+            governance,
             operation_gate: Mutex::new(()),
             inner: Mutex::new(Inner {
                 connection: None,
@@ -243,6 +249,7 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
         run_prompt_loop(
             &self.inner,
             &self.config,
+            self.governance.as_ref(),
             &request,
             &acp_session_id,
             &cancel,

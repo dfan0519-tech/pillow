@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use keeper_knowledge_indexer::{
-    RenderInput, ScanOptions, classify_document, extract_supersession, render_status_view,
-    scan_and_register, validate_path_ssot,
+    RenderInput, ScanOptions, classify_document, extract_supersession, render_handoff_view,
+    render_status_view, scan_and_register, validate_path_ssot,
 };
 use keeper_project::CreateProject;
 use keeper_project::validate_portable_path;
@@ -521,7 +521,7 @@ fn render_from_scan_is_pure_and_covers_buckets() {
     .unwrap();
 
     let md = result.handoff_markdown.clone();
-    let again = render_status_view(&RenderInput {
+    let again = render_handoff_view(&RenderInput {
         documents: result.documents.clone(),
         links: result.links.clone(),
         audit: result.report.clone(),
@@ -529,7 +529,17 @@ fn render_from_scan_is_pure_and_covers_buckets() {
         verdicts: vec![],
         include_archived: false,
     });
-    assert_eq!(md, again, "render must be pure");
+    assert_eq!(md, again, "handoff render must be pure");
+
+    // K1b five body paragraphs present
+    assert!(md.contains("当前在途") || md.contains("Current in-flight"));
+    assert!(md.contains("待验收") || md.contains("Pending acceptance"));
+    assert!(md.contains("最近验收结论") || md.contains("Recent acceptance"));
+    assert!(md.contains("文档状态") || md.contains("Document status"));
+    assert!(md.contains("替不掉") || md.contains("cannot replace"));
+
+    // empty ledger → 无在途 (negative control)
+    assert!(md.contains("无在途"));
 
     // unknown ratio present
     assert!(

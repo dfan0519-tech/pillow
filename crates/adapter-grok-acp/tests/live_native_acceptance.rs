@@ -28,6 +28,11 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
 };
+use keeper_governance_port::{
+    CancellationProbe, GovernedExecutionPort, GovernedProcessExecutionError,
+    GovernedProcessObserver, GovernedProcessOutcome, GovernedReadExecutionError,
+    GovernedReadOutcome, GovernedWriteExecutionError, GovernedWriteObserver, GovernedWriteOutcome,
+};
 
 const ENV_E2E: &str = "KEEPER_GROK_ACP_E2E";
 const ENV_EXECUTABLE: &str = "KEEPER_GROK_EXECUTABLE";
@@ -42,6 +47,42 @@ Do not use any tools. Do not read, write, edit, delete, create, move, or execute
 const CANCEL_PROMPT: &str = "Write a careful multi-paragraph explanation of why software tests must \
 distinguish SKIP from PASS. Use several sentences. Do not use any tools. \
 Do not write, edit, delete, create, move, or execute files. Text only.";
+
+/// Live acceptance deliberately has no host-owned run authority. If the real
+/// provider violates the text-only prompt and asks for a governed tool, reject
+/// it through the injected port instead of reaching ambient runtime state.
+struct UnavailableGovernedExecutionPort;
+
+impl GovernedExecutionPort for UnavailableGovernedExecutionPort {
+    fn execute_read(
+        &self,
+        _run_id: RunId,
+        _proposal: keeper_agent_protocol::ProviderToolProposal,
+        _cancellation: &dyn CancellationProbe,
+    ) -> Result<GovernedReadOutcome, GovernedReadExecutionError> {
+        Err(GovernedReadExecutionError::Unavailable)
+    }
+
+    fn execute_write(
+        &self,
+        _run_id: RunId,
+        _proposal: keeper_agent_protocol::ProviderWriteProposal,
+        _cancellation: &dyn CancellationProbe,
+        _observer: &mut dyn GovernedWriteObserver,
+    ) -> Result<GovernedWriteOutcome, GovernedWriteExecutionError> {
+        Err(GovernedWriteExecutionError::Unavailable)
+    }
+
+    fn execute_process(
+        &self,
+        _run_id: RunId,
+        _proposal: keeper_agent_protocol::ProviderProcessProposal,
+        _cancellation: &dyn CancellationProbe,
+        _observer: &mut dyn GovernedProcessObserver,
+    ) -> Result<GovernedProcessOutcome, GovernedProcessExecutionError> {
+        Err(GovernedProcessExecutionError::Unavailable)
+    }
+}
 
 struct CollectingSink {
     events: Vec<RuntimeEvent>,
@@ -309,7 +350,8 @@ fn controlled_live_native_acceptance() {
     adapter_cfg.request_timeout = Duration::from_secs(180);
     adapter_cfg.cancel_grace = Duration::from_millis(500);
 
-    let adapter = GrokAcpAdapter::new(adapter_cfg).expect("adapter config");
+    let adapter = GrokAcpAdapter::new(adapter_cfg, Arc::new(UnavailableGovernedExecutionPort))
+        .expect("adapter config");
 
     // 1) Probe truth before initialize/session — H1: not healthy, detail=unavailable.
     // Adapter name is always grok-acp (never fake). File presence alone is not healthy.

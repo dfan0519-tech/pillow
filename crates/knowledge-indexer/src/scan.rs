@@ -20,7 +20,7 @@ use crate::classify::{
     status_for_paired_brief,
 };
 use crate::digest::content_digest_sha256;
-use crate::render::{RenderInput, render_status_view};
+use crate::render::{RenderInput, render_handoff_view};
 use crate::supersession::{InferredSupersession, extract_supersession};
 
 /// Options for a scan run.
@@ -78,7 +78,7 @@ pub struct ScanResult {
     pub links: Vec<KnowledgeDocumentLink>,
     pub report: AuditReport,
     pub report_markdown: String,
-    /// K0c pure registry status view (no hand-written narrative).
+    /// K1b composite handoff (ops-first + document status + honest gaps).
     pub handoff_markdown: String,
     pub inferred_supersession: Vec<InferredSupersession>,
 }
@@ -232,8 +232,9 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
     // K0d ledger rows (empty when scan DB has no dispatch/acceptance writes).
     let tasks = repo.list_tasks_by_project(&project_id)?;
     let verdicts = repo.list_verdicts_by_project(&project_id)?;
-    // Render default excludes archived (ADR-0004 §5 / K1a) — hard to forget.
-    let handoff_markdown = render_status_view(&RenderInput {
+    // K1b composite: ops-first handoff + docs + cannot-replace. Archived
+    // excluded by default (ADR-0004 §5 / K1a).
+    let handoff_markdown = render_handoff_view(&RenderInput {
         documents: all_documents.clone(),
         links: links.clone(),
         audit: report.clone(),

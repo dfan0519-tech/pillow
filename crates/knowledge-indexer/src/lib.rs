@@ -1,6 +1,7 @@
-//! Knowledge document indexer (K0b/K0c/K0d/K0e/K1a): classify, extract explicit
-//! supersession, register into K0a tables, audit-only reports, registry status
-//! rendering, ledger CLI helpers, stale detection, and retirement **candidates**.
+//! Knowledge document indexer (K0b/K0c/K0d/K0e/K1a/K1b): classify, extract
+//! explicit supersession, register into K0a tables, audit-only reports,
+//! registry status + composite handoff rendering, ledger CLI helpers, stale
+//! detection, and retirement **candidates**.
 //!
 //! **Report-only for docs lifecycle:** never deletes or moves files. Never
 //! auto-archives (K1a: archive is an explicit storage call). Never auto-migrates
@@ -11,6 +12,9 @@
 //! hand-written project narrative. **Default render excludes `archived`**
 //! (ADR-0004 §5); pass `include_archived: true` only when intentionally
 //! recovering inventory.
+//!
+//! **K1b handoff render** (`render_handoff_view`) is ops-first (在途 / 待验收 /
+//! 验收结论 / 文档状态) and **states what it still cannot replace**.
 //!
 //! **K1a retirement candidates** require an explicit supersedes link whose
 //! target is registered. Zero-inbound is never a retirement signal.
@@ -40,7 +44,7 @@ pub use ledger::{
     format_verdict_recorded, load_snapshot, open_knowledge, record_verdict, resolve_project_id,
     set_task_status,
 };
-pub use render::{RenderInput, render_status_view};
+pub use render::{RenderInput, render_handoff_view, render_status_view};
 pub use scan::{ScanOptions, ScanResult, ScanSummary, scan_and_register, validate_path_ssot};
 pub use stale::{
     StaleFinding, StaleKind, StaleReport, TaskMention, check_stale, extract_inflight_claims,

@@ -12,7 +12,7 @@ use keeper_agent_protocol::{
 };
 use keeper_policy::ExecDecision;
 use keeper_project::CreateProject;
-use keeper_runtime_host::{HostConfig, RuntimeHost};
+use keeper_runtime_host::{GlobalGovernedExecutionPort, HostConfig, RuntimeHost};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{SqliteConversationRepository, SqliteProjectRepository};
 
@@ -80,7 +80,9 @@ fn harness(script: &str) -> Harness {
     let mut config = GrokAcpConfig::new(fake_bin()).with_test_argv(vec![]);
     config.request_timeout = Duration::from_secs(15);
     config.extra_env = vec![("KEEPER_FAKE_ACP_SCRIPT".into(), script.into())];
-    let adapter = Arc::new(GrokAcpAdapter::new(config).unwrap());
+    let adapter = Arc::new(
+        GrokAcpAdapter::new(config, Arc::new(GlobalGovernedExecutionPort::new())).unwrap(),
+    );
     let host = Arc::new(
         RuntimeHost::new_with_governed_tools(adapter, HostConfig::new(1, false, 64), &db).unwrap(),
     );
