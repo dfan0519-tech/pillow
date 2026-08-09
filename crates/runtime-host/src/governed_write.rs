@@ -289,6 +289,19 @@ pub(crate) fn release_write_owner(owner: Uuid) {
     coordinator().cv.notify_all();
 }
 
+pub(crate) fn write_run_is_owned_by(owner: Uuid, run_id: RunId) -> bool {
+    coordinator()
+        .state
+        .lock()
+        .map(|guard| {
+            guard
+                .runs
+                .get(&run_id)
+                .is_some_and(|bound| bound.owner == owner)
+        })
+        .unwrap_or(false)
+}
+
 /// Generate a canonical 43-character base64url (no pad) grant from OS CSPRNG.
 pub fn generate_approval_grant() -> Result<String, GovernedWriteBridgeError> {
     let mut bytes = [0u8; GRANT_RANDOM_BYTES];

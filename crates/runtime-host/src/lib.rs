@@ -9,6 +9,7 @@ mod fake;
 mod fixture;
 mod governance_port;
 mod governed_read;
+mod governed_tool_service;
 mod governed_write;
 mod host;
 mod sink;
@@ -22,6 +23,7 @@ pub use governed_read::{
     GovernedReadBridgeError, GovernedReadDelivery, GovernedReadReceipt, ProviderToolProposal,
     execute_governed_read,
 };
+pub use governed_tool_service::GovernedToolService;
 #[cfg(any(test, feature = "test-support"))]
 pub use governed_write::force_live_expiry_for_tests;
 pub use governed_write::{
@@ -32,13 +34,14 @@ pub use governed_write::{
     recover_write_proposals_with_roots,
 };
 pub use host::{
-    DEFAULT_MAX_CONCURRENT_TURNS, GovernedProcessBridgeError, GovernedProcessDelivery,
-    GovernedProcessLifecycle, GovernedProcessReceipt, HostConfig, LiveProcessProposalView,
-    ProcessOrigin, ProcessOutputChunk, ProcessOutputStream, ProcessOutputView,
-    ProcessProposalRequestedView, ProcessRiskClass, ProviderProcessProposal, RuntimeHost,
-    SpawnedTurn, decide_process_proposal, execute_governed_process, list_process_proposals,
-    live_process_authority_count, normalize_max_concurrent_turns, open_process_output,
-    pending_process_run_count, recover_process_proposals, workspace_fixture_path,
+    DEFAULT_MAX_CONCURRENT_TURNS, GovernedAdapterFactory, GovernedProcessBridgeError,
+    GovernedProcessDelivery, GovernedProcessLifecycle, GovernedProcessReceipt, HostConfig,
+    LiveProcessProposalView, PreparedRuntimeHost, ProcessOrigin, ProcessOutputChunk,
+    ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass,
+    ProviderProcessProposal, RuntimeHost, SpawnedTurn, decide_process_proposal,
+    execute_governed_process, list_process_proposals, live_process_authority_count,
+    normalize_max_concurrent_turns, open_process_output, pending_process_run_count,
+    recover_process_proposals, workspace_fixture_path,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use host::{

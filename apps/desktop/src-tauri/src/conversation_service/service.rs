@@ -12,7 +12,9 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, RunId as ProtocolRunId, RuntimeProbe, SendTurn, StartSession,
 };
 use keeper_project::ProjectId;
-use keeper_runtime_host::{HostConfig, RuntimeHost, SpawnedTurn};
+use keeper_runtime_host::{
+    GovernedAdapterFactory, HostConfig, PreparedRuntimeHost, RuntimeHost, SpawnedTurn,
+};
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
 };
@@ -75,6 +77,31 @@ impl ConversationService {
             RuntimeHost::new_with_governed_reads(adapter, config, path).map_err(|error| {
                 ConversationCommandError::new("governed_read_unavailable", error.to_string())
             })?;
+        Ok(Self::from_parts(
+            repository, tool_calls, projects, host, emitter,
+        ))
+    }
+
+    /// Production governed composition: prepare the host-owned tool service,
+    /// give its erased execution `Arc` to the adapter factory, then finish the
+    /// host with the same concrete service allocation.
+    pub fn open_with_adapter_factory<F>(
+        path: impl AsRef<Path>,
+        emitter: Arc<dyn RuntimeEventEmitter>,
+        config: HostConfig,
+        factory: F,
+    ) -> Result<Self, ConversationCommandError>
+    where
+        F: GovernedAdapterFactory<Error = ConversationCommandError>,
+    {
+        let path = path.as_ref();
+        let repository = SqliteConversationRepository::open(path).map_err(map_session_error)?;
+        let tool_calls = open_tool_calls(path)?;
+        let projects = open_projects(path)?;
+        let prepared = PreparedRuntimeHost::open(path, config).map_err(|error| {
+            ConversationCommandError::new("governed_read_unavailable", error.to_string())
+        })?;
+        let host = prepared.finish_with_adapter_factory(factory)?;
         Ok(Self::from_parts(
             repository, tool_calls, projects, host, emitter,
         ))

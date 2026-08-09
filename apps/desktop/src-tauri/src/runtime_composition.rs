@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
 use keeper_agent_protocol::AgentRuntimeAdapter;
-use keeper_runtime_host::{GlobalGovernedExecutionPort, HostConfig};
+use keeper_runtime_host::HostConfig;
 use keeper_storage_sqlite::{
     ResolvedRuntimeSettings, RuntimeAdapterSetting, SettingSource, SettingsError,
     SqliteSettingsRepository, process_env_map,
@@ -362,21 +362,19 @@ fn open_with_grok_adapter(
     emitter: Arc<dyn RuntimeEventEmitter>,
     config: GrokAcpConfig,
 ) -> Result<(ConversationService, RuntimeSelection), ConversationCommandError> {
-    // Step 5 transitional composition: this zero-state handle still forwards to
-    // runtime-host globals. Step 6 replaces it with an owner-scoped service.
-    let governance = Arc::new(GlobalGovernedExecutionPort::new());
-    let adapter = GrokAcpAdapter::new(config, governance).map_err(|error| {
-        ConversationCommandError::new(
-            "runtime_adapter_unavailable",
-            format!("Failed to construct Grok ACP adapter: {error}"),
-        )
-    })?;
-    let adapter: Arc<dyn AgentRuntimeAdapter> = Arc::new(adapter);
-    let service = ConversationService::open_with_adapter(
+    let service = ConversationService::open_with_adapter_factory(
         db_path,
         emitter,
-        adapter,
         production_grok_host_config(),
+        move |governance| {
+            let adapter = GrokAcpAdapter::new(config, governance).map_err(|error| {
+                ConversationCommandError::new(
+                    "runtime_adapter_unavailable",
+                    format!("Failed to construct Grok ACP adapter: {error}"),
+                )
+            })?;
+            Ok(Arc::new(adapter) as Arc<dyn AgentRuntimeAdapter>)
+        },
     )?;
     Ok((service, RuntimeSelection::GrokAcp))
 }

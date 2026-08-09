@@ -660,12 +660,11 @@ fn slow_output_is_visible_live_and_reopens_after_waiter_consumes_terminal() {
             provider_node_print_hold_until_sentinel("call-live", marker, &sentinel_for_child),
             &AtomicBool::new(false),
             |event| {
-                if matches!(event, GovernedProcessLifecycle::Started(_)) {
-                    if let Ok(mut guard) = started_tx.lock()
-                        && let Some(tx) = guard.take()
-                    {
-                        let _ = tx.send(());
-                    }
+                if matches!(event, GovernedProcessLifecycle::Started(_))
+                    && let Ok(mut guard) = started_tx.lock()
+                    && let Some(tx) = guard.take()
+                {
+                    let _ = tx.send(());
                 }
                 Ok(())
             },

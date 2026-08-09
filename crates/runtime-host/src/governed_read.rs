@@ -99,6 +99,13 @@ pub(crate) fn release_owner(owner: Uuid) {
     runs.retain(|_, bound| bound.owner != owner);
 }
 
+pub(crate) fn run_is_owned_by(owner: Uuid, run_id: RunId) -> bool {
+    active_runs()
+        .lock()
+        .map(|runs| runs.get(&run_id).is_some_and(|bound| bound.owner == owner))
+        .unwrap_or(false)
+}
+
 /// Execute one adapter-normalized fixed-manifest proposal for an active run.
 ///
 /// The adapter supplies no project identity or filesystem authority. Both come

@@ -22,9 +22,59 @@ use keeper_governance_port::{
 
 use crate::{
     GovernedProcessBridgeError, GovernedProcessLifecycle as HostProcessLifecycle,
-    GovernedReadBridgeError, GovernedWriteBridgeError, ProcessProposalRequestedView,
-    execute_governed_process, execute_governed_read, execute_governed_write,
+    GovernedReadBridgeError, GovernedToolService, GovernedWriteBridgeError,
+    ProcessProposalRequestedView, execute_governed_process, execute_governed_read,
+    execute_governed_write,
 };
+
+impl GovernedExecutionPort for GovernedToolService {
+    fn execute_read(
+        &self,
+        run_id: RunId,
+        proposal: ProviderToolProposal,
+        cancellation: &dyn CancellationProbe,
+    ) -> Result<GovernedReadOutcome, GovernedReadExecutionError> {
+        if self.is_shut_down() {
+            return Err(GovernedReadExecutionError::Unavailable);
+        }
+        if !self.owns_read_run(run_id) {
+            return Err(GovernedReadExecutionError::RunNotBound);
+        }
+        GlobalGovernedExecutionPort::new().execute_read(run_id, proposal, cancellation)
+    }
+
+    fn execute_write(
+        &self,
+        run_id: RunId,
+        proposal: ProviderWriteProposal,
+        cancellation: &dyn CancellationProbe,
+        observer: &mut dyn GovernedWriteObserver,
+    ) -> Result<GovernedWriteOutcome, GovernedWriteExecutionError> {
+        if self.is_shut_down() {
+            return Err(GovernedWriteExecutionError::ShuttingDown);
+        }
+        if !self.owns_write_run(run_id) {
+            return Err(GovernedWriteExecutionError::RunNotBound);
+        }
+        GlobalGovernedExecutionPort::new().execute_write(run_id, proposal, cancellation, observer)
+    }
+
+    fn execute_process(
+        &self,
+        run_id: RunId,
+        proposal: ProviderProcessProposal,
+        cancellation: &dyn CancellationProbe,
+        observer: &mut dyn GovernedProcessObserver,
+    ) -> Result<GovernedProcessOutcome, GovernedProcessExecutionError> {
+        if self.is_shut_down() {
+            return Err(GovernedProcessExecutionError::ShuttingDown);
+        }
+        if !self.owns_process_run(run_id) {
+            return Err(GovernedProcessExecutionError::RunNotBound);
+        }
+        GlobalGovernedExecutionPort::new().execute_process(run_id, proposal, cancellation, observer)
+    }
+}
 
 /// Step 4 compatibility implementation backed by the existing global registries.
 ///

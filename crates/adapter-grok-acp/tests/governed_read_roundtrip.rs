@@ -9,7 +9,7 @@ use keeper_agent_protocol::{
     ToolActiveContext, ToolExecutionState, ToolProposal, canonical_arguments_digest,
 };
 use keeper_project::CreateProject;
-use keeper_runtime_host::{GlobalGovernedExecutionPort, HostConfig, RuntimeHost};
+use keeper_runtime_host::{HostConfig, PreparedRuntimeHost};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
     SqliteConversationRepository, SqliteProjectRepository, SqliteToolCallRepository,
@@ -67,11 +67,11 @@ fn grok_reverse_read_executes_once_replays_and_emits_one_normalized_lifecycle() 
         "KEEPER_FAKE_ACP_SCRIPT".into(),
         "governed-read-replay".into(),
     )];
-    let adapter = Arc::new(
-        GrokAcpAdapter::new(config, Arc::new(GlobalGovernedExecutionPort::new())).unwrap(),
-    );
-    let host =
-        RuntimeHost::new_with_governed_reads(adapter, HostConfig::new(1, false, 64), &db).unwrap();
+    let prepared =
+        PreparedRuntimeHost::open(&db, HostConfig::new(1, false, 64)).expect("prepared host");
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config, prepared.governed_execution_port()).unwrap());
+    let host = prepared.finish(adapter);
     let session = host
         .start_session(StartSession {
             conversation_key: conversation.id.0.to_string(),
@@ -220,11 +220,11 @@ fn reused_transport_id_with_different_request_fails_closed_before_execution() {
         "KEEPER_FAKE_ACP_SCRIPT".into(),
         "governed-read-id-conflict".into(),
     )];
-    let adapter = Arc::new(
-        GrokAcpAdapter::new(config, Arc::new(GlobalGovernedExecutionPort::new())).unwrap(),
-    );
-    let host =
-        RuntimeHost::new_with_governed_reads(adapter, HostConfig::new(1, false, 64), &db).unwrap();
+    let prepared =
+        PreparedRuntimeHost::open(&db, HostConfig::new(1, false, 64)).expect("prepared host");
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config, prepared.governed_execution_port()).unwrap());
+    let host = prepared.finish(adapter);
     let session = host
         .start_session(StartSession {
             conversation_key: conversation.id.0.to_string(),
@@ -294,11 +294,11 @@ fn reused_transport_id_in_new_run_gets_new_durable_identity_and_executes() {
         "KEEPER_FAKE_ACP_SCRIPT".into(),
         "governed-read-replay".into(),
     )];
-    let adapter = Arc::new(
-        GrokAcpAdapter::new(config, Arc::new(GlobalGovernedExecutionPort::new())).unwrap(),
-    );
-    let host =
-        RuntimeHost::new_with_governed_reads(adapter, HostConfig::new(1, false, 64), &db).unwrap();
+    let prepared =
+        PreparedRuntimeHost::open(&db, HostConfig::new(1, false, 64)).expect("prepared host");
+    let adapter =
+        Arc::new(GrokAcpAdapter::new(config, prepared.governed_execution_port()).unwrap());
+    let host = prepared.finish(adapter);
     let session = host
         .start_session(StartSession {
             conversation_key: conversation.id.0.to_string(),

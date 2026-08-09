@@ -415,6 +415,19 @@ pub(crate) fn release_process_owner(owner: Uuid) {
     coordinator().cv.notify_all();
 }
 
+pub(crate) fn process_run_is_owned_by(owner: Uuid, run_id: RunId) -> bool {
+    coordinator()
+        .state
+        .lock()
+        .map(|guard| {
+            guard
+                .runs
+                .get(&run_id)
+                .is_some_and(|bound| bound.owner == owner)
+        })
+        .unwrap_or(false)
+}
+
 /// Residual live process authority count for this host owner (tests / invariants).
 pub fn live_process_authority_count(owner: Uuid) -> usize {
     let Ok(guard) = coordinator().state.lock() else {

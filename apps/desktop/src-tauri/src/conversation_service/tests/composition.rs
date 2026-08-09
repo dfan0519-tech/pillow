@@ -229,6 +229,40 @@ fn default_host_config() -> HostConfig {
 }
 
 #[test]
+fn adapter_factory_and_host_share_the_same_governed_service_allocation() {
+    let (_temp, path) = temp_db();
+    let adapter = Arc::new(InjectedRoutingAdapter::new());
+    let emitter = Arc::new(RecordingEmitter::new());
+    let factory_port: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::clone(&factory_port);
+    let adapter_for_factory = Arc::clone(&adapter);
+
+    let service = ConversationService::open_with_adapter_factory(
+        &path,
+        Arc::clone(&emitter) as Arc<_>,
+        default_host_config(),
+        move |execution| {
+            *captured.lock().expect("factory port") =
+                Some(Arc::as_ptr(&execution) as *const () as usize);
+            Ok(adapter_for_factory as Arc<dyn AgentRuntimeAdapter>)
+        },
+    )
+    .expect("factory composition");
+
+    let execution_ptr = factory_port
+        .lock()
+        .expect("factory port")
+        .take()
+        .expect("factory received governance");
+    assert_eq!(
+        execution_ptr,
+        service.runtime_host().governed_tool_service() as *const _ as usize,
+        "desktop factory must receive the exact service allocation owned by the host"
+    );
+    service.shutdown().expect("shutdown");
+}
+
+#[test]
 fn injected_adapter_routes_probe_session_turn_and_cancel() {
     let (_temp, path) = temp_db();
     let project = seed_project(&path, "composition");
