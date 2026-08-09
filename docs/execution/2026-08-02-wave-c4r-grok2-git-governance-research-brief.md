@@ -12,7 +12,7 @@ stage, unstage, commit, branch switch and single-file restore.
 
 1. Read Pillow's accepted C2 resource and C3 write/diff/approval boundaries.
 2. Inspect Git-related state and UI flows in the pinned local Grok App clone.
-3. Inspect `<workspace>\zbbody` conceptually and verify its license before any
+3. Inspect `zbbody reference clone (out of tree)` conceptually and verify its license before any
    direct reuse recommendation.
 4. Map current Pillow project canonicalization, resource paths, approvals,
    receipts, SQLite and contextual-pane seams.
@@ -36,7 +36,7 @@ stage, unstage, commit, branch switch and single-file restore.
 
 Only create or update:
 
-`<workspace>\pillow\docs\research\2026-08-02-c4-git-governance-research.md`
+`this repository\docs\research\2026-08-02-c4-git-governance-research.md`
 
 Do not change any other file. Finish with `Status: DONE` or
 `Status: BLOCKED`, changed-files truth, residual risks and one Keeper signal.

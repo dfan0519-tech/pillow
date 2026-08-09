@@ -10,9 +10,9 @@ Plan: `docs/superpowers/plans/2026-08-05-c4-git-changes-implementation.md`
 ## Keeper boot
 
 - Attempted worker boot once:  
-  `POST http://127.0.0.1:7890/api/agent-bridge/boot`  
+  `POST local session bridge boot (optional; out of tree)`  
   `{"project":"pillow","task":"C4 D3B4 Round 3 real desktop Git E2E","agentName":"grok4","agentRole":"worker"}`
-- Result: **HTTP 400** `{"error":"worker claims require parentSessionId"}`.
+- Result: **HTTP 400** `{"error":"worker claims require local parent session id"}`.
 - Did not impersonate controller. Did not run through Keeper orchestration.
 - Keeper used for record attempt only; no Vault query, prompt rewrite, or completion judgment.
 

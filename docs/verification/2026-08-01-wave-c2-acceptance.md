@@ -47,7 +47,7 @@ opaque and typed.
 
 ## Fresh Controller Evidence
 
-Executed in `<workspace>\pillow` across the final 2026-07-31/2026-08-01 closeout:
+Executed in `this repository` across the final 2026-07-31/2026-08-01 closeout:
 
 - `pnpm check`: exit 0.
   - desktop Vitest: 17 files, 206/206 tests;

@@ -151,6 +151,6 @@ Acceptance:
 - Provider-native `tools=[]` and `mcpServers=[]` remain in force until the
   Pillow-owned gateway proves its acceptance suite.
 - No worker may modify the legacy Keeper repository or the reference
-  `<workspace>/zbbody` repository.
+  `zbbody reference clone (out of tree)` repository.
 - Scope expansion requires a revised brief before implementation.
 

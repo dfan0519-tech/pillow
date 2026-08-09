@@ -2,7 +2,7 @@
 
 Date: 2026-08-02
 Researcher: grok2 (slot `grok2`)
-Workspace: `<workspace>\pillow`
+Workspace: `this repository`
 Baseline HEAD inspected: `7b7f70f` (accepted C1–C3 dirty working tree; staging empty)
 Scope: project-scoped Git capability ladder design evidence only — **no product implementation**
 
@@ -56,7 +56,7 @@ C4 Git **must not** widen C3 write authority. Git mutations are a **separate pro
 
 | Item | Value |
 | --- | --- |
-| Local clone | `<workspace>\VaultSystem\references\grok-app` |
+| Local clone | `pinned Grok App reference (out of tree)` |
 | Pinned commit (verified) | `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` |
 | License | MIT (`docs/references/upstream-baseline.md`) |
 
@@ -85,7 +85,7 @@ UI model: Session Changes (tool-derived) + Workspace Changes (`git_status`); Res
 
 | Item | Value |
 | --- | --- |
-| Local path | `<workspace>\zbbody` |
+| Local path | `zbbody reference clone (out of tree)` |
 | Inspected commit | `00c293414333b6fcc4e4598389fa3952c8d0b09b` |
 | LICENSE | Apache License 2.0 (file header + `package.json` `"license": "Apache-2.0"`) |
 | Readme provenance | Continues AionUi under Apache-2.0 |
@@ -564,7 +564,7 @@ Reject any implementation brief that:
 
 **Changed files (truth):**
 
-- Created `<workspace>\pillow\docs\research\2026-08-02-c4-git-governance-research.md` only.
+- Created `this repository\docs\research\2026-08-02-c4-git-governance-research.md` only.
 
 **Residual risks:** see §10 (Git version skew, nested-repo UX, hook hangs, smudge/CAS, general shell bypass). No product code or reference repos modified.
 

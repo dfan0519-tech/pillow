@@ -177,7 +177,7 @@ git diff --cached --name-only
 
 - HEAD baseline preserved; accepted dirty tree not reset.
 - No staging, commit, discard, or force operations.
-- `<workspace>\VaultSystem\keeper` not modified.
+- `legacy Keeper (out of tree)` not modified.
 - Correction pass does not use or create a Git worktree.
 
 ## COMPLETION: DONE

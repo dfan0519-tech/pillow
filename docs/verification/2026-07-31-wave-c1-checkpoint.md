@@ -32,7 +32,7 @@ and network tools remain disabled.
   checkpoint.
 - No C1/B3 path may be reverted, overwritten, or selectively reset while C2
   is developed.
-- `<workspace>/VaultSystem\\keeper` remains a frozen resource manager; Pillow
+- legacy Keeper (out of tree) remains a frozen resource manager; Pillow
   product work belongs only in this repository.
 
 ## Fresh Verification

@@ -13,11 +13,11 @@ the design and performs the design gate.
 
 ## Shared constraints
 
-- Work only from `<workspace>\pillow` for Pillow artifacts.
-- Treat `<workspace>\VaultSystem\keeper` as frozen and read-only.
-- Local references `<workspace>\VaultSystem\references\grok-app` and
-  `<workspace>\zbbody` are read-only.
-- Read `<workspace>\AGENTS.md`, the shared vault rules and this repository's
+- Work only from `this repository` for Pillow artifacts.
+- Treat `legacy Keeper (out of tree)` as frozen and read-only.
+- Local references `pinned Grok App reference (out of tree)` and
+  `zbbody reference clone (out of tree)` are read-only.
+- Read `root AGENTS.md`, the shared vault rules and this repository's
   `AGENTS.md`, then POST a fresh Keeper boot with `project=pillow`, the exact
   task and `agentRole=worker`.
 - Do not modify source, tests, manifests, lockfiles, shared vault files or

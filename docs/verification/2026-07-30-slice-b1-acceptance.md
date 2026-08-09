@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 
-Worktree: `<repo>-worktrees\integration-slice-b1`
+Worktree: `<repo-worktree>`
 
 Branch: `integration/slice-b1`
 
@@ -23,7 +23,7 @@ The host always uses `RuntimeHost::with_fake`. The UI remains free of provider-s
 
 ## Integrated commit list (Domain → Runtime → UI → Integration)
 
-Integrated in order on `integration/slice-b1` (read-only legacy `<workspace>/VaultSystem\keeper` not modified):
+Integrated in order on `integration/slice-b1` (read-only legacy `legacy Keeper (out of tree)` not modified):
 
 ### Domain (Task 1)
 

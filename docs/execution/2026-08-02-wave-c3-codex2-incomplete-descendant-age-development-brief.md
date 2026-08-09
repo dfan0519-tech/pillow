@@ -5,7 +5,7 @@
 - Worker: Codex2 (`gpt-5.6-terra`, high, `fastMode=false`)
 - Controller: Codex Desktop
 - No stage/commit; no real desktop E2E
-- Frozen tree: `<workspace>\VaultSystem\keeper`
+- Frozen tree: `legacy Keeper (out of tree)`
 
 ## Reproduced failure
 

@@ -5,8 +5,8 @@
 Owner: a leased `grok1`/`grok2`/`grok3` CLI worker selected by the controller.
 The original GLM allocation is retired after repeated non-executing attempts.
 
-This is the first implementation task in C2. Work only in `<workspace>\pillow`.
-Keeper and `<workspace>\VaultSystem\keeper` are read-only resource-management
+This is the first implementation task in C2. Work only in `this repository`.
+Keeper and `legacy Keeper (out of tree)` are read-only resource-management
 infrastructure and must not be edited.
 
 ## Goal

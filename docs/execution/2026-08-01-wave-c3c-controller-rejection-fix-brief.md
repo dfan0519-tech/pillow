@@ -11,7 +11,7 @@ content-privacy, state-machine, diff-correctness and post-write evidence gaps.
 
 ## Startup And Whitelist
 
-Work only in `<workspace>\pillow`; boot as grok3 under controller session
+Work only in `this repository`; boot as grok3 under controller session
 `<keeper-session>`; read all AGENTS, the C3 design, accepted C3-A/B
 reports, current C3-C report and this brief. Preserve every dirty-tree change.
 No stage/commit/reset/worktree.

@@ -5,7 +5,7 @@ Read this file first. It is the complete task contract.
 You are the actual account-2 Codex CLI worker (`CODEX_HOME=%USERPROFILE%\.codex2`,
 `gpt-5.6-terra`, high reasoning, default service tier / fastMode=false).
 Repair only the rejected D3AR output lifecycle. Boot Keeper as a `pillow` worker for task
-`c4-d3ar2-live-output-lifecycle`. Work only in `<workspace>\pillow`; Keeper is
+`c4-d3ar2-live-output-lifecycle`. Work only in `this repository`; Keeper is
 read-only. Preserve HEAD `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`,
 empty staging and all unrelated dirty work. No stage, commit, reset, restore,
 clean, package, publish or numeric-PID/name cleanup.

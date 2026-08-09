@@ -4,7 +4,7 @@ Date: 2026-08-02
 
 Verdict: **ACCEPT — Critical 0 / Important 0**
 
-Repository: `<workspace>\pillow`
+Repository: `this repository`
 
 Branch / HEAD: `main` / `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 

@@ -2,7 +2,7 @@
 
 **Controller session:** `<keeper-session>`
 **Stage:** Stage 1 / C2 Task 2
-**Repository:** `<workspace>\pillow`
+**Repository:** `this repository`
 **Baseline HEAD:** `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 **Status:** implementation task; acceptance belongs to the controller
 
@@ -36,7 +36,7 @@ This task must not:
 - create a second sidebar, dashboard, task table, or global resource store;
 - expose project roots, native paths, handles, raw bytes, session IDs, or
   debug metadata;
-- touch `<workspace>\VaultSystem\keeper`;
+- touch `legacy Keeper (out of tree)`;
 - stage or commit.
 
 ## Exclusive Write Whitelist

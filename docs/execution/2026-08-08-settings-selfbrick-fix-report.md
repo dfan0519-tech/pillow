@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-08  
 **Status:** `SELFBRICK-FIX-COMPLETE`  
-**Worker:** grok-worker (Keeper boot required `parentSessionId`; work continued under total-control brief)
+**Worker:** grok-worker (Keeper boot required `local parent session id`; work continued under total-control brief)
 
 ## Problem (do not re-argue)
 
@@ -130,7 +130,7 @@ Separately, Fake was always listed in the adapter dropdown, contrary to ADR-0003
 2. **Release Fake gate** is only fully exercised via `cfg!(debug_assertions)` dual-path logic + unit tests of the flag; a true `--release` open of stored Fake is not run in this worker gate (release binary not built here). Logic is compile-time `cfg!` + source-based env bypass.
 3. **Degraded conversation commands** fail because `ConversationService` is not managed (Tauri state missing). Banner + Settings CTA is the recovery UX; no stub Fake adapter.
 4. **Stored Fake on release** still appears as a temporary select option when the current value is `fake` so the control is not blank; user can switch to Grok ACP. Value is not auto-rewritten.
-5. Keeper bridge boot failed without `parentSessionId` (controller-owned claim path).
+5. Local session bridge boot (optional) failed without `local parent session id` (controller-owned claim path).
 
 ## Completion marker
 

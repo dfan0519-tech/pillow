@@ -4,7 +4,7 @@
 
 - Worker: real Grok CLI slot `grok4`.
 - Keeper task: `c4-d1r2-git-clippy-fix`; boot as `agentRole=worker` before editing.
-- Repository: `<workspace>\pillow` only. Treat `<workspace>\VaultSystem\keeper` as frozen and read-only.
+- Repository: `this repository` only. Treat `legacy Keeper (out of tree)` as frozen and read-only.
 - Preserve the accepted dirty C1–C3 working tree. Do not stage, commit, reset, clean, or overwrite unrelated changes.
 - Send one completion signal when finished; do not create a polling monitor.
 
@@ -19,7 +19,7 @@ Clippy recommends `*b"??"` and `*b"!!"`. This is the only authorized production 
 
 ## Required workflow
 
-1. Read `<workspace>\AGENTS.md`, `<workspace>\VaultSystem\vault\AGENTS.md`, `<workspace>\pillow\AGENTS.md`, this brief, and the D1/D1R reports relevant to the Git parser.
+1. Read `root AGENTS.md`, `shared vault rules (out of tree)`, `this repository\AGENTS.md`, this brief, and the D1/D1R reports relevant to the Git parser.
 2. Reproduce RED with:
    `cargo clippy -p keeper-git-executor --all-targets -- -D warnings`
 3. Make the minimal two-expression repair in `status.rs`; do not refactor or change parser behavior.

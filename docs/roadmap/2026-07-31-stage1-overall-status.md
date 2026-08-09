@@ -23,7 +23,7 @@ Authority:
 2. Stage 2: governed Obsidian knowledge layer.
 3. Stage 3: one-person-company project operating system.
 
-Only Stage 1 is active. `<workspace>\VaultSystem\keeper` remains a frozen,
+Only Stage 1 is active. `legacy Keeper (out of tree)` remains a frozen,
 independent resource manager and is not a Pillow product-code destination.
 
 ## Stage 1 Capability Ladder

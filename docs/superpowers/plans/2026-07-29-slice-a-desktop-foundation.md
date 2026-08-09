@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Repository root is `<repo>`.
-- The legacy repository `<workspace>/VaultSystem\keeper` is read-only.
+- The legacy repository `legacy Keeper (out of tree)` is read-only.
 - Stage 1 is an industrial AI IDE; Obsidian and company orchestration are out of scope.
 - SQLite is the only operational authority.
 - The renderer never opens SQLite, launches processes, or reads secrets.
@@ -464,7 +464,7 @@ git commit -m "feat: add Grok App-based project workbench"
 test("creates, selects, and restores a project", async ({ page }) => {
   await page.getByRole("button", { name: "新建项目" }).click();
   await page.getByLabel("项目名称").fill("Pillow");
-  await page.getByLabel("项目目录").fill("<workspace>/VaultSystem\\pillow");
+  await page.getByLabel("项目目录").fill("C:\\Users\\Alice\\Projects\\pillow");
   await page.getByRole("button", { name: "创建" }).click();
   await expect(page.getByTestId("active-project-name")).toHaveText("Pillow");
   await page.reload();

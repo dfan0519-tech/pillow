@@ -46,7 +46,7 @@ Modify or create only:
 
 Everything else is read-only, including `RunActivity.tsx`,
 `conversationTypes.ts`, reducers, App, Workbench, resource code, Rust/Tauri,
-provider/runtime code, package files, and `<workspace>\VaultSystem\keeper`.
+provider/runtime code, package files, and `legacy Keeper (out of tree)`.
 Preserve the complete existing dirty worktree. Do not reset, restore, stage, or
 commit.
 

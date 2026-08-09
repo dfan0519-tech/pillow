@@ -11,7 +11,7 @@ acceptance and aggregate gates.
 
 Start with Keeper boot using project `pillow`, task
 `c4-d3ar-process-authority-events-output`, agentRole `worker`. Work only in
-`<workspace>\pillow`. Treat `<workspace>\VaultSystem\keeper` as read-only.
+`this repository`. Treat `legacy Keeper (out of tree)` as read-only.
 
 ## Accepted baseline that must remain true
 

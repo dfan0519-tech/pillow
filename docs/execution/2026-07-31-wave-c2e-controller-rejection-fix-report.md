@@ -1,7 +1,7 @@
 # Wave C2-E Controller Rejection Fix Report
 
 **Worker**: grok-c2e-fix
-**Keeper session**: `<keeper-session>` (controller boot; worker role required parentSessionId)
+**Local session note**: `<keeper-session>` (controller boot; worker role required local parent session id)
 **Date**: 2026-07-31
 **Baseline HEAD**: `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 **Status**: `DONE` — focused C2-E E2E green; four phases complete without gate relaxation

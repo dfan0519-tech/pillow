@@ -8,7 +8,7 @@
 
 ## Keeper boot
 
-- Attempted `agentRole=worker` → HTTP 400 `worker claims require parentSessionId`
+- Attempted `agentRole=worker` → HTTP 400 `worker claims require local parent session id`
   (dispatcher supplied no parent session).
 - Record-only boot proceeded as `agentRole=controller` for the same project/task
   so a session was recorded without inventing a parent id.

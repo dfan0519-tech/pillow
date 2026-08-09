@@ -96,7 +96,7 @@ git diff --check -- apps/desktop/src/features/conversations/AgentActivityDisclos
 
 | Source | License | Use |
 |--------|---------|-----|
-| Local `zbbody` (`<workspace>\zbbody`, Apache-2.0) | Apache-2.0 | **Conceptual only** — conversation-local progressive disclosure of plan / tool / sub-agent activity; no source files copied |
+| Local `zbbody` (`zbbody reference clone (out of tree)`, Apache-2.0) | Apache-2.0 | **Conceptual only** — conversation-local progressive disclosure of plan / tool / sub-agent activity; no source files copied |
 | Grok App commit `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` | MIT | **Interaction baseline only** — compact summary + progressive disclosure pattern; design tokens reused via existing Pillow `tokens.css` (already attributed). **No direct source adaptation** of Grok App components for this slice |
 
 This slice is Pillow-authored TypeScript/CSS. Existing `RunActivity` remains the wired run projection; this component is a parallel, unmounted contract for conversation-scoped disclosure until the controller wires it.

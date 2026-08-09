@@ -34,7 +34,7 @@ The design uses local evidence from:
   `00c293414333b6fcc4e4598389fa3952c8d0b09b`, Apache-2.0;
 - the accepted Pillow B3/C1/C2 dirty-tree checkpoint;
 - frozen Keeper approval invariants under
-  `<workspace>\VaultSystem\keeper\lib\operator-approval-authority.js`.
+  `legacy Keeper (out of tree)\lib\operator-approval-authority.js`.
 
 Grok App and zbbody remain conceptual interaction references. C3 copies no
 upstream application source. Any later direct adaptation must add commit,
@@ -350,5 +350,5 @@ C3 is accepted only when all of the following pass:
 
 Baseline HEAD remains `7b7f70f`. C1/B3/C2 are an accepted unstaged dirty-tree
 checkpoint. C3 workers receive non-overlapping file white-lists. No reset,
-discard, staging or commit is permitted. `<workspace>\VaultSystem\keeper` remains
+discard, staging or commit is permitted. `legacy Keeper (out of tree)` remains
 frozen and read-only.

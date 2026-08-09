@@ -36,7 +36,7 @@ added.
 
 **Not modified by this worker**: Rust, Tauri commands, DTO contracts, SQLite,
 preview classification, conversation timeline/activity projection,
-`<workspace>\VaultSystem\keeper`.
+`legacy Keeper (out of tree)`.
 
 **Pre-existing dirty tree preserved**: other C1/B3/C2 working-tree files
 untouched. `apps/desktop/tests/project-workbench.test.tsx` already carried three

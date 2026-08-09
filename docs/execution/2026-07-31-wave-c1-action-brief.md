@@ -34,7 +34,7 @@ runtime semantics, but the visible shell must use the upstream desktop grammar:
 
 The upstream repository is read-only:
 
-`<workspace>\VaultSystem\references\grok-app`
+`pinned Grok App reference (out of tree)`
 
 Pinned commit:
 
@@ -122,7 +122,7 @@ The runtime implementer may consume but must not rewrite:
 - `crates/tool-executor/**`
 - `crates/storage-sqlite/**`
 
-The current uncommitted B3 working tree at `<workspace>\pillow` is authoritative.
+The current uncommitted B3 working tree at `this repository` is authoritative.
 No B3 file may be reverted or replaced.
 
 ## Track C: Desktop Visual And Interaction Gate
@@ -151,7 +151,7 @@ The acceptance implementer must not edit production renderer or Rust source.
 ## Shared Constraints
 
 - Do not stage or commit.
-- Do not modify `<workspace>\VaultSystem\keeper`.
+- Do not modify `legacy Keeper (out of tree)`.
 - Do not modify shared vault rules, credentials or project metadata.
 - Do not add a UI framework or icon dependency without controller approval.
 - Preserve existing project-first ownership and durable conversation behavior.

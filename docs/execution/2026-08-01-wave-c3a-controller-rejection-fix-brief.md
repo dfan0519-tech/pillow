@@ -6,12 +6,12 @@ Date: 2026-08-01
 
 ## Startup
 
-- Work only in `<workspace>\pillow`.
+- Work only in `this repository`.
 - Worker Keeper session: `<keeper-session>`.
-- Read `<workspace>\AGENTS.md`, `<workspace>\VaultSystem\vault\AGENTS.md`, and
-  `<workspace>\pillow\AGENTS.md` before editing.
+- Read `root AGENTS.md`, `shared vault rules (out of tree)`, and
+  `this repository\AGENTS.md` before editing.
 - Preserve every pre-existing dirty-tree change. The frozen legacy manager at
-  `<workspace>\VaultSystem\keeper` is read-only and out of scope.
+  `legacy Keeper (out of tree)` is read-only and out of scope.
 - This is a correction pass on the current shared working tree; do not use or
   create a Git worktree.
 

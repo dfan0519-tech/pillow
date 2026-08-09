@@ -288,7 +288,7 @@ No product code modified. Gates still run as required.
    design must add notify after eligibility updates.
 3. Desktop projection / “Cancelling → Completed” is a separate concern; this
    debt only fixes process lifecycle **event** timing.
-4. Keeper agent-bridge boot returned HTTP 400 in this environment; work
+4. Local session bridge boot (optional) returned HTTP 400 in this environment; work
    proceeded from the task contract alone.
 5. Parallel desktop worker owns `apps/desktop/**` and E2E; not exercised here.
 

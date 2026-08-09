@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Source repository: `<workspace>/VaultSystem\keeper`
+Source repository: legacy Keeper (out of tree; not published with Pillow)
 
 Source baseline: `340d62f`
 

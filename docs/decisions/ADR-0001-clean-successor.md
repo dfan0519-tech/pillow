@@ -15,7 +15,7 @@ Continuing to patch that implementation would preserve the wrong boundaries.
 
 ## Decision
 
-Create `<repo>` as an independent Git repository.
+Create this repository as an independent Git repository.
 
 The legacy repository is frozen as a read-only migration source. Pillow
 will reimplement accepted behavior behind typed boundaries and use selected

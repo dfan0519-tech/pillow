@@ -5,7 +5,7 @@
 - Worker: Codex2 (`gpt-5.6-terra`, high, `fastMode=false`)
 - Controller: Codex Desktop
 - Stage/commit: forbidden
-- Frozen tree: `<workspace>\VaultSystem\keeper` is read-only
+- Frozen tree: `legacy Keeper (out of tree)` is read-only
 
 ## Problem
 

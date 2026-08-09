@@ -4,12 +4,12 @@ Role: read-only governed-write architecture researcher.
 
 ## Startup
 
-1. Work from `<workspace>\pillow`.
+1. Work from `this repository`.
 2. POST Keeper boot with project `pillow`, task
    `c3-research-governed-write-security`, agentName `grok3`, agentRole
    `worker`.
-3. Read `<workspace>\AGENTS.md`, the shared vault `AGENTS.md`, and
-   `<workspace>\pillow\AGENTS.md`.
+3. Read `root AGENTS.md`, the shared vault `AGENTS.md`, and
+   `this repository\AGENTS.md`.
 
 ## Scope
 
@@ -17,7 +17,7 @@ Inspect the current dirty Pillow working tree without modifying it. Focus on
 `agent-protocol`, `tool-executor`, `storage-sqlite`, `runtime-host`, the Tauri
 conversation service, and current renderer activity/resource contracts.
 
-Use `<workspace>\VaultSystem\keeper` only as a frozen read-only reference for
+Use `legacy Keeper (out of tree)` only as a frozen read-only reference for
 `operator-approval-authority` and related tests. Port behavior through new
 typed contracts; do not propose copying the legacy implementation wholesale.
 
@@ -48,7 +48,7 @@ evidence strongly contradicts that boundary.
 
 Write only:
 
-`<workspace>\pillow\docs\research\2026-08-01-c3-governed-write-security-research.md`
+`this repository\docs\research\2026-08-01-c3-governed-write-security-research.md`
 
 The report must contain: current architecture map with exact local paths/lines,
 three-option comparison, recommended contract and state machine, threat/control

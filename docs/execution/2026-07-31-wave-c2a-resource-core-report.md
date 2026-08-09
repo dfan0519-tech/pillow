@@ -3,7 +3,7 @@
 **Date**: 2026-07-31
 **Status**: `DONE`
 **Worker**: grok-c2a (controller lease)
-**Scope**: `<workspace>\pillow` only; Keeper / `<workspace>\VaultSystem\keeper` untouched.
+**Scope**: `this repository` only; Keeper / `legacy Keeper (out of tree)` untouched.
 **Commit**: not staged, not committed (per brief).
 
 ---

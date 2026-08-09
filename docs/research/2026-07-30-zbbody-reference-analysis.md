@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 
-Reference repository: `<workspace>/zbbody`
+Reference repository: `zbbody reference clone (out of tree)`
 
 Reference commit: `00c293414333b6fcc4e4598389fa3952c8d0b09b`
 
@@ -85,7 +85,7 @@ project or conversation.
 
 ## Local Repository Handling
 
-`<workspace>/zbbody` is a reference repository under Keeper governance. Its
+`zbbody reference clone (out of tree)` is a reference repository under Keeper governance. Its
 pre-existing worktree changes are not part of Pillow and must not be
 cleaned, staged, committed, or reused implicitly.
 

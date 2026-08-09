@@ -2,13 +2,10 @@
 
 Read and follow `AGENTS.md` in this repository.
 
-Before substantial work, connect through Keeper Bridge:
+Pillow product work is self-contained here. Do not assume a local session
+bridge, shared vault wiki, sibling legacy resource manager, or multi-account
+CLI slot farm exists. Build, test, and contribute using only what this
+repository documents.
 
-```text
-POST http://127.0.0.1:7890/api/agent-bridge/boot
-{"project":"pillow","task":"<task>","agentName":"<agent>","agentRole":"controller|worker"}
-```
-
-Shared knowledge rules live at `<workspace>/VaultSystem\vault\AGENTS.md`.
-The legacy resource manager at `<workspace>/VaultSystem\keeper` is a separate
-read-only dependency and must not be modified from this repository.
+For maintainer-only multi-agent operations on a development machine, use the
+local (gitignored) runbook under `.superpowers/RUNBOOK.md` when present.

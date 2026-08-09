@@ -11,11 +11,11 @@ an interactive Windows terminal in a later checkpoint.
 ## Required evidence
 
 1. Read the C3 design, acceptance and process-safety implementation in
-   `<workspace>\pillow`.
+   `this repository`.
 2. Inspect the process/session and terminal-related implementation in the
    pinned local Grok App clone at
-   `<workspace>\VaultSystem\references\grok-app`.
-3. Inspect `<workspace>\zbbody` only as a conceptual reference; verify its license
+   `pinned Grok App reference (out of tree)`.
+3. Inspect `zbbody reference clone (out of tree)` only as a conceptual reference; verify its license
    before recommending any direct reuse.
 4. Map the current Pillow protocol, policy, runtime-host, tool-executor,
    SQLite and Tauri seams that a terminal capability would consume.
@@ -38,7 +38,7 @@ an interactive Windows terminal in a later checkpoint.
 
 Only create or update:
 
-`<workspace>\pillow\docs\research\2026-08-02-c4-terminal-process-research.md`
+`this repository\docs\research\2026-08-02-c4-terminal-process-research.md`
 
 Do not change any other file. Finish the report with `Status: DONE` or
 `Status: BLOCKED`, changed-files truth, residual risks and a concise Keeper

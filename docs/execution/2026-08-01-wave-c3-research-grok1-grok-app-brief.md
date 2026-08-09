@@ -4,16 +4,16 @@ Role: read-only interaction and state-flow researcher.
 
 ## Startup
 
-1. Work from `<workspace>\pillow`.
+1. Work from `this repository`.
 2. POST Keeper boot with project `pillow`, task
    `c3-research-grok-app`, agentName `grok1`, agentRole `worker`.
-3. Read `<workspace>\AGENTS.md`, the shared vault `AGENTS.md`, and
-   `<workspace>\pillow\AGENTS.md`.
+3. Read `root AGENTS.md`, the shared vault `AGENTS.md`, and
+   `this repository\AGENTS.md`.
 
 ## Scope
 
 Inspect the fixed local Grok App reference at
-`<workspace>\VaultSystem\references\grok-app`, source commit
+`pinned Grok App reference (out of tree)`, source commit
 `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9`, MIT. Focus on actual components
 and state transitions for:
 
@@ -42,7 +42,7 @@ reference, adapted implementation and direct reuse under
 
 Write only:
 
-`<workspace>\pillow\docs\research\2026-08-01-c3-grok-app-interaction-research.md`
+`this repository\docs\research\2026-08-01-c3-grok-app-interaction-research.md`
 
 The report must contain: evidence table with source paths/lines, state-flow
 diagram in text, adopt/adapt/avoid decisions, provenance classification,

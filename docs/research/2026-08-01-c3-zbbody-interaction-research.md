@@ -2,14 +2,14 @@
 
 **Date:** 2026-08-01
 **Role:** read-only collaboration / editor interaction researcher (`grok2`)
-**Reference checkout:** `<workspace>\zbbody`
+**Reference checkout:** `zbbody reference clone (out of tree)`
 **Verified HEAD:** `00c293414333b6fcc4e4598389fa3952c8d0b09b` (`fix(conversation): avoid forbidden extra updates`)
 **Worktree note:** independently dirty (`M AGENTS.md`, `M CLAUDE.md`, `M packages/desktop/electron.vite.config.ts`, `?? .cursor/`). Not inspected as product source of truth; not modified.
 **Pillow product order (context):** industrial local AI IDE first; UI follows accepted Grok App interaction baseline until a Pillow design system supersedes it.
 **Prior conceptual reference:** `docs/research/2026-07-30-zbbody-reference-analysis.md`
 **Pillow in-tree baselines used for contrast:** C2-C2 `AgentActivityDisclosure`, C2-C1 `ResourcePane`, C2-C3 project-scoped `ResourcePreview`.
 
-Keeper Bridge boot (`POST /api/agent-bridge/boot` and claim fallback) returned HTTP 400 in this session; work continued under the written brief with vault QUERY only.
+Keeper Bridge boot (`local session bridge boot (optional)` and claim fallback) returned HTTP 400 in this session; work continued under the written brief with vault QUERY only.
 
 ---
 
@@ -19,7 +19,7 @@ Keeper Bridge boot (`POST /api/agent-bridge/boot` and claim fallback) returned H
 |------|----------|
 | Declared license | **Apache License 2.0** |
 | `package.json` | `"license": "Apache-2.0"`, product name `AionUi` / ZBBody packaging |
-| Full license text | `<workspace>\zbbody\LICENSE` (Apache 2.0, standard terms) |
+| Full license text | `zbbody reference clone (out of tree)\LICENSE` (Apache 2.0, standard terms) |
 | Upstream provenance | `readme.md` L159: ZBBody continues [AionUi](https://github.com/iOfficeAI/AionUi) under Apache-2.0 |
 | Per-file SPDX | Widespread `SPDX-License-Identifier: Apache-2.0` and `Copyright … AionUi (aionui.com)` headers (e.g. message/permission/tool components) |
 | NOTICE file | No top-level `NOTICE` found in the checkout |
@@ -447,7 +447,7 @@ enter conversation → workspace collapsed
 
 ## 10. Non-actions taken
 
-- Did **not** modify `<workspace>\zbbody` or its Git state.
+- Did **not** modify `zbbody reference clone (out of tree)` or its Git state.
 - Did **not** modify Pillow product code, tests, or other docs.
 - Did **not** stage or commit.
 - Wrote **only** this file under `docs/research/`.

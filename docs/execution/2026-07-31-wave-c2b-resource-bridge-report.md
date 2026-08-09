@@ -3,7 +3,7 @@
 **Date**: 2026-07-31
 **Status**: `DONE`
 **Worker**: grok3 (controller lease)
-**Scope**: `<workspace>\pillow` only; C2-A / C1 / B3 files outside whitelist untouched.
+**Scope**: `this repository` only; C2-A / C1 / B3 files outside whitelist untouched.
 **Commit**: not staged, not committed (per brief).
 
 ---

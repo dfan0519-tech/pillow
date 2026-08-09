@@ -12,11 +12,11 @@ dependencies of C3-C/D.
 
 ## Startup
 
-- Work only in `<workspace>\pillow`; boot Keeper as grok1 worker under controller
+- Work only in `this repository`; boot Keeper as grok1 worker under controller
   session `<keeper-session>`.
 - Read all governing AGENTS files, the C3 design, the C3-B brief and report.
 - Preserve the complete dirty tree. No stage, commit, reset, discard, worktree,
-  or edits under frozen `<workspace>\VaultSystem\keeper`.
+  or edits under frozen `legacy Keeper (out of tree)`.
 
 ## Allowed Files
 

@@ -21,7 +21,7 @@ environment variables or out-of-band files as the only configuration path.
 | Settings-only slice, credentials deferred indefinitely | Reject as product strategy | Acceptable as **S0 shipping gate** (see §4.3), not as final industrial posture |
 | Credentials store secrets in SQLite (encrypted blob or plaintext) | **Reject** | Violates pillow-first secret boundary and AGENTS.md; dump/backup/sync become secret stores |
 | Renderer holds or displays secret values after entry | **Reject** | Violates Z4 least privilege and C3 host-private grant pattern |
-| Pillow takes over Grok CLI auth.json / slot login | **Reject** | Slot containers and Keeper routing own Grok identity; Pillow must not open or rewrite CLI auth |
+| Pillow takes over Grok CLI auth.json / slot login | **Reject** | External CLI profiles own Grok identity; Pillow must not open or rewrite CLI auth |
 
 **Recommended product framing:** treat this as **one capability boundary**
 documented here, delivered as **S0 then S1**, not as two unrelated features
@@ -565,8 +565,9 @@ Pillow **may** show: "Grok CLI not found", "profile path missing", "adapter
 probe unhealthy" using existing probe codes — **without** account labels or
 auth file contents (already required by runtime composition tests).
 
-Pillow **must not:** claim Grok slot, copy auth between slots, or treat
-outer `<slot-home>\auth.json` as identity (AGENTS.md Grok CLI Slot Isolation).
+Pillow **must not:** claim a Grok CLI slot, copy auth between profiles, or treat
+an outer profile `auth.json` as product identity (see multi-runtime isolation
+in root `AGENTS.md`).
 
 ## 7. Reuse of C3 Governed Primitives
 

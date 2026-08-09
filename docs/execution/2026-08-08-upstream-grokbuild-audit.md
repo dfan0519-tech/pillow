@@ -20,7 +20,7 @@
 | `grok.exe --version`, `grok.exe agent --help` | No auth/token file reads; no desktop E2E; no `git add/commit` |
 | GitHub API: commits / releases / tags | No burn of model quota for protocol probing |
 
-Keeper Bridge boot (`POST http://127.0.0.1:7890/api/agent-bridge/boot`) returned **HTTP 400** in this environment; audit proceeded without a recorded bridge session.
+Keeper Bridge boot (`POST local session bridge boot (optional; out of tree)`) returned **HTTP 400** in this environment; audit proceeded without a recorded bridge session.
 
 ---
 

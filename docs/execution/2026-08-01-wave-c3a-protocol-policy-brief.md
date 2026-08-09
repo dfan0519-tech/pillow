@@ -6,10 +6,10 @@ Controller session: `<keeper-session>`
 
 ## Startup
 
-1. Work only in `<workspace>\pillow`.
+1. Work only in `this repository`.
 2. POST Keeper boot with `project=pillow`, task
    `c3a-protocol-policy`, agentName `grok3`, agentRole `worker`, and
-   `parentSessionId=<keeper-session>`.
+   `<local-parent-session>`.
 3. Read the three AGENTS files and
    `docs/superpowers/specs/2026-08-01-c3-governed-write-design.md`.
 4. Preserve the accepted dirty tree. Do not reset, stage or commit.

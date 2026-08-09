@@ -37,7 +37,7 @@ without adding product features:
    direct fallback paths must resolve and execute `cl.exe` and `link.exe`.
 
 No cloud, Agent runtime, Obsidian, business-operation, or legacy Keeper logic
-was introduced. `<workspace>/VaultSystem\keeper` remained read-only.
+was introduced. `legacy Keeper (out of tree)` remained read-only.
 
 ## Acceptance Layers
 

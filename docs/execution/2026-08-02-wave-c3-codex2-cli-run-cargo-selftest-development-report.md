@@ -55,8 +55,8 @@ focused E2E confirms the normal host path completes far below its fixed
 ## Keeper completion concern
 
 The brief-required exact Keeper boot payload was posted to
-`/api/agent-bridge/boot` and was rejected with HTTP 400:
-`worker claims require parentSessionId`. The brief forbids adding that field,
+local session bridge boot (optional) and was rejected with HTTP 400:
+`worker claims require local parent session id`. The brief forbids adding that field,
 so no valid worker session was issued. A genuine Keeper completion message
 requires that session ID and therefore was not posted; no fabricated or
 borrowed session identity was used. A sessionless completion draft was posted

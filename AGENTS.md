@@ -1,17 +1,8 @@
-> **Keeper is record-only for Pillow project work.**
-> Controllers and launchers may use Keeper to record session boot, query
-> registered runtime/account information, claim or release a slot, and post a
-> completion summary. Keeper must not generate or rewrite task prompts, inject
-> context packs, execute project work, judge completion, or require automatic
-> Vault query/ingest. Workers receive their complete task contract from Pillow
-> and must not call Keeper or read Vault material unless the task explicitly
-> asks for a specific recorded fact.
-
----
-
 # Pillow Agent Rules
 
-This repository is the clean successor to the legacy Vault Keeper.
+This repository is the clean successor to the legacy Vault Keeper resource
+manager. Pillow is a separate product codebase: it does not require an external
+session service, vault checkout, or sibling monorepo layout to build or test.
 
 ## Product Order
 
@@ -24,10 +15,11 @@ design change.
 
 ## Repository Boundary
 
-- Treat `<workspace>\VaultSystem\keeper` as read-only reference material.
-- Do not copy legacy files wholesale.
+- Pillow is independently buildable from this repository alone.
+- Optional external references (a legacy resource manager, upstream UI pins,
+  conceptual interaction clones) may exist out of tree for maintainers; treat
+  them as read-only when present. Never copy them wholesale into product code.
 - Port behavior through typed contracts and focused tests.
-- Do not modify shared vault rules, keys, credentials, or project metadata.
 - Never commit credentials, account tokens, machine-specific paths, or runtime
   session data.
 
@@ -43,21 +35,18 @@ design change.
 - Upstream code reuse must retain required license and attribution notices.
 - New modules require focused tests and must remain independently replaceable.
 
-## Grok CLI Slot Isolation
+## Multi-runtime isolation (principle)
 
-- Claim Grok capacity through Keeper before every worker launch and release the
-  exact lease when the worker finishes or fails to start.
-- `grok1` uses the default profile at `%USERPROFILE%\.grok`. Registered
-  slots `grok2`, `grok3`, and `grok4` must use their Keeper wrapper semantics;
-  their effective Grok profile is `<slot-home>\.grok`.
-- Never launch slots 2-4 by setting only `GROK_HOME=<slot-home>`. That resolves
-  `<slot-home>\auth.json`, creates a parallel credential store, and can falsely
-  report the registered Keeper slot as signed out.
-- Treat an outer `<slot-home>\auth.json` for slots 2-4 as routing contamination,
-  not as the registered slot identity. Do not create, copy, or reuse it.
-- Verify slot routing through Keeper runtime metadata and the resolved config
-  source before interpreting login, quota, or worker results. Never print raw
-  authentication files or token-bearing fields.
+When running more than one provider CLI or agent profile on one machine, keep
+credential stores and config roots isolated per profile. Do not point a second
+profile at another profile’s auth files by only changing a home-style
+environment variable. Verify the resolved config source before treating a
+session as authenticated. Never print raw authentication files or
+token-bearing fields.
+
+Maintainer-only slot pools, claim/release flows, and local session bridges are
+**not** part of the public product contract. See `.superpowers/RUNBOOK.md` on
+machines that use them.
 
 ## Required Gates
 
@@ -66,3 +55,9 @@ design change.
 - Write-capable tools require explicit approval-path tests.
 - UI changes require desktop screenshots at supported Windows sizes.
 - Performance budgets are release gates, not optional diagnostics.
+
+Primary contributor check entry points:
+
+- `pnpm check` (when present at the repo root)
+- `node scripts/run-worker-gate.mjs` — see
+  `docs/verification/worker-gate-entry.md`

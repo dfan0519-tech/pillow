@@ -48,7 +48,7 @@ autonomous project operation was added.
 
 ## Reference Repository Decision
 
-`<workspace>/zbbody` is registered with Keeper as `VK-057` and remains a
+`zbbody reference clone (out of tree)` is registered with Keeper as `VK-057` and remains a
 read-only reference project in lifecycle state `watch`.
 
 The reference was useful for interaction and lifecycle patterns, especially

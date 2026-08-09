@@ -3,11 +3,11 @@
 **Date**: 2026-08-01
 **Agent**: grok1 (worker)
 **Role**: read-only interaction / state-flow research
-**Reference root**: `<workspace>\VaultSystem\references\grok-app`
+**Reference root**: `pinned Grok App reference (out of tree)`
 **Pinned commit**: `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` (verified `git rev-parse HEAD`)
 **License**: MIT
 **Pillow baseline policy**: `docs/references/upstream-baseline.md`
-**Keeper boot**: bridge returned HTTP 400 for both `/api/agent-bridge/boot` and `/api/agent-sessions/claim` at research time; work continued read-only under project rules.
+**Local session bridge** (optional, out of tree): bridge returned HTTP 400 for boot/claim endpoints at research time; work continued read-only under project rules.
 
 ---
 

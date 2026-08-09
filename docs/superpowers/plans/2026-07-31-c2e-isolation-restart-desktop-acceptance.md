@@ -25,7 +25,7 @@ React 19, SQLite, existing `scripts/lib/desktop-process.mjs` supervision.
 
 ## Global Constraints
 
-- Work only in `<workspace>\pillow`; never edit `<workspace>\VaultSystem\keeper`.
+- Work only in `this repository`; never edit `legacy Keeper (out of tree)`.
 - Preserve the accepted dirty tree; no reset, overwrite, stage, or commit.
 - C2 stays read-only: no product file writes, terminal, Git, Obsidian, keys,
   MCP, network tools, or runtime expansion.

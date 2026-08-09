@@ -75,7 +75,7 @@ Lifecycle paths:
 
 ### 2.5 Keeper Bridge
 
-Boot POST to `http://127.0.0.1:7890/api/agent-bridge/boot` returned **400 Bad Request** in this environment. Not used as a substitute prefs store (and AGENTS.md: Keeper is record-only for Pillow project work).
+Boot POST to `local session bridge boot (optional; out of tree)` returned **400 Bad Request** in this environment. Not used as a substitute prefs store (and AGENTS.md: Keeper is record-only for Pillow project work).
 
 ---
 

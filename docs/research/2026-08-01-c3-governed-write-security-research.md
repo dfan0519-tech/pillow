@@ -2,11 +2,11 @@
 
 Date: 2026-08-01
 Researcher: grok3 (read-only architecture)
-Workspace: `<workspace>\pillow`
+Workspace: `this repository`
 Baseline HEAD inspected: `7b7f70f` (dirty working tree; C2 checkpoint accepted, unstaged)
 Scope: evaluate C3 governed write/diff/approval without modifying product code
 
-Keeper Bridge: boot required `parentSessionId` for `agentRole: worker`; session established with controller-role boot for project `pillow`, task `c3-research-governed-write-security`, agentName `grok3`.
+Local session orchestration (optional, out of tree) was used only to record the research session; it is not a product dependency.
 
 ---
 
@@ -146,7 +146,7 @@ UI resource core mirrors the same portable path + reparse rules:
 
 ### 2.9 Legacy reference (read-only) — approval invariants to port
 
-Source: `<workspace>\VaultSystem\keeper\lib\operator-approval-authority.js` (frozen product; do not modify).
+Source: `legacy Keeper (out of tree)\lib\operator-approval-authority.js` (frozen product; do not modify).
 
 | Invariant | Legacy evidence | Port as typed contract (not copy) |
 | --- | --- | --- |

@@ -3,7 +3,7 @@
 Role: real Grok CLI slot `grok1`, implementation worker
 Task: `c4-d1-process-protocol` (Task 1 of C4 governed process/git plan)
 Date: 2026-08-02
-Keeper session: `<keeper-session>` (boot as controller; worker role requires `parentSessionId`)
+Local session note: `<keeper-session>` (boot as controller; worker role requires `local parent session id`)
 HEAD preserved: no stage/commit by this worker
 
 ## Status

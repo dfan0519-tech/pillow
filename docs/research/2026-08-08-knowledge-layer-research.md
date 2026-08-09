@@ -41,7 +41,7 @@ Mode: **read-only** (no source/tests/builds; this file is the only write)
 | 读源码/迁移/文档 | 改任何源码/样式/测试/脚本 |
 | 目录枚举与文本交叉引用统计 | `cargo` / `pnpm build` / gate / 测试 / E2E |
 | 外部网页检索（Obsidian 归档、Karpathy LLM Wiki） | `git add/commit/stash/reset` |
-| 只读浏览共享 vault 结构与 `AGENTS.md` | 修改 `VaultSystem` 任何内容 |
+| 只读浏览共享 vault 结构与 `AGENTS.md` | 修改任何 out-of-tree vault / legacy Keeper 内容 |
 
 ### 1.3 引用计数方法（避免误读）
 

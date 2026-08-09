@@ -3,7 +3,7 @@
 ## Worker identity
 
 - Actual account-2 Codex CLI, `gpt-5.6-terra`, high reasoning.
-- Keeper worker boot with `parentSessionId=<keeper-session>`,
+- Local session worker boot (optional) with `<local-parent-session>`,
   task `c4-d2ar-process-order-repair`, agent `codex2`.
 - Preserve HEAD `7b7f70f`, dirty accepted work and empty staging. No commit,
   reset, restore, clean, package or publish.

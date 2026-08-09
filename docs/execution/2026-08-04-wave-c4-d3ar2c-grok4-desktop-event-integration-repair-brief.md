@@ -4,7 +4,7 @@ Read this file first. It is the complete task contract.
 
 You are the actual Keeper `grok4` CLI worker. Boot Keeper as a `pillow` worker
 for task `c4-d3ar2c-desktop-event-integration-repair`. Work only in
-`<workspace>\pillow`; Keeper is read-only. Preserve HEAD
+`this repository`; Keeper is read-only. Preserve HEAD
 `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`, empty staging and unrelated dirty
 work. No stage, commit, reset, restore, clean, package or publish.
 

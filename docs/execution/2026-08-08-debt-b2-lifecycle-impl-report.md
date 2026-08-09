@@ -113,7 +113,7 @@ No `apps/desktop/**`, `scripts/**`, `crates/git-executor/**`, or
 | `git diff --check` | **0** (CRLF warnings only) |
 | `git diff --cached --name-only` | **0** / empty staging |
 
-Keeper agent-bridge boot returned HTTP 400 in this environment; work followed
+Local session bridge boot (optional) returned HTTP 400 in this environment; work followed
 the task contract alone.
 
 ## 8. Residual risks

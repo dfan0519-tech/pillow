@@ -155,7 +155,7 @@ exit 0
 | Scope expansion | **None** (no App/Workbench mount, no write/Git/terminal/MCP) |
 | Machine-path leak | **None** in command errors (opaque messages) |
 | Raw-byte transport | **None** (DTO omits `bytes`; parser rejects smuggled `bytes`) |
-| Keeper / VaultSystem mutation | **None** |
+| Legacy Keeper (out of tree) mutation | **None** |
 | Extra Rust/npm deps beyond base64 | **None** |
 
 ## Notes for controller / Codex2 review

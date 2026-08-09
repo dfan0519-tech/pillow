@@ -42,7 +42,7 @@ proof and explicit Critical/Important rejection criteria.
 
 Only create or update:
 
-`<workspace>\pillow\docs\research\2026-08-02-c4-security-acceptance-research.md`
+`this repository\docs\research\2026-08-02-c4-security-acceptance-research.md`
 
 Do not change any other file. Finish with `Status: DONE` or
 `Status: BLOCKED`, changed-files truth, residual risks and one Keeper signal.

@@ -2,7 +2,7 @@
 
 Date: 2026-08-02
 Researcher: grok4 (slot `grok4`, controller-boot agentName)
-Workspace: `<workspace>\pillow`
+Workspace: `this repository`
 Baseline HEAD inspected: `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 Scope: adversarial threat model and executable acceptance matrix for C4
 terminal and Git. Research only; product implementation not authorized.
@@ -27,7 +27,7 @@ grounded in:
    and the repaired `ProcessSupervisor`;
 3. local Grok App boundaries at pinned commit
    `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` (MIT) under
-   `<workspace>\VaultSystem\references\grok-app`;
+   `pinned Grok App reference (out of tree)`;
 4. current Pillow protocol validation, `kernel-policy`, receipts,
    cancellation, restart recovery, and desktop E2E harness seams.
 

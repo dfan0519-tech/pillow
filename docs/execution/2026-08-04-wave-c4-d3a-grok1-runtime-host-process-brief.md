@@ -6,7 +6,7 @@
 - Keeper boot: `project=pillow`, `task=c4-d3a-runtime-host-process`,
   `agentName=grok1`, `agentRole=worker`, parent
   `<keeper-session>`.
-- Work only in `<workspace>\pillow`; Keeper and reference clones are read-only.
+- Work only in `this repository`; Keeper and reference clones are read-only.
 - Preserve HEAD `7b7f70f` and the accepted dirty C1-C4 D2B tree. No stage,
   commit, reset, restore, clean, package or publish.
 

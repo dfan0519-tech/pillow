@@ -28,7 +28,7 @@ Authority and full evidence:
   paths at final acceptance (47 modified and 82 untracked).
 - No reset, overwrite, staging, commit, packaging, publishing, or Keeper
   product-code write is authorized by this document.
-- `<workspace>\VaultSystem\keeper` remains a frozen, independent resource manager.
+- `legacy Keeper (out of tree)` remains a frozen, independent resource manager.
 
 ## Accepted Product Boundary
 

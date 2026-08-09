@@ -5,7 +5,7 @@
 - Worker: actual Grok CLI `.grok2`, Grok 4.5 high.
 - Keeper: boot as worker for `c4-d2br2-sealed-process-authority`, parent
   `<keeper-session>`.
-- Work only in `<workspace>\pillow`; Keeper/references are read-only.
+- Work only in `this repository`; Keeper/references are read-only.
 - Preserve HEAD `7b7f70f` and all dirty accepted/in-flight slices. No stage,
   commit, reset, restore, clean, package or publish.
 

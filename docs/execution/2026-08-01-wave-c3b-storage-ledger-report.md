@@ -88,7 +88,7 @@ corrections before C3-B can be treated as storage-ready for C3-C:
 | `crates/storage-sqlite/Cargo.toml` | `serde` (workspace-pinned) for typed receipt |
 | `docs/execution/2026-08-01-wave-c3b-storage-ledger-report.md` | This report |
 
-No stage/commit/reset. `<workspace>\VaultSystem\keeper` not modified.
+No stage/commit/reset. `legacy Keeper (out of tree)` not modified.
 
 ## Gate Evidence (controller final narrow fix)
 
@@ -184,7 +184,7 @@ git diff --cached --name-only
 
 - HEAD baseline preserved; accepted dirty tree not reset.
 - No staging, commit, discard, or force operations.
-- `<workspace>\VaultSystem\keeper` not modified.
+- `legacy Keeper (out of tree)` not modified.
 - Whitelist-only edits for this wave.
 
 ## COMPLETION: DONE

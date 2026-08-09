@@ -26,7 +26,7 @@ as an unstaged, uncommitted working-tree checkpoint. C4 has not started.
 
 - Baseline HEAD is `7b7f70f`; preserve the accepted unstaged C1/B3/C2 tree.
 - Do not reset, discard, stage, commit, package or publish.
-- Do not modify `<workspace>\VaultSystem\keeper`.
+- Do not modify `legacy Keeper (out of tree)`.
 - C3.0 supports only one UTF-8 `create` or `modify` path per proposal.
 - Proposed and base content cap: exactly 262,144 UTF-8 bytes.
 - Diff cap: exactly 262,144 bytes and 4,000 lines with a truncation marker.

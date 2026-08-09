@@ -6,8 +6,8 @@ Date: 2026-08-01
 
 - Worker: `grok4` only.
 - Controller: Codex Desktop; controller owns final review and all broad gates.
-- Repository: `<workspace>\pillow`.
-- Frozen reference: `<workspace>\VaultSystem\keeper`; read-only, never modify it.
+- Repository: `this repository`.
+- Frozen reference: `legacy Keeper (out of tree)`; read-only, never modify it.
 
 ## Objective
 

@@ -6,17 +6,17 @@
 - Model: `gpt-5.6-terra`, reasoning `high`, `fastMode=false`.
 - Keeper boot: `project=pillow`, `task=c4-d2a-process-executor`,
   `agentName=codex2`, `agentRole=worker`,
-  `parentSessionId=<keeper-session>`.
-- Repository: `<workspace>\pillow` only. `<workspace>\VaultSystem\keeper` and reference
+  `<local-parent-session>`.
+- Repository: `this repository` only. `legacy Keeper (out of tree)` and reference
   clones are read-only.
 - Preserve HEAD `7b7f70f` and the accepted dirty C1–C3 plus D1 tree. No stage,
   commit, reset, restore, clean, package or publish.
 
 ## Inputs to read completely
 
-1. `<workspace>\AGENTS.md`
-2. `<workspace>\VaultSystem\vault\AGENTS.md`
-3. `<workspace>\pillow\AGENTS.md`
+1. `root AGENTS.md`
+2. `shared vault rules (out of tree)`
+3. `this repository\AGENTS.md`
 4. `docs/superpowers/specs/2026-08-02-c4-governed-process-git-design.md`
 5. Task 5 in `docs/superpowers/plans/2026-08-02-c4-governed-process-git-implementation.md`
 6. `docs/execution/2026-08-01-desktop-process-cleanup-safety-fix-report.md`

@@ -2,7 +2,7 @@
 
 Date: 2026-08-02
 Researcher: grok1 (Grok CLI slot; controller-role Keeper boot)
-Workspace: `<workspace>\pillow`
+Workspace: `this repository`
 Pillow HEAD inspected: `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 Grok App pin: `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` (MIT)
 zbbody pin: `00c293414333b6fcc4e4598389fa3952c8d0b09b` (Apache-2.0)
@@ -94,7 +94,7 @@ SQLite + run events
 
 ### 2.2 Grok App (conceptual process/session reference)
 
-Pinned: `<workspace>\VaultSystem\references\grok-app` @ `cbbbdf17…`, MIT.
+Pinned: `pinned Grok App reference (out of tree)` @ `cbbbdf17…`, MIT.
 
 | Topic | Path | Observation for Pillow |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ Grok App does **not** implement an in-app ConPTY workbench. Interactive terminal
 
 ### 2.3 zbbody (conceptual only; license verified)
 
-Root: `<workspace>\zbbody` @ `00c29341…`.
+Root: `zbbody reference clone (out of tree)` @ `00c29341…`.
 
 - **License:** Apache-2.0 (`LICENSE` verified).
 - Prior Pillow decision (`docs/research/2026-07-30-zbbody-reference-analysis.md`): read-only interaction/lifecycle reference; no wholesale source copy; reject renderer-defined executable/argv/env/cwd.

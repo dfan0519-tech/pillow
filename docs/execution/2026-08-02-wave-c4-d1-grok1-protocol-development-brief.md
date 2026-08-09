@@ -4,9 +4,9 @@ Role: real Grok CLI slot `grok1`, implementation worker.
 
 Read first:
 
-- `<workspace>\AGENTS.md`
-- `<workspace>\VaultSystem\vault\AGENTS.md`
-- `<workspace>\pillow\AGENTS.md`
+- `root AGENTS.md`
+- `shared vault rules (out of tree)`
+- `this repository\AGENTS.md`
 - `docs/superpowers/specs/2026-08-02-c4-governed-process-git-design.md`
 - Task 1 of `docs/superpowers/plans/2026-08-02-c4-governed-process-git-implementation.md`
 

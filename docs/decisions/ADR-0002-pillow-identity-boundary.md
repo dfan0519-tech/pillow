@@ -6,19 +6,20 @@ Status: Accepted
 
 ## Context
 
-The legacy `<workspace>/VaultSystem\keeper` service still manages shared knowledge,
-API key inventory, project registration, and Agent coordination. The new
-industrial IDE had been developed under the temporary name `Keeper IDE`, which
-made product ownership and project status ambiguous.
+The legacy Keeper service (out of tree; not part of this repository) still
+manages shared knowledge, API key inventory, project registration, and Agent
+coordination on maintainer machines that keep it. The new industrial IDE had
+been developed under the temporary name `Keeper IDE`, which made product
+ownership and project status ambiguous.
 
 ## Decision
 
-The successor IDE is named **Pillow** and its canonical repository is
-`<repo>`.
+The successor IDE is named **Pillow** and its canonical repository is this
+repository (`pillow`).
 
-The legacy Keeper remains unchanged at `<workspace>/VaultSystem\keeper` and may be
-used by Pillow only through explicit governance, knowledge, and resource
-management interfaces.
+The legacy Keeper remains an optional external system and may be used by Pillow
+only through explicit governance, knowledge, and resource management interfaces.
+Pillow builds and runs without it.
 
 Public Pillow identity includes:
 

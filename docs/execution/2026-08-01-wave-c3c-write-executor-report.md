@@ -60,7 +60,7 @@ review still rejected** C3-C on two additional findings (this pass).
 | `crates/tool-executor/tests/governed_write.rs` | Drop hook-based integration test; cancel path still asserts durable `interrupted` |
 | `docs/execution/2026-08-01-wave-c3c-write-executor-report.md` | This report |
 
-No stage/commit/reset. `<workspace>\VaultSystem\keeper` not modified. No other product files touched in this pass.
+No stage/commit/reset. `legacy Keeper (out of tree)` not modified. No other product files touched in this pass.
 
 ## Interfaces (security-relevant surface)
 
@@ -166,7 +166,7 @@ git diff --cached --name-only          → empty (staging empty)
 
 - No staging, commit, discard, or force operations.
 - Whitelist-only product edits for this final security fix.
-- `<workspace>\VaultSystem\keeper` not modified.
+- `legacy Keeper (out of tree)` not modified.
 - `git diff --cached --name-only` empty.
 
 ## COMPLETION: DONE — final security findings F1 and F2 fixed; required gates green; ready for independent reverify

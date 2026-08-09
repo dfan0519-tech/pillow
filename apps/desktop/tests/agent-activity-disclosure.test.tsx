@@ -266,7 +266,7 @@ describe("AgentActivityDisclosure (C2-C2)", () => {
       activity: baseRecord({
         artifacts: [
           { path: "src/main.rs", kind: "file", label: "main.rs" },
-          { path: "<repo>\\secret.rs", kind: "file", label: "secret" },
+          { path: "C:\\Users\\Alice\\Projects\\pillow\\secret.rs", kind: "file", label: "secret" },
           { path: "/abs/root/file.ts", kind: "file", label: "abs" },
           { path: "../escape.ts", kind: "file", label: "escape" },
         ],
@@ -296,7 +296,7 @@ describe("AgentActivityDisclosure (C2-C2)", () => {
       expect(path).not.toContain("\\");
     }
 
-    expect(screen.queryByText(/<workspace>/)).toBeNull();
+    expect(screen.queryByText(/C:\\Users\\Alice/)).toBeNull();
     expect(screen.queryByText(/secret\.rs/)).toBeNull();
     expect(screen.queryByText(/escape\.ts/)).toBeNull();
   });
@@ -306,7 +306,8 @@ describe("AgentActivityDisclosure (C2-C2)", () => {
     renderDisclosure({
       activity: baseRecord({
         status: "failed",
-        errorMessage: "ENOENT: no such file <repo>\\apps\\desktop\\src\\hidden.ts",
+        errorMessage:
+          "ENOENT: no such file C:\\Users\\Alice\\Projects\\pillow\\apps\\desktop\\src\\hidden.ts",
         tools: [
           {
             title: "fs.read",
@@ -320,7 +321,7 @@ describe("AgentActivityDisclosure (C2-C2)", () => {
     await user.click(screen.getByTestId("agent-activity-summary"));
 
     const body = document.body.textContent ?? "";
-    expect(body).not.toContain("<repo>");
+    expect(body).not.toContain("C:\\Users\\Alice\\Projects\\pillow");
     expect(body).not.toContain("C:\\Users");
     expect(body).not.toContain("hidden.ts");
     expect(body).not.toContain("secret.env");

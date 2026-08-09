@@ -13,7 +13,7 @@ progressively disclosed workbench without creating a second dashboard.
 2. Inspect actual terminal, command, diff, approval, activity and project state
    components in the pinned local Grok App clone. Record component paths and
    state flows, not just screenshots or impressions.
-3. Inspect `<workspace>\zbbody` for conceptual patterns involving command steps,
+3. Inspect `zbbody reference clone (out of tree)` for conceptual patterns involving command steps,
    output expansion and role/activity state. Verify license before direct reuse.
 4. Account for 1024x720 and 1440x960 Windows layouts, keyboard access and
    output virtualization.
@@ -35,7 +35,7 @@ progressively disclosed workbench without creating a second dashboard.
 
 Only create or update:
 
-`<workspace>\pillow\docs\research\2026-08-02-c4-terminal-git-interaction-research.md`
+`this repository\docs\research\2026-08-02-c4-terminal-git-interaction-research.md`
 
 Do not change any other file. Finish with `Status: DONE` or
 `Status: BLOCKED`, changed-files truth, residual risks and one Keeper signal.

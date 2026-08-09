@@ -59,7 +59,7 @@ exclusion, terminal replay, invalid transitions, and missing durable context.
 
 ## Integrated Verification
 
-Executed from `<workspace>\pillow` after the final lease and resource-boundary pass:
+Executed from `this repository` after the final lease and resource-boundary pass:
 
 - `git diff --check`: passed;
 - `cargo fmt --all -- --check`: passed;

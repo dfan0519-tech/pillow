@@ -2,11 +2,11 @@
 
 ## 身份与边界
 
-- 工作目录：`<workspace>\pillow`
+- 工作目录：`this repository`
 - 先 Keeper boot：`project=pillow`、`agentRole=worker`
 - HEAD 必须保持 `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 - 不得 stage、commit、reset、回退或覆盖既有 C1/C2 工作树。
-- `<workspace>\VaultSystem\keeper` 冻结只读。
+- `legacy Keeper (out of tree)` 冻结只读。
 - 禁止计划任务、runas、Explorer ShellExecute、注册表、组策略和机器级持久项。
 
 ## 当前状态
@@ -65,7 +65,7 @@
 
 验收调试构建必须设置 acceptance-owned 临时 `CARGO_TARGET_DIR`，并从该目录启动
 `pillow.exe`。测试结束且进程清零后删除临时 target。不得覆盖或留下
-`<workspace>\pillow\target\debug\pillow.exe` 的 CDP 配置。
+`this repository\target\debug\pillow.exe` 的 CDP 配置。
 
 ### D. 临时 WebView2 profile 证明
 

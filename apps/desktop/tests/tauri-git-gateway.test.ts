@@ -451,7 +451,7 @@ describe("normalizeGitDiff hostile responses", () => {
   it("rejects native/backslash/traversal paths on diffs", () => {
     for (const path of [
       "C:/Windows/system32",
-      "<repo>\\secret",
+      "C:\\Users\\Alice\\Projects\\pillow\\secret",
       "../escape",
       "foo\\bar",
       "/etc/passwd",

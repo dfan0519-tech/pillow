@@ -5,8 +5,8 @@
 - Worker: real Grok CLI slot `grok4`, model Grok 4.5, high reasoning.
 - Keeper boot: `project=pillow`, `task=c4-d2b-hardened-git-runner`,
   `agentName=grok4`, `agentRole=worker`,
-  `parentSessionId=<keeper-session>`.
-- Repository: `<workspace>\pillow` only. Keeper and references are read-only.
+  `<local-parent-session>`.
+- Repository: `this repository` only. Keeper and references are read-only.
 - Preserve HEAD `7b7f70f` and the accepted dirty C1-C3/D1/D2A tree. No stage,
   commit, reset, restore, clean, package or publish.
 

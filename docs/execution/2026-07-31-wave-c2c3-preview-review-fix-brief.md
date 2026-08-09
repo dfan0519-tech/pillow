@@ -2,7 +2,7 @@
 
 **Controller session:** `<keeper-session>`
 **Source finding:** Codex2 C2-C3 independent review, Important severity
-**Repository:** `<workspace>\pillow`
+**Repository:** `this repository`
 **Status:** targeted correction only; no stage or commit
 
 ## Finding to Close

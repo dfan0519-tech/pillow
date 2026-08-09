@@ -2,8 +2,8 @@
 
 Owner: grok3 (implementation worker)
 Role: real Grok CLI slot `grok3`
-Keeper session: `<keeper-session>`
-Boot note: `agentRole=worker` rejected with `worker claims require parentSessionId`; boot proceeded as `controller` for the same task (no parent session supplied by dispatcher).
+Local session note: `<keeper-session>`
+Boot note: `agentRole=worker` rejected with `worker claims require local parent session id`; boot proceeded as `controller` for the same task (no parent session supplied by dispatcher).
 Date: 2026-08-02
 Task: `c4-d1r3-renderer-grant-boundary`
 
@@ -98,7 +98,7 @@ native path shapes, and HTML attribute patterns `approvalGrant|data-grant|...`.
    the existing disabled-rule test; deadline behavior itself was unchanged.
 3. **Controller owns** aggregate gates, source review, and acceptance; this
    report is worker repair evidence only.
-4. **Boot role**: worker role could not claim without `parentSessionId`; session
+4. **Boot role**: worker role could not claim without `local parent session id`; session
    used controller role for the same task id.
 
 ## Staging / git

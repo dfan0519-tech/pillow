@@ -10,7 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const project = {
   id: "00000000-0000-0000-0000-000000000001",
   name: "Pillow",
-  rootPath: "<workspace>/VaultSystem\\pillow",
+  rootPath: "C:\\Users\\Alice\\Projects\\pillow",
   trust: "untrusted" as const,
   createdAt: "2026-07-29T00:00:00Z",
   updatedAt: "2026-07-29T00:00:00Z",

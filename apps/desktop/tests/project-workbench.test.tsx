@@ -25,7 +25,7 @@ function fixtureProject(overrides: Partial<ProjectDto> = {}): ProjectDto {
   return {
     id: "pillow",
     name: "Pillow",
-    rootPath: "<workspace>/VaultSystem\\pillow",
+    rootPath: "C:\\Users\\Alice\\Projects\\pillow",
     trust: "trusted",
     createdAt: "2026-07-29T00:00:00.000Z",
     updatedAt: "2026-07-29T00:00:00.000Z",

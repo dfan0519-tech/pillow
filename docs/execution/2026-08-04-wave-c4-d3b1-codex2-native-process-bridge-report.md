@@ -81,7 +81,7 @@ the product invoke handler.
 - This is a native bridge slice only. Controller integration remains responsible
   for renderer wiring and end-to-end desktop acceptance.
 - The exact worker Keeper boot was attempted first but returned HTTP 400:
-  `worker claims require parentSessionId`. The dispatcher supplied no parent
+  `worker claims require local parent session id`. The dispatcher supplied no parent
   session ID, so no worker session exists to receive a valid completion message.
   The required completion POST was attempted before exit and returned HTTP 400:
   `sessionId is required`. No session was fabricated and no role was changed.
@@ -94,7 +94,7 @@ Required completion payload, pending a valid worker session:
 DONE — pillow C4 D3B1 native process bridge complete (unstaged): exact
 list_exec_proposals / decide_exec_proposal / open_exec_output commands are
 registered; 5 focused tests and pillow-desktop all-targets passed; fmt and diff
-checks passed. Keeper worker boot was rejected because parentSessionId was not
+checks passed. Local session worker boot (optional) was rejected because local parent session id was not
 provided.
 ```
 

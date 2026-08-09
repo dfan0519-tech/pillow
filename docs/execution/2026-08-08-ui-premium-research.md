@@ -552,7 +552,7 @@ Tauri 2 `Effect` 枚举（官方文档 `v2.tauri.app`）：
 5. 目标机群上 `blur(18px)` 全侧栏的 **帧时间**。
 6. 浅色 accent 推荐 `#6E56B8` 区间需 **实机对比 + 色相是否仍像 Mirage Loop** 的设计确认。
 7. `font-weight: 550/650` 在 Win 默认 Segoe UI 上的最终渲染（可能已回落）。
-8. Keeper Bridge worker boot 需 `parentSessionId`——本 worker 未获派发槽位/父会话，**未写入 Keeper 会话记录**（不影响本报告内容）。
+8. Local session worker boot (optional) 需 `local parent session id`——本 worker 未获派发槽位/父会话，**未写入 Keeper 会话记录**（不影响本报告内容）。
 
 ---
 

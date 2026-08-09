@@ -4,7 +4,7 @@ Read this file first. It is the complete task contract.
 
 You are the actual Keeper `grok4` CLI worker. Boot Keeper as a `pillow` worker
 for task `c4-d3b-process-ui-integration-research`. Work only in
-`<workspace>\pillow`; Keeper and all reference repositories are read-only. Preserve
+`this repository`; Keeper and all reference repositories are read-only. Preserve
 HEAD `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`, empty staging and all unrelated
 dirty work. No stage, commit, reset, restore, clean, package or publish.
 
@@ -19,8 +19,8 @@ the Tauri/TypeScript bridge into conversation-owned UI with progressive
 disclosure.
 
 Inspect the current Pillow Rust/Tauri/TS/React flow and the local references
-`<workspace>\VaultSystem\references\grok-app` (or its verified current location)
-and `<workspace>\zbbody`. Extract only relevant patterns for conversation-owned
+`pinned Grok App reference (out of tree)` (or its verified current location)
+and `zbbody reference clone (out of tree)`. Extract only relevant patterns for conversation-owned
 agent activity, expandable steps, role/status display and output/file/test
 detail. Record provenance and licenses; do not copy code.
 

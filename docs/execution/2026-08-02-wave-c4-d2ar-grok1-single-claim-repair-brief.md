@@ -3,7 +3,7 @@
 ## Worker identity
 
 - Real Grok CLI slot `grok1`.
-- Keeper worker boot with `parentSessionId=<keeper-session>`,
+- Local session worker boot (optional) with `<local-parent-session>`,
   task `c4-d2ar-single-claim-repair`, agent `grok1`.
 - Preserve HEAD `7b7f70f`, dirty accepted work and empty staging. No commit,
   reset, restore, clean, package or publish.

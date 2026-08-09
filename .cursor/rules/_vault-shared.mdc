@@ -1,15 +1,17 @@
 ---
-description: 共享知识仓库规则（来自 <workspace>/VaultSystem\vault\AGENTS.md）
+description: Pillow repository engineering rules for Cursor agents
 globs: "**/*"
 alwaysApply: true
 ---
 
-本项目的所有工作遵循 <workspace>/VaultSystem\vault\AGENTS.md 中的共享知识仓库规则。
+Follow the root `AGENTS.md` in this repository.
 
-关键约定：
-1. 开始任务前查询 vault（QUERY）
-2. 完成任务后摄入经验（INGEST）
-3. 每周执行健康检查（LINT）
-4. 每月归档过期知识（ARCHIVE）
+Pillow is self-contained for product work: build, test, and code changes must
+not assume an external session bridge, shared vault wiki, or sibling legacy
+resource manager.
 
-详见：<workspace>/VaultSystem\vault\AGENTS.md
+Optional maintainer-only orchestration (local session recording, multi-profile
+CLI isolation) is documented only on machines that keep a gitignored runbook
+under `.superpowers/RUNBOOK.md`. Do not invent vault QUERY/INGEST steps or
+absolute paths outside this repository unless a task file in-tree explicitly
+requires a named recorded fact.

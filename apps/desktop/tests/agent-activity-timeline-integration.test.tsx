@@ -449,7 +449,7 @@ describe("agentActivityFromRun mapper (pure)", () => {
               resourceId: "r-abs",
               kind: "file",
               label: "abs",
-              path: "<repo>\\secret.rs",
+              path: "C:\\Users\\Alice\\Projects\\pillow\\secret.rs",
               truncated: false,
             },
             {

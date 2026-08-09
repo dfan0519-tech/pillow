@@ -8,7 +8,7 @@
 - Keeper boot: `project=pillow`, `task=c4-d3a-typed-native-ts-gateways`,
   `agentName=codex2`, `agentRole=worker`, parent
   `<keeper-session>`.
-- Work only in `<workspace>\pillow`; Keeper and references are read-only.
+- Work only in `this repository`; Keeper and references are read-only.
 - Preserve HEAD `7b7f70f` and the accepted dirty C1-C4 D2B tree. No stage,
   commit, reset, restore, clean, package or publish.
 - Work directly in this CLI instance; do not spawn or substitute subagents.

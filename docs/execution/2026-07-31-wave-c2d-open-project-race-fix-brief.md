@@ -31,7 +31,7 @@ Modify only:
 - `docs/execution/2026-07-31-wave-c2d-resource-workbench-integration-report.md`
 
 All other paths are read-only. Preserve the complete dirty working tree. Do not
-stage, commit, reset, restore, or edit `<workspace>\VaultSystem\keeper`.
+stage, commit, reset, restore, or edit `legacy Keeper (out of tree)`.
 
 ## Required Semantics
 

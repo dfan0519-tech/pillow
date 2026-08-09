@@ -5,7 +5,7 @@ Read this file first. It is the complete task contract.
 You are the actual account-2 Codex CLI worker (`CODEX_HOME=%USERPROFILE%\.codex2`,
 `gpt-5.6-terra`, high reasoning, `fastMode=false`). Boot Keeper as a `pillow`
 worker for task `c4-d3ar2a-format-repair` before editing. Work only in
-`<workspace>\pillow`; `<workspace>\VaultSystem\keeper` is read-only.
+`this repository`; `legacy Keeper (out of tree)` is read-only.
 
 Controller review found D3AR2 task A functionally green, but
 `cargo fmt --all --check` fails. Perform formatting-only repair. Do not change

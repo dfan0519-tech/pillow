@@ -3,7 +3,7 @@
 Owner: grok1 implementation worker
 Date: 2026-08-01
 
-Work only in `<workspace>\pillow`. Boot under controller session
+Work only in `this repository`. Boot under controller session
 `<keeper-session>`, read all AGENTS plus the C3 design and current
 C3-B report, preserve the dirty tree, and do not stage/commit/reset.
 

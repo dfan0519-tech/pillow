@@ -123,7 +123,7 @@ Repeated `PILLOW_WORKER_GATE: FAILED at step "cargo-test-workspace"`:
 1. **2D approximation only** — true 3D torsion/occlusion cannot match a rendered mesh; design export should replace this when available.
 2. **Stroke-ribbon vs flat band mesh** — faces are segment color changes along a thick stroke, not a filled developable surface; at large sizes a mesh/export will read richer.
 3. **Filter cost** — bloom/shadow blurs are light; if sidebar paint jank appears, compact already reduces blur stdDeviation.
-4. **Keeper boot** — worker bridge boot returned `400 parentSessionId` (controller session); work proceeded from task contract alone.
+4. **Keeper boot** — worker bridge boot returned `400 local parent session id` (controller session); work proceeded from task contract alone.
 5. **`IconPillowMark` in `icons.tsx`** — out of whitelist; still the older flat mark. Controller may schedule a follow-up if the compact icon must match.
 6. **Sole gate red** — controller should re-run `node scripts/run-worker-gate.mjs` when `target\debug\deps` is unlocked / machine quieter; logo code does not need further changes for gate health.
 

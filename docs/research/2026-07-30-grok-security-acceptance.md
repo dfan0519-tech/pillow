@@ -6,7 +6,7 @@ Status: Research only (read-only analysis; no product code)
 
 Owner: Keeper B2 security and acceptance designer
 
-Worktree: `<repo>-worktrees\wave-b2-security`
+Worktree: `<repo-worktree>`
 
 ## 0. Purpose And Non-Claims
 
@@ -25,7 +25,7 @@ It is grounded in:
   `scripts/conversation-recovery-desktop.mjs`;
 - bounded host semantics in `crates/runtime-host/src/**`;
 - read-only legacy reference behavior in
-  `<workspace>/VaultSystem\keeper\lib\agent-runtime-adapters.js`,
+  `legacy Keeper (out of tree)\lib\agent-runtime-adapters.js`,
   `grok-acp-client.js`, and `keeper-acp-tool-policy.js`.
 
 ### Explicit non-claims

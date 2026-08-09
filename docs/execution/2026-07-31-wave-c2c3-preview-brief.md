@@ -4,7 +4,7 @@
 **Stage:** Stage 1 / C2 read-only project resource workbench
 **Worker role:** implementation only; the controller owns scope, integration
 decisions, acceptance, and Keeper completion
-**Repository:** `<workspace>\pillow`
+**Repository:** `this repository`
 **Baseline HEAD:** `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 
 ## Objective
@@ -35,7 +35,7 @@ This task must not:
 - mount anything into `App`, `Workbench`, or `ConversationTimeline`;
 - modify existing C1, C2-A, C2-B, C2-C1, or C2-C2 behavior outside the frozen
   interfaces below;
-- touch `<workspace>\VaultSystem\keeper`;
+- touch `legacy Keeper (out of tree)`;
 - stage or commit.
 
 ## Exclusive Write Whitelist

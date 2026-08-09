@@ -468,8 +468,8 @@ L3  Existing resource / artifact / write-diff modes
 
 | Source | Pin | License | Adopt |
 | --- | --- | --- | --- |
-| Grok App | `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` at `<workspace>\VaultSystem\references\grok-app` | MIT | Conversation-dominant layout; single permission bar; tool-in-timeline; Changes in resource pane; multi-session park |
-| zbbody / AionUi | `00c293414333b6fcc4e4598389fa3952c8d0b09b` at `<workspace>\zbbody` | Apache-2.0 | Command progressive disclosure; collapsed group summary; turn fold |
+| Grok App | `cbbbdf17bb8db1588b6707f3f42f6b00397e27f9` at `pinned Grok App reference (out of tree)` | MIT | Conversation-dominant layout; single permission bar; tool-in-timeline; Changes in resource pane; multi-session park |
+| zbbody / AionUi | `00c293414333b6fcc4e4598389fa3952c8d0b09b` at `zbbody reference clone (out of tree)` | Apache-2.0 | Command progressive disclosure; collapsed group summary; turn fold |
 | Pillow C3 write bar | dirty tree | Pillow | Generation guards, Esc reject, grant privacy (process: decisionAvailable instead) |
 
 **Provenance rule:** conceptual reuse only for Grok App / zbbody. Any adapted code requires `THIRD_PARTY_NOTICES.md` update. Grok App has **no** interactive PTY panel at pin — shell is a tool step; Pillow designs Terminal **output** mode deliberately.

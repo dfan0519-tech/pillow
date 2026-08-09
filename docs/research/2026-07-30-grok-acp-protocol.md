@@ -1053,7 +1053,7 @@ Rationale:
 - Three live sessions: no-tool prompt + cancel + load; read-only tool; write permission reject.  
 - No auth files read; secrets redacted if present in free text.  
 - Temporary probe scripts and raw transcripts were used under `docs/research/` during capture and are **not** part of the product deliverable (this document only).  
-- Reference clients: `<workspace>/VaultSystem\keeper\lib\grok-acp-client.js`, `keeper-acp-tool-policy.js` (read-only).
+- Reference clients: `legacy Keeper (out of tree)\lib\grok-acp-client.js`, `keeper-acp-tool-policy.js` (read-only).
 
 ---
 

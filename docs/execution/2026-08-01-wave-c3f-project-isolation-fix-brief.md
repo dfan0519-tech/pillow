@@ -4,7 +4,7 @@
 
 - Controller session: `<keeper-session>`
 - Before reading or editing, boot through
-  `POST http://127.0.0.1:7890/api/agent-bridge/boot` with project `pillow`,
+  `POST local session bridge boot (optional; out of tree)` with project `pillow`,
   task `c3f-project-isolation-fix`, agent name `grok1`, role `worker`, and
   parent session `<keeper-session>`.
 - HEAD must remain `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`.

@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `<repo>`; `<workspace>/VaultSystem\keeper` is record-only and must not provide prompts, context, decisions, or code.
+- Work only in `<repo>`; `legacy Keeper (out of tree)` is record-only and must not provide prompts, context, decisions, or code.
 - Do not stage, commit, reset, restore, clean, or overwrite unrelated dirty work.
 - Only touch the exact Task 5A allowlist in the execution brief.
 - Preserve runtime-host as the sole process ledger/execution authority; do not create another database/repository/channel or expose approval grants.

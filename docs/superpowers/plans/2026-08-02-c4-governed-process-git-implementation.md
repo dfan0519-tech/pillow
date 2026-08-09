@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `<workspace>\pillow`; `<workspace>\VaultSystem\keeper` and local reference clones are read-only.
+- Work only in `this repository`; `legacy Keeper (out of tree)` and local reference clones are read-only.
 - Preserve HEAD `7b7f70f` and the accumulated dirty C1-C3 working tree.
 - Do not stage, commit, reset, restore, clean, package or publish.
 - C4.0 contains `process.run@1` and read-only Git only. It contains no PTY, shell string, Git mutation, network, credentials, Obsidian or runtime expansion.

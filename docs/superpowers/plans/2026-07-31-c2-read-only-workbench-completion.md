@@ -23,7 +23,7 @@ Node desktop E2E.
 
 ## Global Constraints
 
-- Work only in `<workspace>\pillow`; never edit `<workspace>\VaultSystem\keeper`.
+- Work only in `this repository`; never edit `legacy Keeper (out of tree)`.
 - C2 remains read-only: no file mutation, terminal, Git, network, credentials,
   Obsidian, MCP, or runtime expansion.
 - Every operation requires `projectId`; no cwd or last-project fallback.

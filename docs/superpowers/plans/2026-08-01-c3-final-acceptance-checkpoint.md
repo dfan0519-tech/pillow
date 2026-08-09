@@ -15,8 +15,8 @@ repository/build/desktop/hygiene gates. C4 remains planning-only.
 
 ## Global Constraints
 
-- Canonical repository: `<workspace>\pillow`.
-- Frozen legacy repository: `<workspace>\VaultSystem\keeper`; never write Pillow IDE functionality there.
+- Canonical repository: `this repository`.
+- Frozen legacy repository: `legacy Keeper (out of tree)`; never write Pillow IDE functionality there.
 - Baseline branch/HEAD: `main` / `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b` until live evidence proves an authorized change.
 - Preserve every existing C1/C2/C3 working-tree change; no reset, restore, clean, overwrite or broad rewrite.
 - Staging must remain empty. The user has not authorized stage or commit; this overrides generic plan-skill commit guidance.
@@ -73,7 +73,7 @@ repository/build/desktop/hygiene gates. C4 remains planning-only.
   Run:
 
   ```powershell
-  Set-Location <workspace>\pillow
+  Set-Location this repository
   git rev-parse --show-toplevel
   git branch --show-current
   git rev-parse HEAD

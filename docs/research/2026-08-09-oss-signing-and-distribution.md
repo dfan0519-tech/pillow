@@ -356,7 +356,7 @@ Prior art: `docs/research/2026-08-08-desktop-delivery-research.md` §2.2（商�
 | Smart App Control 默认开启比例 / 企业拦截止损率 | **无可靠公开统计** |
 | Pillow 是否永远不做商业 dual-license | 影响 SignPath 资格；**产品决策未在本单锁定** |
 | GHA Windows 上完整 Tauri 打包的分钟数与免费额度是否够 | **禁止本单 build**；未测 |
-| Keeper Bridge worker boot | 本环境 `worker` 需 `parentSessionId` 返回 400；**未阻塞**只读调研本身 |
+| Local session bridge (optional) | 本环境 worker 会话记录返回 400；**未阻塞**只读调研本身 |
 
 ---
 

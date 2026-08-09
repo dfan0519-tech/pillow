@@ -46,7 +46,7 @@ remain outside this wave.
 
 ## Verification Evidence
 
-Executed from `<workspace>\pillow`:
+Executed from `this repository`:
 
 - `pnpm check`: passed;
   - workspace and source checks passed;

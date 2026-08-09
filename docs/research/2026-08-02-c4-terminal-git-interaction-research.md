@@ -7,7 +7,7 @@
 **Not in scope**: process lifecycle authority (grok1), Git protocol/governance (grok2), threat model gates (grok4), product implementation
 
 **Pillow product order**: industrial local AI IDE first; conversation remains visual centre; no second task dashboard.
-**Keeper boot**: `POST /api/agent-bridge/boot` succeeded; session `<keeper-session>`, project `VK-058` / pillow.
+**Keeper boot**: `local session bridge boot (optional)` succeeded; session `<keeper-session>`, project `VK-058` / pillow.
 
 ---
 
@@ -60,7 +60,7 @@ Checkpoint boundaries (must not regress):
 
 ### 2.2 Grok App — component paths and state flows
 
-**Pin**: `<workspace>\VaultSystem\references\grok-app` @ `cbbbdf17…` (MIT).
+**Pin**: `pinned Grok App reference (out of tree)` @ `cbbbdf17…` (MIT).
 
 | Topic | Path | Lines / API | What the code does |
 |-------|------|-------------|--------------------|
@@ -97,7 +97,7 @@ Worktrees        → composer/project chrome (git_worktrees_*), not a permanent 
 
 ### 2.3 zbbody — conceptual patterns and license
 
-**Pin**: `<workspace>\zbbody` @ `00c29341…`
+**Pin**: `zbbody reference clone (out of tree)` @ `00c29341…`
 **License**: Apache-2.0 (`LICENSE`, package `"license": "Apache-2.0"`, SPDX headers on UI files).
 **Reuse ceiling**: **conceptual-only** (matches C2/C3 decision). No line-by-line UI port without a later provenance brief + `THIRD_PARTY_NOTICES.md`.
 

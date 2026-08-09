@@ -4,15 +4,15 @@ Role: read-only collaboration and editor interaction researcher.
 
 ## Startup
 
-1. Work from `<workspace>\pillow`.
+1. Work from `this repository`.
 2. POST Keeper boot with project `pillow`, task `c3-research-zbbody`, agentName
    `grok2`, agentRole `worker`.
-3. Read `<workspace>\AGENTS.md`, the shared vault `AGENTS.md`, and
-   `<workspace>\pillow\AGENTS.md`.
+3. Read `root AGENTS.md`, the shared vault `AGENTS.md`, and
+   `this repository\AGENTS.md`.
 
 ## Scope
 
-Inspect the local `<workspace>\zbbody` checkout at current HEAD
+Inspect the local `zbbody reference clone (out of tree)` checkout at current HEAD
 `00c293414333b6fcc4e4598389fa3952c8d0b09b`. Its worktree is independently
 dirty; do not change it. Verify its license before recommending any reuse.
 
@@ -41,7 +41,7 @@ unless the license and provenance rules clearly permit more.
 
 Write only:
 
-`<workspace>\pillow\docs\research\2026-08-01-c3-zbbody-interaction-research.md`
+`this repository\docs\research\2026-08-01-c3-zbbody-interaction-research.md`
 
 The report must contain: license finding, evidence table with source
 paths/lines, interaction/state-flow findings, adopt/adapt/avoid decisions,

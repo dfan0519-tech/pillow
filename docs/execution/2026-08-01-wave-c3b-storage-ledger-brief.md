@@ -11,10 +11,10 @@ remained empty.
 
 ## Startup
 
-1. Work only in `<workspace>\pillow`.
+1. Work only in `this repository`.
 2. POST Keeper boot with `project=pillow`, task `c3b-storage-ledger`,
    agentName `grok1`, agentRole `worker`, and
-   `parentSessionId=<keeper-session>`.
+   `<local-parent-session>`.
 3. Read all AGENTS files, the C3 design, and
    `docs/execution/2026-08-01-wave-c3a-protocol-policy-report.md`.
 4. Preserve the accepted dirty tree. Do not reset, stage or commit.

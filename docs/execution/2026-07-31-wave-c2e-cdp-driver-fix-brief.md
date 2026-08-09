@@ -2,11 +2,11 @@
 
 ## 身份与边界
 
-- 项目：`<workspace>\pillow`
+- 项目：`this repository`
 - 角色：Grok Worker；先通过 Keeper boot，`project=pillow`、`agentRole=worker`
 - 基线 HEAD：`7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`
 - 工作树包含 C1/C2 已验收但未暂存、未提交的改动。不得丢失、覆盖、回退、暂存或提交。
-- `<workspace>\VaultSystem\keeper` 是冻结旧资源管理器，只读。
+- `legacy Keeper (out of tree)` 是冻结旧资源管理器，只读。
 
 ## 当前失败证据
 

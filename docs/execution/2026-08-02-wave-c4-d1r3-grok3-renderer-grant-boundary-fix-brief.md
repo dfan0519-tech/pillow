@@ -4,7 +4,7 @@
 
 - Worker: real Grok CLI slot `grok3`.
 - Keeper task: `c4-d1r3-renderer-grant-boundary`; boot as `agentRole=worker` before editing.
-- Repository: `<workspace>\pillow` only. Keeper and reference repositories are read-only.
+- Repository: `this repository` only. Keeper and reference repositories are read-only.
 - Preserve the accepted dirty C1–C3 working tree. Do not stage, commit, reset, restore or clean.
 
 ## Controller rejection evidence

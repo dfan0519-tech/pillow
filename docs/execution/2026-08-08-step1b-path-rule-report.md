@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-08  
 **Signal:** `STEP1B-PATH-RULE-COMPLETE`  
-**Worker:** grok-step1b (Keeper boot skipped: worker claims require parentSessionId)
+**Worker:** grok-step1b (Keeper boot skipped: worker claims require local parent session id)
 
 ## Why
 

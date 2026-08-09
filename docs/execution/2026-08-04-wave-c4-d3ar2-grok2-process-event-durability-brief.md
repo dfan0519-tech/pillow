@@ -4,7 +4,7 @@ Read this file first. It is the complete task contract.
 
 You are the actual Grok CLI `grok4` worker selected by the live lease. Repair only the rejected D3AR
 durable event seam. Boot Keeper as a `pillow` worker for task
-`c4-d3ar2-process-event-durability`. Work only in `<workspace>\pillow`; Keeper is
+`c4-d3ar2-process-event-durability`. Work only in `this repository`; Keeper is
 read-only. Preserve HEAD `7b7f70f7360131cd1cfd984a8b19bdfb5725c21b`,
 empty staging and unrelated dirty work. No stage, commit, reset, restore,
 clean, package or publish.

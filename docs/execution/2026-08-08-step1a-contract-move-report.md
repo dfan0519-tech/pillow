@@ -3,7 +3,7 @@
 **日期**: 2026-08-08  
 **任务**: 纯移动 + re-export，零行为变更  
 **工作目录**: `<repo>`  
-**Keeper boot**: 尝试 worker boot 返回 `400 worker claims require parentSessionId`（无 parent 会话时预期）；未读取 auth/token。
+**Local session note**: 尝试 worker boot 返回 `400 worker claims require local parent session id`（无 parent 会话时预期）；未读取 auth/token。
 
 ---
 

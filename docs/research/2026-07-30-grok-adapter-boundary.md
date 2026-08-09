@@ -10,7 +10,7 @@ Scope: Map accepted B1 Rust interfaces to a **minimal** Grok ACP adapter without
 - **Read-only analysis.** This document does not change product code.
 - **Slice B1 is fixed.** Provider-neutral protocol types, host lifecycle, SQLite authority, and conversation service ownership stay as accepted.
 - **Slice B2 is real Grok ACP only.** `FakeRuntimeAdapter` is test evidence and cannot satisfy B2 (design + B1 acceptance).
-- **Legacy is reference, not copy.** Port behavior through typed contracts; do not copy `<workspace>/VaultSystem\keeper` files wholesale.
+- **Legacy is reference, not copy.** Port behavior through typed contracts; do not copy `legacy Keeper (out of tree)` files wholesale.
 - **Every new source file must stay under 500 lines.**
 - **Secrets never enter events, logs, SQLite payloads, or renderer state.**
 - **Domain state remains in SQLite; provider wire state remains inside the adapter crate.**
@@ -635,8 +635,8 @@ B2 adapter work is architecturally sound when:
 
 **Legacy reference only (not modified):**
 
-- `<workspace>/VaultSystem\keeper\lib\grok-acp-client.js`
-- `<workspace>/VaultSystem\keeper\lib\agent-runtime-adapters.js`
-- `<workspace>/VaultSystem\keeper\lib\keeper-acp-tool-policy.js` (permission observe path)
+- `legacy Keeper (out of tree)\lib\grok-acp-client.js`
+- `legacy Keeper (out of tree)\lib\agent-runtime-adapters.js`
+- `legacy Keeper (out of tree)\lib\keeper-acp-tool-policy.js` (permission observe path)
 
 **External protocol vocabulary:** Agent Client Protocol v1 (`initialize`, `session/*`, `session/update` variants) as documented by the ACP project; legacy client covers a deliberate subset (`agent_message_chunk`, `tool_call`, `tool_call_update`).

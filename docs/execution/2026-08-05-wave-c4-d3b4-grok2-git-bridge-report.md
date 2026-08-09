@@ -8,7 +8,7 @@ Design: `docs/superpowers/specs/2026-08-05-c4-git-changes-design.md`
 
 ## Keeper
 
-- Attempted worker boot (`agentRole: worker`) → HTTP 400 `worker claims require parentSessionId` (no parent session supplied by dispatcher).
+- Attempted worker boot (`agentRole: worker`) → HTTP 400 `worker claims require local parent session id` (no parent session supplied by dispatcher).
 - Record-only controller boot succeeded for the same task: session `<session-id>`, project `pillow` / VK-058, agentName `grok2`.
 - Keeper used for session record only; no execution, judgment, Vault query, or prompt rewrite.
 

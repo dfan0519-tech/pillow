@@ -8,8 +8,8 @@ Date: 2026-08-01
 - Model: `gpt-5.6-terra`, reasoning `high`, `fastMode=false`.
 - Controller: Codex Desktop; controller owns final source review, focused reruns,
   real desktop acceptance, and all repository-wide gates.
-- Repository: `<workspace>\pillow`.
-- Frozen reference: `<workspace>\VaultSystem\keeper`; read-only, never modify it.
+- Repository: `this repository`.
+- Frozen reference: `legacy Keeper (out of tree)`; read-only, never modify it.
 
 ## Objective
 
