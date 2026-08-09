@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use keeper_project::{CreateProject, validate_portable_path};
 use keeper_storage_sqlite::{
     AddDocumentLink, DocumentLinkRel, DocumentRole, DocumentStatus, KnowledgeDocument,
-    KnowledgeDocumentLink, KnowledgeError, RegisterDocument, RegisteredBy,
+    KnowledgeDocumentLink, KnowledgeError, ListDocumentsQuery, RegisterDocument, RegisteredBy,
     SqliteKnowledgeRepository, SqliteProjectRepository, UpdateDocument,
 };
 
@@ -211,15 +211,16 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
     summary.links_added = link_stats.0;
     summary.links_skipped_existing = link_stats.1;
 
-    // Reload registry.
-    let documents = repo.list_by_project(&project_id)?;
+    // Reload full registry (including archived) for inventory / audit / rescan.
+    // Default list paths exclude archived; scanner maintenance must opt in.
+    let all_documents = list_all_docs(&repo, &project_id)?;
     let mut links = Vec::new();
-    for doc in &documents {
+    for doc in &all_documents {
         links.extend(repo.list_links_from(&doc.document_id)?);
     }
 
     let report = audit_documents(AuditInput {
-        documents: documents.clone(),
+        documents: all_documents.clone(),
         links: links.clone(),
         contents,
         path_content_conflicts,
@@ -231,13 +232,16 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
     // K0d ledger rows (empty when scan DB has no dispatch/acceptance writes).
     let tasks = repo.list_tasks_by_project(&project_id)?;
     let verdicts = repo.list_verdicts_by_project(&project_id)?;
+    // Render default excludes archived (ADR-0004 §5 / K1a) — hard to forget.
     let handoff_markdown = render_status_view(&RenderInput {
-        documents: documents.clone(),
+        documents: all_documents.clone(),
         links: links.clone(),
         audit: report.clone(),
         tasks,
         verdicts,
+        include_archived: false,
     });
+    let documents = all_documents;
 
     Ok(ScanResult {
         project_id,
@@ -314,11 +318,24 @@ fn collect_markdown(
     Ok(())
 }
 
+/// Full project inventory including archived (scanner / admin only).
+fn list_all_docs(
+    repo: &SqliteKnowledgeRepository,
+    project_id: &str,
+) -> Result<Vec<KnowledgeDocument>, ScanError> {
+    Ok(repo.list_documents(
+        project_id,
+        ListDocumentsQuery {
+            include_archived: true,
+        },
+    )?)
+}
+
 fn apply_brief_pairing(
     repo: &SqliteKnowledgeRepository,
     project_id: &str,
 ) -> Result<(), ScanError> {
-    let documents = repo.list_by_project(project_id)?;
+    let documents = list_all_docs(repo, project_id)?;
     let report_stems: HashSet<String> = documents
         .iter()
         .filter(|d| matches!(d.role, DocumentRole::Report) || is_report_like_path(&d.path))
@@ -357,7 +374,7 @@ fn apply_explicit_supersession(
     contents: &HashMap<String, String>,
     _registered_by: RegisteredBy,
 ) -> Result<(usize, usize), ScanError> {
-    let documents = repo.list_by_project(project_id)?;
+    let documents = list_all_docs(repo, project_id)?;
     let by_path: HashMap<String, KnowledgeDocument> = documents
         .iter()
         .map(|d| (d.path.clone(), d.clone()))

@@ -35,6 +35,13 @@ serde_json.workspace = true
 tauri = { version = "2", features = [] }
 uuid.workspace = true
 
+[features]
+default = []
+# Path-probe IO injection and other desktop test seams. Never enable in
+# production/release builds — unit tests get this via `cfg(test)` without
+# needing the feature flag.
+test-support = []
+
 [dev-dependencies]
 # Enable host test seams only for desktop unit/integration tests (not release).
 keeper-runtime-host = { path = "../../../crates/runtime-host", features = ["test-support"] }

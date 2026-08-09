@@ -10,8 +10,10 @@
 //! resolve_runtime`. This module maps resolved values into adapter construction
 //! and **must not** re-implement the adapter label parser.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig};
 use keeper_agent_protocol::AgentRuntimeAdapter;
@@ -155,12 +157,18 @@ pub fn fake_adapter_selectable() -> bool {
 ///
 /// Other failures (SQLite, illegal parse outside this set when not settings-
 /// fixable, etc.) remain fatal. **Never** maps to Fake.
+///
+/// Probe-failed codes (`runtime_executable_probe_failed` /
+/// `runtime_profile_probe_failed`) are degradable so the shell still reaches
+/// Settings; they are **not** the same codes as definite missing/invalid.
 pub fn is_degradable_runtime_error(code: &str) -> bool {
     matches!(
         code,
         "runtime_executable_missing"
+            | "runtime_executable_probe_failed"
             | "runtime_profile_invalid"
             | "runtime_profile_missing"
+            | "runtime_profile_probe_failed"
             | "runtime_fake_not_allowed"
     )
 }
@@ -200,9 +208,19 @@ pub fn guidance_for_runtime_error(code: &str) -> String {
              或清空该字段以便使用 PATH；保存后重启 Pillow。"
                 .to_owned()
         }
+        "runtime_executable_probe_failed" => {
+            "Pillow 暂时无法确认 Grok 可执行文件路径（文件系统探测失败，非「确定不存在」）。\
+             请稍后重启；若持续出现，打开「设置」核对路径后保存并重启。"
+                .to_owned()
+        }
         "runtime_profile_invalid" | "runtime_profile_missing" => {
             "打开「设置」，将「Grok profile 路径」改为已存在的目录（进程主目录），\
              或清空该字段以使用当前用户主目录；保存后重启 Pillow。"
+                .to_owned()
+        }
+        "runtime_profile_probe_failed" => {
+            "Pillow 暂时无法确认 Grok profile 目录（文件系统探测失败，非「确定不存在」）。\
+             请稍后重启；若持续出现，打开「设置」核对路径后保存并重启。"
                 .to_owned()
         }
         "runtime_fake_not_allowed" => "打开「设置」，将「运行时适配器」改为 Grok ACP（默认）；\
@@ -394,15 +412,18 @@ pub fn discover_grok_config_with_overrides(
     };
     let profile = match profile_override {
         Some(raw) => require_profile_dir(raw)?,
-        None => current_user_home_dir().ok_or_else(|| {
-            ConversationCommandError::new(
-                "runtime_profile_missing",
-                format!(
-                    "Grok process home could not be resolved. Set {ENV_GROK_PROFILE} or a settings profile path to an existing directory, or ensure the current-user home ({}) exists. Real runtime never falls back to Fake.",
-                    if cfg!(windows) { "USERPROFILE" } else { "HOME" }
-                ),
-            )
-        })?,
+        None => match current_user_home_dir()? {
+            Some(home) => home,
+            None => {
+                return Err(ConversationCommandError::new(
+                    "runtime_profile_missing",
+                    format!(
+                        "Grok process home could not be resolved. Set {ENV_GROK_PROFILE} or a settings profile path to an existing directory, or ensure the current-user home ({}) exists. Real runtime never falls back to Fake.",
+                        if cfg!(windows) { "USERPROFILE" } else { "HOME" }
+                    ),
+                ));
+            }
+        },
     };
     finish_grok_config(executable, profile)
 }
@@ -424,6 +445,172 @@ fn finish_grok_config(
     Ok(config)
 }
 
+/// Max filesystem probes per configured path (1 initial + retries).
+///
+/// Chosen so a brief Windows AV / indexer / sharing lock can clear without
+/// turning every startup into a multi-second wait. Only applies when the
+/// probe result is **indeterminate** (IO error); confirmed missing/wrong-type
+/// and confirmed-ok never sleep and never re-probe.
+const PATH_PROBE_MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff after indeterminate attempt 1 and 2 (milliseconds).
+///
+/// Rationale: metadata ops are cheap; short sleeps (10ms + 30ms ≈ 40ms cap)
+/// recover most transient locks without measurably slowing the happy path
+/// (happy path: one `metadata` call, zero sleep).
+const PATH_PROBE_BACKOFF_MS: [u64; 2] = [10, 30];
+
+/// Expected path kind for startup configuration checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathTypeExpectation {
+    File,
+    Directory,
+}
+
+/// Three-way presence result for a single probe (before retries).
+enum PathPresence {
+    /// Exists and matches the expected type.
+    ConfirmedOk,
+    /// Definite NotFound, or exists but wrong type (file vs directory).
+    ConfirmedReject,
+    /// Cannot decide — permission, sharing violation, Interrupted, etc.
+    Indeterminate(io::Error),
+}
+
+/// Final outcome after the limited retry loop.
+enum PathCheckOutcome {
+    Ok,
+    Rejected,
+    Indeterminate(io::Error),
+}
+
+/// IO injection seam for unit tests / `test-support` builds only.
+///
+/// Entire module is stripped from production builds: no statics, no public
+/// inject API, and `metadata_for_path` has no injection branch.
+#[cfg(any(test, feature = "test-support"))]
+pub mod path_probe_test_hook {
+    use std::cell::Cell;
+    use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    thread_local! {
+        static REMAINING_FORCED_ERRORS: Cell<u32> = const { Cell::new(0) };
+        static FORCED_KIND: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
+    }
+
+    static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Clear injection state and the probe counter (call under `env_lock`).
+    pub fn reset() {
+        REMAINING_FORCED_ERRORS.with(|c| c.set(0));
+        FORCED_KIND.with(|c| c.set(None));
+        PROBE_COUNT.store(0, Ordering::SeqCst);
+    }
+
+    /// Force the next `count` metadata probes to return `kind` (then real FS).
+    pub fn inject_io_errors(count: u32, kind: io::ErrorKind) {
+        REMAINING_FORCED_ERRORS.with(|c| c.set(count));
+        FORCED_KIND.with(|c| c.set(Some(kind)));
+    }
+
+    /// How many times [`super::metadata_for_path`] ran on this thread's process
+    /// counter (tests hold `env_lock` so this is effectively serial).
+    pub fn probe_count() -> u64 {
+        PROBE_COUNT.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn record_probe() {
+        PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn take_forced_error() -> Option<io::Error> {
+        REMAINING_FORCED_ERRORS.with(|remaining| {
+            let n = remaining.get();
+            if n == 0 {
+                return None;
+            }
+            remaining.set(n - 1);
+            let kind = FORCED_KIND
+                .with(|k| k.get())
+                .unwrap_or(io::ErrorKind::Other);
+            Some(io::Error::new(
+                kind,
+                "path_probe_test_hook: injected filesystem probe error",
+            ))
+        })
+    }
+}
+
+/// Metadata for a path, with optional test-only IO injection.
+///
+/// Production: single `std::fs::metadata` call — no counters, no hooks.
+fn metadata_for_path(path: &Path) -> io::Result<std::fs::Metadata> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        path_probe_test_hook::record_probe();
+        if let Some(err) = path_probe_test_hook::take_forced_error() {
+            return Err(err);
+        }
+    }
+    std::fs::metadata(path)
+}
+
+fn classify_path(path: &Path, expect: PathTypeExpectation) -> PathPresence {
+    match metadata_for_path(path) {
+        Ok(meta) => {
+            let matches = match expect {
+                PathTypeExpectation::File => meta.is_file(),
+                PathTypeExpectation::Directory => meta.is_dir(),
+            };
+            if matches {
+                PathPresence::ConfirmedOk
+            } else {
+                PathPresence::ConfirmedReject
+            }
+        }
+        // Definite absence — same fail-closed codes as before (`is_file`/`is_dir`
+        // also treated NotFound as false).
+        Err(err) if err.kind() == io::ErrorKind::NotFound => PathPresence::ConfirmedReject,
+        // Structural path error: an intermediate component is not a directory.
+        // Definite configuration problem, not a transient probe failure.
+        Err(err) if err.kind() == io::ErrorKind::NotADirectory => PathPresence::ConfirmedReject,
+        Err(err) => PathPresence::Indeterminate(err),
+    }
+}
+
+/// Probe with limited retries **only** on indeterminate IO results.
+///
+/// Confirmed-ok and confirmed-reject return immediately (no backoff, no extra
+/// IO). Uncertain results still fail closed after retries — never treated as
+/// pass.
+fn require_path_with_retry(path: &Path, expect: PathTypeExpectation) -> PathCheckOutcome {
+    let mut last_indeterminate: Option<io::Error> = None;
+    for attempt in 0..PATH_PROBE_MAX_ATTEMPTS {
+        match classify_path(path, expect) {
+            PathPresence::ConfirmedOk => return PathCheckOutcome::Ok,
+            PathPresence::ConfirmedReject => return PathCheckOutcome::Rejected,
+            PathPresence::Indeterminate(err) => {
+                last_indeterminate = Some(err);
+                let next = attempt + 1;
+                if next < PATH_PROBE_MAX_ATTEMPTS {
+                    let backoff_ms = PATH_PROBE_BACKOFF_MS[attempt as usize];
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                }
+            }
+        }
+    }
+    PathCheckOutcome::Indeterminate(
+        last_indeterminate
+            .unwrap_or_else(|| io::Error::other("path probe failed without IO detail")),
+    )
+}
+
+fn format_io_error_kind(kind: io::ErrorKind) -> String {
+    // Debug form (e.g. `PermissionDenied`) is stable for log/diagnosis.
+    format!("{kind:?}")
+}
+
 fn require_executable_file(raw: &str) -> Result<PathBuf, ConversationCommandError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -433,16 +620,27 @@ fn require_executable_file(raw: &str) -> Result<PathBuf, ConversationCommandErro
         ));
     }
     let path = PathBuf::from(trimmed);
-    if !path.is_file() {
-        return Err(ConversationCommandError::new(
+    match require_path_with_retry(&path, PathTypeExpectation::File) {
+        PathCheckOutcome::Ok => Ok(path),
+        PathCheckOutcome::Rejected => Err(ConversationCommandError::new(
             "runtime_executable_missing",
             format!(
                 "Grok executable is not a file: {}. Set {ENV_GROK_EXECUTABLE} or install `grok` on PATH.",
                 path.display()
             ),
-        ));
+        )),
+        PathCheckOutcome::Indeterminate(err) => Err(ConversationCommandError::new(
+            "runtime_executable_probe_failed",
+            format!(
+                "Could not verify Grok executable path (io::ErrorKind::{}): {}. \
+                 Filesystem probe failed after {PATH_PROBE_MAX_ATTEMPTS} attempts; \
+                 this is not a confirmed missing path. Settings remain available; \
+                 real runtime never falls back to Fake.",
+                format_io_error_kind(err.kind()),
+                path.display()
+            ),
+        )),
     }
-    Ok(path)
 }
 
 fn require_profile_dir(raw: &str) -> Result<PathBuf, ConversationCommandError> {
@@ -454,17 +652,28 @@ fn require_profile_dir(raw: &str) -> Result<PathBuf, ConversationCommandError> {
         ));
     }
     let path = PathBuf::from(trimmed);
-    // Path existence only — never open auth files inside the profile.
-    if !path.is_dir() {
-        return Err(ConversationCommandError::new(
+    // Path existence / type only — never open auth files inside the profile.
+    match require_path_with_retry(&path, PathTypeExpectation::Directory) {
+        PathCheckOutcome::Ok => Ok(path),
+        PathCheckOutcome::Rejected => Err(ConversationCommandError::new(
             "runtime_profile_invalid",
             format!(
                 "Grok profile path must be an existing directory: {}",
                 path.display()
             ),
-        ));
+        )),
+        PathCheckOutcome::Indeterminate(err) => Err(ConversationCommandError::new(
+            "runtime_profile_probe_failed",
+            format!(
+                "Could not verify Grok profile path (io::ErrorKind::{}): {}. \
+                 Filesystem probe failed after {PATH_PROBE_MAX_ATTEMPTS} attempts; \
+                 this is not a confirmed missing directory. Settings remain available; \
+                 real runtime never falls back to Fake.",
+                format_io_error_kind(err.kind()),
+                path.display()
+            ),
+        )),
     }
-    Ok(path)
 }
 
 fn resolve_grok_executable_from_env() -> Result<PathBuf, ConversationCommandError> {
@@ -507,25 +716,44 @@ fn resolve_grok_profile_from_env() -> Result<PathBuf, ConversationCommandError> 
         }
     }
 
-    if let Some(home) = current_user_home_dir() {
-        return Ok(home);
+    match current_user_home_dir()? {
+        Some(home) => Ok(home),
+        None => Err(ConversationCommandError::new(
+            "runtime_profile_missing",
+            format!(
+                "Grok process home could not be resolved. Set {ENV_GROK_PROFILE} to an existing directory, or ensure the current-user home ({}) exists. Real runtime never falls back to Fake.",
+                if cfg!(windows) { "USERPROFILE" } else { "HOME" }
+            ),
+        )),
     }
-
-    Err(ConversationCommandError::new(
-        "runtime_profile_missing",
-        format!(
-            "Grok process home could not be resolved. Set {ENV_GROK_PROFILE} to an existing directory, or ensure the current-user home ({}) exists. Real runtime never falls back to Fake.",
-            if cfg!(windows) { "USERPROFILE" } else { "HOME" }
-        ),
-    ))
 }
 
-/// Current-user home from the platform env var, only when it is an existing directory.
-fn current_user_home_dir() -> Option<PathBuf> {
+/// Current-user home from the platform env var, only when it is a confirmed directory.
+///
+/// - `Ok(None)` — env unset, or path definitely missing / not a directory
+/// - `Ok(Some)` — confirmed existing directory
+/// - `Err` — probe indeterminate after retries (`runtime_profile_probe_failed`)
+fn current_user_home_dir() -> Result<Option<PathBuf>, ConversationCommandError> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let value = std::env::var_os(key)?;
+    let Some(value) = std::env::var_os(key) else {
+        return Ok(None);
+    };
     let path = PathBuf::from(value);
-    if path.is_dir() { Some(path) } else { None }
+    match require_path_with_retry(&path, PathTypeExpectation::Directory) {
+        PathCheckOutcome::Ok => Ok(Some(path)),
+        PathCheckOutcome::Rejected => Ok(None),
+        PathCheckOutcome::Indeterminate(err) => Err(ConversationCommandError::new(
+            "runtime_profile_probe_failed",
+            format!(
+                "Could not verify current-user home as Grok profile (io::ErrorKind::{}): {}. \
+                 Filesystem probe failed after {PATH_PROBE_MAX_ATTEMPTS} attempts; \
+                 this is not a confirmed missing directory. Settings remain available; \
+                 real runtime never falls back to Fake.",
+                format_io_error_kind(err.kind()),
+                path.display()
+            ),
+        )),
+    }
 }
 
 /// Locate `grok` (or `grok.exe` on Windows) on `PATH`.
@@ -1239,11 +1467,227 @@ pub(crate) mod tests {
         // Structural: Degraded has no selection field and Ready with Fake only
         // comes from explicit Fake open (env/store), never from missing Grok.
         assert!(is_degradable_runtime_error("runtime_executable_missing"));
+        assert!(is_degradable_runtime_error(
+            "runtime_executable_probe_failed"
+        ));
         assert!(is_degradable_runtime_error("runtime_profile_invalid"));
         assert!(is_degradable_runtime_error("runtime_profile_missing"));
+        assert!(is_degradable_runtime_error("runtime_profile_probe_failed"));
         assert!(is_degradable_runtime_error("runtime_fake_not_allowed"));
         assert!(!is_degradable_runtime_error("settings_sqlite"));
         assert!(!is_degradable_runtime_error("invalid_runtime_selection"));
+    }
+
+    // --- Path probe three-way + retry (path-validation robustness) ---------
+
+    #[test]
+    fn path_probe_missing_still_fail_closed_legacy_codes() {
+        let _guard = env_lock().lock().unwrap();
+        path_probe_test_hook::reset();
+        let temp = tempdir().unwrap();
+        let missing_exe = temp.path().join("definitely-missing-grok.exe");
+        let missing_profile = temp.path().join("definitely-missing-profile");
+        assert!(!missing_exe.exists());
+        assert!(!missing_profile.exists());
+
+        let exe_err = require_executable_file(&missing_exe.to_string_lossy()).unwrap_err();
+        assert_eq!(exe_err.code, "runtime_executable_missing");
+        assert!(
+            !exe_err.message.contains("io::ErrorKind"),
+            "confirmed missing must not look like probe failure: {}",
+            exe_err.message
+        );
+
+        let profile_err = require_profile_dir(&missing_profile.to_string_lossy()).unwrap_err();
+        assert_eq!(profile_err.code, "runtime_profile_invalid");
+        assert!(
+            !profile_err.message.contains("io::ErrorKind"),
+            "confirmed missing must not look like probe failure: {}",
+            profile_err.message
+        );
+        // Confirmed reject: one probe each, no retry amplification.
+        assert_eq!(path_probe_test_hook::probe_count(), 2);
+    }
+
+    #[test]
+    fn path_probe_existing_ok_single_probe_no_retry_overhead() {
+        let _guard = env_lock().lock().unwrap();
+        path_probe_test_hook::reset();
+        let temp = tempdir().unwrap();
+        let exe = write_placeholder_executable(temp.path());
+        let profile = temp.path().join("ok-profile-dir");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        path_probe_test_hook::reset();
+        let got_exe = require_executable_file(&exe.to_string_lossy()).expect("exe exists");
+        assert_eq!(got_exe, exe);
+        assert_eq!(
+            path_probe_test_hook::probe_count(),
+            1,
+            "happy path must probe exactly once (no retry)"
+        );
+
+        path_probe_test_hook::reset();
+        let got_profile = require_profile_dir(&profile.to_string_lossy()).expect("profile exists");
+        assert_eq!(got_profile, profile);
+        assert_eq!(
+            path_probe_test_hook::probe_count(),
+            1,
+            "happy path must probe exactly once (no retry)"
+        );
+    }
+
+    #[test]
+    fn path_probe_io_error_triggers_retry_then_success() {
+        let _guard = env_lock().lock().unwrap();
+        path_probe_test_hook::reset();
+        let temp = tempdir().unwrap();
+        let profile = temp.path().join("retry-then-ok-profile");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        // Two injected IO failures → third real metadata succeeds within max attempts.
+        path_probe_test_hook::inject_io_errors(2, io::ErrorKind::Interrupted);
+        let got = require_profile_dir(&profile.to_string_lossy())
+            .expect("transient probe errors must recover");
+        assert_eq!(got, profile);
+        assert_eq!(
+            path_probe_test_hook::probe_count(),
+            3,
+            "2 injected failures + 1 real success"
+        );
+    }
+
+    #[test]
+    fn path_probe_io_error_exhausted_uses_distinct_code_with_error_kind() {
+        let _guard = env_lock().lock().unwrap();
+        path_probe_test_hook::reset();
+        let temp = tempdir().unwrap();
+        // Path exists on disk; all probes forced to fail so we never mis-classify
+        // as confirmed missing.
+        let profile = temp.path().join("exists-but-unprobeable");
+        std::fs::create_dir_all(&profile).unwrap();
+        let exe = write_placeholder_executable(temp.path());
+
+        path_probe_test_hook::inject_io_errors(
+            PATH_PROBE_MAX_ATTEMPTS,
+            io::ErrorKind::PermissionDenied,
+        );
+        let profile_err = require_profile_dir(&profile.to_string_lossy()).unwrap_err();
+        assert_eq!(profile_err.code, "runtime_profile_probe_failed");
+        assert_ne!(profile_err.code, "runtime_profile_invalid");
+        assert_ne!(profile_err.code, "runtime_profile_missing");
+        assert!(
+            profile_err
+                .message
+                .contains("io::ErrorKind::PermissionDenied"),
+            "must surface ErrorKind: {}",
+            profile_err.message
+        );
+        assert_eq!(
+            path_probe_test_hook::probe_count(),
+            u64::from(PATH_PROBE_MAX_ATTEMPTS)
+        );
+
+        path_probe_test_hook::reset();
+        path_probe_test_hook::inject_io_errors(PATH_PROBE_MAX_ATTEMPTS, io::ErrorKind::TimedOut);
+        let exe_err = require_executable_file(&exe.to_string_lossy()).unwrap_err();
+        assert_eq!(exe_err.code, "runtime_executable_probe_failed");
+        assert_ne!(exe_err.code, "runtime_executable_missing");
+        assert!(
+            exe_err.message.contains("io::ErrorKind::TimedOut"),
+            "must surface ErrorKind: {}",
+            exe_err.message
+        );
+    }
+
+    #[test]
+    fn path_probe_failure_degrades_not_fake() {
+        let _guard = env_lock().lock().unwrap();
+        path_probe_test_hook::reset();
+        let temp = tempdir().unwrap();
+        let db = temp.path().join("keeper.db");
+        let exe = write_placeholder_executable(temp.path());
+        let profile = temp.path().join("probe-fail-profile");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        repo.upsert_runtime_adapter(
+            SettingScope::Global,
+            None,
+            RuntimeAdapterSetting::GrokAcp,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &exe.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        repo.upsert_path(
+            SettingScope::Global,
+            None,
+            keeper_storage_sqlite::KEY_GROK_PROFILE,
+            &profile.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+        drop(repo);
+
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_SELECTION);
+            std::env::remove_var(ENV_GROK_EXECUTABLE);
+            std::env::remove_var(ENV_GROK_PROFILE);
+        }
+
+        // Force the first configured-path probe (executable) to exhaust retries.
+        // Paths exist on disk — failure is probe-class, not confirmed-missing.
+        path_probe_test_hook::reset();
+        path_probe_test_hook::inject_io_errors(PATH_PROBE_MAX_ATTEMPTS, io::ErrorKind::Interrupted);
+
+        let emitter = Arc::new(RecordingEmitter::new());
+        let outcome = open_conversation_service_or_degrade(&db, emitter as Arc<_>)
+            .expect("probe failure is degradable, not fatal");
+        match outcome {
+            RuntimeOpenOutcome::Degraded { code, message, .. } => {
+                assert_eq!(code, "runtime_executable_probe_failed");
+                assert!(
+                    message.contains("io::ErrorKind::Interrupted"),
+                    "degrade message must carry ErrorKind: {message}"
+                );
+                assert!(
+                    !message.to_ascii_lowercase().contains("using fake")
+                        && !message.to_ascii_lowercase().contains("falling back"),
+                    "degrade must not be Fake: {message}"
+                );
+            }
+            RuntimeOpenOutcome::Ready { selection, .. } => {
+                panic!("must degrade, not Ready (selection={selection:?}); never Fake fallback")
+            }
+        }
+
+        // Explicit: Degraded has no selection; Ready+Fake is only env/store Fake.
+        // Structural check that probe-failed codes degrade and are not Fake-named.
+        assert!(is_degradable_runtime_error(
+            "runtime_executable_probe_failed"
+        ));
+        assert!(is_degradable_runtime_error("runtime_profile_probe_failed"));
+        path_probe_test_hook::reset();
+    }
+
+    #[test]
+    fn path_probe_inject_module_is_test_gated() {
+        // Production builds compile without `path_probe_test_hook` (module is
+        // `cfg(any(test, feature = "test-support"))` only). Under `cfg(test)`
+        // the inject API is available for the cases above.
+        assert!(
+            cfg!(any(test, feature = "test-support")),
+            "this unit test only runs under cfg(test)"
+        );
+        path_probe_test_hook::reset();
+        assert_eq!(path_probe_test_hook::probe_count(), 0);
     }
 
     #[test]

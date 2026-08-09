@@ -1,13 +1,19 @@
-//! Knowledge document indexer (K0b/K0c/K0d/K0e): classify, extract explicit
+//! Knowledge document indexer (K0b/K0c/K0d/K0e/K1a): classify, extract explicit
 //! supersession, register into K0a tables, audit-only reports, registry status
-//! rendering, and (K0e) non-interactive ledger CLI helpers + stale detection.
+//! rendering, ledger CLI helpers, stale detection, and retirement **candidates**.
 //!
-//! **Report-only for docs:** never deletes, archives, or moves documents. Never
-//! auto-migrates task status beyond explicit CLI commands. Path grammar is always
+//! **Report-only for docs lifecycle:** never deletes or moves files. Never
+//! auto-archives (K1a: archive is an explicit storage call). Never auto-migrates
+//! task status beyond explicit CLI commands. Path grammar is always
 //! [`keeper_project::validate_portable_path`] — never reimplemented here.
 //!
 //! **K0c render** is a pure projection of registry rows + audit buckets — never
-//! hand-written project narrative.
+//! hand-written project narrative. **Default render excludes `archived`**
+//! (ADR-0004 §5); pass `include_archived: true` only when intentionally
+//! recovering inventory.
+//!
+//! **K1a retirement candidates** require an explicit supersedes link whose
+//! target is registered. Zero-inbound is never a retirement signal.
 //!
 //! **K0e ledger CLI** records dispatch/acceptance as a byproduct (ADR-0004 §2)
 //! and detects handoff-vs-ledger staleness without rewriting documents.

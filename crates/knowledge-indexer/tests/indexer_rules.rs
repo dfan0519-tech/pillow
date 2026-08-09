@@ -527,6 +527,7 @@ fn render_from_scan_is_pure_and_covers_buckets() {
         audit: result.report.clone(),
         tasks: vec![],
         verdicts: vec![],
+        include_archived: false,
     });
     assert_eq!(md, again, "render must be pure");
 
@@ -570,6 +571,7 @@ fn render_empty_registry_honest() {
         audit: keeper_knowledge_indexer::AuditReport::default(),
         tasks: vec![],
         verdicts: vec![],
+        include_archived: false,
     });
     assert!(md.contains("0"));
     assert!(
@@ -578,4 +580,369 @@ fn render_empty_registry_honest() {
             || md.contains("无数据")
             || md.contains("Nothing")
     );
+}
+
+// ---------------------------------------------------------------------------
+// K1a — retirement: archive visibility, candidates, negative controls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_default_excludes_archived_include_flag_shows() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        &root.join("docs/handoff/current.md"),
+        "> 本文件取代 `docs/handoff/old.md`。\n",
+    );
+    write(&root.join("docs/handoff/old.md"), "# Old handoff\n");
+    write(&root.join("docs/handoff/live.md"), "# Live\n");
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    let old = result
+        .documents
+        .iter()
+        .find(|d| d.path.contains("old.md"))
+        .expect("old registered");
+    let repo = SqliteKnowledgeRepository::open(root.join("k.db")).unwrap();
+    repo.archive(&old.document_id).unwrap();
+
+    // Reload after archive.
+    let docs_all = repo
+        .list_documents(
+            &result.project_id,
+            keeper_storage_sqlite::ListDocumentsQuery {
+                include_archived: true,
+            },
+        )
+        .unwrap();
+    assert!(
+        docs_all
+            .iter()
+            .any(|d| d.path.contains("old.md") && d.status == DocumentStatus::Archived)
+    );
+
+    let default_md = render_status_view(&RenderInput {
+        documents: docs_all.clone(),
+        links: result.links.clone(),
+        audit: result.report.clone(),
+        tasks: vec![],
+        verdicts: vec![],
+        include_archived: false,
+    });
+    assert!(
+        !default_md.contains("docs/handoff/old.md"),
+        "default render must omit archived path: {default_md}"
+    );
+    assert!(
+        default_md.contains("archived excluded by default")
+            || default_md.contains("include_archived"),
+        "default render must state archived exclusion"
+    );
+
+    let with_md = render_status_view(&RenderInput {
+        documents: docs_all,
+        links: result.links.clone(),
+        audit: result.report.clone(),
+        tasks: vec![],
+        verdicts: vec![],
+        include_archived: true,
+    });
+    assert!(
+        with_md.contains("docs/handoff/old.md"),
+        "include_archived=true must show archived path"
+    );
+    assert!(
+        with_md.contains("status=`archived`") || with_md.contains("`archived`"),
+        "archived status should appear when included"
+    );
+}
+
+#[test]
+fn retirement_candidates_only_explicit_supersession_registered_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    // Explicit supersession with registered target → candidate.
+    write(
+        &root.join("docs/handoff/new.md"),
+        "> 本文件取代 `docs/handoff/old.md`。\n",
+    );
+    write(&root.join("docs/handoff/old.md"), "# Old\n");
+    // Free-path claim only → no registered target → not a candidate source for others.
+    write(
+        &root.join("docs/execution/status-report.md"),
+        "This report supersedes prior delivery status.\n",
+    );
+    // Zero-inbound research → never a candidate.
+    write(
+        &root.join("docs/research/zero-inbound-note.md"),
+        "# Research nobody links\n",
+    );
+    // Manual-looking old date alone → never a candidate.
+    write(
+        &root.join("docs/research/2020-01-01-ancient.md"),
+        "# Looks old\n",
+    );
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    let candidates = &result.report.retirement.retirement_candidates;
+    assert!(
+        candidates.iter().any(|p| p.contains("handoff/old.md")),
+        "explicit supersession target must be candidate: {candidates:?}"
+    );
+    // Negative: zero-inbound must not appear.
+    assert!(
+        !candidates
+            .iter()
+            .any(|p| p.contains("zero-inbound-note") || p.contains("ancient")),
+        "zero-inbound / date-old must not be candidates: {candidates:?}"
+    );
+    // Free-path claim has no registered target path.
+    assert!(
+        !candidates
+            .iter()
+            .any(|p| p.contains("prior delivery") || p.contains("status-report")),
+        "free-path claim must not invent candidates: {candidates:?}"
+    );
+}
+
+#[test]
+fn zero_inbound_never_retirement_candidate_negative() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        &root.join("docs/research/lonely-research.md"),
+        "# Orphan research\n\nNo inbound references.\n",
+    );
+    write(
+        &root.join("docs/execution/lonely-report.md"),
+        "# Orphan report\n",
+    );
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    // Confirm they are orphans.
+    let total_orphans: usize = result
+        .report
+        .orphans_by_role
+        .values()
+        .map(|v| v.len())
+        .sum();
+    assert!(total_orphans >= 2, "fixture must produce orphans");
+
+    assert!(
+        result.report.retirement.retirement_candidates.is_empty(),
+        "zero-inbound alone must never produce retirement candidates: {:?}",
+        result.report.retirement.retirement_candidates
+    );
+}
+
+#[test]
+fn expected_orphans_verification_decision_labeled_not_candidates() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        &root.join("docs/verification/lonely-acceptance.md"),
+        "# Acceptance\n\nEvidence only.\n",
+    );
+    write(
+        &root.join("docs/decisions/ADR-0099-orphan.md"),
+        "Status: Accepted\n\n# Orphan ADR\n",
+    );
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    let expected = &result.report.retirement.expected_orphans_non_problem;
+    assert!(
+        expected.iter().any(|p| p.contains("lonely-acceptance")),
+        "verification orphan must be labeled expected: {expected:?}"
+    );
+    assert!(
+        expected.iter().any(|p| p.contains("ADR-0099")),
+        "decision orphan must be labeled expected: {expected:?}"
+    );
+
+    for p in &result.report.retirement.retirement_candidates {
+        assert!(
+            !p.contains("lonely-acceptance") && !p.contains("ADR-0099"),
+            "expected orphan leaked into candidates: {p}"
+        );
+    }
+
+    // Report markdown carries the Chinese non-problem label.
+    assert!(
+        result.report_markdown.contains("预期孤儿") || result.report_markdown.contains("非问题"),
+        "audit markdown must label expected orphans"
+    );
+}
+
+#[test]
+fn orphan_brief_goes_to_pending_review_not_retirement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        &root.join("docs/execution/2026-08-09-unfinished-brief.md"),
+        "# Brief without report\n",
+    );
+
+    let result = scan_and_register(&ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: root.join("k.db"),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    })
+    .unwrap();
+
+    assert!(
+        result
+            .report
+            .retirement
+            .briefs_pending_review
+            .iter()
+            .any(|p| p.contains("unfinished-brief")),
+        "orphan brief must be 待复核: {:?}",
+        result.report.retirement.briefs_pending_review
+    );
+    assert!(
+        result
+            .report
+            .unpaired_briefs
+            .iter()
+            .any(|p| p.contains("unfinished-brief"))
+    );
+    assert!(
+        !result
+            .report
+            .retirement
+            .retirement_candidates
+            .iter()
+            .any(|p| p.contains("unfinished-brief")),
+        "orphan brief must not be retirement candidate"
+    );
+}
+
+#[test]
+fn archive_preserves_non_unknown_on_rescan_and_is_explicit_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let path = "docs/handoff/controller-active.md";
+    write(&root.join(path), "# Handoff\n\nController-owned active.\n");
+
+    let db = root.join("k.db");
+    let opts = ScanOptions {
+        repo_root: root.to_path_buf(),
+        db_path: db.clone(),
+        project_name: "t".into(),
+        registered_by: RegisteredBy::Lint,
+        source_run_id: None,
+        docs_relative: "docs".into(),
+        exclude_paths: vec![],
+    };
+    let first = scan_and_register(&opts).unwrap();
+    let doc = first.documents.iter().find(|d| d.path == path).unwrap();
+
+    // Controller judgment: active (non-unknown).
+    let repo = SqliteKnowledgeRepository::open(&db).unwrap();
+    repo.update(UpdateDocument {
+        document_id: doc.document_id.clone(),
+        role: None,
+        status: Some(DocumentStatus::Active),
+        content_digest: None,
+        registered_by: Some(RegisteredBy::Controller),
+        source_run_id: None,
+    })
+    .unwrap();
+
+    // Rescan must not clobber Active (K0b + K1a).
+    write(
+        &root.join(path),
+        "# Handoff\n\nUpdated body; still controller-active.\n",
+    );
+    let second = scan_and_register(&opts).unwrap();
+    let again = second.documents.iter().find(|d| d.path == path).unwrap();
+    assert_eq!(again.status, DocumentStatus::Active);
+
+    // Explicit archive is the only path to archived; scanner did not auto-archive.
+    assert!(
+        !second
+            .documents
+            .iter()
+            .any(|d| d.status == DocumentStatus::Archived)
+    );
+    let archived = repo.archive(&again.document_id).unwrap();
+    assert_eq!(archived.status, DocumentStatus::Archived);
+
+    // Rescan preserves archived (non-unknown).
+    write(
+        &root.join(path),
+        "# Handoff\n\nDigest change after archive.\n",
+    );
+    let third = scan_and_register(&opts).unwrap();
+    let after = third
+        .documents
+        .iter()
+        .find(|d| d.path == path)
+        .expect("archived still in full inventory");
+    assert_eq!(
+        after.status,
+        DocumentStatus::Archived,
+        "rescan must not overwrite archived"
+    );
+}
+
+#[test]
+fn indexer_has_no_delete_or_purge_api() {
+    let lib = include_str!("../src/lib.rs");
+    let audit = include_str!("../src/audit.rs");
+    let scan = include_str!("../src/scan.rs");
+    for (name, src) in [("lib", lib), ("audit", audit), ("scan", scan)] {
+        for needle in ["fn delete", "fn purge", "delete_document", "purge_document"] {
+            assert!(
+                !src.contains(needle),
+                "knowledge-indexer {name} must not expose {needle}"
+            );
+        }
+    }
+    // Scanner must not call archive either (candidates only).
+    assert!(!scan.contains(".archive("), "scanner must not auto-archive");
 }

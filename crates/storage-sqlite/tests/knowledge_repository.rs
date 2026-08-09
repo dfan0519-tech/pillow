@@ -1,10 +1,11 @@
-//! K0a knowledge registry: migration, 1→N supersedes, defaults, SSoT path, isolation.
+//! K0a/K1a knowledge registry: migration, 1→N supersedes, archive, defaults,
+//! SSoT path, isolation. No delete/purge API.
 
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
     AddDocumentLink, DocumentLinkRel, DocumentRole, DocumentStatus, KnowledgeError,
-    RegisterDocument, RegisteredBy, SqliteKnowledgeRepository, SqliteProjectRepository,
-    UpdateDocument,
+    ListDocumentsQuery, RegisterDocument, RegisteredBy, SqliteKnowledgeRepository,
+    SqliteProjectRepository, UpdateDocument,
 };
 use rusqlite::Connection;
 
@@ -629,4 +630,206 @@ fn adding_supersedes_link_does_not_auto_change_status() {
         DocumentStatus::Active,
         "K0a must not auto-migrate status when a supersedes link is written"
     );
+}
+
+// ---------------------------------------------------------------------------
+// K1a: archive / unarchive round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn archive_unarchive_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "proj-a");
+    let repo = open_knowledge(&temp);
+
+    let doc = register(
+        &repo,
+        &project_id,
+        "docs/handoff/retire-me.md",
+        DocumentRole::Handoff,
+        Some(DocumentStatus::Active),
+    );
+    assert_eq!(doc.status, DocumentStatus::Active);
+
+    let archived = repo.archive(&doc.document_id).expect("archive");
+    assert_eq!(archived.status, DocumentStatus::Archived);
+    let loaded = repo.get(&doc.document_id).unwrap().unwrap();
+    assert_eq!(loaded.status, DocumentStatus::Archived);
+
+    // Idempotent archive.
+    let again = repo.archive(&doc.document_id).unwrap();
+    assert_eq!(again.status, DocumentStatus::Archived);
+
+    let restored = repo.unarchive(&doc.document_id).expect("unarchive");
+    assert_eq!(
+        restored.status,
+        DocumentStatus::Unknown,
+        "unarchive restores to unknown (explicit follow-up update for stronger status)"
+    );
+    let loaded = repo.get(&doc.document_id).unwrap().unwrap();
+    assert_eq!(loaded.status, DocumentStatus::Unknown);
+
+    // unarchive on non-archived is a no-op (does not invent status).
+    let still = repo.unarchive(&doc.document_id).unwrap();
+    assert_eq!(still.status, DocumentStatus::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// K1a: default list excludes archived; include_archived makes them visible
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_list_excludes_archived_include_flag_shows_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "proj-a");
+    let repo = open_knowledge(&temp);
+
+    let live = register(
+        &repo,
+        &project_id,
+        "docs/handoff/live.md",
+        DocumentRole::Handoff,
+        Some(DocumentStatus::Active),
+    );
+    let old = register(
+        &repo,
+        &project_id,
+        "docs/handoff/old.md",
+        DocumentRole::Handoff,
+        Some(DocumentStatus::Superseded),
+    );
+    repo.archive(&old.document_id).unwrap();
+
+    // Default path — cannot forget to exclude.
+    let default_list = repo.list_by_project(&project_id).unwrap();
+    assert_eq!(default_list.len(), 1);
+    assert_eq!(default_list[0].document_id, live.document_id);
+    assert!(
+        !default_list
+            .iter()
+            .any(|d| d.status == DocumentStatus::Archived)
+    );
+
+    let explicit_default = repo
+        .list_documents(
+            &project_id,
+            ListDocumentsQuery {
+                include_archived: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(explicit_default.len(), 1);
+
+    let with_archived = repo
+        .list_documents(
+            &project_id,
+            ListDocumentsQuery {
+                include_archived: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(with_archived.len(), 2);
+    assert!(
+        with_archived
+            .iter()
+            .any(|d| d.document_id == old.document_id && d.status == DocumentStatus::Archived)
+    );
+
+    // Point lookup still returns archived (explicit id/path is not a default search).
+    let by_id = repo.get(&old.document_id).unwrap().unwrap();
+    assert_eq!(by_id.status, DocumentStatus::Archived);
+    let by_path = repo
+        .get_by_path(&project_id, "docs/handoff/old.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_path.status, DocumentStatus::Archived);
+}
+
+// ---------------------------------------------------------------------------
+// K1a: archive does not clobber non-unknown on *other* docs; rescan preserve
+// is covered in indexer. Here: archive is explicit status write only on target.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn archive_does_not_overwrite_other_docs_non_unknown_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "proj-a");
+    let repo = open_knowledge(&temp);
+
+    let active = register(
+        &repo,
+        &project_id,
+        "docs/handoff/active.md",
+        DocumentRole::Handoff,
+        Some(DocumentStatus::Active),
+    );
+    let evidence = register(
+        &repo,
+        &project_id,
+        "docs/execution/report.md",
+        DocumentRole::Report,
+        Some(DocumentStatus::Evidence),
+    );
+    let target = register(
+        &repo,
+        &project_id,
+        "docs/handoff/old.md",
+        DocumentRole::Handoff,
+        Some(DocumentStatus::Superseded),
+    );
+
+    repo.archive(&target.document_id).unwrap();
+
+    assert_eq!(
+        repo.get(&active.document_id).unwrap().unwrap().status,
+        DocumentStatus::Active
+    );
+    assert_eq!(
+        repo.get(&evidence.document_id).unwrap().unwrap().status,
+        DocumentStatus::Evidence
+    );
+    assert_eq!(
+        repo.get(&target.document_id).unwrap().unwrap().status,
+        DocumentStatus::Archived
+    );
+
+    // Scanner-facing constraint: non-unknown statuses (incl. archived) are only
+    // changed by explicit update/archive/unarchive — not by register defaults.
+    let listed = repo
+        .list_documents(
+            &project_id,
+            ListDocumentsQuery {
+                include_archived: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(listed.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// K1a: no delete / purge entry on the knowledge API surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn knowledge_api_has_no_delete_or_purge_entry() {
+    // Source-level assertion: durable knowledge module must not expose delete
+    // or purge for documents (ADR-0004 §5 — true delete needs approval + receipt).
+    let src = include_str!("../src/knowledge.rs");
+    for needle in [
+        "fn delete",
+        "fn purge",
+        "fn remove_document",
+        "DELETE FROM knowledge_documents",
+        "delete_document",
+        "purge_document",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "knowledge API must not expose {needle}"
+        );
+    }
+    // Positive: archive/unarchive exist (mark + archive only).
+    assert!(src.contains("pub fn archive"));
+    assert!(src.contains("pub fn unarchive"));
+    assert!(src.contains("include_archived"));
 }

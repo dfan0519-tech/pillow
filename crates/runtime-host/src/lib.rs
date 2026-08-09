@@ -7,6 +7,7 @@
 mod delivery;
 mod fake;
 mod fixture;
+mod governance_port;
 mod governed_read;
 mod governed_write;
 mod host;
@@ -16,6 +17,7 @@ mod worker;
 pub use delivery::{BoundedDelivery, DEFAULT_EVENT_QUEUE_CAPACITY};
 pub use fake::FakeRuntimeAdapter;
 pub use fixture::{FAKE_TURN_FIXTURE, FixtureEventLine, load_fixture_file, parse_fixture_jsonl};
+pub use governance_port::GlobalGovernedExecutionPort;
 pub use governed_read::{
     GovernedReadBridgeError, GovernedReadDelivery, GovernedReadReceipt, ProviderToolProposal,
     execute_governed_read,

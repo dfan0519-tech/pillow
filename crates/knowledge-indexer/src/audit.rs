@@ -1,14 +1,17 @@
-//! Audit-only findings. Never deletes, archives, or retires documents.
+//! Audit-only findings. Never deletes, auto-archives, or retires documents.
 //!
-//! Hard policies from the 2026-08-08 inventory audit:
+//! Hard policies from the 2026-08-08 inventory audit + ADR-0004 §5 / K1a:
 //! - `verification` / `decision` zero-inbound → **expected orphans, not problems**
 //! - orphan briefs → **待复核**, never retirement candidates
 //! - zero-inbound is **not** a retirement signal
+//! - retirement candidates = targets of **explicit** supersedes links whose
+//!   superseder is registered **and** the target document is registered
+//!   (`to_document_id` resolved). Scanner only produces this list.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use keeper_storage_sqlite::{
-    DocumentRole, DocumentStatus, KnowledgeDocument, KnowledgeDocumentLink,
+    DocumentLinkRel, DocumentRole, DocumentStatus, KnowledgeDocument, KnowledgeDocumentLink,
 };
 
 use crate::classify::{is_brief_like_path, is_report_like_path, pairing_stem};
@@ -21,16 +24,19 @@ pub struct AuditFinding {
     pub detail: String,
 }
 
-/// Retirement / review buckets — reporting only.
+/// Retirement / review buckets — reporting only (never applied automatically).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RetirementBucket {
-    /// Explicit-supersession targets only (safe automatic mark candidates).
+    /// Targets of explicit supersedes links with registered endpoints.
+    /// Same population as [`retirement_candidates`](Self::retirement_candidates)
+    /// (alias kept for K0b report sections).
     pub explicit_superseded_candidates: Vec<String>,
     /// Briefs with no paired report — review, not retire.
     pub briefs_pending_review: Vec<String>,
     /// Expected orphans (verification/decision) — labeled non-problem.
     pub expected_orphans_non_problem: Vec<String>,
-    /// Must stay empty of verification/decision orphans as retirement.
+    /// Archive candidates only: explicit supersession + registered superseder
+    /// and registered target. Zero-inbound alone never appears here.
     pub retirement_candidates: Vec<String>,
 }
 
@@ -192,44 +198,62 @@ pub fn audit_documents(input: AuditInput) -> AuditReport {
 
     report.inferred_supersession = input.inferred_supersession;
 
-    // Retirement buckets (report-only policy).
-    report.retirement = build_retirement_buckets(&input.documents, &report);
+    // Retirement buckets (report-only policy — never auto-applied).
+    report.retirement = build_retirement_buckets(&input.documents, &input.links, &report);
 
-    let _ = input.links; // reserved for future link-graph audits
     report
 }
 
 fn build_retirement_buckets(
     documents: &[KnowledgeDocument],
+    links: &[KnowledgeDocumentLink],
     report: &AuditReport,
 ) -> RetirementBucket {
     let mut bucket = RetirementBucket::default();
 
-    // Explicit superseded only → safe mark candidates (not auto-applied here).
-    for doc in documents {
-        if doc.status == DocumentStatus::Superseded {
-            bucket.explicit_superseded_candidates.push(doc.path.clone());
+    // K1a: retirement candidates require explicit supersedes evidence with both
+    // endpoints registered (from_document_id always FK; to_document_id Some).
+    // Zero-inbound alone is never enough. Status==superseded alone is not
+    // enough without a resolved supersedes link (avoids manual-status false
+    // positives and free-path claims without a registered target).
+    let id_to_path: HashMap<&str, &str> = documents
+        .iter()
+        .map(|d| (d.document_id.as_str(), d.path.as_str()))
+        .collect();
+    let mut candidate_paths: BTreeSet<String> = BTreeSet::new();
+    for link in links {
+        if link.rel != DocumentLinkRel::Supersedes {
+            continue;
+        }
+        // Superseder must be registered (FK) — skip if from is missing from map
+        // (should not happen under FK, but stay defensive).
+        if !id_to_path.contains_key(link.from_document_id.as_str()) {
+            continue;
+        }
+        let Some(ref to_id) = link.to_document_id else {
+            // Free-path / unresolved target — not a retirement candidate.
+            continue;
+        };
+        if let Some(path) = id_to_path.get(to_id.as_str()) {
+            candidate_paths.insert((*path).to_owned());
         }
     }
-    bucket.explicit_superseded_candidates.sort();
+    bucket.explicit_superseded_candidates = candidate_paths.iter().cloned().collect();
+    bucket.retirement_candidates = bucket.explicit_superseded_candidates.clone();
 
     // Orphan briefs → 待复核, never retirement_candidates.
     for path in &report.unpaired_briefs {
         bucket.briefs_pending_review.push(path.clone());
     }
-    // Also zero-inbound briefs that are paired still aren't retirement.
-    if let Some(briefs) = report.orphans_by_role.get("brief") {
-        for path in briefs {
-            if !bucket.briefs_pending_review.contains(path) {
-                // Paired orphan brief: still not retirement; optional note only.
-                // Keep pending_review for unpaired only per hard policy.
-            }
-        }
-    }
+    // Zero-inbound briefs that are paired still aren't retirement.
+    // Keep pending_review for unpaired only per hard policy.
     bucket.briefs_pending_review.sort();
     bucket.briefs_pending_review.dedup();
 
-    // verification / decision orphans → expected, non-problem.
+    // verification / decision orphans → expected, non-problem. Never candidates
+    // unless they also appear via explicit supersession (table: orphans 永不;
+    // explicit supersession 可以). Zero-inbound verification/decision stay out
+    // of candidates unless a registered superseder points at them.
     for role in ["verification", "decision"] {
         if let Some(list) = report.orphans_by_role.get(role) {
             for path in list {
@@ -239,17 +263,18 @@ fn build_retirement_buckets(
     }
     bucket.expected_orphans_non_problem.sort();
 
-    // retirement_candidates: ONLY explicit superseded (already marked).
-    // Must NEVER include verification/decision orphans or zero-inbound-only.
-    bucket.retirement_candidates = bucket.explicit_superseded_candidates.clone();
-    // Strip any verification/decision that somehow got in (should not).
-    bucket.retirement_candidates.retain(|p| {
-        !documents.iter().any(|d| {
-            d.path == *p
-                && matches!(d.role, DocumentRole::Verification | DocumentRole::Decision)
-                && d.status != DocumentStatus::Superseded
-        })
-    });
+    // Hard strip: zero-inbound-only verification/decision must not sit in
+    // retirement_candidates without an explicit supersedes link. (They only
+    // enter candidate_paths via links, so this is a safety net.)
+    let expected_set: HashSet<&str> = bucket
+        .expected_orphans_non_problem
+        .iter()
+        .map(String::as_str)
+        .collect();
+    // If a path is both expected orphan AND has explicit supersession, keep it
+    // as candidate (explicit evidence wins). If only in expected orphans, it
+    // was never in candidate_paths. No further strip needed for zero-inbound.
+    let _ = expected_set;
 
     bucket
 }
@@ -541,14 +566,32 @@ mod unit_tests {
                 DocumentRole::Handoff,
                 DocumentStatus::Superseded,
             ),
+            doc(
+                "docs/handoff/new.md",
+                DocumentRole::Handoff,
+                DocumentStatus::Unknown,
+            ),
+            // Zero-inbound research — must never become a candidate.
+            doc(
+                "docs/research/lonely.md",
+                DocumentRole::Research,
+                DocumentStatus::Unknown,
+            ),
         ];
+        let links = vec![KnowledgeDocumentLink {
+            link_id: "l1".into(),
+            from_document_id: "docs/handoff/new.md".into(),
+            to_document_id: Some("docs/handoff/old.md".into()),
+            to_path: Some("docs/handoff/old.md".into()),
+            rel: DocumentLinkRel::Supersedes,
+        }];
         let mut contents = HashMap::new();
         for d in &documents {
             contents.insert(d.path.clone(), format!("# {}\n", d.path));
         }
         let report = audit_documents(AuditInput {
             documents,
-            links: vec![],
+            links,
             contents,
             path_content_conflicts: HashMap::new(),
             classify_notes: HashMap::new(),
@@ -570,20 +613,41 @@ mod unit_tests {
                 .iter()
                 .any(|p| p.contains("ADR-0004"))
         );
-        // Retirement candidates may include superseded handoff, never verification orphan.
-        assert!(
-            !report
-                .retirement
-                .retirement_candidates
-                .iter()
-                .any(|p| p.contains("verification") || p.contains("ADR-0004"))
-        );
+        // Retirement candidates require explicit supersedes + registered target;
+        // never verification/decision orphans or zero-inbound-only research.
+        assert!(!report.retirement.retirement_candidates.iter().any(
+            |p| p.contains("verification") || p.contains("ADR-0004") || p.contains("lonely.md")
+        ));
         assert!(
             report
                 .retirement
                 .retirement_candidates
                 .iter()
                 .any(|p| p.contains("handoff/old"))
+        );
+    }
+
+    #[test]
+    fn status_superseded_alone_is_not_retirement_without_link() {
+        let documents = vec![doc(
+            "docs/handoff/manual-superseded.md",
+            DocumentRole::Handoff,
+            DocumentStatus::Superseded,
+        )];
+        let mut contents = HashMap::new();
+        contents.insert(documents[0].path.clone(), "# manual status only\n".into());
+        let report = audit_documents(AuditInput {
+            documents,
+            links: vec![],
+            contents,
+            path_content_conflicts: HashMap::new(),
+            classify_notes: HashMap::new(),
+            digest_changes: vec![],
+            inferred_supersession: vec![],
+        });
+        assert!(
+            report.retirement.retirement_candidates.is_empty(),
+            "status=superseded without resolved supersedes link must not be a candidate"
         );
     }
 }

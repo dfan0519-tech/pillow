@@ -14,12 +14,17 @@ use keeper_agent_protocol::{
     RuntimeEventKind, RuntimeProbe, RuntimeSession, SendTurn, StartSession, WriteProposalState,
     WritePublicErrorCode,
 };
+use keeper_governance_port::testkit::{FixedCancellationProbe, RecordingWriteObserver};
+use keeper_governance_port::{
+    CheckedGovernedOutcome, GovernedExecutionPort, GovernedWriteExecutionError,
+    LifecycleObserverError,
+};
 use keeper_policy::WriteDecision;
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
-    BoundedDelivery, BoundedDeliverySink, GovernedWriteBridgeError, GovernedWriteDelivery,
-    HostConfig, ProtocolGuardSink, ProviderWriteProposal, RuntimeHost, execute_governed_write,
-    is_canonical_grant, recover_write_proposals_with_roots,
+    BoundedDelivery, BoundedDeliverySink, GlobalGovernedExecutionPort, GovernedWriteBridgeError,
+    GovernedWriteDelivery, HostConfig, ProtocolGuardSink, ProviderWriteProposal, RuntimeHost,
+    execute_governed_write, is_canonical_grant, recover_write_proposals_with_roots,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
@@ -1885,5 +1890,71 @@ fn cancel_probe_level_triggered_after_execute_entry_barrier() {
         receipt.provider_error,
         Some(WritePublicErrorCode::Cancelled)
     );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn governance_port_write_preserves_lifecycle_replay_and_observer_failure() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    fs::create_dir_all(fx.root.join("src")).unwrap();
+
+    let port = GlobalGovernedExecutionPort::new();
+    let cancel = FixedCancellationProbe::new();
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+    let decide = thread::spawn(move || {
+        let (proposal_id, grant) = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_write_proposal(
+                &conversation_id,
+                &proposal_id,
+                &grant,
+                WriteDecision::Reject,
+            )
+            .unwrap();
+    });
+
+    let proposal = provider_create("port-write", "src/port.ts", "export {}\n");
+    let mut observer = RecordingWriteObserver::new();
+    let first = port
+        .execute_write(fx.run_id, proposal.clone(), &cancel, &mut observer)
+        .unwrap();
+    decide.join().unwrap();
+    assert_eq!(first.receipt().delivery, GovernedWriteDelivery::Executed);
+    assert_eq!(first.receipt().resolved.state, WriteProposalState::Rejected);
+    assert_eq!(observer.requested_count, 1);
+
+    let replay = port
+        .execute_write(fx.run_id, proposal, &cancel, &mut observer)
+        .unwrap();
+    assert_eq!(replay.receipt().delivery, GovernedWriteDelivery::Replayed);
+    assert_eq!(
+        observer.requested_count, 1,
+        "replay must not invoke the port observer"
+    );
+
+    for call_id in [
+        "port-write-observer-failure-1",
+        "port-write-observer-failure-2",
+    ] {
+        let mut failing = RecordingWriteObserver::new();
+        failing.fail_next(LifecycleObserverError::DeliveryFailed);
+        let error = port
+            .execute_write(
+                fx.run_id,
+                provider_create(call_id, &format!("src/{call_id}.ts"), "x\n"),
+                &cancel,
+                &mut failing,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            GovernedWriteExecutionError::LifecycleDeliveryFailed,
+            "observer failure must stay distinct from ordinary Unavailable"
+        );
+    }
+
     host.shutdown().unwrap();
 }

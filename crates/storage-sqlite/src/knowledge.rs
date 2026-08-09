@@ -1,4 +1,5 @@
-//! Knowledge document registry (K0a) + dispatch/acceptance ledger (K0d).
+//! Knowledge document registry (K0a) + dispatch/acceptance ledger (K0d)
+//! + explicit archive (K1a).
 //!
 //! Durable authority for document role, lifecycle status, multi-valued
 //! supersession / related / implements links, and controller dispatch /
@@ -6,8 +7,15 @@
 //! Path grammar is the `keeper_project::validate_portable_path` SSoT — this
 //! module must not re-implement portable-path rules.
 //!
-//! Status is never auto-migrated: only explicit set/update calls change it.
-//! Default for unclassified registration is [`DocumentStatus::Unknown`].
+//! Status is never auto-migrated: only explicit set/update/archive/unarchive
+//! calls change it. Default for unclassified registration is
+//! [`DocumentStatus::Unknown`].
+//!
+//! **Retirement (ADR-0004 §5 / K1a):** automatic retirement is mark + archive
+//! only. [`SqliteKnowledgeRepository::archive`] / [`unarchive`] are explicit;
+//! list/query defaults **exclude** `archived` so retirement is not cosmetic.
+//! There is **no** delete/purge API — true deletion requires a future approval
+//! path and receipt (intentionally not implemented here).
 //!
 //! **Privacy (K0d red line):** never store lease ids, Keeper session ids, or
 //! machine user-profile paths. Only slot labels (e.g. `grok3`) and portable
@@ -244,6 +252,21 @@ pub struct AddDocumentLink {
     pub to_document_id: Option<String>,
     pub to_path: Option<String>,
     pub rel: DocumentLinkRel,
+}
+
+/// Query options for listing knowledge documents.
+///
+/// **Default excludes archived** (ADR-0004 §5): retirement is real only when
+/// the default retrieval path cannot "forget" to hide archived rows. Callers
+/// that need inventory / rescan / unarchive flows must set
+/// [`include_archived`](ListDocumentsQuery::include_archived) to `true`.
+/// The `false` default is load-bearing, not incidental. It is enforced by
+/// `default_list_excludes_archived_include_flag_shows_them` rather than by the
+/// shape of this impl, so deriving costs nothing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListDocumentsQuery {
+    /// When `false` (default), rows with `status = archived` are omitted.
+    pub include_archived: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -606,30 +629,123 @@ impl SqliteKnowledgeRepository {
             .map_err(map_sqlite)
     }
 
-    /// List all documents for a project (path ASC, then document_id ASC).
+    /// List documents for a project (path ASC, then document_id ASC).
+    ///
+    /// **Excludes `archived` by default** (ADR-0004 §5). Equivalent to
+    /// [`list_documents`](Self::list_documents) with
+    /// [`ListDocumentsQuery::default()`].
     pub fn list_by_project(
         &self,
         project_id: &str,
     ) -> Result<Vec<KnowledgeDocument>, KnowledgeError> {
+        self.list_documents(project_id, ListDocumentsQuery::default())
+    }
+
+    /// List documents for a project with explicit visibility options.
+    ///
+    /// Use `include_archived: true` only for inventory, rescan, or explicit
+    /// recovery paths. Default query surfaces must call
+    /// [`list_by_project`](Self::list_by_project) or pass
+    /// `include_archived: false`.
+    pub fn list_documents(
+        &self,
+        project_id: &str,
+        query: ListDocumentsQuery,
+    ) -> Result<Vec<KnowledgeDocument>, KnowledgeError> {
         validate_project_id(project_id)?;
         let connection = self.connection()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT document_id, project_id, path, role, status, content_digest,
-                        updated_at, registered_by, source_run_id
-                 FROM knowledge_documents
-                 WHERE project_id = ?1
-                 ORDER BY path ASC, document_id ASC",
-            )
-            .map_err(map_sqlite)?;
-        let rows = statement
-            .query_map(params![project_id], document_from_row)
-            .map_err(map_sqlite)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(map_sqlite)?);
+        if query.include_archived {
+            let mut statement = connection
+                .prepare(
+                    "SELECT document_id, project_id, path, role, status, content_digest,
+                            updated_at, registered_by, source_run_id
+                     FROM knowledge_documents
+                     WHERE project_id = ?1
+                     ORDER BY path ASC, document_id ASC",
+                )
+                .map_err(map_sqlite)?;
+            let rows = statement
+                .query_map(params![project_id], document_from_row)
+                .map_err(map_sqlite)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(map_sqlite)?);
+            }
+            Ok(out)
+        } else {
+            // Hard default: status ≠ archived. Callers cannot "forget" the filter.
+            let mut statement = connection
+                .prepare(
+                    "SELECT document_id, project_id, path, role, status, content_digest,
+                            updated_at, registered_by, source_run_id
+                     FROM knowledge_documents
+                     WHERE project_id = ?1 AND status != 'archived'
+                     ORDER BY path ASC, document_id ASC",
+                )
+                .map_err(map_sqlite)?;
+            let rows = statement
+                .query_map(params![project_id], document_from_row)
+                .map_err(map_sqlite)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(map_sqlite)?);
+            }
+            Ok(out)
         }
-        Ok(out)
+    }
+
+    /// Explicit archive (K1a). Sets `status = archived`.
+    ///
+    /// Never automatic — scanners and link writes must not call this. Does not
+    /// delete rows. Idempotent when already archived.
+    pub fn archive(&self, document_id: &str) -> Result<KnowledgeDocument, KnowledgeError> {
+        if document_id.is_empty() {
+            return Err(KnowledgeError::NotFound {
+                document_id: document_id.to_owned(),
+            });
+        }
+        self.update(UpdateDocument {
+            document_id: document_id.to_owned(),
+            role: None,
+            status: Some(DocumentStatus::Archived),
+            content_digest: None,
+            registered_by: None,
+            source_run_id: None,
+        })
+    }
+
+    /// Explicit unarchive (K1a). Restores status to [`DocumentStatus::Unknown`].
+    ///
+    /// Callers that need a stronger lifecycle label must follow with an
+    /// explicit [`update`](Self::update). Does not invent prior status (no
+    /// auto-restore of `active` / `superseded`).
+    pub fn unarchive(&self, document_id: &str) -> Result<KnowledgeDocument, KnowledgeError> {
+        if document_id.is_empty() {
+            return Err(KnowledgeError::NotFound {
+                document_id: document_id.to_owned(),
+            });
+        }
+        let connection = self.connection()?;
+        let current = self
+            .load_by_id_conn(&connection, document_id)?
+            .ok_or_else(|| KnowledgeError::NotFound {
+                document_id: document_id.to_owned(),
+            })?;
+        drop(connection);
+
+        if current.status != DocumentStatus::Archived {
+            // Already live — return as-is (no silent status invention).
+            return Ok(current);
+        }
+
+        self.update(UpdateDocument {
+            document_id: document_id.to_owned(),
+            role: None,
+            status: Some(DocumentStatus::Unknown),
+            content_digest: None,
+            registered_by: None,
+            source_run_id: None,
+        })
     }
 
     /// Insert a multi-valued link. Supports 1→N supersession: call once per

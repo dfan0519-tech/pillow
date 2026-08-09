@@ -17,8 +17,8 @@ pub use exec_proposal::{
 pub use knowledge::{
     AddDocumentLink, DispatchTask, DocumentLinkRel, DocumentRole, DocumentStatus,
     KnowledgeDocument, KnowledgeDocumentLink, KnowledgeError, KnowledgeTask, KnowledgeVerdict,
-    RecordVerdict, RegisterDocument, RegisteredBy, SetTaskStatus, SqliteKnowledgeRepository,
-    TaskStatus, UpdateDocument, VerdictOutcome,
+    ListDocumentsQuery, RecordVerdict, RegisterDocument, RegisteredBy, SetTaskStatus,
+    SqliteKnowledgeRepository, TaskStatus, UpdateDocument, VerdictOutcome,
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,

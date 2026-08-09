@@ -20,12 +20,17 @@ use keeper_agent_protocol::{
     RuntimeEvent, RuntimeEventKind, RuntimeProbe, RuntimeSession, SendTurn, StartSession,
     validate_payload,
 };
+use keeper_governance_port::testkit::{FixedCancellationProbe, RecordingProcessObserver};
+use keeper_governance_port::{
+    CheckedGovernedOutcome, GovernedExecutionPort, GovernedProcessExecutionError,
+    LifecycleObserverError,
+};
 use keeper_policy::{ExecDecision, ExecProposalState};
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
-    GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle, HostConfig,
-    ProviderProcessProposal, RuntimeHost, clear_pre_claim_hook_for_tests, execute_governed_process,
-    set_pre_claim_hook_for_tests,
+    GlobalGovernedExecutionPort, GovernedProcessBridgeError, GovernedProcessDelivery,
+    GovernedProcessLifecycle, HostConfig, ProviderProcessProposal, RuntimeHost,
+    clear_pre_claim_hook_for_tests, execute_governed_process, set_pre_claim_hook_for_tests,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
@@ -1886,4 +1891,68 @@ fn process_event_payloads_never_carry_grant_or_output() {
         let event = RuntimeEvent::new(ProtocolRunId::new(), 1, kind, &v, Utc::now()).unwrap();
         assert_eq!(event.kind, kind);
     }
+}
+
+#[test]
+fn governance_port_process_preserves_lifecycle_replay_and_observer_failure() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    let port = GlobalGovernedExecutionPort::new();
+    let cancel = FixedCancellationProbe::new();
+    let conversation_id = fx.conversation_id.clone();
+    let host2 = Arc::clone(&host);
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&host2, &conversation_id);
+        host2
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+    });
+
+    let proposal = provider_node_version("port-process");
+    let mut observer = RecordingProcessObserver::new();
+    let first = port
+        .execute_process(fx.run_id, proposal.clone(), &cancel, &mut observer)
+        .unwrap();
+    decide.join().unwrap();
+    assert_eq!(first.receipt().delivery, GovernedProcessDelivery::Executed);
+    assert_eq!(first.receipt().state, ExecProposalState::Rejected);
+    assert_eq!(observer.events, vec!["requested", "decided"]);
+    let requested = first.receipt().requested.as_ref().unwrap();
+    assert_eq!(requested.program, "node");
+    assert_eq!(requested.argv, vec!["--version".to_string()]);
+
+    let replay = port
+        .execute_process(fx.run_id, proposal, &cancel, &mut observer)
+        .unwrap();
+    assert_eq!(replay.receipt().delivery, GovernedProcessDelivery::Replayed);
+    assert_eq!(
+        observer.events,
+        vec!["requested", "decided"],
+        "replay must not invoke the port observer"
+    );
+
+    for call_id in [
+        "port-process-observer-failure-1",
+        "port-process-observer-failure-2",
+    ] {
+        let mut failing = RecordingProcessObserver::new();
+        failing.fail_next(LifecycleObserverError::DeliveryFailed);
+        let error = port
+            .execute_process(
+                fx.run_id,
+                provider_node_version(call_id),
+                &cancel,
+                &mut failing,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            GovernedProcessExecutionError::LifecycleDeliveryFailed,
+            "observer failure must stay distinct from ordinary Unavailable"
+        );
+    }
+
+    host.shutdown().unwrap();
 }

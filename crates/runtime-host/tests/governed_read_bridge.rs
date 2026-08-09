@@ -2,7 +2,10 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use keeper_governance_port::CancellationProbe;
+use keeper_governance_port::testkit::FixedCancellationProbe;
+use keeper_governance_port::{
+    CancellationProbe, CheckedGovernedOutcome, GovernedExecutionPort, GovernedReadExecutionError,
+};
 
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId as ProtocolRunId, RuntimeError, RuntimeProbe,
@@ -11,8 +14,8 @@ use keeper_agent_protocol::{
 };
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
-    GovernedReadBridgeError, GovernedReadDelivery, HostConfig, ProviderToolProposal, RuntimeHost,
-    execute_governed_read,
+    GlobalGovernedExecutionPort, GovernedReadBridgeError, GovernedReadDelivery, HostConfig,
+    ProviderToolProposal, RuntimeHost, execute_governed_read,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
@@ -392,5 +395,83 @@ fn cancel_probe_level_triggered_not_entry_snapshot() {
         "level-trigger requires at least two probe reads"
     );
     assert_eq!(receipt.delivery, GovernedReadDelivery::Executed);
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn governance_port_checked_read_outcomes_preserve_bridge_behavior() {
+    let fixture = fixture();
+    fs::write(fixture.root.join("note.txt"), "first").unwrap();
+    let host = RuntimeHost::new_with_governed_reads(
+        Arc::new(IdleAdapter),
+        HostConfig::default(),
+        &fixture.db,
+    )
+    .unwrap();
+    host.register_governed_read_run(
+        fixture.context.run_id(),
+        fixture.context.project_id(),
+        fixture.context.conversation_id(),
+        &fixture.root,
+    )
+    .unwrap();
+
+    let port = GlobalGovernedExecutionPort::new();
+    let cancel = FixedCancellationProbe::new();
+    let first = port
+        .execute_read(
+            fixture.context.run_id(),
+            provider_read("port-read", 64),
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(first.receipt().delivery, GovernedReadDelivery::Executed);
+    assert_eq!(
+        first.receipt().result.state(),
+        ToolExecutionState::Succeeded
+    );
+    assert_eq!(
+        first.receipt().result.output().unwrap()["content"].as_str(),
+        Some("first")
+    );
+
+    fs::write(fixture.root.join("note.txt"), "second").unwrap();
+    let replay = port
+        .execute_read(
+            fixture.context.run_id(),
+            provider_read("port-read", 64),
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(replay.receipt().delivery, GovernedReadDelivery::Replayed);
+    assert_eq!(
+        replay.receipt().result.output().unwrap()["content"].as_str(),
+        Some("first"),
+        "port replay must preserve the bridge's durable result"
+    );
+
+    let invalid = port
+        .execute_read(
+            fixture.context.run_id(),
+            ProviderToolProposal {
+                call_id: "port-invalid".into(),
+                tool_id: "fs.write".into(),
+                tool_version: 1,
+                arguments: json!({"path":"note.txt","content":"no"}),
+            },
+            &cancel,
+        )
+        .unwrap_err();
+    assert_eq!(invalid, GovernedReadExecutionError::InvalidProposal);
+
+    host.release_governed_read_run(fixture.context.run_id());
+    let unbound = port
+        .execute_read(
+            fixture.context.run_id(),
+            provider_read("port-unbound", 64),
+            &cancel,
+        )
+        .unwrap_err();
+    assert_eq!(unbound, GovernedReadExecutionError::RunNotBound);
     host.shutdown().unwrap();
 }
