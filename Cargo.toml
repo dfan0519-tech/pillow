@@ -5,6 +5,7 @@ members = [
   "crates/adapter-grok-acp",
   "crates/agent-protocol",
   "crates/git-executor",
+  "crates/governance-port",
   "crates/kernel-policy",
   "crates/kernel-project",
   "crates/kernel-resource",

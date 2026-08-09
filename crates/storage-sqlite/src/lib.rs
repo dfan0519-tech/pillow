@@ -15,9 +15,10 @@ pub use exec_proposal::{
     MAX_RUN_LEASE_MS, SqliteExecProposalRepository, StoredExecProposal,
 };
 pub use knowledge::{
-    AddDocumentLink, DocumentLinkRel, DocumentRole, DocumentStatus, KnowledgeDocument,
-    KnowledgeDocumentLink, KnowledgeError, RegisterDocument, RegisteredBy,
-    SqliteKnowledgeRepository, UpdateDocument,
+    AddDocumentLink, DispatchTask, DocumentLinkRel, DocumentRole, DocumentStatus,
+    KnowledgeDocument, KnowledgeDocumentLink, KnowledgeError, KnowledgeTask, KnowledgeVerdict,
+    RecordVerdict, RegisterDocument, RegisteredBy, SetTaskStatus, SqliteKnowledgeRepository,
+    TaskStatus, UpdateDocument, VerdictOutcome,
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,

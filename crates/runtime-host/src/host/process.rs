@@ -207,6 +207,9 @@ struct BoundProcessRun {
     gateway: Arc<GovernedProcessToolGateway>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+type PreClaimHook = Box<dyn FnMut(&str) + Send>;
+
 struct LiveProcessEntry {
     owner: Uuid,
     run_id: RunId,
@@ -239,6 +242,11 @@ struct LiveProcessEntry {
     decided_delivered: bool,
     started_delivered: bool,
     waiter_notified: bool,
+    observer_delivery_in_progress: bool,
+    observer_failure_cleanup_in_progress: bool,
+    observer_quarantine_deferred: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pre_claim_hook: Option<PreClaimHook>,
 }
 
 impl std::fmt::Debug for LiveProcessEntry {
@@ -806,6 +814,11 @@ pub fn execute_governed_process(
                 decided_delivered: false,
                 started_delivered: false,
                 waiter_notified: false,
+                observer_delivery_in_progress: false,
+                observer_failure_cleanup_in_progress: false,
+                observer_quarantine_deferred: false,
+                #[cfg(any(test, feature = "test-support"))]
+                pre_claim_hook: None,
             },
         );
     }
@@ -861,9 +874,16 @@ fn wait_for_resolution(
         if let Some(decided) = pending_decided {
             if let Some(entry) = guard.live.get_mut(proposal_id) {
                 entry.decided_delivered = true;
+                entry.observer_delivery_in_progress = true;
             }
             drop(guard);
-            on_lifecycle(GovernedProcessLifecycle::Decided(&decided))?;
+            if let Err(error) = on_lifecycle(GovernedProcessLifecycle::Decided(&decided)) {
+                fail_closed_after_observer_failure(proposal_id, bound);
+                return Err(error);
+            }
+            if finish_observer_delivery(proposal_id, bound) {
+                return Err(GovernedProcessBridgeError::Gateway);
+            }
             continue;
         }
 
@@ -878,9 +898,16 @@ fn wait_for_resolution(
         if let Some(started) = pending_started {
             if let Some(entry) = guard.live.get_mut(proposal_id) {
                 entry.started_delivered = true;
+                entry.observer_delivery_in_progress = true;
             }
             drop(guard);
-            on_lifecycle(GovernedProcessLifecycle::Started(&started))?;
+            if let Err(error) = on_lifecycle(GovernedProcessLifecycle::Started(&started)) {
+                fail_closed_after_observer_failure(proposal_id, bound);
+                return Err(error);
+            }
+            if finish_observer_delivery(proposal_id, bound) {
+                return Err(GovernedProcessBridgeError::Gateway);
+            }
             continue;
         }
 
@@ -1081,22 +1108,163 @@ fn fail_closed_after_reserve(proposal_id: &str, bound: &BoundProcessRun) {
         proposal_id,
     );
     if let Ok(mut guard) = coordinator().state.lock() {
-        if let Some(entry) = guard.live.remove(proposal_id) {
-            guard.pending_by_run.remove(&entry.run_id);
+        remove_live_entry_and_pending(&mut guard, proposal_id);
+        coordinator().cv.notify_all();
+    }
+}
+
+/// Fail closed after a post-commit lifecycle observer rejects delivery.
+///
+/// Pending/approved proposals can be interrupted directly. A started proposal
+/// is already durably `Running`, so first cancel its supervised execution and
+/// wait for that owner path to persist a real terminal receipt. Live/pending
+/// authority is released only after durable terminal truth is observable.
+fn fail_closed_after_observer_failure(proposal_id: &str, bound: &BoundProcessRun) {
+    let process_cancel = coordinator().state.lock().ok().and_then(|mut guard| {
+        let entry = guard.live.get_mut(proposal_id)?;
+        if entry.owner != bound.owner || entry.run_id != bound.context.run_id() {
+            return None;
+        }
+        entry.raw_grant.clear();
+        entry.observer_delivery_in_progress = false;
+        entry.observer_failure_cleanup_in_progress = true;
+        Some(entry.process_cancel.clone())
+    });
+    if let Some(process_cancel) = process_cancel {
+        process_cancel.cancel();
+    }
+
+    let interrupted = bound
+        .gateway
+        .interrupt_proposal(
+            &bound.capability,
+            bound.context.conversation_id(),
+            proposal_id,
+        )
+        .is_ok_and(|row| is_exec_terminal(row.state));
+
+    if !interrupted {
+        wait_for_durable_observer_failure_terminal(proposal_id, bound);
+    }
+
+    if let Ok(mut guard) = coordinator().state.lock() {
+        let owned = guard.live.get(proposal_id).is_some_and(|entry| {
+            entry.owner == bound.owner && entry.run_id == bound.context.run_id()
+        });
+        if owned {
+            remove_live_entry_and_pending(&mut guard, proposal_id);
         }
         coordinator().cv.notify_all();
     }
 }
 
+/// Complete one successful lock-free observer delivery.
+///
+/// A concurrent decision/execution failure may have requested quarantine while
+/// the callback was running. Preserve the pre-fix public `Gateway` result, but
+/// defer removal until the callback has returned so an error can instead enter
+/// the durable observer-failure cleanup path.
+fn finish_observer_delivery(proposal_id: &str, bound: &BoundProcessRun) -> bool {
+    let Ok(mut guard) = coordinator().state.lock() else {
+        return false;
+    };
+    let Some(entry) = guard.live.get_mut(proposal_id) else {
+        return false;
+    };
+    if entry.owner != bound.owner || entry.run_id != bound.context.run_id() {
+        return false;
+    }
+    entry.observer_delivery_in_progress = false;
+    if !entry.observer_quarantine_deferred {
+        return false;
+    }
+    remove_live_entry_and_pending(&mut guard, proposal_id);
+    coordinator().cv.notify_all();
+    true
+}
+
+fn wait_for_durable_observer_failure_terminal(proposal_id: &str, bound: &BoundProcessRun) {
+    let coord = coordinator();
+    // Deliberately no wall-clock deadline: releasing the single-flight slot
+    // before a real terminal is proven would permit overlapping authority.
+    loop {
+        let durable = bound.gateway.get_for_owner(
+            &bound.capability,
+            bound.context.conversation_id(),
+            proposal_id,
+        );
+        if let Ok(Some(row)) = durable {
+            if is_exec_terminal(row.state) {
+                return;
+            }
+            if matches!(
+                row.state,
+                ExecProposalState::PendingApproval | ExecProposalState::Approved
+            ) && bound
+                .gateway
+                .interrupt_proposal(
+                    &bound.capability,
+                    bound.context.conversation_id(),
+                    proposal_id,
+                )
+                .is_ok_and(|row| is_exec_terminal(row.state))
+            {
+                return;
+            }
+        }
+
+        let Ok(mut guard) = coord.state.lock() else {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        if let Some(entry) = guard.live.get_mut(proposal_id)
+            && entry.owner == bound.owner
+            && entry.run_id == bound.context.run_id()
+        {
+            entry.raw_grant.clear();
+            entry.process_cancel.cancel();
+            if entry
+                .terminal
+                .as_ref()
+                .is_some_and(|row| is_exec_terminal(row.state))
+            {
+                return;
+            }
+        }
+        let _ = coord.cv.wait_timeout(guard, Duration::from_millis(50));
+    }
+}
+
+fn remove_live_entry_and_pending(guard: &mut CoordinatorState, proposal_id: &str) {
+    if let Some(entry) = guard.live.remove(proposal_id)
+        && guard
+            .pending_by_run
+            .get(&entry.run_id)
+            .is_some_and(|pending| pending == proposal_id)
+    {
+        guard.pending_by_run.remove(&entry.run_id);
+    }
+}
+
 fn quarantine_live(proposal_id: &str) {
-    take_live_entry(proposal_id);
+    if let Ok(mut guard) = coordinator().state.lock() {
+        if let Some(entry) = guard.live.get_mut(proposal_id)
+            && (entry.observer_delivery_in_progress || entry.observer_failure_cleanup_in_progress)
+        {
+            entry.raw_grant.clear();
+            entry.process_cancel.cancel();
+            entry.observer_quarantine_deferred = true;
+            coordinator().cv.notify_all();
+            return;
+        }
+        remove_live_entry_and_pending(&mut guard, proposal_id);
+        coordinator().cv.notify_all();
+    }
 }
 
 fn take_live_entry(proposal_id: &str) {
     if let Ok(mut guard) = coordinator().state.lock() {
-        if let Some(entry) = guard.live.remove(proposal_id) {
-            guard.pending_by_run.remove(&entry.run_id);
-        }
+        remove_live_entry_and_pending(&mut guard, proposal_id);
         coordinator().cv.notify_all();
     }
 }
@@ -1696,33 +1864,43 @@ pub fn force_live_process_expiry_for_tests(owner: Uuid, proposal_id: &str) -> bo
     false
 }
 
+/// Install a proposal-scoped, one-shot pre-claim hook (test builds only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_pre_claim_hook_for_tests(proposal_id: &str, hook: Box<dyn FnMut(&str) + Send>) -> bool {
+    let Ok(mut guard) = coordinator().state.lock() else {
+        return false;
+    };
+    let Some(entry) = guard.live.get_mut(proposal_id) else {
+        return false;
+    };
+    entry.pre_claim_hook = Some(hook);
+    true
+}
+
+/// Clear a proposal-scoped pre-claim hook (test builds only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_pre_claim_hook_for_tests(proposal_id: &str) -> bool {
+    let Ok(mut guard) = coordinator().state.lock() else {
+        return false;
+    };
+    let Some(entry) = guard.live.get_mut(proposal_id) else {
+        return false;
+    };
+    entry.pre_claim_hook = None;
+    true
+}
+
 /// Test seam: run after durable approve, before one-shot claim/execute.
 ///
-/// Used to force claim Busy/Conflict without changing the decide blocking model.
-/// One-shot: taken and cleared on the next approve path.
-#[cfg(any(test, feature = "test-support"))]
-static PRE_CLAIM_HOOK: Mutex<Option<Box<dyn FnMut(&str) + Send>>> = Mutex::new(None);
-
-/// Install a one-shot pre-claim hook (test builds only).
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_pre_claim_hook_for_tests(hook: Box<dyn FnMut(&str) + Send>) {
-    if let Ok(mut guard) = PRE_CLAIM_HOOK.lock() {
-        *guard = Some(hook);
-    }
-}
-
-/// Clear any installed pre-claim hook (test builds only).
-#[cfg(any(test, feature = "test-support"))]
-pub fn clear_pre_claim_hook_for_tests() {
-    if let Ok(mut guard) = PRE_CLAIM_HOOK.lock() {
-        *guard = None;
-    }
-}
-
+/// The hook lives on the target proposal, so parallel approve tests cannot
+/// consume it. It is taken under the coordinator lock and invoked lock-free.
 #[cfg(any(test, feature = "test-support"))]
 fn take_pre_claim_hook_for_tests(proposal_id: &str) {
-    let mut hook = match PRE_CLAIM_HOOK.lock() {
-        Ok(mut guard) => guard.take(),
+    let mut hook = match coordinator().state.lock() {
+        Ok(mut guard) => guard
+            .live
+            .get_mut(proposal_id)
+            .and_then(|entry| entry.pre_claim_hook.take()),
         Err(_) => None,
     };
     if let Some(ref mut hook) = hook {

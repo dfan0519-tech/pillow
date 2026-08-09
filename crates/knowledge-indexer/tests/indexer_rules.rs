@@ -383,7 +383,7 @@ fn verification_decision_orphans_not_retirement_candidates() {
 #[test]
 fn path_validation_uses_ssot_rejects_com_superscript() {
     // U+00B9 SUPERSCRIPT ONE — same device-name form as kernel-project contract.
-    let bad = format!("docs/COM\u{00b9}/note.md");
+    let bad = "docs/COM\u{00b9}/note.md".to_string();
     let ssot = validate_portable_path(&bad);
     let via_indexer = validate_path_ssot(&bad);
     assert!(ssot.is_err(), "SSoT must reject COM\\u{{00b9}}");
@@ -525,6 +525,8 @@ fn render_from_scan_is_pure_and_covers_buckets() {
         documents: result.documents.clone(),
         links: result.links.clone(),
         audit: result.report.clone(),
+        tasks: vec![],
+        verdicts: vec![],
     });
     assert_eq!(md, again, "render must be pure");
 
@@ -566,6 +568,8 @@ fn render_empty_registry_honest() {
         documents: vec![],
         links: vec![],
         audit: keeper_knowledge_indexer::AuditReport::default(),
+        tasks: vec![],
+        verdicts: vec![],
     });
     assert!(md.contains("0"));
     assert!(

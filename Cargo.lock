@@ -1954,6 +1954,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper-governance-port"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keeper-agent-protocol",
+ "keeper-policy",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "keeper-knowledge-indexer"
 version = "0.1.0"
 dependencies = [

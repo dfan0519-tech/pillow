@@ -12,6 +12,7 @@ const RUN_EVENTS_PROCESS_KINDS_MIGRATION: &str =
     include_str!("../migrations/0008_run_events_process_kinds.sql");
 const SETTINGS_MIGRATION: &str = include_str!("../migrations/0009_settings.sql");
 const KNOWLEDGE_MIGRATION: &str = include_str!("../migrations/0010_knowledge.sql");
+const KNOWLEDGE_TASKS_MIGRATION: &str = include_str!("../migrations/0011_knowledge_tasks.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -21,6 +22,7 @@ const KNOWLEDGE_MIGRATION: &str = include_str!("../migrations/0010_knowledge.sql
 /// still rejects any of the four C4 process event kinds.
 /// Migration 0009 adds non-secret settings (global + project scopes).
 /// Migration 0010 adds the knowledge document registry and multi-valued links.
+/// Migration 0011 adds the dispatch / acceptance ledger (tasks + verdicts).
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -32,6 +34,7 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     upgrade_run_events_process_kinds(connection)?;
     connection.execute_batch(SETTINGS_MIGRATION)?;
     connection.execute_batch(KNOWLEDGE_MIGRATION)?;
+    connection.execute_batch(KNOWLEDGE_TASKS_MIGRATION)?;
     Ok(())
 }
 

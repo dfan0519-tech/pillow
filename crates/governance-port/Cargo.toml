@@ -1,0 +1,18 @@
+[package]
+name = "keeper-governance-port"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adapter-facing governed execution port: traits, closed errors, opaque outcomes"
+
+[dependencies]
+# First-party only. `keeper-policy` is required to name `ExecProposalState` /
+# `ExecDecision` for closed process-receipt validation; those types appear on
+# agent-protocol public fields but are not re-exported from that crate.
+keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-policy = { path = "../kernel-policy" }
+
+[dev-dependencies]
+chrono.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

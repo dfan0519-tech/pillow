@@ -24,11 +24,13 @@ use keeper_policy::{ExecDecision, ExecProposalState};
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
     GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle, HostConfig,
-    ProviderProcessProposal, RuntimeHost, execute_governed_process,
+    ProviderProcessProposal, RuntimeHost, clear_pre_claim_hook_for_tests, execute_governed_process,
+    set_pre_claim_hook_for_tests,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    SqliteConversationRepository, SqliteExecProposalRepository, SqliteProjectRepository,
+    ExecRunClaimOutcome, ExecTerminalReceipt, SqliteConversationRepository,
+    SqliteExecProposalRepository, SqliteProjectRepository,
 };
 use serde_json::json;
 
@@ -1067,6 +1069,467 @@ fn force_expiry_seam_is_cfg_gated_not_ordinary_product_export() {
 }
 
 // ── B2: in-flight lifecycle emit (decided / started before terminal) ────────
+
+#[test]
+fn decided_observer_failure_before_claim_is_durable_and_restart_safe() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    let (requested_tx, requested_rx) = mpsc::sync_channel(1);
+    let (hook_entered_tx, hook_entered_rx) = mpsc::sync_channel(1);
+    let (release_hook_tx, release_hook_rx) = mpsc::sync_channel(1);
+    let (callback_failed_tx, callback_failed_rx) = mpsc::sync_channel(1);
+    let run_id = fx.run_id;
+    let mut release_hook_rx = Some(release_hook_rx);
+
+    let waiter = thread::spawn(move || {
+        execute_governed_process(
+            run_id,
+            provider_node_version("call-decided-observer-failure"),
+            &AtomicBool::new(false),
+            move |event| match event {
+                GovernedProcessLifecycle::Requested(requested) => {
+                    let hook_entered_tx = hook_entered_tx.clone();
+                    let release_hook_rx = release_hook_rx
+                        .take()
+                        .expect("requested lifecycle must be delivered once");
+                    assert!(set_pre_claim_hook_for_tests(
+                        &requested.proposal_id,
+                        Box::new(move |_| {
+                            hook_entered_tx.send(()).expect("signal pre-claim hook");
+                            release_hook_rx
+                                .recv_timeout(Duration::from_secs(10))
+                                .expect("release pre-claim hook");
+                        }),
+                    ));
+                    requested_tx
+                        .send(requested.proposal_id.clone())
+                        .expect("signal requested proposal");
+                    Ok(())
+                }
+                GovernedProcessLifecycle::Decided(_) => {
+                    callback_failed_tx
+                        .send(())
+                        .expect("signal decided observer failure");
+                    Err(GovernedProcessBridgeError::Gateway)
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    panic!("pre-claim barrier must prevent ProcessStarted")
+                }
+            },
+        )
+    });
+
+    let proposal_id = requested_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("requested lifecycle");
+    let decide_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let proposal_for_decide = proposal_id.clone();
+    let decide = thread::spawn(move || {
+        decide_host.decide_process_proposal(
+            &conversation_id,
+            &proposal_for_decide,
+            ExecDecision::ApproveOnce,
+        )
+    });
+
+    hook_entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("durable approve reached pre-claim hook");
+    callback_failed_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("decided observer returned failure");
+    let waiter_result = waiter.join().expect("waiter thread");
+
+    let repository = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let durable_before_claim_release = repository.get(&proposal_id).unwrap().unwrap();
+    let history_before_claim_release = repository.history(&proposal_id).unwrap();
+    let live_before_claim_release = host.live_process_authority_count();
+    let pending_before_claim_release = host.pending_process_run_count();
+
+    release_hook_tx.send(()).expect("release decision thread");
+    let decide_result = decide.join().expect("decision thread");
+    let _ = clear_pre_claim_hook_for_tests(&proposal_id);
+    let durable_after_decide = repository.get(&proposal_id).unwrap().unwrap();
+    let history_after_decide = repository.history(&proposal_id).unwrap();
+
+    host.shutdown().unwrap();
+    drop(host);
+
+    let host_after_restart =
+        RuntimeHost::new_with_governed_tools(Arc::new(IdleAdapter), HostConfig::default(), &fx.db)
+            .unwrap();
+    let recovered = host_after_restart
+        .recover_process_proposals(Utc::now())
+        .unwrap();
+    register(&host_after_restart, &fx);
+    let replay_callback_count = AtomicUsize::new(0);
+    let replay = execute_governed_process(
+        fx.run_id,
+        provider_node_version("call-decided-observer-failure"),
+        &AtomicBool::new(false),
+        |_| {
+            replay_callback_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .unwrap();
+    host_after_restart.shutdown().unwrap();
+
+    assert!(matches!(
+        waiter_result,
+        Err(GovernedProcessBridgeError::Gateway)
+    ));
+    assert_eq!(
+        durable_before_claim_release.state,
+        ExecProposalState::Interrupted,
+        "observer failure must durably interrupt before claim"
+    );
+    assert_eq!(
+        history_before_claim_release,
+        vec![
+            ExecProposalState::PendingApproval,
+            ExecProposalState::Approved,
+            ExecProposalState::Interrupted,
+        ]
+    );
+    assert_eq!(live_before_claim_release, 0);
+    assert_eq!(pending_before_claim_release, 0);
+    assert_eq!(decide_result.unwrap().state, ExecProposalState::Interrupted);
+    assert_eq!(durable_after_decide.state, ExecProposalState::Interrupted);
+    assert_eq!(history_after_decide, history_before_claim_release);
+    assert!(recovered.is_empty(), "restart must find no live authority");
+    assert_eq!(replay.delivery, GovernedProcessDelivery::Replayed);
+    assert_eq!(replay.state, ExecProposalState::Interrupted);
+    assert_eq!(replay_callback_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn started_observer_failure_waits_for_real_terminal_before_clearing_authority() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let sentinel = fx.root.join("release-started-observer-failure");
+    let run_id = fx.run_id;
+    let (started_failed_tx, started_failed_rx) = mpsc::sync_channel(1);
+
+    let waiter = thread::spawn(move || {
+        execute_governed_process(
+            run_id,
+            provider_node_print_hold_until_sentinel(
+                "call-started-observer-failure",
+                "STARTED_FAILURE",
+                &sentinel,
+            ),
+            &AtomicBool::new(false),
+            move |event| match event {
+                GovernedProcessLifecycle::Requested(_) | GovernedProcessLifecycle::Decided(_) => {
+                    Ok(())
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    started_failed_tx
+                        .send(())
+                        .expect("signal started observer failure");
+                    Err(GovernedProcessBridgeError::ShutDown)
+                }
+            },
+        )
+    });
+
+    let proposal_id = wait_live_pending(&host, &fx.conversation_id);
+    let decide_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let proposal_for_decide = proposal_id.clone();
+    let decide = thread::spawn(move || {
+        decide_host.decide_process_proposal(
+            &conversation_id,
+            &proposal_for_decide,
+            ExecDecision::ApproveOnce,
+        )
+    });
+
+    started_failed_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("claim-confirmed started observer failure");
+    let waiter_result = waiter.join().expect("waiter thread");
+    let repository = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let durable_after_callback = repository.get(&proposal_id).unwrap().unwrap();
+    let output_after_callback = host
+        .open_process_output(&fx.conversation_id, &proposal_id)
+        .unwrap();
+    let live_after_callback = host.live_process_authority_count();
+    let pending_after_callback = host.pending_process_run_count();
+
+    fs::write(fx.root.join("release-started-observer-failure"), b"release").unwrap();
+    let decide_result = decide.join().expect("decision thread");
+    let durable_after_decide = repository.get(&proposal_id).unwrap().unwrap();
+    let history = repository.history(&proposal_id).unwrap();
+    host.shutdown().unwrap();
+
+    assert!(matches!(
+        waiter_result,
+        Err(GovernedProcessBridgeError::ShutDown)
+    ));
+    assert_eq!(
+        durable_after_callback.state,
+        ExecProposalState::Cancelled,
+        "started observer failure must await the runner's durable terminal"
+    );
+    assert_eq!(durable_after_callback.cancelled, Some(true));
+    assert!(
+        !output_after_callback.live_retained,
+        "started failure cleanup must remove the live entry"
+    );
+    assert_eq!(live_after_callback, 0);
+    assert_eq!(pending_after_callback, 0);
+    assert_eq!(decide_result.unwrap().state, ExecProposalState::Cancelled);
+    assert_eq!(durable_after_decide.state, ExecProposalState::Cancelled);
+    assert_eq!(
+        history,
+        vec![
+            ExecProposalState::PendingApproval,
+            ExecProposalState::Approved,
+            ExecProposalState::Running,
+            ExecProposalState::Cancelled,
+        ]
+    );
+}
+
+#[test]
+fn rejected_decided_observer_failure_preserves_terminal_and_releases_busy_slot() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let run_id = fx.run_id;
+
+    let waiter = thread::spawn(move || {
+        execute_governed_process(
+            run_id,
+            provider_node_version("call-rejected-observer-failure"),
+            &AtomicBool::new(false),
+            |event| match event {
+                GovernedProcessLifecycle::Decided(_) => Err(GovernedProcessBridgeError::Gateway),
+                GovernedProcessLifecycle::Requested(_) | GovernedProcessLifecycle::Started(_) => {
+                    Ok(())
+                }
+            },
+        )
+    });
+
+    let proposal_id = wait_live_pending(&host, &fx.conversation_id);
+    host.decide_process_proposal(&fx.conversation_id, &proposal_id, ExecDecision::Reject)
+        .unwrap();
+    let waiter_result = waiter.join().expect("waiter thread");
+    let repository = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let durable = repository.get(&proposal_id).unwrap().unwrap();
+    let history = repository.history(&proposal_id).unwrap();
+    let output = host
+        .open_process_output(&fx.conversation_id, &proposal_id)
+        .unwrap();
+    let pending_after_callback = host.pending_process_run_count();
+
+    let second = execute_governed_process(
+        fx.run_id,
+        provider_node_version("call-after-rejected-observer-failure"),
+        &AtomicBool::new(true),
+        |_| Ok(()),
+    );
+    host.shutdown().unwrap();
+
+    assert!(matches!(
+        waiter_result,
+        Err(GovernedProcessBridgeError::Gateway)
+    ));
+    assert_eq!(durable.state, ExecProposalState::Rejected);
+    assert_eq!(
+        history,
+        vec![
+            ExecProposalState::PendingApproval,
+            ExecProposalState::Rejected,
+        ],
+        "cleanup must not fabricate a replacement terminal"
+    );
+    assert!(
+        !output.live_retained,
+        "terminal output must come from durable storage after live cleanup"
+    );
+    assert_eq!(pending_after_callback, 0);
+    assert_eq!(second.unwrap().state, ExecProposalState::Cancelled);
+}
+
+#[test]
+fn observer_failure_keeps_run_busy_until_existing_claim_has_a_durable_terminal() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    let (requested_tx, requested_rx) = mpsc::sync_channel(1);
+    let (hook_entered_tx, hook_entered_rx) = mpsc::sync_channel(1);
+    let (release_hook_tx, release_hook_rx) = mpsc::sync_channel(1);
+    let (callback_entered_tx, callback_entered_rx) = mpsc::sync_channel(1);
+    let (release_callback_tx, release_callback_rx) = mpsc::sync_channel(1);
+    let run_id = fx.run_id;
+    let mut release_hook_rx = Some(release_hook_rx);
+    let mut release_callback_rx = Some(release_callback_rx);
+
+    let waiter = thread::spawn(move || {
+        execute_governed_process(
+            run_id,
+            provider_node_version("call-observer-failure-busy-owner"),
+            &AtomicBool::new(false),
+            move |event| match event {
+                GovernedProcessLifecycle::Requested(requested) => {
+                    let hook_entered_tx = hook_entered_tx.clone();
+                    let release_hook_rx = release_hook_rx
+                        .take()
+                        .expect("requested lifecycle must be delivered once");
+                    assert!(set_pre_claim_hook_for_tests(
+                        &requested.proposal_id,
+                        Box::new(move |_| {
+                            hook_entered_tx.send(()).expect("signal pre-claim hook");
+                            release_hook_rx
+                                .recv_timeout(Duration::from_secs(10))
+                                .expect("release pre-claim hook");
+                        }),
+                    ));
+                    requested_tx
+                        .send(requested.proposal_id.clone())
+                        .expect("signal requested proposal");
+                    Ok(())
+                }
+                GovernedProcessLifecycle::Decided(_) => {
+                    callback_entered_tx
+                        .send(())
+                        .expect("signal blocked decided callback");
+                    release_callback_rx
+                        .take()
+                        .expect("decided callback must be delivered once")
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("release decided callback");
+                    Err(GovernedProcessBridgeError::Gateway)
+                }
+                GovernedProcessLifecycle::Started(_) => {
+                    panic!("busy claim must not advertise a local start")
+                }
+            },
+        )
+    });
+
+    let proposal_id = requested_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("requested lifecycle");
+    let decide_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let proposal_for_decide = proposal_id.clone();
+    let decide = thread::spawn(move || {
+        decide_host.decide_process_proposal(
+            &conversation_id,
+            &proposal_for_decide,
+            ExecDecision::ApproveOnce,
+        )
+    });
+
+    hook_entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("durable approve reached pre-claim hook");
+    callback_entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("decided callback reached deterministic barrier");
+    let repository = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let external_owner = "observer-failure-existing-owner";
+    let claim = repository
+        .claim_run(&proposal_id, external_owner, 60_000, Utc::now())
+        .unwrap();
+    let claim_debug = format!("{claim:?}");
+    if !matches!(claim, ExecRunClaimOutcome::Claimed(_)) {
+        release_hook_tx.send(()).expect("release decision thread");
+        release_callback_tx
+            .send(())
+            .expect("release decided callback");
+        let _ = decide.join();
+        let _ = waiter.join();
+        host.shutdown().unwrap();
+        panic!("external claim must win before local claim: {claim_debug}");
+    }
+
+    release_hook_tx.send(()).expect("release decision thread");
+    let decide_result = decide.join().expect("decision thread");
+    let during_cleanup = execute_governed_process(
+        fx.run_id,
+        provider_node_version("call-during-observer-failure-cleanup"),
+        &AtomicBool::new(true),
+        |_| Ok(()),
+    );
+    let live_during_cleanup = host.live_process_authority_count();
+    let pending_during_cleanup = host.pending_process_run_count();
+
+    let empty_sha256 = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    repository
+        .complete_run(
+            &proposal_id,
+            external_owner,
+            ExecProposalState::Cancelled,
+            &ExecTerminalReceipt {
+                exit_code: None,
+                duration_ms: 0,
+                stdout_sha256: empty_sha256.into(),
+                stderr_sha256: empty_sha256.into(),
+                captured_bytes: 0,
+                truncated: false,
+                encoding_lossy: false,
+                cancelled: true,
+                timed_out: false,
+            },
+            Utc::now(),
+        )
+        .unwrap();
+
+    release_callback_tx
+        .send(())
+        .expect("release decided callback");
+    let waiter_result = waiter.join().expect("waiter thread");
+    let after_cleanup = execute_governed_process(
+        fx.run_id,
+        provider_node_version("call-after-observer-failure-cleanup"),
+        &AtomicBool::new(true),
+        |_| Ok(()),
+    );
+    let durable = repository.get(&proposal_id).unwrap().unwrap();
+    let history = repository.history(&proposal_id).unwrap();
+    let live_after_cleanup = host.live_process_authority_count();
+    let pending_after_cleanup = host.pending_process_run_count();
+    host.shutdown().unwrap();
+
+    assert!(matches!(
+        decide_result,
+        Err(GovernedProcessBridgeError::Busy)
+    ));
+    assert!(matches!(
+        during_cleanup,
+        Err(GovernedProcessBridgeError::Busy)
+    ));
+    assert_eq!(live_during_cleanup, 1);
+    assert_eq!(pending_during_cleanup, 1);
+    assert!(matches!(
+        waiter_result,
+        Err(GovernedProcessBridgeError::Gateway)
+    ));
+    assert_eq!(durable.state, ExecProposalState::Cancelled);
+    assert_eq!(
+        history,
+        vec![
+            ExecProposalState::PendingApproval,
+            ExecProposalState::Approved,
+            ExecProposalState::Running,
+            ExecProposalState::Cancelled,
+        ]
+    );
+    assert_eq!(live_after_cleanup, 0);
+    assert_eq!(pending_after_cleanup, 0);
+    assert_eq!(after_cleanup.unwrap().state, ExecProposalState::Cancelled);
+}
 
 #[test]
 fn in_flight_started_is_observable_before_terminal() {

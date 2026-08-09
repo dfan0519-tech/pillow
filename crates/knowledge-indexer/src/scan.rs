@@ -228,10 +228,15 @@ pub fn scan_and_register(options: &ScanOptions) -> Result<ScanResult, ScanError>
         inferred_supersession: all_inferred.clone(),
     });
     let report_markdown = format_audit_report(&report);
+    // K0d ledger rows (empty when scan DB has no dispatch/acceptance writes).
+    let tasks = repo.list_tasks_by_project(&project_id)?;
+    let verdicts = repo.list_verdicts_by_project(&project_id)?;
     let handoff_markdown = render_status_view(&RenderInput {
         documents: documents.clone(),
         links: links.clone(),
         audit: report.clone(),
+        tasks,
+        verdicts,
     });
 
     Ok(ScanResult {
