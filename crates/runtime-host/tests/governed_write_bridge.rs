@@ -1823,3 +1823,67 @@ fn cancel_arbitration_blocks_success_ordinary_and_duplicate_safe_resolution() {
         assert_eq!(cancelled, 1, "exactly one run_cancelled terminal");
     }
 }
+
+// ── Step 3: level-triggered CancellationProbe (deterministic barrier) ───────
+
+/// Proves the write waiter re-probes cancel after execute entry.
+///
+/// Barrier order (deterministic, no sleep race):
+/// 1. cancel starts false (an entry snapshot would capture false);
+/// 2. `on_requested` fires only after durable reserve — execute has entered;
+/// 3. only then do we flip the AtomicBool with SeqCst;
+/// 4. waiter must observe the live true and return Cancelled.
+///
+/// If the host snapshotted once at entry, this test hangs until expiry or
+/// returns a non-Cancelled terminal (mutation probe fails closed).
+#[test]
+fn cancel_probe_level_triggered_after_execute_entry_barrier() {
+    let fx = fixture();
+    let host = host_for(&fx);
+    register(&host, &fx);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    // 2 parties: waiter thread (on_requested) + main (flip after entry).
+    let entered = Arc::new(Barrier::new(2));
+    let cancel_for_cb = Arc::clone(&cancel);
+    let entered_for_cb = Arc::clone(&entered);
+
+    let cancel_token = Arc::clone(&cancel);
+    let waiter = thread::spawn(move || {
+        execute_governed_write(
+            fx.run_id,
+            provider_create("call-level-cancel", "level.txt", "x\n"),
+            cancel_token.as_ref(),
+            |_| {
+                // Execute has reserved and is past any entry-time cancel check.
+                assert!(
+                    !cancel_for_cb.load(Ordering::SeqCst),
+                    "cancel must still be false at entry/on_requested"
+                );
+                entered_for_cb.wait();
+                // Main flips cancel only after this barrier.
+                Ok(())
+            },
+        )
+    });
+
+    // Wait until execute has entered (on_requested), then flip live cancel.
+    entered.wait();
+    cancel.store(true, Ordering::SeqCst);
+
+    let receipt = waiter
+        .join()
+        .expect("waiter thread")
+        .expect("level-triggered cancel must yield a receipt");
+    assert_eq!(
+        receipt.resolved.state,
+        WriteProposalState::Cancelled,
+        "waiter must re-probe cancel after entry; got {:?}",
+        receipt.resolved.state
+    );
+    assert_eq!(
+        receipt.provider_error,
+        Some(WritePublicErrorCode::Cancelled)
+    );
+    host.shutdown().unwrap();
+}

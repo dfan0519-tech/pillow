@@ -17,6 +17,8 @@ import {
   selectActiveTimeline,
   selectConversationsForProject,
 } from "./features/conversations/conversationReducer";
+import { FirstRunOnboarding } from "./features/onboarding/FirstRunOnboarding";
+import { shouldShowFirstRunOnboarding } from "./features/onboarding/shouldShowFirstRunOnboarding";
 import { AppSidebar } from "./features/projects/AppSidebar";
 import {
   GROK_CLI_LOGIN_GUIDANCE,
@@ -167,6 +169,13 @@ export function App({
    * Independent of degraded startup; never reads auth files — only failure phrases.
    */
   const [loginGuidanceVisible, setLoginGuidanceVisible] = useState(false);
+  /**
+   * First-run dismiss flag from settings (`ui.onboarding.dismissed`).
+   * null = not yet resolved (do not flash guidance).
+   */
+  const [onboardingDismissed, setOnboardingDismissed] = useState<boolean | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -302,6 +311,26 @@ export function App({
           degradedMessage: null,
           degradedGuidance: null,
         });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsGateway]);
+
+  // First-run dismiss flag — settings layer only (no second store / no env).
+  useEffect(() => {
+    let cancelled = false;
+    void settingsGateway.getOnboardingSettings().then(
+      (view) => {
+        if (cancelled) return;
+        setOnboardingDismissed(view.dismissed);
+      },
+      () => {
+        if (cancelled) return;
+        // Fail closed to "not dismissed" only when read fails? Prefer hide to
+        // avoid nagging when storage is broken; still allow shell use.
+        setOnboardingDismissed(true);
       },
     );
     return () => {
@@ -811,6 +840,10 @@ export function App({
       const project = await gateway.openOrRegisterProject(path);
       if (generation !== projectActivationGenRef.current) return;
       await activateProject(project, generation);
+      // Completing the primary first-run action: durable dismiss via settings.
+      if (onboardingDismissed === false) {
+        void dismissFirstRunOnboarding();
+      }
     } catch (cause) {
       if (generation !== projectActivationGenRef.current) return;
       setError(normalizeProjectGatewayError(cause));
@@ -818,6 +851,21 @@ export function App({
       if (generation === projectActivationGenRef.current) {
         setBusy(false);
       }
+    }
+  }
+
+  /**
+   * Persist first-run dismiss through the settings gateway
+   * (`ui.onboarding.dismissed`). Optimistic UI hide; settings is authority.
+   */
+  async function dismissFirstRunOnboarding() {
+    setOnboardingDismissed(true);
+    try {
+      const view = await settingsGateway.setOnboardingDismissed(true);
+      setOnboardingDismissed(view.dismissed);
+    } catch (cause) {
+      console.error("Failed to persist onboarding dismiss.", cause);
+      // Keep hidden for this session; next launch may re-show if write failed.
     }
   }
 
@@ -1053,6 +1101,13 @@ export function App({
     return <main className="app-loading">正在加载工作台…</main>;
   }
 
+  const showFirstRunOnboarding = shouldShowFirstRunOnboarding({
+    dismissed: onboardingDismissed,
+    projectsCount: projects.length,
+    runtimeStartup,
+    shellReady,
+  });
+
   return (
     <div className="app-shell">
       <WindowControls />
@@ -1093,6 +1148,15 @@ export function App({
             打开设置
           </button>
         </div>
+      ) : null}
+      {/* Never-configured stranger guidance — not an error, not degraded. */}
+      {showFirstRunOnboarding ? (
+        <FirstRunOnboarding
+          busy={busy}
+          onDismiss={() => void dismissFirstRunOnboarding()}
+          onOpenProject={() => void openProject()}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       ) : null}
       {/* Login guidance only when conversation runtime is up (not degraded).
           Degraded path points at Settings/paths; login path points at grok login. */}

@@ -1766,6 +1766,64 @@ fn lifecycle_order_is_decided_then_started_then_terminal() {
     host.shutdown().unwrap();
 }
 
+// ── Step 3: level-triggered CancellationProbe (deterministic barrier) ───────
+
+/// Proves the process waiter re-probes cancel after execute entry.
+///
+/// Barrier order (deterministic, no sleep race):
+/// 1. cancel starts false (an entry snapshot would capture false);
+/// 2. Requested lifecycle fires only after durable reserve — execute entered;
+/// 3. only then do we flip the AtomicBool with SeqCst;
+/// 4. waiter must observe the live true and return Cancelled.
+#[test]
+fn cancel_probe_level_triggered_after_execute_entry_barrier() {
+    let fx = fixture();
+    let host = host_for(&fx);
+    register(&host, &fx);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Barrier::new(2));
+    let cancel_for_cb = Arc::clone(&cancel);
+    let entered_for_cb = Arc::clone(&entered);
+
+    let cancel_token = Arc::clone(&cancel);
+    let run_id = fx.run_id;
+    let waiter = thread::spawn(move || {
+        execute_governed_process(
+            run_id,
+            provider_node_version("call-level-cancel"),
+            cancel_token.as_ref(),
+            |event| {
+                if let GovernedProcessLifecycle::Requested(_) = event {
+                    assert!(
+                        !cancel_for_cb.load(Ordering::SeqCst),
+                        "cancel must still be false at Requested (post-entry)"
+                    );
+                    entered_for_cb.wait();
+                }
+                Ok(())
+            },
+        )
+    });
+
+    entered.wait();
+    cancel.store(true, Ordering::SeqCst);
+
+    let receipt = waiter
+        .join()
+        .expect("waiter thread")
+        .expect("level-triggered cancel must yield a receipt");
+    assert_eq!(
+        receipt.state,
+        ExecProposalState::Cancelled,
+        "waiter must re-probe cancel after entry; got {:?}",
+        receipt.state
+    );
+    assert!(receipt.cancelled || receipt.state == ExecProposalState::Cancelled);
+    assert_eq!(host.live_process_authority_count(), 0);
+    host.shutdown().unwrap();
+}
+
 #[test]
 fn process_event_payloads_never_carry_grant_or_output() {
     let requested = ProcessProposalRequestedPayload {

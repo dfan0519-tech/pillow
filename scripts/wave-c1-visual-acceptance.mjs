@@ -114,6 +114,30 @@ async function assertGeometry(page, state, viewport) {
     return {
       bodyScrolls: document.body.scrollHeight > window.innerHeight + 1
         || document.body.scrollWidth > window.innerWidth + 1,
+      // A bare "true !== false" says nothing actionable. Record the axis, the
+      // overflow amount, and the tallest/widest offender so the next failure
+      // points at an element instead of starting another bisect.
+      scrollDebug: (() => {
+        const vh = window.innerHeight;
+        const vw = window.innerWidth;
+        const all = Array.from(document.querySelectorAll("body *"));
+        const worst = (pick) =>
+          all
+            .map((el) => ({ el, value: pick(el.getBoundingClientRect()) }))
+            .sort((a, b) => b.value - a.value)[0];
+        const describe = (hit) =>
+          hit && hit.el
+            ? `${hit.el.tagName.toLowerCase()}.${String(hit.el.className || "").split(" ")[0]}@${Math.round(hit.value)}`
+            : "none";
+        return {
+          viewport: `${vw}x${vh}`,
+          bodyScroll: `${document.body.scrollWidth}x${document.body.scrollHeight}`,
+          overflowY: document.body.scrollHeight - vh,
+          overflowX: document.body.scrollWidth - vw,
+          tallest: describe(worst((r) => r.bottom)),
+          widest: describe(worst((r) => r.right)),
+        };
+      })(),
       composer: box("[data-testid='composer']"),
       duplicateRails: document.querySelectorAll("[data-testid='app-sidebar']").length,
       forbiddenAdminSurface: Boolean(document.querySelector(
@@ -129,7 +153,11 @@ async function assertGeometry(page, state, viewport) {
 
   assert.equal(snapshot.duplicateRails, 1, "C1 needs exactly one continuous left rail.");
   assert.equal(snapshot.forbiddenAdminSurface, false, "Generic admin-dashboard surface detected.");
-  assert.equal(snapshot.bodyScrolls, false, "The desktop shell must not create a document scroll trap.");
+  assert.equal(
+    snapshot.bodyScrolls,
+    false,
+    `The desktop shell must not create a document scroll trap. ${state} ${JSON.stringify(snapshot.scrollDebug)}`,
+  );
   rectInside(snapshot.sidebar, viewport, `${state} sidebar`);
   rectInside(snapshot.workbench, viewport, `${state} workbench`);
   rectInside(snapshot.composer, viewport, `${state} composer`);

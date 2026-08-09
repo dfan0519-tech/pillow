@@ -29,6 +29,13 @@ pub const KEY_GROK_PROFILE: &str = "runtime.grok.profile";
 /// UI theme preference (`PILLOW_THEME`). Values: `dark` | `light` only.
 pub const KEY_UI_THEME: &str = "ui.theme";
 
+/// Whether the user has dismissed first-run onboarding.
+///
+/// Deliberately has no env override: onboarding is a per-install fact about
+/// what this person has already seen, not machine configuration, and an env
+/// var could only serve to hide guidance from someone who never dismissed it.
+pub const KEY_ONBOARDING_DISMISSED: &str = "ui.onboarding.dismissed";
+
 /// Allow-listed env override for [`KEY_RUNTIME_ADAPTER`].
 pub const ENV_RUNTIME_ADAPTER: &str = "PILLOW_RUNTIME";
 /// Allow-listed env override for [`KEY_GROK_EXECUTABLE`].
@@ -40,6 +47,7 @@ pub const ENV_UI_THEME: &str = "PILLOW_THEME";
 
 const VALUE_KIND_ENUM: &str = "enum";
 const VALUE_KIND_PATH: &str = "path";
+const VALUE_KIND_FLAG: &str = "flag";
 
 /// Setting scope: installation-wide or one project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +495,65 @@ impl SqliteSettingsRepository {
         })
     }
 
+    /// Convenience: record whether first-run onboarding has been dismissed.
+    ///
+    /// Global scope only in practice — "this person has seen the guidance" is a
+    /// fact about the install, not about one project.
+    pub fn upsert_onboarding_dismissed(
+        &self,
+        scope: SettingScope,
+        project_id: Option<&str>,
+        dismissed: bool,
+        updated_by: SettingsUpdatedBy,
+    ) -> Result<StoredSetting, SettingsError> {
+        self.upsert(UpsertSetting {
+            scope,
+            project_id: project_id.map(str::to_owned),
+            key: KEY_ONBOARDING_DISMISSED.to_owned(),
+            value_kind: VALUE_KIND_FLAG.to_owned(),
+            value_json: if dismissed { "true" } else { "false" }.to_owned(),
+            updated_by,
+        })
+    }
+
+    /// Resolve the onboarding flag. Absent means **not** dismissed, so a fresh
+    /// install shows guidance rather than silently skipping it.
+    pub fn resolve_onboarding_dismissed(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<ResolvedSetting<bool>, SettingsError> {
+        for (scope, id) in [
+            (SettingScope::Project, project_id),
+            (SettingScope::Global, None),
+        ] {
+            if scope == SettingScope::Project && id.is_none() {
+                continue;
+            }
+            if let Some(row) = self.get(scope, id, KEY_ONBOARDING_DISMISSED)? {
+                let value = match row.value_json.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(SettingsError::InvalidValueJson {
+                            key: KEY_ONBOARDING_DISMISSED.to_owned(),
+                        });
+                    }
+                };
+                return Ok(ResolvedSetting {
+                    value,
+                    source: match scope {
+                        SettingScope::Project => SettingSource::Project,
+                        SettingScope::Global => SettingSource::Global,
+                    },
+                });
+            }
+        }
+        Ok(ResolvedSetting {
+            value: false,
+            source: SettingSource::Default,
+        })
+    }
+
     /// Delete one key at a scope.
     pub fn delete(
         &self,
@@ -754,6 +821,22 @@ fn validate_known_key_write(input: &UpsertSetting) -> Result<(), SettingsError> 
             // Fail closed on write; never store free-form or system themes.
             let _ = UiThemeSetting::parse(&label)?;
             Ok(())
+        }
+        KEY_ONBOARDING_DISMISSED => {
+            if input.value_kind != VALUE_KIND_FLAG {
+                return Err(SettingsError::InvalidValueKind {
+                    key: input.key.clone(),
+                    kind: input.value_kind.clone(),
+                });
+            }
+            // Only the two literals. A free-form flag would let a typo read as
+            // "not dismissed" forever, which is the failure the user notices.
+            match input.value_json.as_str() {
+                "true" | "false" => Ok(()),
+                _ => Err(SettingsError::InvalidValueJson {
+                    key: input.key.clone(),
+                }),
+            }
         }
         KEY_GROK_EXECUTABLE | KEY_GROK_PROFILE => {
             if input.value_kind != VALUE_KIND_PATH {

@@ -225,6 +225,8 @@
 /* Runtime config degraded: shell stays up; conversation off. Does not alter
  * sidebar/rail geometry — sits above the project shell as a full-width bar. */
 .runtime-degraded-banner {
+  /* Banner keeps its natural height; the workbench absorbs the rest. */
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;

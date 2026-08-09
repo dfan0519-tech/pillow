@@ -51,8 +51,9 @@ use resource_commands::{
 };
 use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degrade};
 use settings_commands::{
-    RuntimeStartupState, clear_runtime_setting, get_runtime_settings, get_runtime_startup,
-    get_theme_settings, set_grok_executable, set_grok_profile, set_runtime_adapter, set_ui_theme,
+    RuntimeStartupState, clear_runtime_setting, get_onboarding_settings, get_runtime_settings,
+    get_runtime_startup, get_theme_settings, set_grok_executable, set_grok_profile,
+    set_onboarding_dismissed, set_runtime_adapter, set_ui_theme,
 };
 use tauri::Manager;
 use write_commands::{decide_write_proposal, list_write_proposals, open_write_proposal_diff};
@@ -97,7 +98,9 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         set_grok_profile,
         clear_runtime_setting,
         get_theme_settings,
-        set_ui_theme
+        set_ui_theme,
+        get_onboarding_settings,
+        set_onboarding_dismissed
     ])
 }
 

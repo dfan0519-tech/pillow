@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   SettingsGatewayError,
+  type OnboardingSettingsView,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type RuntimeStartupView,
@@ -156,6 +157,21 @@ function parseThemeSettings(value: unknown): ThemeSettingsView {
   };
 }
 
+function parseOnboardingSettings(value: unknown): OnboardingSettingsView {
+  assertNoSecretFields(value);
+  if (
+    !isRecord(value)
+    || typeof value.dismissed !== "boolean"
+    || !isSettingSource(value.source)
+  ) {
+    throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
+  }
+  return {
+    dismissed: value.dismissed,
+    source: value.source,
+  };
+}
+
 function normalizeSettingsError(error: unknown): SettingsGatewayError {
   if (error instanceof SettingsGatewayError) return error;
   if (
@@ -278,6 +294,28 @@ export class TauriSettingsGateway implements SettingsGateway {
   setUiTheme(theme: UiThemeLabel): Promise<ThemeSettingsView> {
     return invokeThemeSettings("set_ui_theme", { theme });
   }
+
+  async getOnboardingSettings(): Promise<OnboardingSettingsView> {
+    try {
+      const payload = await invoke<unknown>("get_onboarding_settings");
+      return parseOnboardingSettings(payload);
+    } catch (error) {
+      throw normalizeSettingsError(error);
+    }
+  }
+
+  async setOnboardingDismissed(
+    dismissed: boolean,
+  ): Promise<OnboardingSettingsView> {
+    try {
+      const payload = await invoke<unknown>("set_onboarding_dismissed", {
+        dismissed,
+      });
+      return parseOnboardingSettings(payload);
+    } catch (error) {
+      throw normalizeSettingsError(error);
+    }
+  }
 }
 
 /** In-memory gateway for unit tests (no Tauri). */
@@ -285,11 +323,13 @@ export class MockSettingsGateway implements SettingsGateway {
   private state: RuntimeSettingsView;
   private themeState: ThemeSettingsView;
   private startup: RuntimeStartupView;
+  private onboarding: OnboardingSettingsView;
 
   constructor(
     initial?: Partial<RuntimeSettingsView>,
     themeInitial?: Partial<ThemeSettingsView>,
     startupInitial?: Partial<RuntimeStartupView>,
+    onboardingInitial?: Partial<OnboardingSettingsView>,
   ) {
     this.state = {
       adapter: {
@@ -315,6 +355,12 @@ export class MockSettingsGateway implements SettingsGateway {
       degradedMessage: null,
       degradedGuidance: null,
       ...startupInitial,
+    };
+    // Fresh install default: not dismissed (guidance may show when empty shell).
+    this.onboarding = {
+      dismissed: false,
+      source: "default",
+      ...onboardingInitial,
     };
   }
 
@@ -479,5 +525,31 @@ export class MockSettingsGateway implements SettingsGateway {
       theme: { value: theme, source: "global", envVar: null },
     };
     return this.getThemeSettings();
+  }
+
+  /** Test seam: force dismiss state without going through setOnboardingDismissed. */
+  setOnboardingDismissedSync(dismissed: boolean): void {
+    this.onboarding = {
+      dismissed,
+      source: dismissed ? "global" : "default",
+    };
+  }
+
+  getOnboardingSnapshot(): OnboardingSettingsView {
+    return structuredClone(this.onboarding);
+  }
+
+  async getOnboardingSettings(): Promise<OnboardingSettingsView> {
+    return structuredClone(this.onboarding);
+  }
+
+  async setOnboardingDismissed(
+    dismissed: boolean,
+  ): Promise<OnboardingSettingsView> {
+    this.onboarding = {
+      dismissed,
+      source: "global",
+    };
+    return this.getOnboardingSettings();
   }
 }

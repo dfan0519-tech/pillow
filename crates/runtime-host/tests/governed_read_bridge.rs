@@ -1,6 +1,8 @@
 use std::fs;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use keeper_governance_port::CancellationProbe;
 
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId as ProtocolRunId, RuntimeError, RuntimeProbe,
@@ -331,5 +333,64 @@ fn interrupted_execution_is_recovered_through_the_same_bridge() {
             ToolExecutionState::Succeeded,
         ]
     );
+    host.shutdown().unwrap();
+}
+
+// ── Step 3: level-triggered CancellationProbe (deterministic) ───────────────
+
+/// Probe that is false on the first `is_cancelled` and true on every later call.
+///
+/// If `execute_governed_read` snapshotted cancel once at entry, the first
+/// reading (false) would stick and this test would see Succeeded. Re-probing
+/// on every tool-executor checkpoint yields Cancelled on the second check.
+struct FirstFalseThenTrue {
+    calls: AtomicUsize,
+}
+
+impl CancellationProbe for FirstFalseThenTrue {
+    fn is_cancelled(&self) -> bool {
+        self.calls.fetch_add(1, Ordering::SeqCst) >= 1
+    }
+}
+
+/// Proves read execute re-probes cancel (level-triggered), not entry snapshot.
+#[test]
+fn cancel_probe_level_triggered_not_entry_snapshot() {
+    let fixture = fixture();
+    fs::write(fixture.root.join("note.txt"), "content").unwrap();
+    let host = RuntimeHost::new_with_governed_reads(
+        Arc::new(IdleAdapter),
+        HostConfig::default(),
+        &fixture.db,
+    )
+    .unwrap();
+    host.register_governed_read_run(
+        fixture.context.run_id(),
+        fixture.context.project_id(),
+        fixture.context.conversation_id(),
+        &fixture.root,
+    )
+    .unwrap();
+
+    let probe = FirstFalseThenTrue {
+        calls: AtomicUsize::new(0),
+    };
+    let receipt = execute_governed_read(
+        fixture.context.run_id(),
+        provider_read("grok-acp:level-cancel", 64),
+        &probe,
+    )
+    .unwrap();
+    assert_eq!(
+        receipt.result.state(),
+        ToolExecutionState::Cancelled,
+        "host must re-probe cancel after first false reading; probe calls={}",
+        probe.calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        probe.calls.load(Ordering::SeqCst) >= 2,
+        "level-trigger requires at least two probe reads"
+    );
+    assert_eq!(receipt.delivery, GovernedReadDelivery::Executed);
     host.shutdown().unwrap();
 }

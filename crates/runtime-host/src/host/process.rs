@@ -16,7 +16,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -32,6 +31,7 @@ use keeper_agent_protocol::{
     ProcessStartedPayload, ProcessTerminalOutcomePayload, RunId, ToolActiveContext, ToolArguments,
     ToolProposal, canonical_arguments_digest,
 };
+use keeper_governance_port::CancellationProbe;
 use keeper_policy::{ExecDecision, ExecProposalState, is_exec_terminal};
 use keeper_process_executor::{
     CancellationSignal as ProcessCancellationSignal, OutputChunk as RunnerOutputChunk,
@@ -634,10 +634,13 @@ fn map_seal_error(error: GovernedProcessError) -> GovernedProcessBridgeError {
 ///
 /// Typed process event payloads on the receipt follow
 /// reserve → requested → decided → started → terminal (reject/expire omit start).
+///
+/// `cancellation` is level-triggered: the waiter re-probes on every wait cycle.
+/// Snapshotting once at execute entry is fail-open and forbidden.
 pub fn execute_governed_process(
     run_id: RunId,
     provider: ProviderProcessProposal,
-    cancellation: &AtomicBool,
+    cancellation: &dyn CancellationProbe,
     mut on_lifecycle: impl FnMut(GovernedProcessLifecycle<'_>) -> Result<(), GovernedProcessBridgeError>,
 ) -> Result<GovernedProcessReceipt, GovernedProcessBridgeError> {
     if provider.tool_id != "process.run" || provider.tool_version != 1 {
@@ -842,7 +845,7 @@ fn wait_for_resolution(
     run_id: RunId,
     proposal_id: &str,
     bound: &BoundProcessRun,
-    cancellation: &AtomicBool,
+    cancellation: &dyn CancellationProbe,
     requested: ProcessProposalRequestedView,
     on_lifecycle: &mut impl FnMut(
         GovernedProcessLifecycle<'_>,
@@ -855,7 +858,8 @@ fn wait_for_resolution(
             .lock()
             .map_err(|_| GovernedProcessBridgeError::Gateway)?;
 
-        if cancellation.load(Ordering::SeqCst)
+        // Level-triggered: re-probe on every wait cycle (never entry snapshot).
+        if cancellation.is_cancelled()
             && let Some(entry) = guard.live.get_mut(proposal_id)
         {
             entry.cancelled = true;

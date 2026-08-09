@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -24,6 +23,7 @@ use keeper_agent_protocol::{
     WRITE_CONTENT_BYTE_CAP, WriteMode, WriteProposalRequestedPayload, WriteProposalResolvedPayload,
     WriteProposalState, WritePublicErrorCode, canonical_arguments_digest,
 };
+use keeper_governance_port::CancellationProbe;
 use keeper_policy::WriteDecision;
 use keeper_storage_sqlite::{
     StoredWriteProposal, WriteDecisionOutcome, WriteProposalReserveInput, WriteReservationOutcome,
@@ -438,10 +438,13 @@ fn parse_write_arguments(arguments: &Value) -> Result<FsWriteArguments, Governed
 /// (caller emits the runtime event), then condition wait for the exact
 /// proposal. Approve applies sealed content; reject/expire/cancel return fixed
 /// opaque provider errors.
+///
+/// `cancellation` is level-triggered: the waiter re-probes on every wait cycle.
+/// Snapshotting once at execute entry is fail-open and forbidden.
 pub fn execute_governed_write(
     run_id: RunId,
     provider: ProviderWriteProposal,
-    cancellation: &AtomicBool,
+    cancellation: &dyn CancellationProbe,
     mut on_requested: impl FnMut(&WriteProposalRequestedPayload) -> Result<(), GovernedWriteBridgeError>,
 ) -> Result<GovernedWriteReceipt, GovernedWriteBridgeError> {
     if provider.tool_id != "fs.write" || provider.tool_version != 1 {
@@ -708,7 +711,7 @@ fn wait_for_resolution(
     run_id: RunId,
     proposal_id: &str,
     bound: &BoundWriteRun,
-    cancellation: &AtomicBool,
+    cancellation: &dyn CancellationProbe,
     requested: WriteProposalRequestedPayload,
 ) -> Result<GovernedWriteReceipt, GovernedWriteBridgeError> {
     let coord = coordinator();
@@ -718,8 +721,8 @@ fn wait_for_resolution(
             .lock()
             .map_err(|_| GovernedWriteBridgeError::Gateway)?;
 
-        // Cancellation / shutdown / interrupt checks under the lock.
-        if cancellation.load(Ordering::SeqCst)
+        // Level-triggered: re-probe on every wait cycle (never entry snapshot).
+        if cancellation.is_cancelled()
             && let Some(entry) = guard.live.get_mut(proposal_id)
         {
             entry.cancelled = true;

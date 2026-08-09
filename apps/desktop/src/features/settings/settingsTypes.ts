@@ -53,6 +53,17 @@ export type ThemeSettingsView = {
   theme: ResolvedSettingView;
 };
 
+/**
+ * First-run onboarding dismiss flag (`ui.onboarding.dismissed`).
+ * Global install fact; no env override; no secret fields.
+ * Absent store row → dismissed false (show guidance once).
+ */
+export type OnboardingSettingsView = {
+  dismissed: boolean;
+  /** `project` | `global` | `default` — never env for this key. */
+  source: SettingSource;
+};
+
 export type SettingsGatewayErrorCode =
   | "invalid_runtime_selection"
   | "invalid_theme_selection"
@@ -115,6 +126,10 @@ export interface SettingsGateway {
   getThemeSettings(projectId?: string | null): Promise<ThemeSettingsView>;
   /** Global-only write. Product UI does not expose project-scoped theme. */
   setUiTheme(theme: UiThemeLabel): Promise<ThemeSettingsView>;
+  /** Global install fact: whether first-run onboarding was dismissed/skipped. */
+  getOnboardingSettings(): Promise<OnboardingSettingsView>;
+  /** Persist dismiss/skip so guidance does not re-nag after restart. */
+  setOnboardingDismissed(dismissed: boolean): Promise<OnboardingSettingsView>;
 }
 
 /** Apply resolved theme to the document before paint-sensitive UI. */

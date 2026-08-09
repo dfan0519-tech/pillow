@@ -16,6 +16,7 @@ base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-governance-port = { path = "../governance-port" }
 keeper-policy = { path = "../kernel-policy" }
 keeper-process-executor = { path = "../process-executor" }
 keeper-storage-sqlite = { path = "../storage-sqlite" }
@@ -32,6 +33,7 @@ uuid.workspace = true
 # Without this, feature-gated integration tests (expiry / storage-failure seams)
 # are silently omitted when Workers run a single-package gate.
 keeper-runtime-host = { path = ".", features = ["test-support"] }
+keeper-governance-port = { path = "../governance-port" }
 keeper-project = { path = "../kernel-project" }
 keeper-session = { path = "../kernel-session" }
 keeper-storage-sqlite = { path = "../storage-sqlite" }

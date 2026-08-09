@@ -120,8 +120,16 @@
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   flex: 1;
+  /*
+   * `min-height: 0` is what lets this shrink inside the column flex shell. It
+   * used to be followed by a second `min-height: 100vh` on the next line, which
+   * silently won and pinned the shell to a full viewport regardless of what sat
+   * above it — so any full-width banner (degraded runtime, login guidance,
+   * first-run onboarding) pushed the document past the viewport and tripped the
+   * scroll-trap assertion. `flex: 1` already fills the space when there is
+   * nothing above; the floor was never needed.
+   */
   min-height: 0;
-  min-height: 100vh;
 }
 
 /* Continuous left sidebar — frosted glass container (not per-row blur) */

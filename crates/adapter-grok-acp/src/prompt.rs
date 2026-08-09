@@ -35,6 +35,7 @@ use crate::provider_writes::{
 use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_params};
 use crate::state::{Inner, PromptOutcome};
 use crate::turn::ProviderRequestIdentityError;
+use keeper_governance_port::CancellationProbe;
 use keeper_runtime_host::{
     GovernedProcessBridgeError, GovernedProcessLifecycle, GovernedReadBridgeError,
     GovernedWriteBridgeError, execute_governed_process, execute_governed_read,
@@ -422,7 +423,9 @@ fn handle_server_request(
             }
         }
     }
-    let receipt = match execute_governed_read(run_id, normalized.proposal, cancel) {
+    // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
+    let cancel_probe: &dyn CancellationProbe = cancel;
+    let receipt = match execute_governed_read(run_id, normalized.proposal, cancel_probe) {
         Ok(receipt) => receipt,
         Err(
             GovernedReadBridgeError::InvalidProposal | GovernedReadBridgeError::ReservationConflict,
@@ -513,10 +516,12 @@ fn handle_write_tool(
     };
 
     let mut requested_sequence = None;
+    // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
+    let cancel_probe: &dyn CancellationProbe = cancel;
     let receipt = match execute_governed_write(
         run_id,
         normalized.proposal,
-        cancel,
+        cancel_probe,
         |requested: &WriteProposalRequestedPayload| {
             let sequence = {
                 let mut guard = inner.lock().expect("inner lock");
@@ -662,50 +667,54 @@ fn handle_process_tool(
     // fills remaining kinds (typically terminal). Double-emit is a failure.
     let decided_emitted = AtomicBool::new(false);
     let started_emitted = AtomicBool::new(false);
+    // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
+    let cancel_probe: &dyn CancellationProbe = cancel;
     let receipt =
-        match execute_governed_process(run_id, normalized.proposal, cancel, |event| match event {
-            GovernedProcessLifecycle::Requested(requested) => {
-                let payload = ProcessProposalRequestedPayload {
-                    proposal_id: requested.proposal_id.clone(),
-                    program: requested.program.clone(),
-                    argv: requested.argv.clone(),
-                    portable_cwd: requested.portable_cwd.clone(),
-                    summary: requested.summary.clone(),
-                    risk_class: requested.risk_class.into(),
-                    expires_at: requested.expires_at,
-                };
-                emit_process_event(
-                    inner,
-                    sink,
-                    run_id,
-                    RuntimeEventKind::ProcessProposalRequested,
-                    payload,
-                )
-                .map_err(|_| GovernedProcessBridgeError::Gateway)
-            }
-            GovernedProcessLifecycle::Decided(decided) => {
-                emit_process_event(
-                    inner,
-                    sink,
-                    run_id,
-                    RuntimeEventKind::ProcessProposalDecided,
-                    decided,
-                )
-                .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-                decided_emitted.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            GovernedProcessLifecycle::Started(started) => {
-                emit_process_event(
-                    inner,
-                    sink,
-                    run_id,
-                    RuntimeEventKind::ProcessStarted,
-                    started,
-                )
-                .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-                started_emitted.store(true, Ordering::SeqCst);
-                Ok(())
+        match execute_governed_process(run_id, normalized.proposal, cancel_probe, |event| {
+            match event {
+                GovernedProcessLifecycle::Requested(requested) => {
+                    let payload = ProcessProposalRequestedPayload {
+                        proposal_id: requested.proposal_id.clone(),
+                        program: requested.program.clone(),
+                        argv: requested.argv.clone(),
+                        portable_cwd: requested.portable_cwd.clone(),
+                        summary: requested.summary.clone(),
+                        risk_class: requested.risk_class.into(),
+                        expires_at: requested.expires_at,
+                    };
+                    emit_process_event(
+                        inner,
+                        sink,
+                        run_id,
+                        RuntimeEventKind::ProcessProposalRequested,
+                        payload,
+                    )
+                    .map_err(|_| GovernedProcessBridgeError::Gateway)
+                }
+                GovernedProcessLifecycle::Decided(decided) => {
+                    emit_process_event(
+                        inner,
+                        sink,
+                        run_id,
+                        RuntimeEventKind::ProcessProposalDecided,
+                        decided,
+                    )
+                    .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+                    decided_emitted.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
+                GovernedProcessLifecycle::Started(started) => {
+                    emit_process_event(
+                        inner,
+                        sink,
+                        run_id,
+                        RuntimeEventKind::ProcessStarted,
+                        started,
+                    )
+                    .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+                    started_emitted.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
             }
         }) {
             Ok(receipt) => receipt,

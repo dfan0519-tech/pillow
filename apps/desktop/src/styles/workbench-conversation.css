@@ -12,7 +12,14 @@
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-width: 0;
-  min-height: 100vh;
+  /*
+   * Fit the grid area the shell hands down; do not re-assert a viewport floor.
+   * `100vh` here meant "fill the screen", but this sits two levels inside a
+   * shell that already sizes it, so the floor only ever added height that
+   * anything above (banners, guidance) then pushed off-screen.
+   * `.app-loading` keeps its `100vh` — that one really is the whole screen.
+   */
+  min-height: 0;
   background: var(--bg-main);
 }
 

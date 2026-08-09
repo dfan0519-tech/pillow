@@ -13,6 +13,7 @@ required-features = []
 [dependencies]
 chrono.workspace = true
 keeper-agent-protocol = { path = "../agent-protocol" }
+keeper-governance-port = { path = "../governance-port" }
 keeper-process-executor = { path = "../process-executor" }
 keeper-runtime-host = { path = "../runtime-host" }
 serde.workspace = true

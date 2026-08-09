@@ -138,6 +138,18 @@ pub struct ThemeSettingsDto {
     pub theme: ResolvedSettingDto,
 }
 
+/// First-run onboarding dismiss flag (`ui.onboarding.dismissed`).
+///
+/// Global install fact only — no env override, no secret fields.
+/// Absent row resolves to `dismissed = false` (show guidance on fresh install).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingSettingsDto {
+    pub dismissed: bool,
+    /// Which layer won: `project` | `global` | `default` (never `env`).
+    pub source: String,
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -280,6 +292,40 @@ pub fn set_ui_theme(
     Ok(theme_to_dto(resolved))
 }
 
+/// Resolve first-run onboarding dismiss flag (global install fact).
+///
+/// Default when absent: **not dismissed** so strangers see guidance once.
+/// No env override (by design — see storage `KEY_ONBOARDING_DISMISSED`).
+#[tauri::command]
+pub fn get_onboarding_settings(
+    settings: State<'_, SqliteSettingsRepository>,
+) -> Result<OnboardingSettingsDto, CommandError> {
+    let resolved = settings
+        .resolve_onboarding_dismissed(None)
+        .map_err(map_settings_error)?;
+    Ok(onboarding_to_dto(resolved))
+}
+
+/// Persist onboarding dismiss / restore at **global** scope. Returns fresh view.
+#[tauri::command]
+pub fn set_onboarding_dismissed(
+    settings: State<'_, SqliteSettingsRepository>,
+    dismissed: bool,
+) -> Result<OnboardingSettingsDto, CommandError> {
+    settings
+        .upsert_onboarding_dismissed(
+            SettingScope::Global,
+            None,
+            dismissed,
+            SettingsUpdatedBy::User,
+        )
+        .map_err(map_settings_error)?;
+    let resolved = settings
+        .resolve_onboarding_dismissed(None)
+        .map_err(map_settings_error)?;
+    Ok(onboarding_to_dto(resolved))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -399,6 +445,13 @@ pub(crate) fn theme_to_dto(resolved: ResolvedSetting<UiThemeSetting>) -> ThemeSe
             source: source_str(resolved.source).to_owned(),
             env_var: env_var_for(resolved.source, "PILLOW_THEME"),
         },
+    }
+}
+
+pub(crate) fn onboarding_to_dto(resolved: ResolvedSetting<bool>) -> OnboardingSettingsDto {
+    OnboardingSettingsDto {
+        dismissed: resolved.value,
+        source: source_str(resolved.source).to_owned(),
     }
 }
 

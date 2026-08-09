@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // Contract types live in `keeper-agent-protocol`; re-export for backward compatibility.
 pub use keeper_agent_protocol::{GovernedReadDelivery, GovernedReadReceipt, ProviderToolProposal};
 
 use keeper_agent_protocol::{RunId, ToolActiveContext, ToolProposal, canonical_arguments_digest};
+use keeper_governance_port::CancellationProbe;
 use keeper_tool_executor::{
     CancellationSignal, GovernedReadToolGateway, GovernedToolError, GovernedToolOutcome,
     ProjectCapability,
@@ -103,10 +103,14 @@ pub(crate) fn release_owner(owner: Uuid) {
 ///
 /// The adapter supplies no project identity or filesystem authority. Both come
 /// from the host registration created by the owning conversation service.
+///
+/// `cancellation` is level-triggered: the host re-probes on every cancel check
+/// (including tool-executor checkpoints). Snapshotting once at entry is
+/// fail-open and forbidden.
 pub fn execute_governed_read(
     run_id: RunId,
     provider: ProviderToolProposal,
-    cancellation: &AtomicBool,
+    cancellation: &dyn CancellationProbe,
 ) -> Result<GovernedReadReceipt, GovernedReadBridgeError> {
     let bound = active_runs()
         .lock()
@@ -128,7 +132,8 @@ pub fn execute_governed_read(
     }
     .validate_for_context(&bound.context)
     .map_err(|_| GovernedReadBridgeError::InvalidProposal)?;
-    let cancellation = AtomicCancellation(cancellation);
+    // Live probe adapter: each CancellationSignal check re-reads the probe.
+    let cancellation = LiveProbeCancellation(cancellation);
 
     match bound
         .gateway
@@ -154,10 +159,13 @@ pub fn execute_governed_read(
     }
 }
 
-struct AtomicCancellation<'a>(&'a AtomicBool);
+/// Forwards tool-executor cancel checks to a live [`CancellationProbe`].
+///
+/// Must not cache the first reading — every `is_cancelled` re-probes.
+struct LiveProbeCancellation<'a>(&'a dyn CancellationProbe);
 
-impl CancellationSignal for AtomicCancellation<'_> {
+impl CancellationSignal for LiveProbeCancellation<'_> {
     fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.is_cancelled()
     }
 }

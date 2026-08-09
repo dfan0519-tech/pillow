@@ -1,18 +1,24 @@
-//! Knowledge document indexer (K0b/K0c): classify, extract explicit supersession,
-//! register into K0a tables, audit-only reports, and registry status rendering.
+//! Knowledge document indexer (K0b/K0c/K0d/K0e): classify, extract explicit
+//! supersession, register into K0a tables, audit-only reports, registry status
+//! rendering, and (K0e) non-interactive ledger CLI helpers + stale detection.
 //!
-//! **Report-only:** never deletes, archives, or moves documents. Never auto-
-//! migrates status beyond explicit scan rules. Path grammar is always
+//! **Report-only for docs:** never deletes, archives, or moves documents. Never
+//! auto-migrates task status beyond explicit CLI commands. Path grammar is always
 //! [`keeper_project::validate_portable_path`] — never reimplemented here.
 //!
 //! **K0c render** is a pure projection of registry rows + audit buckets — never
 //! hand-written project narrative.
+//!
+//! **K0e ledger CLI** records dispatch/acceptance as a byproduct (ADR-0004 §2)
+//! and detects handoff-vs-ledger staleness without rewriting documents.
 
 pub mod audit;
 pub mod classify;
 pub mod digest;
+pub mod ledger;
 pub mod render;
 pub mod scan;
+pub mod stale;
 pub mod supersession;
 
 pub use audit::{
@@ -22,8 +28,18 @@ pub use classify::{
     Classification, ClassifiedDoc, classify_document, classify_role, classify_status_from_content,
 };
 pub use digest::content_digest_sha256;
+pub use ledger::{
+    CompleteInput, DispatchInput, LedgerCliError, LedgerDbOptions, LedgerSnapshot, VerdictInput,
+    dispatch_task, ensure_project_id, format_ledger_status, format_task_recorded,
+    format_verdict_recorded, load_snapshot, open_knowledge, record_verdict, resolve_project_id,
+    set_task_status,
+};
 pub use render::{RenderInput, render_status_view};
 pub use scan::{ScanOptions, ScanResult, ScanSummary, scan_and_register, validate_path_ssot};
+pub use stale::{
+    StaleFinding, StaleKind, StaleReport, TaskMention, check_stale, extract_inflight_claims,
+    extract_task_mentions, format_stale_report,
+};
 pub use supersession::{
     ExplicitSupersession, InferredSupersession, SupersessionExtract, extract_supersession,
 };
