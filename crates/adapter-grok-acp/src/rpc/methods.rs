@@ -26,12 +26,27 @@ const PLAINTEXT_ALLOWED_TOOL: &str = "ask_user_question";
 ///
 /// Governed capability arrives separately, as MCP tools, and is added here by
 /// name when it lands.
+/// The two meta-tools through which every MCP tool is reached.
+///
+/// The allowlist cannot withhold these: upstream keeps `search_tool` and
+/// `use_tool` alive no matter what the allowlist names, so that MCP stays
+/// reachable. Its own test says so by name.
+///
+/// That matters because `mcpServers: []` does not mean "no MCP". The agent
+/// merges servers from the user's config, plugins, and an account gateway, and
+/// there is no field that says "use only what the client supplied". A live
+/// session under the allowlist reached the account's `tasks` MCP and really
+/// created an automation. Denying the two meta-tools is the only lever the
+/// client has, and denials run before the allowlist, so it is available.
+const MCP_META_TOOLS: [&str; 2] = ["search_tool", "use_tool"];
+
 fn plaintext_agent_profile() -> Value {
     json!({
         "name": "pillow-plaintext",
         "description": "Pillow-hosted session. Native tools are withheld; \
                         capability arrives only through governed host tools.",
-        "tools": [PLAINTEXT_ALLOWED_TOOL]
+        "tools": [PLAINTEXT_ALLOWED_TOOL],
+        "disallowedTools": MCP_META_TOOLS
     })
 }
 
@@ -136,7 +151,8 @@ mod tests {
                 "name": "pillow-plaintext",
                 "description": "Pillow-hosted session. Native tools are withheld; \
                                 capability arrives only through governed host tools.",
-                "tools": ["ask_user_question"]
+                "tools": ["ask_user_question"],
+                "disallowedTools": ["search_tool", "use_tool"]
             }),
             "the session profile must not grow implicit capabilities"
         );
@@ -179,14 +195,28 @@ mod tests {
         );
     }
 
-    /// Denials are not a boundary, so the profile must not lean on one.
+    /// The denylist has exactly one job, and native gating is not it.
+    ///
+    /// Denying native tools was tried and failed: blocked from `write`, the
+    /// agent reached the same result through `workflow` and `monitor`, which
+    /// no denylist had thought to name. Native gating belongs to the allowlist,
+    /// which fails closed. The denylist survives only to cut the two MCP
+    /// meta-tools, which the allowlist is structurally unable to withhold.
+    /// Anything else appearing here means someone is enumerating again.
     #[test]
-    fn profile_does_not_rely_on_a_denylist() {
+    fn denylist_covers_only_the_mcp_meta_tools() {
         let profile = &session_new_params("C:/project")["_meta"]["agentProfile"];
-        assert!(
-            profile.get("disallowedTools").is_none(),
-            "a denylist only enumerates: a live probe watched the agent, denied \
-             `write`, reach the same result through `workflow` and `monitor`"
+        let denied = profile["disallowedTools"]
+            .as_array()
+            .expect("the MCP meta-tools must be denied");
+        let mut denied: Vec<&str> = denied.iter().filter_map(|v| v.as_str()).collect();
+        denied.sort_unstable();
+        let mut expected: Vec<&str> = MCP_META_TOOLS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            denied, expected,
+            "the denylist exists to cut MCP discovery, not to gate native tools \
+             — an enumeration cannot bound what the provider adds next"
         );
     }
 

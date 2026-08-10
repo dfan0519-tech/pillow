@@ -334,7 +334,8 @@ fn has_safe_plaintext_session_params(params: &Value) -> bool {
                 "name": "pillow-plaintext",
                 "description": "Pillow-hosted session. Native tools are withheld; \
                                 capability arrives only through governed host tools.",
-                "tools": ["ask_user_question"]
+                "tools": ["ask_user_question"],
+                "disallowedTools": ["search_tool", "use_tool"]
             }))
 }
 
