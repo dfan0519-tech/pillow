@@ -2,29 +2,36 @@
 
 use serde_json::{Value, json};
 
+/// The single built-in the plaintext profile permits.
+///
+/// Upstream treats an empty `tools` array as "inherit every tool", so there is
+/// no way to spell "none" — the list has to name something. This one is inert:
+/// it cannot touch the filesystem, spawn a process, or reach the network, and a
+/// live probe confirmed the turn still ends cleanly when the agent calls it.
+const PLAINTEXT_ALLOWED_TOOL: &str = "ask_user_question";
+
+/// Fixed session profile: the agent gets no native capability of its own.
+///
+/// This is an **allowlist**, deliberately. A denylist is only an enumeration —
+/// a live probe watched the agent, blocked from `write`, reach the same result
+/// through `workflow` and `monitor`, which no denylist had thought to name.
+/// Every tool the provider adds is a hole a denylist cannot know about, while
+/// an allowlist fails closed.
+///
+/// `name` and `description` are **required**: upstream deserializes this object
+/// with no defaults for them, and a parse failure is not an error the client
+/// ever sees — the agent logs it and silently falls back to its *full* default
+/// toolset. Pillow shipped exactly that shape and believed native tools were
+/// off for weeks. Do not remove either field.
+///
+/// Governed capability arrives separately, as MCP tools, and is added here by
+/// name when it lands.
 fn plaintext_agent_profile() -> Value {
     json!({
-        "tools": [],
-        "disallowedTools": [
-            "read_file",
-            "grep_search",
-            "list_dir",
-            "bash",
-            "run_terminal_command",
-            "search_replace",
-            "write_file",
-            "task",
-            "kill_task",
-            "get_task_output",
-            "search_tool",
-            "use_tool",
-            "web_search",
-            "web_fetch",
-            "memory_search",
-            "memory_get",
-            "todo_write",
-            "lsp"
-        ]
+        "name": "pillow-plaintext",
+        "description": "Pillow-hosted session. Native tools are withheld; \
+                        capability arrives only through governed host tools.",
+        "tools": [PLAINTEXT_ALLOWED_TOOL]
     })
 }
 
@@ -126,29 +133,60 @@ mod tests {
         assert_eq!(
             new_profile,
             &json!({
-                "tools": [],
-                "disallowedTools": [
-                    "read_file",
-                    "grep_search",
-                    "list_dir",
-                    "bash",
-                    "run_terminal_command",
-                    "search_replace",
-                    "write_file",
-                    "task",
-                    "kill_task",
-                    "get_task_output",
-                    "search_tool",
-                    "use_tool",
-                    "web_search",
-                    "web_fetch",
-                    "memory_search",
-                    "memory_get",
-                    "todo_write",
-                    "lsp"
-                ]
+                "name": "pillow-plaintext",
+                "description": "Pillow-hosted session. Native tools are withheld; \
+                                capability arrives only through governed host tools.",
+                "tools": ["ask_user_question"]
             }),
             "the session profile must not grow implicit capabilities"
+        );
+    }
+
+    /// The two fields upstream requires, asserted on their own.
+    ///
+    /// Kept separate from the exact-shape test above because this is the pair
+    /// whose absence is silent: upstream logs the parse failure and falls back
+    /// to its full default toolset, so a profile missing them looks like a
+    /// working restriction and is the opposite of one.
+    #[test]
+    fn profile_carries_the_fields_upstream_requires_to_parse() {
+        for params in [
+            session_new_params("C:/project"),
+            session_load_params("session-1", "C:/project"),
+        ] {
+            let profile = &params["_meta"]["agentProfile"];
+            for field in ["name", "description"] {
+                assert!(
+                    profile[field]
+                        .as_str()
+                        .is_some_and(|v| !v.trim().is_empty()),
+                    "agentProfile.{field} is required upstream; without it the \
+                     profile is dropped and every native tool comes back"
+                );
+            }
+        }
+    }
+
+    /// An empty `tools` array means "inherit all" upstream, not "none".
+    #[test]
+    fn profile_never_ships_an_empty_tools_allowlist() {
+        let tools = session_new_params("C:/project")["_meta"]["agentProfile"]["tools"].clone();
+        let tools = tools.as_array().expect("tools must be an array");
+        assert!(
+            !tools.is_empty(),
+            "an empty allowlist is read upstream as inherit-all, which grants \
+             every native tool — name what is permitted instead"
+        );
+    }
+
+    /// Denials are not a boundary, so the profile must not lean on one.
+    #[test]
+    fn profile_does_not_rely_on_a_denylist() {
+        let profile = &session_new_params("C:/project")["_meta"]["agentProfile"];
+        assert!(
+            profile.get("disallowedTools").is_none(),
+            "a denylist only enumerates: a live probe watched the agent, denied \
+             `write`, reach the same result through `workflow` and `monitor`"
         );
     }
 
@@ -171,11 +209,32 @@ mod tests {
                 );
             }
 
+            // Deliberately not `tools == []`. That is what this assertion used
+            // to require, and it encoded the defect: upstream reads an empty
+            // allowlist as inherit-all, so the test was demanding the one shape
+            // that grants everything. Name the permitted set instead.
             assert_eq!(
                 params["_meta"]["agentProfile"]["tools"],
-                json!([]),
+                json!([PLAINTEXT_ALLOWED_TOOL]),
                 "the plaintext profile may not expose provider tools"
             );
+            for native in [
+                "write",
+                "write_file",
+                "search_replace",
+                "run_terminal_cmd",
+                "bash",
+                "read_file",
+                "workflow",
+                "monitor",
+            ] {
+                assert!(
+                    !params["_meta"]["agentProfile"]["tools"]
+                        .as_array()
+                        .is_some_and(|tools| tools.iter().any(|t| t == native)),
+                    "the plaintext profile must never permit native {native}"
+                );
+            }
         }
     }
 }

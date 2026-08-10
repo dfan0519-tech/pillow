@@ -331,27 +331,10 @@ fn has_safe_plaintext_session_params(params: &Value) -> bool {
             .get("_meta")
             .and_then(|meta| meta.get("agentProfile"))
             == Some(&json!({
-                "tools": [],
-                "disallowedTools": [
-                    "read_file",
-                    "grep_search",
-                    "list_dir",
-                    "bash",
-                    "run_terminal_command",
-                    "search_replace",
-                    "write_file",
-                    "task",
-                    "kill_task",
-                    "get_task_output",
-                    "search_tool",
-                    "use_tool",
-                    "web_search",
-                    "web_fetch",
-                    "memory_search",
-                    "memory_get",
-                    "todo_write",
-                    "lsp"
-                ]
+                "name": "pillow-plaintext",
+                "description": "Pillow-hosted session. Native tools are withheld; \
+                                capability arrives only through governed host tools.",
+                "tools": ["ask_user_question"]
             }))
 }
 
