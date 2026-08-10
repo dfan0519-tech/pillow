@@ -231,3 +231,31 @@ denylist 在上游 `builder.rs` L882 **先于** allowlist 执行,所以客户端
   但没做对抗性探针)。
 - `--plugin-dir` / `_meta.pluginDirs` 的 "always trusted" 会跳过插件信任闸;
   Pillow 不传这些,但要确保将来也不传。
+
+---
+
+## 10. 代价:边界也切断了我们自己的治理 MCP(2026-08-10)
+
+§9 的修法把 `use_tool` 禁掉了。**`use_tool` 是模型调用 MCP 的唯一入口** ——
+所以它切断的不只是环境侧 MCP,**也包括客户端自己在 `session/new.mcpServers` 里挂的 server**。
+
+探针变体 `shipped-profile-client-mcp`(shipped profile + 客户端挂治理 MCP):
+
+| 观察 | 值 |
+| --- | --- |
+| 客户端 MCP server 被拉起 | ✅ `mcpServerSpawned: true` |
+| `initialize` / `tools/list` | ✅ 都完成 |
+| **`tools/call`** | 🔴 **从未发生**(`mcpToolInvoked: false`) |
+| 代理原话 | `"Unable to invoke MCP - is call_mcp_tool available?"` |
+
+**server 连得上、工具列得出,但模型没有调用它的手。**
+
+这正是交接手册 §3.2 预言过的那个陷阱("接好了却被自己拒绝"),
+只是它从另一个方向来了 —— 不是权限策略拒掉,是我们自己把调用入口摘了。
+
+⚠️ **所以"治理工具经 MCP 暴露"这条路,在当前边界下是不通的。**
+任务 #19 当时的结论(MCP 路可行)成立于**没有边界**的前提下;
+边界立起来之后,前提变了。**已派调研找替代路线,不自行选型。**
+
+判据不变:任何新路线都必须先被本探针实测,
+且**不得重新打开 ambient MCP 的洞**(§9)。

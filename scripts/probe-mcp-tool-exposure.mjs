@@ -62,6 +62,21 @@ const DISCOVERY_TOOLS = new Set(["search_tool", "use_tool"]);
 
 const VARIANTS = [
   {
+    // Denying the MCP meta-tools closed ambient MCP — but governed tools were
+    // meant to arrive as MCP too. If the denial also hides a server the client
+    // itself attached, the planned route for governed capability is shut by our
+    // own boundary, and that has to be known before anything is built on it.
+    id: "shipped-profile-client-mcp",
+    question: "Can the shipped profile still reach a CLIENT-supplied MCP tool?",
+    agentProfile: {
+      name: "pillow-plaintext",
+      description: "Pillow-hosted session. Native tools are withheld; "
+        + "capability arrives only through governed host tools.",
+      tools: ["ask_user_question"],
+      disallowedTools: ["search_tool", "use_tool"],
+    },
+  },
+  {
     id: "no-profile",
     question: "Does client-supplied MCP work at all, with no Pillow profile?",
     agentProfile: null,
