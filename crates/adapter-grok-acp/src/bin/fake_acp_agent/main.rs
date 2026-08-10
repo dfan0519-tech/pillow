@@ -334,8 +334,8 @@ fn has_safe_plaintext_session_params(params: &Value) -> bool {
             == Some(&json!({
                 "name": "pillow-plaintext",
                 "description": "Pillow-hosted session. Native authority is restricted; \
-                                file writes run through governed client filesystem RPC.",
-                "tools": ["ask_user_question", "write"],
+                                file writes and shell commands run through governed client RPC.",
+                "tools": ["ask_user_question", "write", "run_terminal_cmd"],
                 "disallowedTools": ["search_tool", "use_tool"]
             }))
 }

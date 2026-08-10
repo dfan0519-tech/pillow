@@ -29,8 +29,9 @@ use keeper_policy::{ExecDecision, ExecProposalState};
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
     GlobalGovernedExecutionPort, GovernedProcessBridgeError, GovernedProcessDelivery,
-    GovernedProcessLifecycle, HostConfig, ProviderProcessProposal, RuntimeHost,
-    clear_pre_claim_hook_for_tests, execute_governed_process, set_pre_claim_hook_for_tests,
+    GovernedProcessLifecycle, HostConfig, ProviderProcessProposal, ProviderShellProposal,
+    RuntimeHost, clear_pre_claim_hook_for_tests, execute_governed_process, execute_governed_shell,
+    set_pre_claim_hook_for_tests,
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
@@ -260,6 +261,98 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
     assert_eq!(attribution.prefix, "process");
     assert_eq!(attribution.pattern, "node --version");
     assert_eq!(attribution.action, "allow");
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn shell_command_ignores_auto_allow_and_retains_the_exact_approved_subject_and_output() {
+    let fx = fixture();
+    add_process_rule(&fx, "*", PermissionRuleAction::Allow);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let conversation_id = fx.conversation_id.clone();
+    let decision_host = Arc::clone(&host);
+    #[cfg(windows)]
+    let command = "echo governed shell exact && echo second";
+    #[cfg(not(windows))]
+    let command = "printf 'governed shell exact' && printf second";
+    let expected = command.to_owned();
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&decision_host, &conversation_id);
+        let view = decision_host
+            .list_process_proposals(&conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.proposal_id == proposal_id)
+            .expect("pending shell proposal");
+        assert_eq!(view.program, "shell");
+        assert_eq!(view.argv, vec![expected]);
+        assert_eq!(
+            view.summary,
+            format!(
+                "\"shell\" {}",
+                serde_json::to_string(&command).expect("shell command summary")
+            ),
+            "the approval surface must receive the complete reversible command, never a truncation"
+        );
+        assert!(view.rule_subject.is_empty());
+        assert!(view.decision_available);
+        assert_eq!(view.auto_approved_by_rule, None);
+        decision_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::ApproveOnce)
+            .unwrap();
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_shell(
+        fx.run_id,
+        ProviderShellProposal {
+            call_id: "shell-human-only".into(),
+            command: command.into(),
+            portable_cwd: Some(".".into()),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    assert_eq!(receipt.approved_command, command);
+    assert_eq!(receipt.process.state, ExecProposalState::Succeeded);
+    let requested = receipt.process.requested.as_ref().unwrap();
+    assert_eq!(requested.program, "shell");
+    assert_eq!(requested.argv, vec![command]);
+    assert!(
+        receipt
+            .output
+            .as_ref()
+            .is_some_and(|output| output.output.contains("governed shell exact"))
+    );
+    assert_eq!(
+        SqliteExecProposalRepository::open(&fx.db)
+            .unwrap()
+            .get_rule_receipt(&receipt.process.proposal_id)
+            .unwrap(),
+        None,
+        "S1 shell commands must never receive rule attribution"
+    );
+
+    let structured_error = execute_governed_process(
+        fx.run_id,
+        ProviderProcessProposal {
+            call_id: "structured-shell-denied".into(),
+            tool_id: "process.run".into(),
+            tool_version: 1,
+            arguments: json!({"program":"shell","argv":[command],"cwd":"."}),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .expect_err("structured process.run must not acquire shell authority");
+    assert_eq!(
+        structured_error,
+        GovernedProcessBridgeError::InvalidProposal
+    );
     host.shutdown().unwrap();
 }
 

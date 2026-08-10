@@ -5,12 +5,13 @@
 //! `async` would change cancel/decision/terminal timing and is out of scope.
 
 use keeper_agent_protocol::{
-    ProviderProcessProposal, ProviderToolProposal, ProviderWriteProposal, RunId,
+    ProviderProcessProposal, ProviderShellProposal, ProviderToolProposal, ProviderWriteProposal,
+    RunId,
 };
 
 use crate::{
     CancellationProbe, GovernedProcessExecutionError, GovernedProcessObserver,
-    GovernedProcessOutcome, GovernedReadExecutionError, GovernedReadOutcome,
+    GovernedProcessOutcome, GovernedReadExecutionError, GovernedReadOutcome, GovernedShellOutcome,
     GovernedWriteExecutionError, GovernedWriteObserver, GovernedWriteOutcome,
 };
 
@@ -74,4 +75,20 @@ pub trait GovernedExecutionPort: Send + Sync + 'static {
         cancellation: &dyn CancellationProbe,
         observer: &mut dyn GovernedProcessObserver,
     ) -> Result<GovernedProcessOutcome, GovernedProcessExecutionError>;
+
+    /// Execute one complete raw shell command through the host's governed
+    /// process lifecycle.
+    ///
+    /// This distinct proposal type cannot enter `execute_process`. The default
+    /// fails closed so existing test doubles do not accidentally gain shell
+    /// authority; production hosts must override it explicitly.
+    fn execute_shell(
+        &self,
+        _run_id: RunId,
+        _proposal: ProviderShellProposal,
+        _cancellation: &dyn CancellationProbe,
+        _observer: &mut dyn GovernedProcessObserver,
+    ) -> Result<GovernedShellOutcome, GovernedProcessExecutionError> {
+        Err(GovernedProcessExecutionError::Unavailable)
+    }
 }

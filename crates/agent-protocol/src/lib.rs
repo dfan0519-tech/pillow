@@ -22,8 +22,8 @@ pub use adapter::{AgentRuntimeAdapter, EventSink};
 pub use error::RuntimeError;
 pub use governed::{
     GovernedProcessDelivery, GovernedProcessReceipt, GovernedReadDelivery, GovernedReadReceipt,
-    GovernedWriteDelivery, GovernedWriteReceipt, ProviderProcessProposal, ProviderToolProposal,
-    ProviderWriteProposal,
+    GovernedShellOutput, GovernedShellReceipt, GovernedWriteDelivery, GovernedWriteReceipt,
+    ProviderProcessProposal, ProviderShellProposal, ProviderToolProposal, ProviderWriteProposal,
 };
 pub use keeper_policy::WriteProposalState;
 pub use tool::{

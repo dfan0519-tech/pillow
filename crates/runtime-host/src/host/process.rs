@@ -22,7 +22,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 // Contract types live in `keeper-agent-protocol`; re-export for backward compatibility.
 pub use keeper_agent_protocol::{
-    GovernedProcessDelivery, GovernedProcessReceipt, ProviderProcessProposal,
+    GovernedProcessDelivery, GovernedProcessReceipt, GovernedShellOutput, GovernedShellReceipt,
+    ProviderProcessProposal, ProviderShellProposal,
 };
 
 use keeper_agent_protocol::{
@@ -45,6 +46,7 @@ use keeper_tool_executor::{
     ClaimedObserver, GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
     GovernedProcessToolGateway, LiveProcessOutput, ProcessOutputChunk as GatewayOutputChunk,
     ProcessOutputStream as GatewayOutputStream, ProjectCapability, SealedProcessSpec,
+    SealedShellSpec,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -232,7 +234,7 @@ struct LiveProcessEntry {
     summary: String,
     risk_class: ProcessRiskClass,
     expires_at: DateTime<Utc>,
-    sealed: SealedProcessSpec,
+    sealed: SealedCommandAuthority,
     /// Memory-only raw grant; never serialized, never on public views.
     raw_grant: String,
     grant_digest: String,
@@ -256,9 +258,118 @@ struct LiveProcessEntry {
     observer_failure_cleanup_in_progress: bool,
     observer_quarantine_deferred: bool,
     auto_rule_pending: bool,
+    /// Empty for S1 shell commands: no rule/auto-decision surface exists.
+    rule_subject: String,
     auto_approved_by_rule: Option<PermissionRuleAttributionView>,
     #[cfg(any(test, feature = "test-support"))]
     pre_claim_hook: Option<PreClaimHook>,
+}
+
+#[derive(Clone)]
+enum SealedCommandAuthority {
+    Structured(SealedProcessSpec),
+    Shell(SealedShellSpec),
+}
+
+impl SealedCommandAuthority {
+    fn program(&self) -> &str {
+        match self {
+            Self::Structured(sealed) => sealed.program(),
+            Self::Shell(sealed) => sealed.program(),
+        }
+    }
+
+    fn argv(&self) -> &[String] {
+        match self {
+            Self::Structured(sealed) => sealed.argv(),
+            Self::Shell(sealed) => sealed.argv(),
+        }
+    }
+
+    fn portable_cwd(&self) -> Option<&str> {
+        match self {
+            Self::Structured(sealed) => sealed.portable_cwd(),
+            Self::Shell(sealed) => sealed.portable_cwd(),
+        }
+    }
+
+    fn argv_digest(&self) -> &str {
+        match self {
+            Self::Structured(sealed) => sealed.argv_digest(),
+            Self::Shell(sealed) => sealed.argv_digest(),
+        }
+    }
+
+    fn proposal_fingerprint(&self) -> &str {
+        match self {
+            Self::Structured(sealed) => sealed.proposal_fingerprint(),
+            Self::Shell(sealed) => sealed.proposal_fingerprint(),
+        }
+    }
+
+    fn reserve(
+        &self,
+        bound: &BoundProcessRun,
+        run_id: RunId,
+        call_id: &str,
+    ) -> Result<StoredExecProposal, GovernedProcessError> {
+        match self {
+            Self::Structured(sealed) => bound
+                .gateway
+                .reserve(
+                    &bound.capability,
+                    bound.context.conversation_id(),
+                    run_id,
+                    call_id,
+                    sealed,
+                )
+                .map(|prepared| prepared.metadata),
+            Self::Shell(sealed) => bound
+                .gateway
+                .reserve_shell(
+                    &bound.capability,
+                    bound.context.conversation_id(),
+                    run_id,
+                    call_id,
+                    sealed,
+                )
+                .map(|prepared| prepared.metadata),
+        }
+    }
+
+    fn execute_with_observer(
+        &self,
+        bound: &BoundProcessRun,
+        proposal_id: &str,
+        process_cancel: ProcessCancellationSignal,
+        observer: OutputObserver,
+        on_claimed: ClaimedObserver,
+    ) -> Result<GovernedProcessExecution, GovernedProcessError> {
+        match self {
+            Self::Structured(sealed) => bound.gateway.execute_with_observer(
+                &bound.capability,
+                proposal_id,
+                sealed,
+                process_cancel,
+                Some(observer),
+                Some(on_claimed),
+            ),
+            Self::Shell(sealed) => bound.gateway.execute_shell_with_observer(
+                &bound.capability,
+                proposal_id,
+                sealed,
+                process_cancel,
+                Some(observer),
+                Some(on_claimed),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalPolicy {
+    StructuredRules,
+    HumanOnly,
 }
 
 impl std::fmt::Debug for LiveProcessEntry {
@@ -677,17 +788,7 @@ pub fn execute_governed_process(
         return Err(GovernedProcessBridgeError::InvalidProposal);
     }
 
-    let bound = {
-        let guard = coordinator()
-            .state
-            .lock()
-            .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-        guard
-            .runs
-            .get(&run_id)
-            .cloned()
-            .ok_or(GovernedProcessBridgeError::RunNotRegistered)?
-    };
+    let bound = bound_process_run(run_id)?;
 
     let args = parse_process_arguments(&provider.arguments)?;
     let arguments_digest = canonical_arguments_digest(&provider.arguments)
@@ -717,47 +818,118 @@ pub fn execute_governed_process(
 
     // One pending process action per owning run — before seal/reserve so busy
     // never creates new spawn authority.
-    {
-        let guard = coordinator()
-            .state
-            .lock()
-            .map_err(|_| GovernedProcessBridgeError::Gateway)?;
-        if guard.pending_by_run.contains_key(&run_id) {
-            return Err(GovernedProcessBridgeError::Busy);
-        }
-    }
+    ensure_process_run_available(run_id)?;
+    let sealed = SealedCommandAuthority::Structured(
+        GovernedProcessToolGateway::seal(
+            &bound.capability,
+            &args.program,
+            &args.argv,
+            args.cwd.as_deref(),
+        )
+        .map_err(map_seal_error)?,
+    );
 
-    let sealed = GovernedProcessToolGateway::seal(
-        &bound.capability,
-        &args.program,
-        &args.argv,
-        args.cwd.as_deref(),
+    execute_governed_sealed(
+        run_id,
+        provider.call_id,
+        bound,
+        sealed,
+        ApprovalPolicy::StructuredRules,
+        cancellation,
+        &mut on_lifecycle,
     )
-    .map_err(map_seal_error)?;
+}
 
+/// Execute one ACP shell-string proposal through the same reserve, approval,
+/// claim, supervised process, cancellation, timeout and durable receipt path
+/// as [`execute_governed_process`]. S1 always requires a human decision.
+pub fn execute_governed_shell(
+    run_id: RunId,
+    provider: ProviderShellProposal,
+    cancellation: &dyn CancellationProbe,
+    mut on_lifecycle: impl FnMut(GovernedProcessLifecycle<'_>) -> Result<(), GovernedProcessBridgeError>,
+) -> Result<GovernedShellReceipt, GovernedProcessBridgeError> {
+    if provider.call_id.is_empty() || provider.command.is_empty() {
+        return Err(GovernedProcessBridgeError::InvalidProposal);
+    }
+    let bound = bound_process_run(run_id)?;
+    ensure_process_run_available(run_id)?;
+    let sealed = SealedCommandAuthority::Shell(
+        GovernedProcessToolGateway::seal_shell(
+            &bound.capability,
+            &provider.command,
+            provider.portable_cwd.as_deref(),
+        )
+        .map_err(map_seal_error)?,
+    );
+    let approved_command = provider.command;
+    let process = execute_governed_sealed(
+        run_id,
+        provider.call_id,
+        Arc::clone(&bound),
+        sealed,
+        ApprovalPolicy::HumanOnly,
+        cancellation,
+        &mut on_lifecycle,
+    )?;
+    let output = retained_shell_output(&bound, &process);
+    Ok(GovernedShellReceipt {
+        process,
+        approved_command,
+        output,
+    })
+}
+
+fn bound_process_run(run_id: RunId) -> Result<Arc<BoundProcessRun>, GovernedProcessBridgeError> {
+    let guard = coordinator()
+        .state
+        .lock()
+        .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+    guard
+        .runs
+        .get(&run_id)
+        .cloned()
+        .ok_or(GovernedProcessBridgeError::RunNotRegistered)
+}
+
+fn ensure_process_run_available(run_id: RunId) -> Result<(), GovernedProcessBridgeError> {
+    let guard = coordinator()
+        .state
+        .lock()
+        .map_err(|_| GovernedProcessBridgeError::Gateway)?;
+    if guard.pending_by_run.contains_key(&run_id) {
+        return Err(GovernedProcessBridgeError::Busy);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_governed_sealed(
+    run_id: RunId,
+    call_id: String,
+    bound: Arc<BoundProcessRun>,
+    sealed: SealedCommandAuthority,
+    approval_policy: ApprovalPolicy,
+    cancellation: &dyn CancellationProbe,
+    on_lifecycle: &mut impl FnMut(
+        GovernedProcessLifecycle<'_>,
+    ) -> Result<(), GovernedProcessBridgeError>,
+) -> Result<GovernedProcessReceipt, GovernedProcessBridgeError> {
     // Terminal identity replay via deterministic reservation key + fingerprint
     // from reserve — never pre-list storage rows.
-    let prepared = bound
-        .gateway
-        .reserve(
-            &bound.capability,
-            bound.context.conversation_id(),
-            run_id,
-            &provider.call_id,
-            &sealed,
-        )
+    let row = sealed
+        .reserve(&bound, run_id, &call_id)
         .map_err(|error| match error {
             GovernedProcessError::NotApplicable => GovernedProcessBridgeError::Busy,
             other => map_seal_error(other),
         })?;
 
-    let row = prepared.metadata.clone();
     if is_exec_terminal(row.state) {
         if row.proposal_fingerprint == sealed.proposal_fingerprint()
             && row.project_id == bound.context.project_id()
             && row.conversation_id == bound.context.conversation_id()
             && row.run_id == run_id
-            && row.call_id == provider.call_id
+            && row.call_id == call_id
         {
             return Ok(replay_receipt(row));
         }
@@ -780,21 +952,33 @@ pub fn execute_governed_process(
     let grant_digest_value =
         grant_digest(&raw_grant).map_err(|_| GovernedProcessBridgeError::Gateway)?;
     let summary = process_summary(sealed.program(), sealed.argv());
-    let risk_class = classify_risk(sealed.program(), sealed.argv());
+    let risk_class = match approval_policy {
+        ApprovalPolicy::StructuredRules => classify_risk(sealed.program(), sealed.argv()),
+        ApprovalPolicy::HumanOnly => ProcessRiskClass::High,
+    };
     let process_cancel = ProcessCancellationSignal::new();
     let proposal_id = row.proposal_id.clone();
-    let rule_subject = canonical_process_subject(sealed.program(), sealed.argv());
-    let rule_evaluation = match evaluate_host_permission_rules(
-        bound.permission_rules.as_deref(),
-        bound.context.project_id(),
-        PermissionRulePrefix::Process,
-        &rule_subject,
-    ) {
-        Ok(evaluation) => evaluation,
-        Err(()) => {
-            fail_closed_after_reserve(&proposal_id, &bound);
-            return Err(GovernedProcessBridgeError::Gateway);
+    let (rule_subject, rule_evaluation) = match approval_policy {
+        ApprovalPolicy::StructuredRules => {
+            let subject = canonical_process_subject(sealed.program(), sealed.argv());
+            let evaluation = match evaluate_host_permission_rules(
+                bound.permission_rules.as_deref(),
+                bound.context.project_id(),
+                PermissionRulePrefix::Process,
+                &subject,
+            ) {
+                Ok(evaluation) => evaluation,
+                Err(()) => {
+                    fail_closed_after_reserve(&proposal_id, &bound);
+                    return Err(GovernedProcessBridgeError::Gateway);
+                }
+            };
+            (subject, evaluation)
         }
+        ApprovalPolicy::HumanOnly => (
+            String::new(),
+            HostPermissionRuleEvaluation::RequireConfirmation,
+        ),
     };
     let auto_rule_pending = !matches!(
         &rule_evaluation,
@@ -865,6 +1049,7 @@ pub fn execute_governed_process(
                 observer_failure_cleanup_in_progress: false,
                 observer_quarantine_deferred: false,
                 auto_rule_pending,
+                rule_subject,
                 auto_approved_by_rule: None,
                 #[cfg(any(test, feature = "test-support"))]
                 pre_claim_hook: None,
@@ -899,7 +1084,7 @@ pub fn execute_governed_process(
         &bound,
         cancellation,
         requested,
-        &mut on_lifecycle,
+        on_lifecycle,
     )
 }
 
@@ -1374,6 +1559,29 @@ fn retain_terminal_output(guard: &mut CoordinatorState, entry: &LiveProcessEntry
     });
 }
 
+fn retained_shell_output(
+    bound: &BoundProcessRun,
+    receipt: &GovernedProcessReceipt,
+) -> Option<GovernedShellOutput> {
+    receipt.provider_ok.as_ref()?;
+    let guard = coordinator().state.lock().ok()?;
+    let retained = guard.retained_terminal.iter().find(|entry| {
+        entry.owner == bound.owner
+            && entry.conversation_id == bound.context.conversation_id()
+            && entry.proposal_id == receipt.proposal_id
+    })?;
+    let mut chunks = retained.chunks.clone();
+    chunks.sort_by_key(|chunk| chunk.sequence);
+    let output = chunks
+        .into_iter()
+        .map(|chunk| chunk.text)
+        .collect::<String>();
+    Some(GovernedShellOutput {
+        output,
+        truncated: retained.metadata.truncated.unwrap_or(false),
+    })
+}
+
 fn append_live_output_chunk(
     owner: Uuid,
     conversation_id: &str,
@@ -1813,15 +2021,8 @@ fn decide_process_proposal_inner(
                 }
                 coordinator().cv.notify_all();
             });
-            let exec: Result<GovernedProcessExecution, GovernedProcessError> =
-                bound.gateway.execute_with_observer(
-                    &bound.capability,
-                    proposal_id,
-                    &sealed,
-                    process_cancel,
-                    Some(observer),
-                    Some(on_claimed),
-                );
+            let exec: Result<GovernedProcessExecution, GovernedProcessError> = sealed
+                .execute_with_observer(&bound, proposal_id, process_cancel, observer, on_claimed);
 
             match exec {
                 Ok(execution) => {
@@ -1975,7 +2176,7 @@ fn live_view_from_entry(
         truncated: meta.truncated,
         encoding_lossy: meta.encoding_lossy,
         captured_bytes: meta.captured_bytes,
-        rule_subject: canonical_process_subject(&entry.program, &entry.argv),
+        rule_subject: entry.rule_subject.clone(),
         auto_approved_by_rule: entry.auto_approved_by_rule.clone(),
     }
 }
@@ -2001,7 +2202,11 @@ fn view_from_stored(
         program: row.program.clone(),
         argv: argv.to_vec(),
         portable_cwd: cwd,
-        risk_class: classify_risk(&row.program, argv),
+        risk_class: if row.program == "shell" {
+            ProcessRiskClass::High
+        } else {
+            classify_risk(&row.program, argv)
+        },
         summary,
         expires_at: row.expires_at,
         decision_available,
@@ -2012,9 +2217,13 @@ fn view_from_stored(
         truncated: row.truncated,
         encoding_lossy: row.encoding_lossy,
         captured_bytes: row.captured_bytes,
-        rule_subject: rule_receipt
-            .map(|receipt| receipt.match_subject.clone())
-            .unwrap_or_else(|| canonical_process_subject(&row.program, argv)),
+        rule_subject: if row.program == "shell" {
+            String::new()
+        } else {
+            rule_receipt
+                .map(|receipt| receipt.match_subject.clone())
+                .unwrap_or_else(|| canonical_process_subject(&row.program, argv))
+        },
         auto_approved_by_rule: rule_receipt.map(attribution_from_receipt),
     }
 }

@@ -6,9 +6,9 @@ pub use process::{
     CLEANUP_UNPROVEN_PUBLIC_ERROR, ClaimedObserver, GovernedProcessError, GovernedProcessExecution,
     GovernedProcessOutcome, GovernedProcessToolGateway, LiveProcessOutput, PROCESS_CATALOG,
     PROCESS_OUTPUT_BYTE_CAP, PROCESS_RUN_ARGV_BYTE_CAP, PROCESS_RUN_ARGV_COUNT_CAP,
-    PROCESS_TIMEOUT, PreparedExecProposal, ProcessOutputChunk, ProcessOutputStream,
-    SealedProcessSpec, build_clean_environment, validate_process_run_arguments,
-    validate_program_catalog,
+    PROCESS_TIMEOUT, PreparedExecProposal, PreparedShellExecProposal, ProcessOutputChunk,
+    ProcessOutputStream, SHELL_PROGRAM_LABEL, SealedProcessSpec, SealedShellSpec,
+    build_clean_environment, validate_process_run_arguments, validate_program_catalog,
 };
 pub use write::{
     BaseSnapshot, GovernedWriteApplyOutcome, GovernedWriteError, GovernedWriteToolGateway,

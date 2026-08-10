@@ -7,15 +7,15 @@
 use std::cell::Cell;
 
 use keeper_agent_protocol::{
-    GovernedProcessReceipt, GovernedReadReceipt, GovernedWriteReceipt,
-    ProcessProposalRequestedPayload, ProviderProcessProposal, ProviderToolProposal,
-    ProviderWriteProposal, RunId,
+    GovernedProcessReceipt, GovernedReadReceipt, GovernedShellReceipt, GovernedWriteReceipt,
+    ProcessProposalRequestedPayload, ProviderProcessProposal, ProviderShellProposal,
+    ProviderToolProposal, ProviderWriteProposal, RunId,
 };
 use keeper_governance_port::{
     CancellationProbe, CheckedGovernedOutcome, GovernedExecutionPort,
     GovernedOutcomeValidationError, GovernedProcessExecutionError,
     GovernedProcessLifecycle as PortProcessLifecycle, GovernedProcessObserver,
-    GovernedProcessOutcome, GovernedReadExecutionError, GovernedReadOutcome,
+    GovernedProcessOutcome, GovernedReadExecutionError, GovernedReadOutcome, GovernedShellOutcome,
     GovernedWriteExecutionError, GovernedWriteLifecycle, GovernedWriteObserver,
     GovernedWriteOutcome, LifecycleObserverError,
 };
@@ -24,7 +24,7 @@ use crate::{
     GovernedProcessBridgeError, GovernedProcessLifecycle as HostProcessLifecycle,
     GovernedReadBridgeError, GovernedToolService, GovernedWriteBridgeError,
     ProcessProposalRequestedView, execute_governed_process, execute_governed_read,
-    execute_governed_write,
+    execute_governed_shell, execute_governed_write,
 };
 
 impl GovernedExecutionPort for GovernedToolService {
@@ -73,6 +73,22 @@ impl GovernedExecutionPort for GovernedToolService {
             return Err(GovernedProcessExecutionError::RunNotBound);
         }
         GlobalGovernedExecutionPort::new().execute_process(run_id, proposal, cancellation, observer)
+    }
+
+    fn execute_shell(
+        &self,
+        run_id: RunId,
+        proposal: ProviderShellProposal,
+        cancellation: &dyn CancellationProbe,
+        observer: &mut dyn GovernedProcessObserver,
+    ) -> Result<GovernedShellOutcome, GovernedProcessExecutionError> {
+        if self.is_shut_down() {
+            return Err(GovernedProcessExecutionError::ShuttingDown);
+        }
+        if !self.owns_process_run(run_id) {
+            return Err(GovernedProcessExecutionError::RunNotBound);
+        }
+        GlobalGovernedExecutionPort::new().execute_shell(run_id, proposal, cancellation, observer)
     }
 }
 
@@ -171,6 +187,46 @@ impl GovernedExecutionPort for GlobalGovernedExecutionPort {
             },
         }
     }
+
+    fn execute_shell(
+        &self,
+        run_id: RunId,
+        proposal: ProviderShellProposal,
+        cancellation: &dyn CancellationProbe,
+        observer: &mut dyn GovernedProcessObserver,
+    ) -> Result<GovernedShellOutcome, GovernedProcessExecutionError> {
+        let observer_failure = Cell::new(None);
+        let result = execute_governed_shell(run_id, proposal, cancellation, |event| {
+            let observed = match event {
+                HostProcessLifecycle::Requested(requested) => {
+                    let payload = process_requested_payload(requested);
+                    observer.observe(PortProcessLifecycle::Requested(&payload))
+                }
+                HostProcessLifecycle::Decided(decided) => {
+                    observer.observe(PortProcessLifecycle::Decided(decided))
+                }
+                HostProcessLifecycle::Started(started) => {
+                    observer.observe(PortProcessLifecycle::Started(started))
+                }
+            };
+            observed.map_err(|error| {
+                observer_failure.set(Some(error));
+                map_process_observer_error_to_bridge(error)
+            })
+        });
+
+        if matches!(&result, Err(GovernedProcessBridgeError::CleanupUnproven)) {
+            return Err(GovernedProcessExecutionError::CleanupUnproven);
+        }
+
+        match observer_failure.get() {
+            Some(error) => Err(map_process_observer_error_to_port(error)),
+            None => match result {
+                Ok(receipt) => checked_shell_outcome(receipt),
+                Err(error) => Err(map_process_bridge_error(error)),
+            },
+        }
+    }
 }
 
 fn checked_read_outcome(
@@ -189,6 +245,12 @@ fn checked_process_outcome(
     receipt: GovernedProcessReceipt,
 ) -> Result<GovernedProcessOutcome, GovernedProcessExecutionError> {
     GovernedProcessOutcome::try_from_receipt(receipt).map_err(map_process_outcome_error)
+}
+
+fn checked_shell_outcome(
+    receipt: GovernedShellReceipt,
+) -> Result<GovernedShellOutcome, GovernedProcessExecutionError> {
+    GovernedShellOutcome::try_from_receipt(receipt).map_err(map_process_outcome_error)
 }
 
 fn map_read_bridge_error(error: GovernedReadBridgeError) -> GovernedReadExecutionError {

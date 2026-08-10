@@ -399,6 +399,9 @@ pub(crate) fn run_prompt_script(
         "governed-process-timeout" => {
             run_governed_process_timeout(stdout, rx, session_id, id, &cancelled);
         }
+        "governed-terminal-roundtrip" => {
+            run_governed_terminal_roundtrip(stdout, rx, session_id, session_root, id, &cancelled);
+        }
         "governed-process-desktop" => {
             // Desktop acceptance: one ACP child, prompt tags select the action.
             // Tags are harness-owned and must not appear as secret-bearing IDs.
@@ -634,6 +637,92 @@ pub(crate) fn run_prompt_script(
             );
         }
     }
+}
+
+fn run_governed_terminal_roundtrip(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    session_root: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+) {
+    #[cfg(windows)]
+    let command = "echo governed-terminal-roundtrip";
+    #[cfg(not(windows))]
+    let command = "printf governed-terminal-roundtrip";
+    write_json(
+        stdout,
+        &json!({
+            "jsonrpc":"2.0",
+            "id":151,
+            "method":"terminal/create",
+            "params":{
+                "sessionId":session_id,
+                "command":command,
+                "args":[],
+                "env":[],
+                "cwd":session_root,
+                "outputByteLimit":128
+            }
+        }),
+    );
+    let created = wait_for_result(rx, cancelled, 151);
+    let Some(terminal_id) = created
+        .as_ref()
+        .and_then(|result| result.get("terminalId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        finish_process_script(stdout, session_id, id, "governed-terminal-roundtrip-failed");
+        return;
+    };
+
+    let request = |request_id: u64, method: &str| {
+        json!({
+            "jsonrpc":"2.0",
+            "id":request_id,
+            "method":method,
+            "params":{"sessionId":session_id,"terminalId":terminal_id}
+        })
+    };
+    write_json(stdout, &request(152, "terminal/wait_for_exit"));
+    let waited = wait_for_result(rx, cancelled, 152);
+    write_json(stdout, &request(153, "terminal/output"));
+    let output = wait_for_result(rx, cancelled, 153);
+    write_json(stdout, &request(154, "terminal/kill"));
+    let killed = wait_for_result(rx, cancelled, 154);
+    write_json(stdout, &request(155, "terminal/release"));
+    let released = wait_for_result(rx, cancelled, 155);
+
+    let ok = waited
+        .as_ref()
+        .and_then(|result| result.get("exitCode"))
+        .and_then(Value::as_u64)
+        == Some(0)
+        && output
+            .as_ref()
+            .and_then(|result| result.get("output"))
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("governed-terminal-roundtrip"))
+        && output
+            .as_ref()
+            .and_then(|result| result.get("exitStatus"))
+            .and_then(|status| status.get("exitCode"))
+            .and_then(Value::as_u64)
+            == Some(0)
+        && killed.as_ref().is_some_and(Value::is_object)
+        && released.as_ref().is_some_and(Value::is_object);
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if ok {
+            "governed-terminal-roundtrip-ok"
+        } else {
+            "governed-terminal-roundtrip-failed"
+        },
+    );
 }
 
 fn process_request(request_id: u64, session_id: &str, call_id: &str, argv: &[&str]) -> Value {

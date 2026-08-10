@@ -30,6 +30,11 @@ use crate::provider_processes::{
     ProviderProcessRequestError, ProviderProcessResponseError, normalize_provider_process,
     provider_process_response,
 };
+use crate::provider_terminals::{
+    CompletedTerminal, ProviderTerminalRequestError, TERMINAL_CREATE_METHOD, TERMINAL_KILL_METHOD,
+    TERMINAL_OUTPUT_METHOD, TERMINAL_RELEASE_METHOD, TERMINAL_WAIT_METHOD,
+    is_provider_terminal_method, normalize_terminal_create, normalize_terminal_reference,
+};
 use crate::provider_tools::{
     ProviderToolRequestError, normalize_provider_tool, normalized_result_events, provider_response,
     provider_transport_id,
@@ -353,6 +358,10 @@ fn handle_server_request(
     // Strict process entrypoint â€” never routed through governed reads.
     if method == "pillow/process_tool" {
         return handle_process_tool(inner, governance, sink, cancel, id, params);
+    }
+
+    if is_provider_terminal_method(method) {
+        return handle_terminal_request(inner, governance, sink, cancel, id, method, params);
     }
 
     let (run_id, session_id, project_root, rpc) = {
@@ -760,6 +769,263 @@ fn handle_write_tool(
     }
 }
 
+fn handle_terminal_request(
+    inner: &Mutex<Inner>,
+    governance: &dyn GovernedExecutionPort,
+    sink: &mut dyn EventSink,
+    cancel: &AtomicBool,
+    id: serde_json::Value,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    if method == TERMINAL_CREATE_METHOD {
+        return handle_terminal_create(inner, governance, sink, cancel, id, params);
+    }
+
+    let (run_id, session_id, rpc) = {
+        let guard = inner.lock().expect("inner lock");
+        let Some(active) = guard.turns.active().filter(|active| active.live) else {
+            if let Some(connection) = guard.connection.as_ref() {
+                connection
+                    .rpc
+                    .respond_error(id, -32000, "governed_terminal_unavailable")?;
+            }
+            return Ok(());
+        };
+        let Some(connection) = guard.connection.as_ref() else {
+            return Ok(());
+        };
+        (
+            active.run_id,
+            active.acp_session_id.clone(),
+            Arc::clone(&connection.rpc),
+        )
+    };
+    let terminal_id = match normalize_terminal_reference(method, params, &session_id) {
+        Ok(terminal_id) => terminal_id,
+        Err(ProviderTerminalRequestError::MethodNotFound) => {
+            rpc.respond_error(id, -32601, "method_not_found")?;
+            return Ok(());
+        }
+        Err(ProviderTerminalRequestError::InvalidParams) => {
+            rpc.respond_error(id, -32602, "invalid_terminal_request")?;
+            return Ok(());
+        }
+    };
+
+    let response = {
+        let mut guard = inner.lock().expect("inner lock");
+        let Some(active) = guard
+            .turns
+            .active_mut()
+            .filter(|active| active.run_id == run_id && active.live)
+        else {
+            rpc.respond_error(id, -32000, "governed_terminal_unavailable")?;
+            return Ok(());
+        };
+        match method {
+            TERMINAL_OUTPUT_METHOD => active
+                .terminals
+                .get(&terminal_id)
+                .map(CompletedTerminal::output_response),
+            TERMINAL_WAIT_METHOD => active
+                .terminals
+                .get(&terminal_id)
+                .map(CompletedTerminal::wait_response),
+            // `terminal/create` returns only after this synchronous S1 governed
+            // execution reaches durable terminal, so kill is an idempotent
+            // acknowledgement for a known completed terminal. Turn cancel and
+            // the host timeout still cancel the supervised Job while create runs.
+            TERMINAL_KILL_METHOD => active
+                .terminals
+                .get(&terminal_id)
+                .map(|_| serde_json::json!({})),
+            TERMINAL_RELEASE_METHOD => active
+                .terminals
+                .release(&terminal_id)
+                .then(|| serde_json::json!({})),
+            _ => None,
+        }
+    };
+    match response {
+        Some(response) => rpc.respond(id, response),
+        None => rpc.respond_error(id, -32065, "terminal_not_found"),
+    }
+}
+
+fn handle_terminal_create(
+    inner: &Mutex<Inner>,
+    governance: &dyn GovernedExecutionPort,
+    sink: &mut dyn EventSink,
+    cancel: &AtomicBool,
+    id: serde_json::Value,
+    params: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let (run_id, session_id, project_root, rpc) = {
+        let guard = inner.lock().expect("inner lock");
+        let Some(active) = guard.turns.active().filter(|active| active.live) else {
+            if let Some(connection) = guard.connection.as_ref() {
+                connection
+                    .rpc
+                    .respond_error(id, -32000, "governed_terminal_unavailable")?;
+            }
+            return Ok(());
+        };
+        let Some(connection) = guard.connection.as_ref() else {
+            return Ok(());
+        };
+        (
+            active.run_id,
+            active.acp_session_id.clone(),
+            active.project_root.clone(),
+            Arc::clone(&connection.rpc),
+        )
+    };
+    let mut normalized =
+        match normalize_terminal_create(TERMINAL_CREATE_METHOD, params, &session_id, &project_root)
+        {
+            Ok(normalized) => normalized,
+            Err(ProviderTerminalRequestError::MethodNotFound) => {
+                rpc.respond_error(id, -32601, "method_not_found")?;
+                return Ok(());
+            }
+            Err(ProviderTerminalRequestError::InvalidParams) => {
+                rpc.respond_error(id, -32602, "invalid_terminal_request")?;
+                return Ok(());
+            }
+        };
+    let transport_id = match provider_transport_id(&id) {
+        Ok(transport_id) => transport_id,
+        Err(_) => {
+            rpc.respond_error(id, -32602, "invalid_terminal_request")?;
+            return Ok(());
+        }
+    };
+    let canonical_request =
+        normalized
+            .canonical_request_identity()
+            .map_err(|_| RuntimeError::Internal {
+                message: "terminal_request_canonicalization_failed".into(),
+            })?;
+    let call_id = {
+        let mut guard = inner.lock().expect("inner lock");
+        let Some(active) = guard
+            .turns
+            .active_mut()
+            .filter(|active| active.run_id == run_id && active.live)
+        else {
+            rpc.respond_error(id, -32000, "governed_terminal_unavailable")?;
+            return Ok(());
+        };
+        active
+            .provider_requests
+            .resolve(run_id, transport_id, canonical_request)
+    };
+    let call_id = match call_id {
+        Ok(call_id) => call_id,
+        Err(ProviderRequestIdentityError::Conflict) => {
+            rpc.respond_error(id, -32030, "provider_request_id_reused")?;
+            return Ok(());
+        }
+        Err(ProviderRequestIdentityError::Exhausted) => {
+            rpc.respond_error(id, -32000, "governed_terminal_unavailable")?;
+            return Ok(());
+        }
+    };
+
+    let cached = {
+        let guard = inner.lock().expect("inner lock");
+        guard
+            .turns
+            .active()
+            .filter(|active| active.run_id == run_id && active.live)
+            .and_then(|active| active.terminals.by_call_id(&call_id))
+            .cloned()
+    };
+    if let Some(cached) = cached {
+        return rpc.respond(id, serde_json::json!({"terminalId": cached.terminal_id}));
+    }
+
+    normalized.proposal.call_id = call_id.clone();
+    let output_byte_limit = normalized.output_byte_limit();
+    let decided_emitted = AtomicBool::new(false);
+    let started_emitted = AtomicBool::new(false);
+    let cancel_probe: &dyn CancellationProbe = cancel;
+    let execution = {
+        let mut observer = ProcessLifecycleEmitter {
+            inner,
+            sink,
+            run_id,
+            decided_emitted: &decided_emitted,
+            started_emitted: &started_emitted,
+        };
+        governance.execute_shell(run_id, normalized.proposal, cancel_probe, &mut observer)
+    };
+    let receipt = match execution {
+        Ok(outcome) => outcome.into_receipt(),
+        Err(GovernedProcessExecutionError::InvalidProposal) => {
+            rpc.respond_error(id, -32602, "invalid_terminal_request")?;
+            return Ok(());
+        }
+        Err(GovernedProcessExecutionError::ReservationConflict) => {
+            rpc.respond_error(id, -32063, "governed_terminal_conflict")?;
+            return Ok(());
+        }
+        Err(GovernedProcessExecutionError::Busy) => {
+            rpc.respond_error(id, -32064, "governed_terminal_in_progress")?;
+            return Ok(());
+        }
+        Err(
+            GovernedProcessExecutionError::RunNotBound
+            | GovernedProcessExecutionError::InvalidContext
+            | GovernedProcessExecutionError::NotLive
+            | GovernedProcessExecutionError::ShuttingDown
+            | GovernedProcessExecutionError::CleanupUnproven
+            | GovernedProcessExecutionError::LifecycleDeliveryFailed
+            | GovernedProcessExecutionError::Unavailable,
+        ) => {
+            rpc.respond_error(id, -32000, "governed_terminal_unavailable")?;
+            return Ok(());
+        }
+    };
+
+    emit_remaining_process_events(
+        inner,
+        sink,
+        run_id,
+        &receipt.process,
+        &decided_emitted,
+        &started_emitted,
+    )?;
+    let terminal = match CompletedTerminal::from_receipt(receipt, call_id, output_byte_limit) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            let (code, message) = error.rpc_error();
+            rpc.respond_error(id, code, message)?;
+            return Ok(());
+        }
+    };
+    let terminal_id = terminal.terminal_id.clone();
+    let inserted = {
+        let mut guard = inner.lock().expect("inner lock");
+        let Some(active) = guard
+            .turns
+            .active_mut()
+            .filter(|active| active.run_id == run_id && active.live)
+        else {
+            rpc.respond_error(id, -32000, "governed_terminal_unavailable")?;
+            return Ok(());
+        };
+        active.terminals.insert(terminal)
+    };
+    if let Err(error) = inserted {
+        let (code, message) = error.rpc_error();
+        rpc.respond_error(id, code, message)?;
+        return Ok(());
+    }
+    rpc.respond(id, serde_json::json!({"terminalId": terminal_id}))
+}
+
 fn handle_process_tool(
     inner: &Mutex<Inner>,
     governance: &dyn GovernedExecutionPort,
@@ -846,43 +1112,14 @@ fn handle_process_tool(
         }
     };
 
-    // Post-return: emit only kinds not already delivered in-flight.
-    // Replays return existing terminal evidence and must not duplicate events.
-    if receipt.delivery == GovernedProcessDelivery::Executed {
-        if let Some(decided) = receipt.decided.as_ref()
-            && !decided_emitted.load(Ordering::SeqCst)
-        {
-            emit_process_event(
-                inner,
-                sink,
-                run_id,
-                RuntimeEventKind::ProcessProposalDecided,
-                decided,
-            )?;
-        }
-        if let Some(started) = receipt.started.as_ref()
-            && !started_emitted.load(Ordering::SeqCst)
-        {
-            emit_process_event(
-                inner,
-                sink,
-                run_id,
-                RuntimeEventKind::ProcessStarted,
-                started,
-            )?;
-        }
-        if let Some(terminal) = receipt.terminal.as_ref() {
-            // Completion is deliberately sent only after this terminal event has
-            // been accepted by the durable sink.
-            emit_process_event(
-                inner,
-                sink,
-                run_id,
-                RuntimeEventKind::ProcessTerminalOutcome,
-                terminal,
-            )?;
-        }
-    }
+    emit_remaining_process_events(
+        inner,
+        sink,
+        run_id,
+        &receipt,
+        &decided_emitted,
+        &started_emitted,
+    )?;
 
     match provider_process_response(&receipt) {
         Ok(response) => rpc.respond(id, response),
@@ -891,6 +1128,53 @@ fn handle_process_tool(
             rpc.respond_error(id, code, message)
         }
     }
+}
+
+fn emit_remaining_process_events(
+    inner: &Mutex<Inner>,
+    sink: &mut dyn EventSink,
+    run_id: RunId,
+    receipt: &keeper_agent_protocol::GovernedProcessReceipt,
+    decided_emitted: &AtomicBool,
+    started_emitted: &AtomicBool,
+) -> Result<(), RuntimeError> {
+    // Post-return fills only lifecycle kinds not already delivered in-flight.
+    // Replays return existing terminal evidence and emit nothing again.
+    if receipt.delivery != GovernedProcessDelivery::Executed {
+        return Ok(());
+    }
+    if let Some(decided) = receipt.decided.as_ref()
+        && !decided_emitted.load(Ordering::SeqCst)
+    {
+        emit_process_event(
+            inner,
+            sink,
+            run_id,
+            RuntimeEventKind::ProcessProposalDecided,
+            decided,
+        )?;
+    }
+    if let Some(started) = receipt.started.as_ref()
+        && !started_emitted.load(Ordering::SeqCst)
+    {
+        emit_process_event(
+            inner,
+            sink,
+            run_id,
+            RuntimeEventKind::ProcessStarted,
+            started,
+        )?;
+    }
+    if let Some(terminal) = receipt.terminal.as_ref() {
+        emit_process_event(
+            inner,
+            sink,
+            run_id,
+            RuntimeEventKind::ProcessTerminalOutcome,
+            terminal,
+        )?;
+    }
+    Ok(())
 }
 
 fn emit_process_event(

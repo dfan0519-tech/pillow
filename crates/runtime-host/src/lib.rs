@@ -36,13 +36,14 @@ pub use governed_write::{
 };
 pub use host::{
     DEFAULT_MAX_CONCURRENT_TURNS, GovernedAdapterFactory, GovernedProcessBridgeError,
-    GovernedProcessDelivery, GovernedProcessLifecycle, GovernedProcessReceipt, HostConfig,
-    LiveProcessProposalView, PreparedRuntimeHost, ProcessOrigin, ProcessOutputChunk,
-    ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass,
-    ProviderProcessProposal, RuntimeHost, SpawnedTurn, decide_process_proposal,
-    execute_governed_process, list_process_proposals, live_process_authority_count,
-    normalize_max_concurrent_turns, open_process_output, pending_process_run_count,
-    recover_process_proposals, workspace_fixture_path,
+    GovernedProcessDelivery, GovernedProcessLifecycle, GovernedProcessReceipt, GovernedShellOutput,
+    GovernedShellReceipt, HostConfig, LiveProcessProposalView, PreparedRuntimeHost, ProcessOrigin,
+    ProcessOutputChunk, ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView,
+    ProcessRiskClass, ProviderProcessProposal, ProviderShellProposal, RuntimeHost, SpawnedTurn,
+    decide_process_proposal, execute_governed_process, execute_governed_shell,
+    list_process_proposals, live_process_authority_count, normalize_max_concurrent_turns,
+    open_process_output, pending_process_run_count, recover_process_proposals,
+    workspace_fixture_path,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use host::{

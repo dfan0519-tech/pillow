@@ -80,6 +80,18 @@ pub const PROCESS_TIMEOUT: Duration = Duration::from_millis(60_000);
 /// Combined stdout/stderr capture budget (matches process.run@1 manifest).
 pub const PROCESS_OUTPUT_BYTE_CAP: usize = 262_144;
 
+/// Durable/display label for the distinct governed shell path.
+///
+/// This is deliberately not a member of [`PROCESS_CATALOG`]. Structured
+/// `process.run@1` proposals remain unable to select a shell interpreter.
+pub const SHELL_PROGRAM_LABEL: &str = "shell";
+
+/// The existing desktop approval DTO admits at most 1,024 characters of
+/// summary text. Shell proposals use the complete JSON-reversible command in
+/// that summary, so commands that cannot fit are rejected instead of being
+/// truncated before a human decision.
+const SHELL_APPROVAL_SUMMARY_BYTE_CAP: usize = 1_024;
+
 /// Run-lease margin above the sealed timeout (milliseconds).
 const RUN_LEASE_MARGIN_MS: u64 = 5_000;
 
@@ -266,11 +278,123 @@ impl std::fmt::Debug for SealedProcessSpec {
     }
 }
 
+/// Memory-only authority for one complete, original shell command string.
+///
+/// This type is intentionally distinct from [`SealedProcessSpec`]. It exposes
+/// no `Deref`, `AsRef`, or conversion into the structured type, so the existing
+/// `reserve` / `execute` signatures cannot accept shell authority.
+///
+/// ```compile_fail
+/// use keeper_tool_executor::{SealedProcessSpec, SealedShellSpec};
+///
+/// fn structured_only(_: &SealedProcessSpec) {}
+/// let shell: &SealedShellSpec = todo!();
+/// structured_only(shell);
+/// ```
+#[derive(Clone)]
+pub struct SealedShellSpec {
+    inner: SealedProcessSpec,
+}
+
+impl SealedShellSpec {
+    /// The exact command string that is reviewed, fingerprinted and executed.
+    pub fn command(&self) -> &str {
+        self.inner
+            .argv
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default()
+    }
+
+    pub fn program(&self) -> &str {
+        self.inner.program()
+    }
+
+    /// Review representation: exactly one argv entry containing [`Self::command`].
+    pub fn argv(&self) -> &[String] {
+        self.inner.argv()
+    }
+
+    pub fn portable_cwd(&self) -> Option<&str> {
+        self.inner.portable_cwd()
+    }
+
+    pub fn argv_digest(&self) -> &str {
+        self.inner.argv_digest()
+    }
+
+    pub fn proposal_fingerprint(&self) -> &str {
+        self.inner.proposal_fingerprint()
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.inner.timeout()
+    }
+
+    pub fn output_byte_cap(&self) -> usize {
+        self.inner.output_byte_cap()
+    }
+}
+
+impl std::fmt::Debug for SealedShellSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealedShellSpec")
+            .field("program", &self.inner.program)
+            .field("command", &"<redacted>")
+            .field("portable_cwd", &self.inner.portable_cwd)
+            .field("argv_digest", &self.inner.argv_digest)
+            .field("proposal_fingerprint", &self.inner.proposal_fingerprint)
+            .field("executable", &"<redacted>")
+            .field("native_cwd", &"<redacted>")
+            .field("timeout", &self.inner.timeout)
+            .field("output_byte_cap", &self.inner.output_byte_cap)
+            .finish()
+    }
+}
+
 /// Durable metadata plus memory-only sealed material for review/execution.
 #[derive(Clone)]
 pub struct PreparedExecProposal {
     pub metadata: StoredExecProposal,
     pub sealed: SealedProcessSpec,
+}
+
+/// Durable metadata plus the distinct memory-only shell authority.
+#[derive(Clone)]
+pub struct PreparedShellExecProposal {
+    pub metadata: StoredExecProposal,
+    pub sealed: SealedShellSpec,
+}
+
+impl std::fmt::Debug for PreparedShellExecProposal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedShellExecProposal")
+            .field("metadata", &self.metadata)
+            .field("sealed", &self.sealed)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SealedSpecRef<'a> {
+    Structured(&'a SealedProcessSpec),
+    Shell(&'a SealedShellSpec),
+}
+
+impl<'a> SealedSpecRef<'a> {
+    fn inner(self) -> &'a SealedProcessSpec {
+        match self {
+            Self::Structured(sealed) => sealed,
+            Self::Shell(sealed) => &sealed.inner,
+        }
+    }
+
+    fn execution_argv(self) -> Vec<OsString> {
+        match self {
+            Self::Structured(sealed) => sealed.argv.iter().map(OsString::from).collect(),
+            Self::Shell(sealed) => shell_execution_argv(sealed.command()),
+        }
+    }
 }
 
 impl std::fmt::Debug for PreparedExecProposal {
@@ -585,6 +709,41 @@ impl GovernedProcessToolGateway {
         })
     }
 
+    /// Resolve and seal one complete shell command string without changing the
+    /// structured [`Self::seal`] catalog contract.
+    ///
+    /// The returned [`SealedShellSpec`] is a distinct authority type. Its
+    /// review argv contains exactly one entry — the original command — while
+    /// the interpreter executable and native cwd remain private.
+    pub fn seal_shell(
+        capability: &ProjectCapability,
+        command: &str,
+        portable_cwd: Option<&str>,
+    ) -> Result<SealedShellSpec, GovernedProcessError> {
+        validate_shell_command(command, portable_cwd)?;
+        let root = revalidate_root(capability)?;
+        let executable = resolve_shell_executable()?;
+        let native_cwd = resolve_portable_cwd(&root, portable_cwd)?;
+        let review_argv = vec![command.to_owned()];
+        let argv_digest = argv_digest(&review_argv);
+        let proposal_fingerprint =
+            shell_fingerprint(command, portable_cwd, &executable, &native_cwd);
+
+        Ok(SealedShellSpec {
+            inner: SealedProcessSpec {
+                program: SHELL_PROGRAM_LABEL.to_owned(),
+                argv: review_argv,
+                portable_cwd: portable_cwd.map(str::to_owned),
+                argv_digest,
+                proposal_fingerprint,
+                executable,
+                native_cwd,
+                timeout: PROCESS_TIMEOUT,
+                output_byte_cap: PROCESS_OUTPUT_BYTE_CAP,
+            },
+        })
+    }
+
     /// Persist digests/metadata only and return the prepared proposal.
     ///
     /// Reservation is bound to `capability`: project/conversation/run/call
@@ -598,26 +757,60 @@ impl GovernedProcessToolGateway {
         call_id: &str,
         sealed: &SealedProcessSpec,
     ) -> Result<PreparedExecProposal, GovernedProcessError> {
+        let metadata = self.reserve_sealed(
+            capability,
+            conversation_id,
+            run_id,
+            call_id,
+            SealedSpecRef::Structured(sealed),
+        )?;
+        Ok(PreparedExecProposal {
+            metadata,
+            sealed: sealed.clone(),
+        })
+    }
+
+    /// Shell-only reservation wrapper over the same durable reserve path used
+    /// by [`Self::reserve`]. The distinct sealed type prevents cross-use.
+    pub fn reserve_shell(
+        &self,
+        capability: &ProjectCapability,
+        conversation_id: &str,
+        run_id: RunId,
+        call_id: &str,
+        sealed: &SealedShellSpec,
+    ) -> Result<PreparedShellExecProposal, GovernedProcessError> {
+        let metadata = self.reserve_sealed(
+            capability,
+            conversation_id,
+            run_id,
+            call_id,
+            SealedSpecRef::Shell(sealed),
+        )?;
+        Ok(PreparedShellExecProposal {
+            metadata,
+            sealed: sealed.clone(),
+        })
+    }
+
+    fn reserve_sealed(
+        &self,
+        capability: &ProjectCapability,
+        conversation_id: &str,
+        run_id: RunId,
+        call_id: &str,
+        sealed: SealedSpecRef<'_>,
+    ) -> Result<StoredExecProposal, GovernedProcessError> {
         if capability.project_id().is_empty() {
             return Err(GovernedProcessError::InvalidProjectRoot);
         }
         if conversation_id.is_empty() || call_id.is_empty() {
             return Err(GovernedProcessError::InvalidArguments);
         }
-        // Re-seal check: catalog still holds and fingerprints stay stable.
-        let again = Self::seal(
-            capability,
-            sealed.program(),
-            sealed.argv(),
-            sealed.portable_cwd(),
-        )?;
-        if again.proposal_fingerprint != sealed.proposal_fingerprint
-            || again.argv_digest != sealed.argv_digest
-            || again.executable != sealed.executable
-            || again.native_cwd != sealed.native_cwd
-        {
-            return Err(GovernedProcessError::DriftDetected);
-        }
+        // Re-seal check: the path-specific authority still holds and all
+        // executable/fingerprint material stays stable.
+        self.revalidate_sealed(capability, sealed)?;
+        let sealed = sealed.inner();
 
         let input = ExecProposalReserveInput {
             proposal_id: Uuid::new_v4().to_string(),
@@ -639,19 +832,13 @@ impl GovernedProcessToolGateway {
         };
 
         match self.store.reserve(&input)? {
-            ExecReservationOutcome::Reserved(metadata) => Ok(PreparedExecProposal {
-                metadata,
-                sealed: sealed.clone(),
-            }),
+            ExecReservationOutcome::Reserved(metadata) => Ok(metadata),
             ExecReservationOutcome::Replay(metadata)
                 if metadata.proposal_fingerprint == sealed.proposal_fingerprint
                     && metadata.project_id == capability.project_id()
                     && metadata.conversation_id == conversation_id =>
             {
-                Ok(PreparedExecProposal {
-                    metadata,
-                    sealed: sealed.clone(),
-                })
+                Ok(metadata)
             }
             // Deterministic reservation key + matching fingerprint: terminal
             // identity replay. Store returns Conflict when a new proposal_id is
@@ -665,10 +852,7 @@ impl GovernedProcessToolGateway {
                     && metadata.reservation_key == input.reservation_key
                     && is_exec_terminal(metadata.state) =>
             {
-                Ok(PreparedExecProposal {
-                    metadata,
-                    sealed: sealed.clone(),
-                })
+                Ok(metadata)
             }
             ExecReservationOutcome::Replay(_)
             | ExecReservationOutcome::Conflict(_)
@@ -738,6 +922,18 @@ impl GovernedProcessToolGateway {
         self.execute_with_observer(capability, proposal_id, sealed, cancellation, None, None)
     }
 
+    /// Shell-only execution wrapper over the same durable claim, supervised
+    /// runner, cancellation, timeout and receipt path used by [`Self::execute`].
+    pub fn execute_shell(
+        &self,
+        capability: &ProjectCapability,
+        proposal_id: &str,
+        sealed: &SealedShellSpec,
+        cancellation: ProcessCancellationSignal,
+    ) -> Result<GovernedProcessExecution, GovernedProcessError> {
+        self.execute_shell_with_observer(capability, proposal_id, sealed, cancellation, None, None)
+    }
+
     /// Execute using a data-only observer of retained display chunks and an
     /// optional post-claim side channel.
     ///
@@ -755,9 +951,51 @@ impl GovernedProcessToolGateway {
         observer: Option<OutputObserver>,
         on_claimed: Option<ClaimedObserver>,
     ) -> Result<GovernedProcessExecution, GovernedProcessError> {
+        self.execute_sealed_with_observer(
+            capability,
+            proposal_id,
+            SealedSpecRef::Structured(sealed),
+            cancellation,
+            observer,
+            on_claimed,
+        )
+    }
+
+    /// Shell-only observed execution wrapper. The shell authority remains a
+    /// distinct type until it enters the shared private execution path.
+    pub fn execute_shell_with_observer(
+        &self,
+        capability: &ProjectCapability,
+        proposal_id: &str,
+        sealed: &SealedShellSpec,
+        cancellation: ProcessCancellationSignal,
+        observer: Option<OutputObserver>,
+        on_claimed: Option<ClaimedObserver>,
+    ) -> Result<GovernedProcessExecution, GovernedProcessError> {
+        self.execute_sealed_with_observer(
+            capability,
+            proposal_id,
+            SealedSpecRef::Shell(sealed),
+            cancellation,
+            observer,
+            on_claimed,
+        )
+    }
+
+    fn execute_sealed_with_observer(
+        &self,
+        capability: &ProjectCapability,
+        proposal_id: &str,
+        sealed: SealedSpecRef<'_>,
+        cancellation: ProcessCancellationSignal,
+        observer: Option<OutputObserver>,
+        on_claimed: Option<ClaimedObserver>,
+    ) -> Result<GovernedProcessExecution, GovernedProcessError> {
         if capability.project_id().is_empty() {
             return Err(GovernedProcessError::InvalidProjectRoot);
         }
+
+        let inner = sealed.inner();
 
         let Some(current) = self.store.get(proposal_id)? else {
             return Err(GovernedProcessError::NotApplicable);
@@ -765,16 +1003,16 @@ impl GovernedProcessToolGateway {
         if current.project_id != capability.project_id() {
             return Err(GovernedProcessError::CapabilityMismatch);
         }
-        if current.proposal_fingerprint != sealed.proposal_fingerprint
-            || current.argv_digest != sealed.argv_digest
-            || current.program != sealed.program
-            || current.portable_cwd != sealed.portable_cwd
+        if current.proposal_fingerprint != inner.proposal_fingerprint
+            || current.argv_digest != inner.argv_digest
+            || current.program != inner.program
+            || current.portable_cwd != inner.portable_cwd
         {
             return Err(GovernedProcessError::FingerprintMismatch);
         }
 
         let owner = format!("process-gateway-{}", Uuid::new_v4());
-        let lease_ms = run_lease_ms(sealed.timeout);
+        let lease_ms = run_lease_ms(inner.timeout);
         let now = Utc::now();
         let claim = self.store.claim_run(proposal_id, &owner, lease_ms, now)?;
 
@@ -849,7 +1087,7 @@ impl GovernedProcessToolGateway {
             ));
         }
 
-        let env = match build_clean_environment(&sealed.executable) {
+        let env = match build_clean_environment(&inner.executable) {
             Ok(env) => env,
             Err(error) => {
                 return self
@@ -859,12 +1097,12 @@ impl GovernedProcessToolGateway {
         };
 
         let spec = ProcessSpec {
-            executable: sealed.executable.clone(),
-            argv: sealed.argv.iter().map(OsString::from).collect(),
-            cwd: sealed.native_cwd.clone(),
+            executable: inner.executable.clone(),
+            argv: sealed.execution_argv(),
+            cwd: inner.native_cwd.clone(),
             env,
-            timeout: sealed.timeout,
-            output_byte_cap: sealed.output_byte_cap,
+            timeout: inner.timeout,
+            output_byte_cap: inner.output_byte_cap,
         };
 
         match self.runner.run_with_observer(spec, cancellation, observer) {
@@ -904,19 +1142,28 @@ impl GovernedProcessToolGateway {
     fn revalidate_sealed(
         &self,
         capability: &ProjectCapability,
-        sealed: &SealedProcessSpec,
+        sealed: SealedSpecRef<'_>,
     ) -> Result<(), GovernedProcessError> {
-        let again = Self::seal(
-            capability,
-            sealed.program(),
-            sealed.argv(),
-            sealed.portable_cwd(),
-        )?;
-        if again.executable != sealed.executable || again.native_cwd != sealed.native_cwd {
+        let current = sealed.inner();
+        let again = match sealed {
+            SealedSpecRef::Structured(sealed) => Self::seal(
+                capability,
+                sealed.program(),
+                sealed.argv(),
+                sealed.portable_cwd(),
+            )?,
+            SealedSpecRef::Shell(sealed) => {
+                Self::seal_shell(capability, sealed.command(), sealed.portable_cwd())?.inner
+            }
+        };
+        if again.executable != current.executable || again.native_cwd != current.native_cwd {
             return Err(GovernedProcessError::DriftDetected);
         }
-        if again.proposal_fingerprint != sealed.proposal_fingerprint
-            || again.argv_digest != sealed.argv_digest
+        if again.proposal_fingerprint != current.proposal_fingerprint
+            || again.argv_digest != current.argv_digest
+            || again.program != current.program
+            || again.argv != current.argv
+            || again.portable_cwd != current.portable_cwd
         {
             return Err(GovernedProcessError::DriftDetected);
         }
@@ -1008,6 +1255,31 @@ pub fn validate_process_run_arguments(
         if combined > PROCESS_ARGV_BYTE_CAP {
             return Err(GovernedProcessError::InvalidArguments);
         }
+    }
+    if let Some(cwd) = portable_cwd {
+        validate_portable_cwd_grammar(cwd)?;
+    }
+    Ok(())
+}
+
+fn validate_shell_command(
+    command: &str,
+    portable_cwd: Option<&str>,
+) -> Result<(), GovernedProcessError> {
+    if command.is_empty()
+        || command.contains('\0')
+        || SHELL_PROGRAM_LABEL.len().saturating_add(command.len()) > PROCESS_ARGV_BYTE_CAP
+    {
+        return Err(GovernedProcessError::InvalidArguments);
+    }
+    let review_summary = format!(
+        "{} {}",
+        serde_json::to_string(SHELL_PROGRAM_LABEL)
+            .map_err(|_| GovernedProcessError::InvalidArguments)?,
+        serde_json::to_string(command).map_err(|_| GovernedProcessError::InvalidArguments)?,
+    );
+    if review_summary.len() > SHELL_APPROVAL_SUMMARY_BYTE_CAP {
+        return Err(GovernedProcessError::InvalidArguments);
     }
     if let Some(cwd) = portable_cwd {
         validate_portable_cwd_grammar(cwd)?;
@@ -1223,6 +1495,52 @@ fn resolve_program_executable(program: &str) -> Result<PathBuf, GovernedProcessE
     Err(GovernedProcessError::ProgramUnavailable)
 }
 
+#[cfg(windows)]
+fn resolve_shell_executable() -> Result<PathBuf, GovernedProcessError> {
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("SYSTEMROOT") {
+        roots.push(PathBuf::from(root));
+    }
+    if let Some(root) = std::env::var_os("WINDIR") {
+        roots.push(PathBuf::from(root));
+    }
+    roots.push(PathBuf::from(r"C:\Windows"));
+    roots.sort();
+    roots.dedup();
+
+    for root in roots {
+        let candidate = root.join("System32").join("cmd.exe");
+        if candidate.is_file() {
+            return candidate
+                .canonicalize()
+                .map_err(|_| GovernedProcessError::ProgramUnavailable);
+        }
+    }
+    Err(GovernedProcessError::ProgramUnavailable)
+}
+
+#[cfg(not(windows))]
+fn resolve_shell_executable() -> Result<PathBuf, GovernedProcessError> {
+    for candidate in [Path::new("/bin/sh"), Path::new("/usr/bin/sh")] {
+        if candidate.is_file() {
+            return candidate
+                .canonicalize()
+                .map_err(|_| GovernedProcessError::ProgramUnavailable);
+        }
+    }
+    Err(GovernedProcessError::ProgramUnavailable)
+}
+
+#[cfg(windows)]
+fn shell_execution_argv(command: &str) -> Vec<OsString> {
+    vec!["/D".into(), "/S".into(), "/C".into(), command.into()]
+}
+
+#[cfg(not(windows))]
+fn shell_execution_argv(command: &str) -> Vec<OsString> {
+    vec!["-c".into(), command.into()]
+}
+
 fn candidate_names(label: &str) -> Vec<String> {
     #[cfg(windows)]
     {
@@ -1304,6 +1622,30 @@ fn process_fingerprint(
     payload.push(0);
     payload.extend_from_slice(
         serde_json::to_string(argv)
+            .unwrap_or_else(|_| "[]".into())
+            .as_bytes(),
+    );
+    payload.push(0);
+    payload.extend_from_slice(portable_cwd.unwrap_or(".").as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(executable.to_string_lossy().as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(native_cwd.to_string_lossy().as_bytes());
+    sha256_hex(&payload)
+}
+
+fn shell_fingerprint(
+    command: &str,
+    portable_cwd: Option<&str>,
+    executable: &Path,
+    native_cwd: &Path,
+) -> String {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"shell.run@1\0");
+    payload.extend_from_slice(SHELL_PROGRAM_LABEL.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(
+        serde_json::to_string(&[command])
             .unwrap_or_else(|_| "[]".into())
             .as_bytes(),
     );
@@ -1558,6 +1900,189 @@ mod unit_tests {
             GovernedProcessToolGateway::seal(&cap, "node", &["--version".into()], Some("."))
                 .unwrap();
         assert_eq!(resealed.timeout(), PROCESS_TIMEOUT);
+    }
+
+    #[test]
+    fn shell_seal_preserves_the_complete_command_without_opening_the_structured_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let cap = ProjectCapability::new("proj-shell-seal", &root).unwrap();
+        let command = "printf 'left right' && printf \"quoted\"";
+
+        let sealed = GovernedProcessToolGateway::seal_shell(&cap, command, Some(".")).unwrap();
+
+        assert_eq!(sealed.command(), command);
+        assert_eq!(sealed.program(), "shell");
+        assert_eq!(sealed.argv(), &[command.to_owned()]);
+        assert_eq!(sealed.portable_cwd(), Some("."));
+        assert_eq!(sealed.timeout(), PROCESS_TIMEOUT);
+        assert_eq!(sealed.output_byte_cap(), PROCESS_OUTPUT_BYTE_CAP);
+        assert!(
+            GovernedProcessToolGateway::seal(&cap, "shell", &[command.into()], Some(".")).is_err(),
+            "the structured process.run@1 seal must not acquire a shell catalog escape"
+        );
+        assert!(
+            !format!("{sealed:?}").contains(command),
+            "Debug must not disclose the raw approved command"
+        );
+    }
+
+    #[test]
+    fn shell_seal_rejects_a_command_that_cannot_fit_the_untruncated_approval_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let cap = ProjectCapability::new("proj-shell-review-cap", &root).unwrap();
+        let command = "x".repeat(1_024);
+
+        assert!(matches!(
+            GovernedProcessToolGateway::seal_shell(&cap, &command, Some(".")),
+            Err(GovernedProcessError::InvalidArguments)
+        ));
+    }
+
+    #[test]
+    fn shell_reserve_and_execute_share_the_one_shot_claim_chain() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let db = temp.path().join("shell-count.db");
+        let projects = keeper_storage_sqlite::SqliteProjectRepository::open(&db).unwrap();
+        let project = projects
+            .create(keeper_project::CreateProject {
+                name: "P".into(),
+                root_path: root.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        let sessions = keeper_storage_sqlite::SqliteConversationRepository::open(&db).unwrap();
+        let conversation = sessions
+            .create_conversation(keeper_session::NewConversation {
+                project_id: project.id,
+                title: Some("shell".into()),
+            })
+            .unwrap();
+        let run = sessions
+            .create_run(keeper_session::NewRun {
+                conversation_id: conversation.id,
+                user_message: "shell".into(),
+            })
+            .unwrap();
+        let cap = ProjectCapability::new(project.id.0.to_string(), &root).unwrap();
+        let counter = Arc::new(CountingProcessRunner::new());
+        let gateway = GovernedProcessToolGateway::open_with_runner(
+            &db,
+            counter.clone() as Arc<dyn ProcessRunner>,
+        )
+        .unwrap();
+        #[cfg(windows)]
+        let command = "echo governed-shell-s1";
+        #[cfg(not(windows))]
+        let command = "printf governed-shell-s1";
+        let sealed = GovernedProcessToolGateway::seal_shell(&cap, command, Some(".")).unwrap();
+        let prepared = gateway
+            .reserve_shell(
+                &cap,
+                &conversation.id.0.to_string(),
+                RunId(run.id.0),
+                "call-shell-count",
+                &sealed,
+            )
+            .unwrap();
+        let grant = {
+            let hex = Sha256::digest(b"grant-shell-count");
+            format!(
+                "sha256:{}",
+                hex.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        };
+        gateway
+            .decide(
+                &prepared.metadata.proposal_id,
+                &conversation.id.0.to_string(),
+                ExecDecision::ApproveOnce,
+                &grant,
+                sealed.proposal_fingerprint(),
+            )
+            .unwrap();
+
+        let first = gateway
+            .execute_shell(
+                &cap,
+                &prepared.metadata.proposal_id,
+                &sealed,
+                ProcessCancellationSignal::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            first.outcome,
+            GovernedProcessOutcome::Succeeded(_)
+        ));
+        assert!(first.live_output.as_ref().is_some_and(|output| {
+            output
+                .chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("governed-shell-s1"))
+        }));
+        assert_eq!(counter.spawn_count(), 1);
+
+        let replay = gateway
+            .execute_shell(
+                &cap,
+                &prepared.metadata.proposal_id,
+                &sealed,
+                ProcessCancellationSignal::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            replay.outcome,
+            GovernedProcessOutcome::Terminal(_)
+        ));
+        assert_eq!(counter.spawn_count(), 1);
+
+        let cancelled = gateway
+            .reserve_shell(
+                &cap,
+                &conversation.id.0.to_string(),
+                RunId(run.id.0),
+                "call-shell-cancelled",
+                &sealed,
+            )
+            .unwrap();
+        let cancelled_grant = {
+            let hex = Sha256::digest(b"grant-shell-cancelled");
+            format!(
+                "sha256:{}",
+                hex.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        };
+        gateway
+            .decide(
+                &cancelled.metadata.proposal_id,
+                &conversation.id.0.to_string(),
+                ExecDecision::ApproveOnce,
+                &cancelled_grant,
+                sealed.proposal_fingerprint(),
+            )
+            .unwrap();
+        let cancellation = ProcessCancellationSignal::new();
+        cancellation.cancel();
+        let cancelled_execution = gateway
+            .execute_shell(&cap, &cancelled.metadata.proposal_id, &sealed, cancellation)
+            .unwrap();
+        assert!(matches!(
+            cancelled_execution.outcome,
+            GovernedProcessOutcome::Cancelled(_)
+        ));
+        assert_eq!(
+            counter.spawn_count(),
+            1,
+            "pre-spawn shell cancellation must reuse the shared no-spawn terminal path"
+        );
     }
 
     #[test]

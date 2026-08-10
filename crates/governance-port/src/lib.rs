@@ -124,6 +124,7 @@ pub use lifecycle::{
     GovernedWriteObserver,
 };
 pub use outcome::{
-    CheckedGovernedOutcome, GovernedProcessOutcome, GovernedReadOutcome, GovernedWriteOutcome,
+    CheckedGovernedOutcome, GovernedProcessOutcome, GovernedReadOutcome, GovernedShellOutcome,
+    GovernedWriteOutcome,
 };
 pub use port::GovernedExecutionPort;

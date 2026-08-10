@@ -8,8 +8,10 @@ use serde_json::{Value, json};
 /// no way to spell "none" — the list has to name something. `ask_user_question`
 /// is inert. Native `write` is admitted only together with both ACP filesystem
 /// capabilities, which makes the provider call Pillow's governed client RPC
-/// instead of selecting its direct-to-disk LocalFs backend.
-const PLAINTEXT_ALLOWED_TOOLS: [&str; 2] = ["ask_user_question", "write"];
+/// instead of selecting its direct-to-disk LocalFs backend. Native
+/// `run_terminal_cmd` is admitted only together with the ACP terminal
+/// capability, preventing the same silent fallback to LocalTerminal.
+const PLAINTEXT_ALLOWED_TOOLS: [&str; 3] = ["ask_user_question", "write", "run_terminal_cmd"];
 
 /// Fixed session profile: the agent gets only native surfaces whose backends
 /// are bounded by Pillow.
@@ -44,7 +46,7 @@ fn plaintext_agent_profile() -> Value {
     json!({
         "name": "pillow-plaintext",
         "description": "Pillow-hosted session. Native authority is restricted; \
-                        file writes run through governed client filesystem RPC.",
+                        file writes and shell commands run through governed client RPC.",
         "tools": PLAINTEXT_ALLOWED_TOOLS,
         "disallowedTools": MCP_META_TOOLS
     })
@@ -55,7 +57,7 @@ pub fn initialize_params(client_name: &str, client_version: &str) -> Value {
         "protocolVersion": 1,
         "clientCapabilities": {
             "fs": { "readTextFile": true, "writeTextFile": true },
-            "terminal": false
+            "terminal": true
         },
         "clientInfo": {
             "name": client_name,
@@ -123,9 +125,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_declares_governed_fs_and_no_terminal() {
+    fn initialize_declares_governed_fs_and_governed_terminal() {
         let p = initialize_params("Pillow", "0.1.0");
-        assert_eq!(p["clientCapabilities"]["terminal"], false);
+        assert_eq!(p["clientCapabilities"]["terminal"], true);
         assert_eq!(p["clientCapabilities"]["fs"]["writeTextFile"], true);
         assert_eq!(p["clientCapabilities"]["fs"]["readTextFile"], true);
     }
@@ -158,6 +160,40 @@ mod tests {
         );
     }
 
+    /// A native shell hand plus a false ACP terminal capability silently
+    /// selects the provider's LocalTerminal backend. The child then spawns the
+    /// process directly without ever contacting Pillow, so this implication
+    /// must never be split across changes or weakened into unrelated shape
+    /// assertions: the unsafe half-open combination fails silently.
+    #[test]
+    fn native_shell_allowlist_requires_acp_terminal_capability_in_the_same_profile() {
+        let params = session_new_params("C:/project");
+        let tools = params["_meta"]["agentProfile"]["tools"]
+            .as_array()
+            .expect("profile tools must be an allowlist");
+        let permits_native_shell = tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                Some("run_terminal_cmd" | "run_terminal_command" | "bash")
+            )
+        });
+        let acp_terminal_enabled =
+            initialize_params("Pillow", "0.1.0")["clientCapabilities"]["terminal"] == true;
+
+        assert!(
+            !permits_native_shell || acp_terminal_enabled,
+            "native shell with terminal=false silently bypasses Pillow through LocalTerminal"
+        );
+        assert!(
+            permits_native_shell,
+            "the shipped profile must expose the native shell hand that reaches ACP"
+        );
+        assert!(
+            acp_terminal_enabled,
+            "the ACP terminal backend must ship with that native shell hand"
+        );
+    }
+
     #[test]
     fn prompt_is_content_block_array() {
         let p = session_prompt_params("s1", "hello");
@@ -178,8 +214,8 @@ mod tests {
             &json!({
                 "name": "pillow-plaintext",
                 "description": "Pillow-hosted session. Native authority is restricted; \
-                                file writes run through governed client filesystem RPC.",
-                "tools": ["ask_user_question", "write"],
+                                file writes and shell commands run through governed client RPC.",
+                "tools": ["ask_user_question", "write", "run_terminal_cmd"],
                 "disallowedTools": ["search_tool", "use_tool"]
             }),
             "the session profile must not grow implicit capabilities"
@@ -274,12 +310,11 @@ mod tests {
             assert_eq!(
                 params["_meta"]["agentProfile"]["tools"],
                 json!(PLAINTEXT_ALLOWED_TOOLS),
-                "the plaintext profile may expose only the inert prompt tool and governed ACP write"
+                "the plaintext profile may expose only the inert prompt tool and governed ACP write/shell hands"
             );
             for native in [
                 "write_file",
                 "search_replace",
-                "run_terminal_cmd",
                 "bash",
                 "read_file",
                 "workflow",

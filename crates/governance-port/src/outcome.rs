@@ -13,8 +13,8 @@
 //! ```
 
 use keeper_agent_protocol::{
-    GovernedProcessDelivery, GovernedProcessReceipt, GovernedReadReceipt, GovernedWriteDelivery,
-    GovernedWriteReceipt, ToolExecutionState, WriteProposalState,
+    GovernedProcessDelivery, GovernedProcessReceipt, GovernedReadReceipt, GovernedShellReceipt,
+    GovernedWriteDelivery, GovernedWriteReceipt, ToolExecutionState, WriteProposalState,
 };
 use keeper_policy::{ExecProposalState, is_exec_terminal};
 
@@ -49,6 +49,12 @@ pub struct GovernedWriteOutcome(GovernedWriteReceipt);
 /// Inner receipt is private. Construct only via [`CheckedGovernedOutcome`].
 #[derive(Debug, Clone)]
 pub struct GovernedProcessOutcome(GovernedProcessReceipt);
+
+/// Opaque, validated governed shell outcome.
+///
+/// Inner receipt is private. Construct only via [`CheckedGovernedOutcome`].
+#[derive(Debug, Clone)]
+pub struct GovernedShellOutcome(GovernedShellReceipt);
 
 impl CheckedGovernedOutcome<GovernedReadReceipt> for GovernedReadOutcome {
     fn try_from_receipt(
@@ -97,6 +103,23 @@ impl CheckedGovernedOutcome<GovernedProcessReceipt> for GovernedProcessOutcome {
     }
 
     fn receipt(&self) -> &GovernedProcessReceipt {
+        &self.0
+    }
+}
+
+impl CheckedGovernedOutcome<GovernedShellReceipt> for GovernedShellOutcome {
+    fn try_from_receipt(
+        receipt: GovernedShellReceipt,
+    ) -> Result<Self, GovernedOutcomeValidationError> {
+        validate_shell_receipt(&receipt)?;
+        Ok(Self(receipt))
+    }
+
+    fn into_receipt(self) -> GovernedShellReceipt {
+        self.0
+    }
+
+    fn receipt(&self) -> &GovernedShellReceipt {
         &self.0
     }
 }
@@ -269,6 +292,39 @@ fn validate_process_receipt(
         return Err(GovernedOutcomeValidationError::InvalidLifecycleOrder);
     }
 
+    Ok(())
+}
+
+fn validate_shell_receipt(
+    receipt: &GovernedShellReceipt,
+) -> Result<(), GovernedOutcomeValidationError> {
+    validate_process_receipt(&receipt.process)?;
+    if receipt.approved_command.is_empty() || receipt.approved_command.contains('\0') {
+        return Err(GovernedOutcomeValidationError::InvalidTerminalShape);
+    }
+    let terminal = receipt
+        .process
+        .terminal
+        .as_ref()
+        .ok_or(GovernedOutcomeValidationError::InvalidTerminalShape)?;
+    if terminal.program != "shell" {
+        return Err(GovernedOutcomeValidationError::InvalidTerminalShape);
+    }
+    if receipt.process.delivery == GovernedProcessDelivery::Executed {
+        let requested = receipt
+            .process
+            .requested
+            .as_ref()
+            .ok_or(GovernedOutcomeValidationError::InvalidDeliveryShape)?;
+        if requested.program != "shell"
+            || requested.argv.as_slice() != [receipt.approved_command.as_str()]
+        {
+            return Err(GovernedOutcomeValidationError::InvalidDeliveryShape);
+        }
+    }
+    if receipt.output.is_some() && receipt.process.provider_ok.is_none() {
+        return Err(GovernedOutcomeValidationError::ConflictingProviderOutcome);
+    }
     Ok(())
 }
 

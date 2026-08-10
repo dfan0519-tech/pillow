@@ -27,9 +27,10 @@ pub use config::{
 pub use prepared::{GovernedAdapterFactory, PreparedRuntimeHost};
 pub use process::{
     GovernedProcessBridgeError, GovernedProcessDelivery, GovernedProcessLifecycle,
-    GovernedProcessReceipt, LiveProcessProposalView, ProcessOrigin, ProcessOutputChunk,
-    ProcessOutputStream, ProcessOutputView, ProcessProposalRequestedView, ProcessRiskClass,
-    ProviderProcessProposal, decide_process_proposal, execute_governed_process,
+    GovernedProcessReceipt, GovernedShellOutput, GovernedShellReceipt, LiveProcessProposalView,
+    ProcessOrigin, ProcessOutputChunk, ProcessOutputStream, ProcessOutputView,
+    ProcessProposalRequestedView, ProcessRiskClass, ProviderProcessProposal, ProviderShellProposal,
+    decide_process_proposal, execute_governed_process, execute_governed_shell,
     list_process_proposals, live_process_authority_count, open_process_output,
     pending_process_run_count, recover_process_proposals,
 };

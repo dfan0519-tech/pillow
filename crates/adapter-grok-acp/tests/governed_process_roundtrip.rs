@@ -197,6 +197,34 @@ fn approved_provider_process_emits_the_governed_lifecycle_before_completion() {
 }
 
 #[test]
+fn standard_terminal_methods_roundtrip_through_one_human_approved_shell_receipt() {
+    let events = send_with_decision("governed-terminal-roundtrip", ExecDecision::ApproveOnce);
+    assert_eq!(
+        process_lifecycle(&events),
+        vec![
+            RuntimeEventKind::ProcessProposalRequested,
+            RuntimeEventKind::ProcessProposalDecided,
+            RuntimeEventKind::ProcessStarted,
+            RuntimeEventKind::ProcessTerminalOutcome,
+        ]
+    );
+    let requested = events
+        .iter()
+        .find(|event| event.kind == RuntimeEventKind::ProcessProposalRequested)
+        .expect("shell requested event");
+    assert_eq!(requested.payload["program"], "shell");
+    #[cfg(windows)]
+    let expected = "echo governed-terminal-roundtrip";
+    #[cfg(not(windows))]
+    let expected = "printf governed-terminal-roundtrip";
+    assert_eq!(requested.payload["argv"], serde_json::json!([expected]));
+    assert!(events.iter().any(|event| {
+        event.kind == RuntimeEventKind::AssistantDelta
+            && event.payload["text"] == "governed-terminal-roundtrip-ok"
+    }));
+}
+
+#[test]
 fn rejected_provider_process_omits_started_and_completes_after_terminal() {
     let events = send_with_decision("governed-process-reject", ExecDecision::Reject);
     assert_eq!(

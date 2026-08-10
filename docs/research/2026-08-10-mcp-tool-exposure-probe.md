@@ -397,3 +397,49 @@ ACCEPTANCE: PASS — the write reached the client and never touched disk; no nat
 - ACP **没有 create/modify 字段**,适配层按目标是否存在推断模式;
   竞态由宿主 base-digest 与原子应用 fail-closed 兜住。
 - `search_replace` **故意未暴露**。将来要加,必须先实盘证明它也收敛到同一条客户端写 RPC。
+
+---
+
+## 14. 治理 shell 已上线(S0 + S1,2026-08-11)
+
+### 为什么进程比写多一道
+
+上游按 `client_terminal ∧ gateway` 选后端 —— **单个 bool**,不像 fs 要双开。
+所以同构陷阱是:
+
+```
+allowlist 放 shell 工具  ∧  terminal = false
+  → LocalTerminalBackend,代理自己起进程,宿主看不到 terminal/create
+```
+
+`methods.rs` 里有一条**耦合测试**钉住这条蕴含(变异证据:注入后 101,恢复后 0),
+与写方向那条同形。
+
+### 中间态实测:fail-closed
+
+allowlist 放了 `run_terminal_cmd` + `terminal: true` 但**处理器还没写**时,
+探针变体 `shell-no-handler` 实测:
+
+| 观察 | 值 |
+| --- | --- |
+| 代理请求 | `["terminal/create"]` —— **到达客户端** |
+| 磁盘 | **无文件** —— 无本地逃逸 |
+
+这个变体**保留**为常驻哨兵。它验证的是**供应商的性质,不是我们代码的性质** ——
+哪天变成"文件出现而无 `terminal/create`",shell 能力立即不能发。
+
+### 目录表与 shell 的类型边界
+
+shell 命令**不套程序目录表**(命令到客户端已是一整行串,目录表在表示层套不进去)。
+但它**不能成为结构化路径绕过目录表的后门**,这一条由**类型**保证而非约定:
+
+- `SealedShellSpec` 私有包裹 `SealedProcessSpec`,**无** `Deref` / `AsRef` / `From` / `into_inner`
+- `compile_fail` doctest 钉住"结构化签名不接受 shell 授权"
+- 结构化 `pub fn seal` **一字未动**,仍无条件 `validate_program_catalog`
+
+S1 的安全性来自**每条命令人工批准**,不来自目录表。这是市面做法
+(见 `docs/research/2026-08-11-shell-approval-state-of-the-art.md`),不是妥协。
+
+### 仍未做
+
+拆段 + 规则合取(S2)。在那之前**没有自动放行**,每条都要点。

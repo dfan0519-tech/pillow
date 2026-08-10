@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use keeper_agent_protocol::{RunId, RuntimeError};
 
 use crate::map::ToolRegistry;
+use crate::provider_terminals::ProviderTerminalRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProviderRequestIdentity {
@@ -73,6 +74,7 @@ pub struct ActivePrompt {
     pub acp_session_id: String,
     pub project_root: PathBuf,
     pub(crate) provider_requests: ProviderRequestIdentityRegistry,
+    pub(crate) terminals: ProviderTerminalRegistry,
     pub cancel: Arc<AtomicBool>,
     pub tools: ToolRegistry,
     pub assistant_chars: usize,
@@ -161,6 +163,7 @@ impl TurnRegistry {
             acp_session_id: acp_session_id.clone(),
             project_root: PathBuf::from(&project_root),
             provider_requests: ProviderRequestIdentityRegistry::default(),
+            terminals: ProviderTerminalRegistry::default(),
             cancel,
             tools: ToolRegistry::new(acp_session_id, project_root),
             assistant_chars: 0,
