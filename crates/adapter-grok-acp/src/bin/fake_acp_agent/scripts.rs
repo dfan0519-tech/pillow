@@ -300,6 +300,32 @@ pub(crate) fn run_prompt_script(
         "governed-write-conflict" => {
             run_governed_write_conflict(stdout, rx, session_id, id, &cancelled);
         }
+        "acp-governed-write-snake" => {
+            run_acp_governed_write(
+                stdout,
+                rx,
+                session_id,
+                session_root,
+                id,
+                &cancelled,
+                "fs/write_text_file",
+                "out/acp-snake.txt",
+                "created through governed ACP snake write\n",
+            );
+        }
+        "acp-governed-write-camel" => {
+            run_acp_governed_write(
+                stdout,
+                rx,
+                session_id,
+                session_root,
+                id,
+                &cancelled,
+                "fs/writeTextFile",
+                "out/acp-camel.txt",
+                "created through governed ACP camel write\n",
+            );
+        }
         "governed-write-desktop" => {
             // Desktop acceptance: one ACP child, prompt tags select the action.
             // Tags are harness-owned and must not appear as secret-bearing IDs.
@@ -1214,6 +1240,68 @@ fn run_governed_write_create(
                 "type": "text",
                 "text": label
             }
+        }),
+    );
+    write_json(
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "stopReason": "end_turn" }
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_acp_governed_write(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    session_root: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+    method: &str,
+    relative_path: &str,
+    content: &str,
+) {
+    let absolute_path = std::path::Path::new(session_root).join(relative_path);
+    write_json(
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 181,
+            "method": method,
+            "params": {
+                "sessionId": session_id,
+                "path": absolute_path.to_string_lossy(),
+                "content": content
+            }
+        }),
+    );
+    let response = wait_for_response(rx, cancelled, 181);
+    let ok = response
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .is_some_and(|result| result.as_object().is_some_and(serde_json::Map::is_empty));
+    let governed_error = response
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.contains("governed_write"));
+    let label = if ok {
+        "acp-governed-write-ok"
+    } else if governed_error {
+        "acp-governed-write-rejected"
+    } else {
+        "acp-governed-write-failed"
+    };
+    emit_update(
+        stdout,
+        session_id,
+        json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": label }
         }),
     );
     write_json(

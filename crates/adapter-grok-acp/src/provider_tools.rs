@@ -324,7 +324,7 @@ fn bounded_identity(value: Option<&str>) -> Result<String, ProviderToolRequestEr
         .ok_or(ProviderToolRequestError::InvalidParams)
 }
 
-fn project_relative_path(
+pub(crate) fn project_relative_path(
     project_root: &Path,
     raw: &str,
 ) -> Result<String, ProviderToolRequestError> {

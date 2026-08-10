@@ -35,7 +35,8 @@ use crate::provider_tools::{
     provider_transport_id,
 };
 use crate::provider_writes::{
-    ProviderWriteRequestError, normalize_provider_write, provider_write_response,
+    ProviderWriteRequestError, is_provider_write_method, normalize_provider_write,
+    provider_write_response,
 };
 use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_params};
 use crate::state::{Inner, PromptOutcome};
@@ -345,8 +346,8 @@ fn handle_server_request(
     }
 
     // Strict write entrypoint — never routed through the read normalizer.
-    if method == "pillow/write_tool" {
-        return handle_write_tool(inner, governance, sink, cancel, id, params);
+    if is_provider_write_method(method) {
+        return handle_write_tool(inner, governance, sink, cancel, id, method, params);
     }
 
     // Strict process entrypoint â€” never routed through governed reads.
@@ -596,9 +597,10 @@ fn handle_write_tool(
     sink: &mut dyn EventSink,
     cancel: &AtomicBool,
     id: serde_json::Value,
+    method: &str,
     params: &serde_json::Value,
 ) -> Result<(), RuntimeError> {
-    let (run_id, session_id, rpc) = {
+    let (run_id, session_id, project_root, rpc) = {
         let guard = inner.lock().expect("inner lock");
         let Some(active) = guard.turns.active().filter(|active| active.live) else {
             if let Some(connection) = guard.connection.as_ref() {
@@ -614,11 +616,13 @@ fn handle_write_tool(
         (
             active.run_id,
             active.acp_session_id.clone(),
+            active.project_root.clone(),
             Arc::clone(&connection.rpc),
         )
     };
 
-    let normalized = match normalize_provider_write("pillow/write_tool", params, &session_id) {
+    let mut normalized = match normalize_provider_write(method, params, &session_id, &project_root)
+    {
         Ok(normalized) => normalized,
         Err(ProviderWriteRequestError::MethodNotFound) => {
             rpc.respond_error(id, -32601, "method_not_found")?;
@@ -630,6 +634,49 @@ fn handle_write_tool(
         }
     };
 
+    if normalized.is_native_acp_write() {
+        let transport_id = match provider_transport_id(&id) {
+            Ok(transport_id) => transport_id,
+            Err(ProviderToolRequestError::MethodNotFound) => unreachable!(),
+            Err(ProviderToolRequestError::InvalidParams) => {
+                rpc.respond_error(id, -32602, "invalid_governed_write_request")?;
+                return Ok(());
+            }
+        };
+        let canonical_request =
+            normalized
+                .canonical_request_identity()
+                .map_err(|_| RuntimeError::Internal {
+                    message: "provider_write_request_canonicalization_failed".into(),
+                })?;
+        let call_id = {
+            let mut guard = inner.lock().expect("inner lock");
+            let Some(active) = guard
+                .turns
+                .active_mut()
+                .filter(|active| active.run_id == run_id && active.live)
+            else {
+                rpc.respond_error(id, -32000, "governed_write_unavailable")?;
+                return Ok(());
+            };
+            active
+                .provider_requests
+                .resolve(run_id, transport_id, canonical_request)
+        };
+        match call_id {
+            Ok(call_id) => normalized.proposal.call_id = call_id,
+            Err(ProviderRequestIdentityError::Conflict) => {
+                rpc.respond_error(id, -32030, "provider_request_id_reused")?;
+                return Ok(());
+            }
+            Err(ProviderRequestIdentityError::Exhausted) => {
+                rpc.respond_error(id, -32000, "governed_write_unavailable")?;
+                return Ok(());
+            }
+        }
+    }
+
+    let response_kind = normalized.response_kind;
     let mut requested_sequence = None;
     // Live cancel token: AtomicBool implements CancellationProbe (no entry snapshot).
     let cancel_probe: &dyn CancellationProbe = cancel;
@@ -704,7 +751,7 @@ fn handle_write_tool(
         }
     }
 
-    match provider_write_response(&receipt) {
+    match provider_write_response(&receipt, response_kind) {
         Ok(response) => rpc.respond(id, response),
         Err(error) => {
             let (code, message) = error.rpc_error();

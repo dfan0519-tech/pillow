@@ -1,15 +1,45 @@
-//! Strict `pillow/write_tool` normalization. Independent of the read normalizer.
+//! Strict provider-write normalization into Pillow's single governed write port.
+
+use std::path::Path;
 
 use keeper_agent_protocol::{
     FsWriteOutput, GovernedWriteReceipt, ProviderWriteProposal, WritePublicErrorCode,
+    canonical_arguments_digest,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use crate::provider_tools::project_relative_path;
 
 const WRITE_METHOD: &str = "pillow/write_tool";
+const ACP_WRITE_METHODS: &[&str] = &["fs/writeTextFile", "fs/write_text_file"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderWriteResponseKind {
+    AcpWriteText,
+    PillowToolResult,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NormalizedProviderWrite {
     pub proposal: ProviderWriteProposal,
+    pub response_kind: ProviderWriteResponseKind,
+}
+
+impl NormalizedProviderWrite {
+    pub(crate) fn is_native_acp_write(&self) -> bool {
+        self.response_kind == ProviderWriteResponseKind::AcpWriteText
+    }
+
+    pub(crate) fn canonical_request_identity(&self) -> Result<String, ProviderWriteRequestError> {
+        let digest = canonical_arguments_digest(&self.proposal.arguments)
+            .map_err(|_| ProviderWriteRequestError::InvalidParams)?;
+        Ok(format!(
+            "{}@{}:{}",
+            self.proposal.tool_id,
+            self.proposal.tool_version,
+            digest.as_str()
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,12 +87,20 @@ impl ProviderWriteResponseError {
     }
 }
 
-/// Normalize a provider write method. Only `pillow/write_tool` is accepted.
+pub(crate) fn is_provider_write_method(method: &str) -> bool {
+    method == WRITE_METHOD || ACP_WRITE_METHODS.contains(&method)
+}
+
+/// Normalize every supported provider write surface into `fs.write@1`.
 pub(crate) fn normalize_provider_write(
     method: &str,
     params: &Value,
     active_session_id: &str,
+    project_root: &Path,
 ) -> Result<NormalizedProviderWrite, ProviderWriteRequestError> {
+    if ACP_WRITE_METHODS.contains(&method) {
+        return normalize_acp_write(params, active_session_id, project_root);
+    }
     if method != WRITE_METHOD {
         return Err(ProviderWriteRequestError::MethodNotFound);
     }
@@ -111,14 +149,63 @@ pub(crate) fn normalize_provider_write(
             tool_version,
             arguments,
         },
+        response_kind: ProviderWriteResponseKind::PillowToolResult,
+    })
+}
+
+fn normalize_acp_write(
+    params: &Value,
+    active_session_id: &str,
+    project_root: &Path,
+) -> Result<NormalizedProviderWrite, ProviderWriteRequestError> {
+    let object = strict_object(params, &["sessionId", "path", "content", "_meta"])?;
+    require_active_session(object, active_session_id)?;
+    let raw_path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or(ProviderWriteRequestError::InvalidParams)?;
+    let path = project_relative_path(project_root, raw_path)
+        .map_err(|_| ProviderWriteRequestError::InvalidParams)?;
+    if path == "." {
+        return Err(ProviderWriteRequestError::InvalidParams);
+    }
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or(ProviderWriteRequestError::InvalidParams)?;
+    let mode = match project_root.join(&path).try_exists() {
+        Ok(true) => "modify",
+        Ok(false) => "create",
+        Err(_) => return Err(ProviderWriteRequestError::InvalidParams),
+    };
+
+    Ok(NormalizedProviderWrite {
+        proposal: ProviderWriteProposal {
+            // ACP filesystem requests carry no provider call id. The prompt
+            // router replaces this with a run-scoped Pillow identity derived
+            // from the JSON-RPC transport id before governance sees it.
+            call_id: String::new(),
+            tool_id: "fs.write".into(),
+            tool_version: 1,
+            arguments: json!({
+                "path": path,
+                "mode": mode,
+                "content": content
+            }),
+        },
+        response_kind: ProviderWriteResponseKind::AcpWriteText,
     })
 }
 
 pub(crate) fn provider_write_response(
     receipt: &GovernedWriteReceipt,
+    kind: ProviderWriteResponseKind,
 ) -> Result<Value, ProviderWriteResponseError> {
     if let Some(output) = receipt.provider_ok.as_ref() {
-        return serialize_output(output);
+        return match kind {
+            ProviderWriteResponseKind::AcpWriteText => Ok(json!({})),
+            ProviderWriteResponseKind::PillowToolResult => serialize_output(output),
+        };
     }
     if let Some(code) = receipt.provider_error {
         return Err(ProviderWriteResponseError::from_public(code));
@@ -169,6 +256,8 @@ fn bounded_identity(value: Option<&str>) -> Result<String, ProviderWriteRequestE
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use serde_json::json;
 
@@ -188,6 +277,7 @@ mod tests {
                 }
             }),
             "active",
+            Path::new("."),
         )
         .unwrap();
         assert_eq!(normalized.proposal.call_id, "call-1");
@@ -207,7 +297,8 @@ mod tests {
                     "toolVersion": 1,
                     "arguments": {"path":"a","mode":"create","content":"x"}
                 }),
-                "active"
+                "active",
+                Path::new(".")
             ),
             Err(ProviderWriteRequestError::InvalidParams)
         ));
@@ -222,7 +313,8 @@ mod tests {
                     "arguments": {"path":"a","mode":"create","content":"x"},
                     "extra": true
                 }),
-                "active"
+                "active",
+                Path::new(".")
             ),
             Err(ProviderWriteRequestError::InvalidParams)
         ));
@@ -236,7 +328,8 @@ mod tests {
                     "toolVersion": 1,
                     "arguments": {"path":"a","mode":"create","content":"x"}
                 }),
-                "active"
+                "active",
+                Path::new(".")
             ),
             Err(ProviderWriteRequestError::InvalidParams)
         ));
@@ -250,12 +343,13 @@ mod tests {
                     "toolVersion": 2,
                     "arguments": {"path":"a","mode":"create","content":"x"}
                 }),
-                "active"
+                "active",
+                Path::new(".")
             ),
             Err(ProviderWriteRequestError::InvalidParams)
         ));
         assert!(matches!(
-            normalize_provider_write("pillow/read_tool", &json!({}), "active"),
+            normalize_provider_write("pillow/read_tool", &json!({}), "active", Path::new(".")),
             Err(ProviderWriteRequestError::MethodNotFound)
         ));
     }
@@ -277,10 +371,85 @@ mod tests {
                         "base_digest": "sha256:dead"
                     }
                 }),
-                "active"
+                "active",
+                Path::new(".")
             ),
             Err(ProviderWriteRequestError::InvalidParams)
         ));
+    }
+
+    #[test]
+    fn acp_write_aliases_normalize_absolute_paths_and_infer_create_or_modify() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("existing.txt");
+        std::fs::write(&existing, "old\n").unwrap();
+        let create_path = root.path().join("created.txt");
+
+        let snake = normalize_provider_write(
+            "fs/write_text_file",
+            &json!({
+                "sessionId": "active",
+                "path": create_path.to_string_lossy(),
+                "content": "new\n",
+                "_meta": {"trace": "ignored"}
+            }),
+            "active",
+            root.path(),
+        )
+        .unwrap();
+        let camel = normalize_provider_write(
+            "fs/writeTextFile",
+            &json!({
+                "sessionId": "active",
+                "path": existing.to_string_lossy(),
+                "content": "replacement\n"
+            }),
+            "active",
+            root.path(),
+        )
+        .unwrap();
+
+        assert!(snake.is_native_acp_write());
+        assert!(camel.is_native_acp_write());
+        assert_eq!(
+            snake.proposal.arguments,
+            json!({"path":"created.txt","mode":"create","content":"new\n"})
+        );
+        assert_eq!(
+            camel.proposal.arguments,
+            json!({"path":"existing.txt","mode":"modify","content":"replacement\n"})
+        );
+        assert_eq!(snake.proposal.call_id, "");
+        assert_eq!(camel.proposal.call_id, "");
+    }
+
+    #[test]
+    fn acp_write_rejects_foreign_sessions_unknown_keys_and_project_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().parent().unwrap().join("outside.txt");
+        for params in [
+            json!({
+                "sessionId": "foreign",
+                "path": root.path().join("a.txt").to_string_lossy(),
+                "content": "x"
+            }),
+            json!({
+                "sessionId": "active",
+                "path": root.path().join("a.txt").to_string_lossy(),
+                "content": "x",
+                "grant": "not-accepted"
+            }),
+            json!({
+                "sessionId": "active",
+                "path": outside.to_string_lossy(),
+                "content": "x"
+            }),
+        ] {
+            assert!(matches!(
+                normalize_provider_write("fs/write_text_file", &params, "active", root.path()),
+                Err(ProviderWriteRequestError::InvalidParams)
+            ));
+        }
     }
 
     #[test]
@@ -306,10 +475,16 @@ mod tests {
             provider_ok: Some(output.clone()),
             provider_error: None,
         };
-        let value = provider_write_response(&receipt).unwrap();
+        let value =
+            provider_write_response(&receipt, ProviderWriteResponseKind::PillowToolResult).unwrap();
         assert_eq!(value["path"], "src/a.ts");
         assert!(value.get("approval_grant").is_none());
         assert!(value.get("content").is_none());
+        assert_eq!(
+            provider_write_response(&receipt, ProviderWriteResponseKind::AcpWriteText).unwrap(),
+            json!({}),
+            "ACP acknowledges the governed receipt without exposing Pillow receipt internals"
+        );
         let _ = output;
     }
 }

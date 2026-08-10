@@ -230,6 +230,129 @@ fn approve_roundtrip_pending_before_requested_resolved_before_completion() {
 }
 
 #[test]
+fn acp_snake_write_runs_the_positive_governed_proposal_and_receipt_path() {
+    let h = harness("acp-governed-write-snake");
+    let conversation_id = h.conversation_id.clone();
+    let host = Arc::clone(&h.host);
+    let decide = {
+        let host = Arc::clone(&host);
+        let conversation_id = conversation_id.clone();
+        thread::spawn(move || {
+            let (proposal_id, grant) = wait_live_grant(&host, &conversation_id);
+            host.decide_write_proposal(
+                &conversation_id,
+                &proposal_id,
+                &grant,
+                WriteDecision::ApproveOnce,
+            )
+            .unwrap();
+        })
+    };
+
+    let events = Arc::new(Mutex::new(CollectingSink::default()));
+    let mut sink = SharedSink {
+        inner: Arc::clone(&events),
+    };
+    host.send_turn(
+        SendTurn {
+            session_id: h.session_id,
+            run_id: h.run_id,
+            content: "create through ACP snake write".into(),
+        },
+        &mut sink,
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    let events = events.lock().unwrap().events.clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == RuntimeEventKind::WriteProposalRequested),
+        "ACP write must create a governed proposal"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == RuntimeEventKind::WriteProposalResolved),
+        "ACP write must return through the governed receipt path"
+    );
+    assert!(events.iter().any(|event| {
+        event.kind == RuntimeEventKind::AssistantDelta
+            && event
+                .payload
+                .get("text")
+                .and_then(|text| text.as_str())
+                .is_some_and(|text| text.contains("acp-governed-write-ok"))
+    }));
+    assert_eq!(
+        fs::read_to_string(h.root.join("out/acp-snake.txt")).unwrap(),
+        "created through governed ACP snake write\n"
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn acp_camel_write_rejection_resolves_without_mutating_the_target() {
+    let h = harness("acp-governed-write-camel");
+    let conversation_id = h.conversation_id.clone();
+    let host = Arc::clone(&h.host);
+    let decide = {
+        let host = Arc::clone(&host);
+        let conversation_id = conversation_id.clone();
+        thread::spawn(move || {
+            let (proposal_id, grant) = wait_live_grant(&host, &conversation_id);
+            host.decide_write_proposal(
+                &conversation_id,
+                &proposal_id,
+                &grant,
+                WriteDecision::Reject,
+            )
+            .unwrap();
+        })
+    };
+
+    let events = Arc::new(Mutex::new(CollectingSink::default()));
+    let mut sink = SharedSink {
+        inner: Arc::clone(&events),
+    };
+    host.send_turn(
+        SendTurn {
+            session_id: h.session_id,
+            run_id: h.run_id,
+            content: "reject ACP camel write".into(),
+        },
+        &mut sink,
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    let events = events.lock().unwrap().events.clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == RuntimeEventKind::WriteProposalRequested),
+        "rejected ACP write must still prove proposal delivery"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == RuntimeEventKind::WriteProposalResolved),
+        "rejected ACP write must still prove terminal receipt delivery"
+    );
+    assert!(events.iter().any(|event| {
+        event.kind == RuntimeEventKind::AssistantDelta
+            && event
+                .payload
+                .get("text")
+                .and_then(|text| text.as_str())
+                .is_some_and(|text| text.contains("acp-governed-write-rejected"))
+    }));
+    assert!(!h.root.join("out/acp-camel.txt").exists());
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn reject_roundtrip_wakes_provider_without_write() {
     let h = harness("governed-write-create");
     let conversation_id = h.conversation_id.clone();

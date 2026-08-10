@@ -304,3 +304,96 @@ Pillow 当前 `initialize_params` 是 `readTextFile: true, writeTextFile: false`
 
 进程方向(C4)未测:`terminal/*` 与 Pillow 的"目录表 + 结构化 argv"差距较大,
 调研列为次优先,**未确定**。
+
+---
+
+## 12. 进程方向:ACP 上无法无损承载 C4(2026-08-11)
+
+调研:`docs/research/2026-08-11-governed-process-route.md`。
+
+### 为什么写行、进程不行
+
+| | 写 | 进程 |
+| --- | --- | --- |
+| capability 判定 | `use_acp_fs = read ∧ write`(**双开**) | `client_terminal ∧ gateway`(**单 bool**) |
+| 到客户端的形状 | 结构化(path + content) | **恒 `.args(vec![])` + shell 包装** |
+| 工具 schema | — | `BashToolInput.command: String` only,描述**鼓励 `&&`** |
+
+命令是**一整条 shell 串**到达客户端。C4 的"程序目录表 + 结构化 argv"
+在表示层就丢了 —— 不是实现难度,是信息不存在。
+
+### 🔴 同构的半开陷阱
+
+```
+allowlist 放 shell 工具  ∧  terminal = false
+  → LocalTerminalBackend,代理自己起进程
+  → 宿主永远看不到 terminal/create
+```
+
+与 LocalFs 陷阱同一形状:**放了手,却没开通往宿主的那条线**。
+
+### 当前状态:恰好在安全侧
+
+`initialize_params` 的 `terminal: false`,allowlist 是
+`["ask_user_question", "write"]` —— **没有 shell 工具**。
+所以陷阱现在不成立。
+
+⚠️ **但这是巧合,不是防护。** 需要一条测试钉住:
+**allowlist 含任何 shell 工具时,`terminal` 必须为 true。**
+形状与写方向那条耦合测试相同。等 #22 落地后补(同文件,避免冲突)。
+
+### 需要产品决策(不是技术问题)
+
+- **P0 保持 C4 字面**:不对真实 Grok 开放进程。代理能改代码,构建由人跑。
+- **P1 给手但有损**:`terminal=true`,在 create 入口做降维/拒绝 shell 串联。
+  **丢掉表示层不变量,保住治理闭环。**
+- **P2 改产品模型**:批准对象从"程序 + argv"改成"shell 串"。
+- **P3 MCP**:不推荐,边界倒退。
+
+**这一条要用户拍板** —— 它改变产品承诺什么。
+
+---
+
+## 13. 治理写已上线并实盘验收(2026-08-11)
+
+`plaintext_agent_profile()` 与 `initialize_params()` **同批**改动:
+
+```json
+tools:            ["ask_user_question", "write"]
+disallowedTools:  ["search_tool", "use_tool"]
+clientCapabilities.fs: { readTextFile: true, writeTextFile: true }
+clientCapabilities.terminal: false
+```
+
+`fs/write_text_file` 与 `fs/writeTextFile` 两种拼法都接进了既有 `execute_write`
+治理链(提案 → 批准 → 宿主执行 → 收据),**不是第二条执行链**。
+
+**实盘验收(探针,真实 Grok):**
+
+```
+ACCEPTANCE: PASS — the write reached the client and never touched disk; no native read leaked
+```
+
+| 变体 | 证据 |
+| --- | --- |
+| `shipped-profile-write` | `agentRequests: ["fs/read_text_file","fs/write_text_file"]`;磁盘无文件 |
+| `shipped-profile-mcp` | **零请求、零工具调用** —— MCP 仍不可达,边界未倒退 |
+| `acp-fs-localfs-trap` | 文件落盘 + `agentRequests: []` —— **陷阱仍是已知负例** |
+
+⚠️ 陷阱变体现在是**活的回归哨兵**:它必须一直落盘。
+哪天它不落盘了,说明上游语义变了,配置耦合的前提要重查。
+
+### 判定为什么要求"到达客户端",而不只是"没落盘"
+
+改之前"没落盘"意味着代理**没有写的手**。
+改之后代理**有手**,所以"没落盘"也可能只是它失败了。
+判据因此变成合取:**必须看见 `fs/write*` 到达客户端 且 磁盘未被直接写**。
+只看磁盘会把"功能坏了"读成"治理生效"。
+
+### 残留(来自实施者报告,总控认可)
+
+- 代理子进程**不是 OS 级文件系统沙箱**:被攻陷的子进程仍可用环境自带的 OS 访问。
+  本改动治理的是**已验证的上游工具路径**,不声称进程级文件系统封闭。
+- ACP **没有 create/modify 字段**,适配层按目标是否存在推断模式;
+  竞态由宿主 base-digest 与原子应用 fail-closed 兜住。
+- `search_replace` **故意未暴露**。将来要加,必须先实盘证明它也收敛到同一条客户端写 RPC。

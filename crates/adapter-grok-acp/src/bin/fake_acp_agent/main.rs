@@ -6,6 +6,7 @@
 //! `load-replay`, `timeout-prompt`, `vendor-noise`, `auth-failed`,
 //! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`,
 //! `governed-write-create`, `governed-write-modify`, `governed-write-conflict`,
+//! `acp-governed-write-snake`, `acp-governed-write-camel`,
 //! `governed-write-desktop`, `governed-process-approve`,
 //! `governed-process-reject`, `governed-process-replay`,
 //! `governed-process-conflict`, `governed-process-nonzero`,
@@ -332,9 +333,9 @@ fn has_safe_plaintext_session_params(params: &Value) -> bool {
             .and_then(|meta| meta.get("agentProfile"))
             == Some(&json!({
                 "name": "pillow-plaintext",
-                "description": "Pillow-hosted session. Native tools are withheld; \
-                                capability arrives only through governed host tools.",
-                "tools": ["ask_user_question"],
+                "description": "Pillow-hosted session. Native authority is restricted; \
+                                file writes run through governed client filesystem RPC.",
+                "tools": ["ask_user_question", "write"],
                 "disallowedTools": ["search_tool", "use_tool"]
             }))
 }

@@ -2,15 +2,17 @@
 
 use serde_json::{Value, json};
 
-/// The single built-in the plaintext profile permits.
+/// The fixed built-ins the plaintext profile permits.
 ///
 /// Upstream treats an empty `tools` array as "inherit every tool", so there is
-/// no way to spell "none" — the list has to name something. This one is inert:
-/// it cannot touch the filesystem, spawn a process, or reach the network, and a
-/// live probe confirmed the turn still ends cleanly when the agent calls it.
-const PLAINTEXT_ALLOWED_TOOL: &str = "ask_user_question";
+/// no way to spell "none" — the list has to name something. `ask_user_question`
+/// is inert. Native `write` is admitted only together with both ACP filesystem
+/// capabilities, which makes the provider call Pillow's governed client RPC
+/// instead of selecting its direct-to-disk LocalFs backend.
+const PLAINTEXT_ALLOWED_TOOLS: [&str; 2] = ["ask_user_question", "write"];
 
-/// Fixed session profile: the agent gets no native capability of its own.
+/// Fixed session profile: the agent gets only native surfaces whose backends
+/// are bounded by Pillow.
 ///
 /// This is an **allowlist**, deliberately. A denylist is only an enumeration —
 /// a live probe watched the agent, blocked from `write`, reach the same result
@@ -24,8 +26,6 @@ const PLAINTEXT_ALLOWED_TOOL: &str = "ask_user_question";
 /// toolset. Pillow shipped exactly that shape and believed native tools were
 /// off for weeks. Do not remove either field.
 ///
-/// Governed capability arrives separately, as MCP tools, and is added here by
-/// name when it lands.
 /// The two meta-tools through which every MCP tool is reached.
 ///
 /// The allowlist cannot withhold these: upstream keeps `search_tool` and
@@ -43,9 +43,9 @@ const MCP_META_TOOLS: [&str; 2] = ["search_tool", "use_tool"];
 fn plaintext_agent_profile() -> Value {
     json!({
         "name": "pillow-plaintext",
-        "description": "Pillow-hosted session. Native tools are withheld; \
-                        capability arrives only through governed host tools.",
-        "tools": [PLAINTEXT_ALLOWED_TOOL],
+        "description": "Pillow-hosted session. Native authority is restricted; \
+                        file writes run through governed client filesystem RPC.",
+        "tools": PLAINTEXT_ALLOWED_TOOLS,
         "disallowedTools": MCP_META_TOOLS
     })
 }
@@ -54,7 +54,7 @@ pub fn initialize_params(client_name: &str, client_version: &str) -> Value {
     json!({
         "protocolVersion": 1,
         "clientCapabilities": {
-            "fs": { "readTextFile": true, "writeTextFile": false },
+            "fs": { "readTextFile": true, "writeTextFile": true },
             "terminal": false
         },
         "clientInfo": {
@@ -123,11 +123,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_declares_read_only_fs_and_no_terminal() {
+    fn initialize_declares_governed_fs_and_no_terminal() {
         let p = initialize_params("Pillow", "0.1.0");
         assert_eq!(p["clientCapabilities"]["terminal"], false);
-        assert_eq!(p["clientCapabilities"]["fs"]["writeTextFile"], false);
+        assert_eq!(p["clientCapabilities"]["fs"]["writeTextFile"], true);
         assert_eq!(p["clientCapabilities"]["fs"]["readTextFile"], true);
+    }
+
+    /// Native `write` plus a false ACP write capability silently selects the
+    /// provider's LocalFs backend. The child then writes directly without ever
+    /// contacting Pillow, so this implication must never be split across
+    /// changes or weakened into two unrelated shape assertions.
+    #[test]
+    fn native_write_allowlist_requires_acp_write_capability_in_the_same_profile() {
+        let params = session_new_params("C:/project");
+        let tools = params["_meta"]["agentProfile"]["tools"]
+            .as_array()
+            .expect("profile tools must be an allowlist");
+        let permits_native_write = tools.iter().any(|tool| tool == "write");
+        let acp_write_enabled = initialize_params("Pillow", "0.1.0")["clientCapabilities"]["fs"]["writeTextFile"]
+            == true;
+
+        assert!(
+            !permits_native_write || acp_write_enabled,
+            "native write with writeTextFile=false silently bypasses Pillow through LocalFs"
+        );
+        assert!(
+            permits_native_write,
+            "the shipped profile must expose the native write hand that reaches ACP"
+        );
+        assert!(
+            acp_write_enabled,
+            "the ACP write backend must ship with that native write hand"
+        );
     }
 
     #[test]
@@ -149,9 +177,9 @@ mod tests {
             new_profile,
             &json!({
                 "name": "pillow-plaintext",
-                "description": "Pillow-hosted session. Native tools are withheld; \
-                                capability arrives only through governed host tools.",
-                "tools": ["ask_user_question"],
+                "description": "Pillow-hosted session. Native authority is restricted; \
+                                file writes run through governed client filesystem RPC.",
+                "tools": ["ask_user_question", "write"],
                 "disallowedTools": ["search_tool", "use_tool"]
             }),
             "the session profile must not grow implicit capabilities"
@@ -245,11 +273,10 @@ mod tests {
             // that grants everything. Name the permitted set instead.
             assert_eq!(
                 params["_meta"]["agentProfile"]["tools"],
-                json!([PLAINTEXT_ALLOWED_TOOL]),
-                "the plaintext profile may not expose provider tools"
+                json!(PLAINTEXT_ALLOWED_TOOLS),
+                "the plaintext profile may expose only the inert prompt tool and governed ACP write"
             );
             for native in [
-                "write",
                 "write_file",
                 "search_replace",
                 "run_terminal_cmd",
