@@ -38,7 +38,66 @@ const output = {
   durationMs: 1,
 };
 
+/** Every key the host actually serializes for a pending process proposal. */
+const hostProposal = {
+  ...proposal,
+  decisionAvailable: true,
+  ruleSubject: "cargo test",
+};
+
 describe("C4 gateway contract", () => {
+  // The renderer validates host payloads against a closed key allowlist, so a
+  // widened host DTO silently becomes a breaking change: every list call
+  // throws and no approval bar ever renders. The suite above only ever
+  // asserts rejection, which stays green even if the validator rejects
+  // everything — so the accept direction has to be pinned explicitly.
+  it("accepts the exact host DTO for a pending process proposal", () => {
+    expect(normalizeExecProposal(hostProposal)).toMatchObject({
+      proposalId: "proposal-1",
+      decisionAvailable: true,
+      ruleSubject: "cargo test",
+    });
+    expect(normalizeExecProposal(hostProposal).autoApprovedByRule).toBeUndefined();
+  });
+
+  it("carries rule attribution through, and only for a process rule", () => {
+    const attributed = {
+      ...hostProposal,
+      autoApprovedByRule: { prefix: "process", pattern: "cargo*", action: "allow" },
+    };
+    expect(normalizeExecProposal(attributed).autoApprovedByRule).toEqual({
+      prefix: "process",
+      pattern: "cargo*",
+      action: "allow",
+    });
+    // A write/edit rule can never decide a process proposal.
+    expect(() =>
+      normalizeExecProposal({
+        ...hostProposal,
+        autoApprovedByRule: { prefix: "write", pattern: "src/**", action: "allow" },
+      }),
+    ).toThrow();
+    expect(() =>
+      normalizeExecProposal({
+        ...hostProposal,
+        autoApprovedByRule: { prefix: "process", pattern: "cargo*", action: "sudo" },
+      }),
+    ).toThrow();
+    expect(() =>
+      normalizeExecProposal({
+        ...hostProposal,
+        autoApprovedByRule: { prefix: "process", pattern: "cargo*", action: "allow", ruleId: "r-1" },
+      }),
+    ).toThrow();
+  });
+
+  it("requires the host-normalized rule subject", () => {
+    const { ruleSubject: _dropped, ...missing } = hostProposal;
+    expect(() => normalizeExecProposal(missing)).toThrow();
+    expect(() => normalizeExecProposal({ ...hostProposal, ruleSubject: "" })).toThrow();
+    expect(() => normalizeExecProposal({ ...hostProposal, ruleSubject: 7 })).toThrow();
+  });
+
   it("rejects unknown, authority, and invalid enum fields before exec renderer state", () => {
     expect(() => normalizeExecProposal({ ...proposal, state: "spawned" })).toThrow();
     expect(() => normalizeExecProposal({ ...proposal, nativePath: "C:/secret" })).toThrow();

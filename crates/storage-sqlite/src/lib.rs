@@ -3,6 +3,7 @@ mod conversation_rows;
 mod exec_proposal;
 mod knowledge;
 mod migrations;
+mod permission_rules;
 mod resource_recent;
 mod settings;
 mod tool_call;
@@ -19,6 +20,12 @@ pub use knowledge::{
     KnowledgeDocument, KnowledgeDocumentLink, KnowledgeError, KnowledgeTask, KnowledgeVerdict,
     ListDocumentsQuery, RecordVerdict, RegisterDocument, RegisteredBy, SetTaskStatus,
     SqliteKnowledgeRepository, TaskStatus, UpdateDocument, VerdictOutcome,
+};
+pub use permission_rules::{
+    AddPermissionRule, PERMISSION_RULE_PATTERN_BYTE_CAP, PERMISSION_RULE_SUBJECT_BYTE_CAP,
+    PermissionRule, PermissionRuleAction, PermissionRuleError, PermissionRuleMatchSnapshot,
+    PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
+    PermissionRuleScope, SqlitePermissionRuleRepository, StoredPermissionRuleReceipt,
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,

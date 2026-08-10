@@ -4,8 +4,15 @@
 //! It has no filesystem, SQLite, renderer, adapter, or OS process dependencies.
 //! Write and process state machines use separate enums and error types.
 
+mod permission_rules;
 mod process;
 mod write;
+
+pub use permission_rules::{
+    MatchedPermissionRule, PermissionRuleAction, PermissionRuleEvaluation, PermissionRulePrefix,
+    PermissionRuleScope, PermissionRuleSpec, canonical_process_subject, evaluate_permission_rules,
+    permission_rule_matches,
+};
 
 pub use process::{
     EXEC_PROPOSAL_TTL_SECS, ExecDecision, ExecPolicyError, ExecProposalState, apply_exec_decision,

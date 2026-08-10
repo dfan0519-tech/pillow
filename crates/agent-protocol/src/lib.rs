@@ -39,14 +39,14 @@ pub use tool::{
     fixed_tool_manifests,
 };
 pub use types::{
-    ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PlanStep, PlanUpdatedPayload,
-    ProcessProposalDecidedPayload, ProcessProposalRequestedPayload, ProcessRiskClass,
-    ProcessStartedPayload, ProcessTerminalOutcomePayload, ReasoningSummaryDeltaPayload,
-    RunCancelledPayload, RunId, RunStartedPayload, RunStatus, RuntimeEvent, RuntimeEventKind,
-    RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn, StartSession,
-    SubagentCompletedPayload, SubagentProgressPayload, SubagentStartedPayload, SubagentStatus,
-    ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload, ToolCallStatus,
-    TurnCompletedPayload, TurnFailedPayload, WriteProposalRequestedPayload,
+    ArtifactProducedPayload, AssistantDeltaPayload, HeartbeatPayload, PermissionRuleAttribution,
+    PlanStep, PlanUpdatedPayload, ProcessProposalDecidedPayload, ProcessProposalRequestedPayload,
+    ProcessRiskClass, ProcessStartedPayload, ProcessTerminalOutcomePayload,
+    ReasoningSummaryDeltaPayload, RunCancelledPayload, RunId, RunStartedPayload, RunStatus,
+    RuntimeEvent, RuntimeEventKind, RuntimeProbe, RuntimeSession, RuntimeSessionId, SendTurn,
+    StartSession, SubagentCompletedPayload, SubagentProgressPayload, SubagentStartedPayload,
+    SubagentStatus, ToolCallCompletedPayload, ToolCallOutputPayload, ToolCallStartedPayload,
+    ToolCallStatus, TurnCompletedPayload, TurnFailedPayload, WriteProposalRequestedPayload,
     WriteProposalResolvedPayload,
 };
 pub use validate::validate_payload;
@@ -55,6 +55,7 @@ pub use validate::validate_payload;
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
+    use keeper_policy::{ExecDecision, ExecProposalState};
     use uuid::Uuid;
 
     fn fixed_time() -> DateTime<Utc> {
@@ -338,6 +339,36 @@ mod tests {
                 mode: WriteMode::Create,
                 state: WriteProposalState::Succeeded,
                 error_code: None,
+                auto_approved_by_rule: None,
+            })
+            .unwrap(),
+            // Rule attribution is optional and skipped when absent, so a
+            // `None`-only sample would never exercise its serialized form. The
+            // populated variants below are what keep the timeline's
+            // human-vs-rule distinction inside this guard.
+            serde_json::to_value(WriteProposalResolvedPayload {
+                proposal_id: "wp-2".into(),
+                path: "src/b.ts".into(),
+                mode: WriteMode::Modify,
+                state: WriteProposalState::Succeeded,
+                error_code: None,
+                auto_approved_by_rule: Some(PermissionRuleAttribution {
+                    prefix: "Write".into(),
+                    pattern: "src/**".into(),
+                    action: "allow".into(),
+                }),
+            })
+            .unwrap(),
+            serde_json::to_value(ProcessProposalDecidedPayload {
+                proposal_id: "pp-1".into(),
+                program: "cargo".into(),
+                decision: ExecDecision::ApproveOnce,
+                state: ExecProposalState::Approved,
+                auto_approved_by_rule: Some(PermissionRuleAttribution {
+                    prefix: "Bash".into(),
+                    pattern: "cargo*".into(),
+                    action: "allow".into(),
+                }),
             })
             .unwrap(),
         ];

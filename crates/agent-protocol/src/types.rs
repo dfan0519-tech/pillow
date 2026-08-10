@@ -293,6 +293,10 @@ pub struct WriteProposalResolvedPayload {
     pub state: WriteProposalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<WritePublicErrorCode>,
+    /// Set when a permission rule decided this instead of a human. See
+    /// [`ProcessProposalDecidedPayload::auto_approved_by_rule`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approved_by_rule: Option<PermissionRuleAttribution>,
 }
 
 /// Display risk class for process proposals (safe summary only).
@@ -328,6 +332,26 @@ pub struct ProcessProposalDecidedPayload {
     pub program: String,
     pub decision: ExecDecision,
     pub state: ExecProposalState,
+    /// Set when a permission rule decided this instead of a human.
+    ///
+    /// The timeline is built from events, so attribution has to ride on the
+    /// event: an auto-approval the user cannot see afterwards is the same as no
+    /// approval at all. Absent means a human decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approved_by_rule: Option<PermissionRuleAttribution>,
+}
+
+/// Which permission rule decided an operation, for display and audit.
+///
+/// Lives here rather than in the host so the event contract and the host share
+/// one definition — this repository has already paid for the same invariant
+/// existing in several places.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionRuleAttribution {
+    pub prefix: String,
+    pub pattern: String,
+    pub action: String,
 }
 
 /// Process start notice after one-shot claim. Never carries raw grant, native

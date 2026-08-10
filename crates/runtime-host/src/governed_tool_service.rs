@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use keeper_agent_protocol::RunId;
 use keeper_policy::{ExecDecision, WriteDecision};
-use keeper_storage_sqlite::{StoredExecProposal, StoredWriteProposal};
+use keeper_storage_sqlite::{
+    SqlitePermissionRuleRepository, StoredExecProposal, StoredWriteProposal,
+};
 use keeper_tool_executor::{
     GovernedProcessToolGateway, GovernedReadToolGateway, GovernedWriteToolGateway,
 };
@@ -43,6 +45,7 @@ pub struct GovernedToolService {
     read_gateway: Option<Arc<GovernedReadToolGateway>>,
     write_gateway: Option<Arc<GovernedWriteToolGateway>>,
     process_gateway: Option<Arc<GovernedProcessToolGateway>>,
+    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
     /// Retained construction identity; recovery uses gateway handles only.
     #[allow(dead_code)]
     database_path: Option<PathBuf>,
@@ -58,6 +61,7 @@ impl std::fmt::Debug for GovernedToolService {
             .field("has_read_gateway", &self.read_gateway.is_some())
             .field("has_write_gateway", &self.write_gateway.is_some())
             .field("has_process_gateway", &self.process_gateway.is_some())
+            .field("has_permission_rules", &self.permission_rules.is_some())
             .field("shut_down", &self.is_shut_down())
             .finish()
     }
@@ -70,22 +74,27 @@ impl GovernedToolService {
         let read = open_gateway(path)?;
         let write = open_write_gateway(path).map_err(|_| GovernedReadBridgeError::Gateway)?;
         let process = open_process_gateway(path).map_err(|_| GovernedReadBridgeError::Gateway)?;
+        let permission_rules = SqlitePermissionRuleRepository::open(path)
+            .map(Arc::new)
+            .map_err(|_| GovernedReadBridgeError::Gateway)?;
         Ok(Self::build(
             Some(read),
             Some(write),
             Some(process),
+            Some(permission_rules),
             Some(path.to_path_buf()),
         ))
     }
 
     pub(crate) fn without_gateways() -> Self {
-        Self::build(None, None, None, None)
+        Self::build(None, None, None, None, None)
     }
 
     fn build(
         read_gateway: Option<Arc<GovernedReadToolGateway>>,
         write_gateway: Option<Arc<GovernedWriteToolGateway>>,
         process_gateway: Option<Arc<GovernedProcessToolGateway>>,
+        permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
         database_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -93,6 +102,7 @@ impl GovernedToolService {
             read_gateway,
             write_gateway,
             process_gateway,
+            permission_rules,
             database_path,
             shut_down: AtomicBool::new(false),
             lifecycle: Mutex::new(()),
@@ -145,6 +155,7 @@ impl GovernedToolService {
             bind_write_run(
                 self.owner_id,
                 write_gateway,
+                self.permission_rules.clone(),
                 run_id,
                 project_id,
                 conversation_id,
@@ -172,6 +183,7 @@ impl GovernedToolService {
         bind_write_run(
             self.owner_id,
             gateway,
+            self.permission_rules.clone(),
             run_id,
             project_id,
             conversation_id,
@@ -196,6 +208,7 @@ impl GovernedToolService {
         bind_process_run(
             self.owner_id,
             gateway,
+            self.permission_rules.clone(),
             run_id,
             project_id,
             conversation_id,
@@ -236,6 +249,7 @@ impl GovernedToolService {
             self.owner_id,
             conversation_id,
             self.process_gateway.as_deref(),
+            self.permission_rules.as_deref(),
         )
     }
 
@@ -292,6 +306,7 @@ impl GovernedToolService {
             self.owner_id,
             conversation_id,
             self.write_gateway.as_deref(),
+            self.permission_rules.as_deref(),
         )
     }
 

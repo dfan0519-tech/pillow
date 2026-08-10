@@ -7,6 +7,7 @@ pub mod directory_ops;
 mod exec_commands;
 mod git_commands;
 pub mod path_scope;
+mod permission_rule_commands;
 mod project_commands;
 mod resource_commands;
 pub mod runtime_composition;
@@ -17,6 +18,8 @@ mod write_commands;
 mod exec_commands_tests;
 #[cfg(test)]
 mod git_commands_tests;
+#[cfg(test)]
+mod permission_rule_commands_tests;
 #[cfg(test)]
 mod resource_commands_tests;
 #[cfg(test)]
@@ -40,7 +43,11 @@ use desktop_lifecycle::{
 };
 use exec_commands::{decide_exec_proposal, list_exec_proposals, open_exec_output};
 use git_commands::{GitCommandState, discover_git_repositories, get_git_status, open_git_diff};
+use keeper_storage_sqlite::SqlitePermissionRuleRepository;
 use keeper_storage_sqlite::SqliteSettingsRepository;
+use permission_rule_commands::{
+    add_permission_rule, delete_permission_rule, list_permission_rules,
+};
 use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
@@ -88,6 +95,9 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         list_exec_proposals,
         decide_exec_proposal,
         open_exec_output,
+        list_permission_rules,
+        add_permission_rule,
+        delete_permission_rule,
         discover_git_repositories,
         get_git_status,
         open_git_diff,
@@ -116,6 +126,8 @@ pub fn run() {
             let state = AppState::open(&db_path)?;
             let settings = SqliteSettingsRepository::open(&db_path)
                 .map_err(|error| format!("settings store open failed: {error}"))?;
+            let permission_rules = SqlitePermissionRuleRepository::open(&db_path)
+                .map_err(|error| format!("permission rule store open failed: {error}"))?;
             let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
             // Production default: GrokAcpAdapter. Fake only when explicitly
             // selected via env or stored settings (env wins). Never silent-
@@ -148,6 +160,7 @@ pub fn run() {
             }
             app.manage(state);
             app.manage(settings);
+            app.manage(permission_rules);
             app.manage(Arc::new(startup));
             app.manage(GitCommandState::new());
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));

@@ -11,6 +11,7 @@ import type {
   AgentActivityProjection,
 } from "./agentActivityTypes";
 import "../../styles/agent-activity.css";
+import "../../styles/permission-rules.css";
 
 export type { AgentActivityDisclosureProps } from "./agentActivityTypes";
 
@@ -297,6 +298,31 @@ function ActivityDisclosureItem({
             key={outcome.key}
           >
             <p className="write-outcome__message">{outcome.message}</p>
+            {outcome.autoApprovedByRule && outcome.autoRuleLabel ? (
+              <p
+                className={
+                  outcome.autoApprovedByRule.action === "deny"
+                    ? "permission-auto-rule permission-auto-rule--deny"
+                    : "permission-auto-rule"
+                }
+                data-testid="write-outcome-auto-rule"
+              >
+                <span
+                  className="permission-auto-rule__label"
+                  data-testid="write-outcome-auto-rule-label"
+                >
+                  {outcome.autoRuleLabel}
+                </span>
+                {outcome.autoRuleSummary ? (
+                  <code
+                    className="permission-auto-rule__summary"
+                    data-testid="write-outcome-auto-rule-summary"
+                  >
+                    {outcome.autoRuleSummary}
+                  </code>
+                ) : null}
+              </p>
+            ) : null}
             {outcome.canOpenFile
             && outcome.relativePath
             && onOpenArtifact ? (

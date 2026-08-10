@@ -36,6 +36,7 @@ function pendingProposal(
     summary: "Create src/example.ts",
     expiresAt: "2026-08-01T12:10:00.000Z",
     approvalGrant: grant,
+    ruleSubject: "src/example.ts",
     ...overrides,
   };
 }

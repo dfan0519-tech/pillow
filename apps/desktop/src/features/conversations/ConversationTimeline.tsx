@@ -27,7 +27,12 @@ import {
   formatProcessArgvDisplay,
   type ProcessActivityModel,
 } from "../execution/processActivityModel";
+import {
+  autoRuleDecisionLabel,
+  formatRuleSummary,
+} from "../permissions/permissionPattern";
 import "../../styles/execution.css";
+import "../../styles/permission-rules.css";
 
 export type OpenProcessOutputRequest = {
   /** Internal only — never painted in the timeline. */
@@ -265,12 +270,16 @@ function ProcessCommandActivityRow({
   const hasDetails =
     model.argv.length > 0
     || model.decisionLabel
+    || Boolean(model.autoApprovedByRule)
     || model.exitCode !== undefined
     || model.durationMs !== undefined
     || model.capturedBytes !== undefined
     || model.truncated
     || model.encodingLossy
     || Boolean(onOpenOutput);
+  const autoRule = model.autoApprovedByRule;
+  const autoRuleLabel = autoRule ? autoRuleDecisionLabel(autoRule) : null;
+  const autoRuleSummary = autoRule ? formatRuleSummary(autoRule) : null;
 
   return (
     <article
@@ -319,6 +328,31 @@ function ProcessCommandActivityRow({
           >
             {model.programLabel}
           </code>
+          {autoRuleLabel ? (
+            <span
+              className={
+                autoRule?.action === "deny"
+                  ? "permission-auto-rule permission-auto-rule--deny"
+                  : "permission-auto-rule"
+              }
+              data-testid="command-activity-auto-rule"
+            >
+              <span
+                className="permission-auto-rule__label"
+                data-testid="command-activity-auto-rule-label"
+              >
+                {autoRuleLabel}
+              </span>
+              {autoRuleSummary ? (
+                <code
+                  className="permission-auto-rule__summary"
+                  data-testid="command-activity-auto-rule-summary"
+                >
+                  {autoRuleSummary}
+                </code>
+              ) : null}
+            </span>
+          ) : null}
         </summary>
 
         {hasDetails ? (
@@ -337,6 +371,14 @@ function ProcessCommandActivityRow({
                 data-testid="command-activity-decision"
               >
                 决定：{model.decisionLabel}
+              </span>
+            ) : null}
+            {autoRuleLabel && autoRuleSummary ? (
+              <span
+                className="command-activity-row__meta"
+                data-testid="command-activity-auto-rule-detail"
+              >
+                规则：{autoRuleSummary}
               </span>
             ) : null}
             {model.exitCode !== undefined && model.exitCode !== null ? (

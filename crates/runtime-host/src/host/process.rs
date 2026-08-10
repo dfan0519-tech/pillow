@@ -32,12 +32,15 @@ use keeper_agent_protocol::{
     ToolProposal, canonical_arguments_digest,
 };
 use keeper_governance_port::CancellationProbe;
-use keeper_policy::{ExecDecision, ExecProposalState, is_exec_terminal};
+use keeper_policy::{ExecDecision, ExecProposalState, canonical_process_subject, is_exec_terminal};
 use keeper_process_executor::{
     CancellationSignal as ProcessCancellationSignal, OutputChunk as RunnerOutputChunk,
     OutputObserver,
 };
-use keeper_storage_sqlite::{ExecDecisionOutcome, StoredExecProposal};
+use keeper_storage_sqlite::{
+    ExecDecisionOutcome, PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
+    SqlitePermissionRuleRepository, StoredExecProposal, StoredPermissionRuleReceipt,
+};
 use keeper_tool_executor::{
     ClaimedObserver, GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
     GovernedProcessToolGateway, LiveProcessOutput, ProcessOutputChunk as GatewayOutputChunk,
@@ -48,6 +51,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::governed_write::{generate_approval_grant, grant_digest};
+use crate::permission_rules::{
+    HostPermissionRuleEvaluation, PermissionRuleAttributionView, attribution_from_receipt,
+    evaluate_host_permission_rules,
+};
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -119,6 +126,8 @@ pub struct LiveProcessProposalView {
     pub truncated: Option<bool>,
     pub encoding_lossy: Option<bool>,
     pub captured_bytes: Option<u64>,
+    pub rule_subject: String,
+    pub auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 }
 
 impl std::fmt::Debug for LiveProcessProposalView {
@@ -205,6 +214,7 @@ struct BoundProcessRun {
     context: ToolActiveContext,
     capability: ProjectCapability,
     gateway: Arc<GovernedProcessToolGateway>,
+    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -245,6 +255,8 @@ struct LiveProcessEntry {
     observer_delivery_in_progress: bool,
     observer_failure_cleanup_in_progress: bool,
     observer_quarantine_deferred: bool,
+    auto_rule_pending: bool,
+    auto_approved_by_rule: Option<PermissionRuleAttributionView>,
     #[cfg(any(test, feature = "test-support"))]
     pre_claim_hook: Option<PreClaimHook>,
 }
@@ -320,6 +332,7 @@ pub(crate) fn open_process_gateway(
 pub(crate) fn bind_process_run(
     owner: Uuid,
     gateway: Arc<GovernedProcessToolGateway>,
+    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
     run_id: RunId,
     project_id: impl Into<String>,
     conversation_id: impl Into<String>,
@@ -344,6 +357,7 @@ pub(crate) fn bind_process_run(
             context,
             capability,
             gateway,
+            permission_rules,
         }),
     );
     let (conversation, capability) = {
@@ -769,6 +783,23 @@ pub fn execute_governed_process(
     let risk_class = classify_risk(sealed.program(), sealed.argv());
     let process_cancel = ProcessCancellationSignal::new();
     let proposal_id = row.proposal_id.clone();
+    let rule_subject = canonical_process_subject(sealed.program(), sealed.argv());
+    let rule_evaluation = match evaluate_host_permission_rules(
+        bound.permission_rules.as_deref(),
+        bound.context.project_id(),
+        PermissionRulePrefix::Process,
+        &rule_subject,
+    ) {
+        Ok(evaluation) => evaluation,
+        Err(()) => {
+            fail_closed_after_reserve(&proposal_id, &bound);
+            return Err(GovernedProcessBridgeError::Gateway);
+        }
+    };
+    let auto_rule_pending = !matches!(
+        &rule_evaluation,
+        HostPermissionRuleEvaluation::RequireConfirmation
+    );
 
     let requested = ProcessProposalRequestedView {
         proposal_id: proposal_id.clone(),
@@ -833,6 +864,8 @@ pub fn execute_governed_process(
                 observer_delivery_in_progress: false,
                 observer_failure_cleanup_in_progress: false,
                 observer_quarantine_deferred: false,
+                auto_rule_pending,
+                auto_approved_by_rule: None,
                 #[cfg(any(test, feature = "test-support"))]
                 pre_claim_hook: None,
             },
@@ -842,6 +875,22 @@ pub fn execute_governed_process(
     if let Err(error) = on_lifecycle(GovernedProcessLifecycle::Requested(&requested)) {
         fail_closed_after_reserve(&proposal_id, &bound);
         return Err(error);
+    }
+
+    match rule_evaluation {
+        HostPermissionRuleEvaluation::Allow(matched)
+        | HostPermissionRuleEvaluation::Deny(matched) => {
+            if let Err(error) = decide_process_proposal_by_rule(
+                bound.owner,
+                bound.context.conversation_id(),
+                &proposal_id,
+                &matched,
+            ) {
+                fail_closed_after_reserve(&proposal_id, &bound);
+                return Err(error);
+            }
+        }
+        HostPermissionRuleEvaluation::RequireConfirmation => {}
     }
 
     wait_for_resolution(
@@ -1060,11 +1109,15 @@ fn finalize_via_gateway(
         &str,
     ) -> Result<StoredExecProposal, GovernedProcessError>,
 ) -> Result<GovernedProcessReceipt, GovernedProcessBridgeError> {
-    // Clear grant before durable transition.
+    // Clear grant before durable transition. Take the rule attribution in the
+    // same pass: the live entry is gone by the time the decided payload is
+    // built, and an auto-decision the timeline cannot show is invisible.
+    let mut rule_attribution = None;
     if let Ok(mut guard) = coordinator().state.lock()
         && let Some(entry) = guard.live.get_mut(proposal_id)
     {
         entry.raw_grant.clear();
+        rule_attribution = entry.auto_approved_by_rule.clone();
     }
 
     let result = op(
@@ -1099,6 +1152,7 @@ fn finalize_via_gateway(
             program: row.program.clone(),
             decision: ExecDecision::Reject,
             state: row.state,
+            auto_approved_by_rule: rule_attribution.clone(),
         })
     } else {
         None
@@ -1384,6 +1438,7 @@ pub fn list_process_proposals(
     owner: Uuid,
     conversation_id: &str,
     gateway: Option<&GovernedProcessToolGateway>,
+    permission_rules: Option<&SqlitePermissionRuleRepository>,
 ) -> Result<Vec<LiveProcessProposalView>, GovernedProcessBridgeError> {
     reconcile_expired_for_owner(owner, Some(conversation_id))?;
 
@@ -1404,7 +1459,8 @@ pub fn list_process_proposals(
             let decision_available = entry.terminal.is_none()
                 && entry.metadata.state == ExecProposalState::PendingApproval
                 && now < entry.expires_at
-                && !entry.raw_grant.is_empty();
+                && !entry.raw_grant.is_empty()
+                && !entry.auto_rule_pending;
             seen.insert(entry.proposal_id.clone());
             views.push(live_view_from_entry(entry, decision_available));
         }
@@ -1425,7 +1481,18 @@ pub fn list_process_proposals(
             if seen.contains(&row.proposal_id) {
                 continue;
             }
-            views.push(view_from_stored(&row, &[], row.portable_cwd.clone(), false));
+            let rule_receipt = permission_rules
+                .map(|rules| rules.get_exec_rule_receipt(&row.proposal_id))
+                .transpose()
+                .map_err(|_| GovernedProcessBridgeError::Gateway)?
+                .flatten();
+            views.push(view_from_stored(
+                &row,
+                &[],
+                row.portable_cwd.clone(),
+                false,
+                rule_receipt.as_ref(),
+            ));
         }
     }
     Ok(views)
@@ -1532,6 +1599,29 @@ pub fn decide_process_proposal(
     proposal_id: &str,
     decision: ExecDecision,
 ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
+    decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, None)
+}
+
+fn decide_process_proposal_by_rule(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    matched: &PermissionRuleMatchSnapshot,
+) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
+    let decision = match matched.rule.action {
+        PermissionRuleAction::Allow => ExecDecision::ApproveOnce,
+        PermissionRuleAction::Deny => ExecDecision::Reject,
+    };
+    decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, Some(matched))
+}
+
+fn decide_process_proposal_inner(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    decision: ExecDecision,
+    matched: Option<&PermissionRuleMatchSnapshot>,
+) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
     reconcile_expired_for_owner(owner, Some(conversation_id))?;
 
     let (bound, fingerprint, grant_digest_value, sealed, process_cancel, program, argv, cwd) = {
@@ -1552,7 +1642,10 @@ pub fn decide_process_proposal(
         if Utc::now() >= entry.expires_at {
             return Err(GovernedProcessBridgeError::Expired);
         }
-        if entry.raw_grant.is_empty() {
+        if matched.is_none() && entry.raw_grant.is_empty() {
+            return Err(GovernedProcessBridgeError::DecisionDenied);
+        }
+        if matched.is_some() && !entry.auto_rule_pending {
             return Err(GovernedProcessBridgeError::DecisionDenied);
         }
         // Single-use: clear raw grant material at decision time.
@@ -1583,22 +1676,61 @@ pub fn decide_process_proposal(
         )
     };
 
-    let outcome = bound
-        .gateway
-        .decide_for_owner(
-            &bound.capability,
-            conversation_id,
-            proposal_id,
-            decision,
-            &grant_digest_value,
-            &fingerprint,
-        )
-        .map_err(|error| match error {
-            GovernedProcessError::CapabilityMismatch | GovernedProcessError::NotApplicable => {
-                GovernedProcessBridgeError::NotLive
-            }
-            _ => GovernedProcessBridgeError::Gateway,
-        })?;
+    let outcome = if let Some(matched) = matched {
+        bound
+            .permission_rules
+            .as_deref()
+            .ok_or(GovernedProcessBridgeError::Gateway)?
+            .decide_exec_by_rule(
+                proposal_id,
+                conversation_id,
+                matched,
+                &grant_digest_value,
+                &fingerprint,
+                Utc::now(),
+            )
+            .map_err(|error| match error {
+                keeper_storage_sqlite::ExecProposalStoreError::OwnershipMismatch => {
+                    GovernedProcessBridgeError::NotLive
+                }
+                _ => GovernedProcessBridgeError::Gateway,
+            })?
+    } else {
+        bound
+            .gateway
+            .decide_for_owner(
+                &bound.capability,
+                conversation_id,
+                proposal_id,
+                decision,
+                &grant_digest_value,
+                &fingerprint,
+            )
+            .map_err(|error| match error {
+                GovernedProcessError::CapabilityMismatch | GovernedProcessError::NotApplicable => {
+                    GovernedProcessBridgeError::NotLive
+                }
+                _ => GovernedProcessBridgeError::Gateway,
+            })?
+    };
+
+    let rule_receipt = if matched.is_some() {
+        bound
+            .permission_rules
+            .as_deref()
+            .ok_or(GovernedProcessBridgeError::Gateway)?
+            .get_exec_rule_receipt(proposal_id)
+            .map_err(|_| GovernedProcessBridgeError::Gateway)?
+    } else {
+        None
+    };
+    if matched.is_some()
+        && let Ok(mut guard) = coordinator().state.lock()
+        && let Some(entry) = guard.live.get_mut(proposal_id)
+    {
+        entry.auto_rule_pending = false;
+        entry.auto_approved_by_rule = rule_receipt.as_ref().map(attribution_from_receipt);
+    }
 
     match outcome {
         ExecDecisionOutcome::Accepted(row) if decision == ExecDecision::Reject => {
@@ -1607,11 +1739,18 @@ pub fn decide_process_proposal(
                 program: row.program.clone(),
                 decision: ExecDecision::Reject,
                 state: row.state,
+                auto_approved_by_rule: rule_receipt.as_ref().map(attribution_from_receipt),
             };
             // Durable reject first; mark decided eligibility + terminal, notify
             // waiter (no EventSink here — waiter owns emit callbacks).
             publish_terminal_for_waiter(proposal_id, row.clone(), None, None, Some(decided), None);
-            Ok(view_from_stored(&row, &argv, cwd, false))
+            Ok(view_from_stored(
+                &row,
+                &argv,
+                cwd,
+                false,
+                rule_receipt.as_ref(),
+            ))
         }
         ExecDecisionOutcome::Accepted(_approved) if decision == ExecDecision::ApproveOnce => {
             let decided = ProcessProposalDecidedPayload {
@@ -1619,6 +1758,7 @@ pub fn decide_process_proposal(
                 program: program.clone(),
                 decision: ExecDecision::ApproveOnce,
                 state: ExecProposalState::Approved,
+                auto_approved_by_rule: rule_receipt.as_ref().map(attribution_from_receipt),
             };
             let started = ProcessStartedPayload {
                 proposal_id: proposal_id.to_owned(),
@@ -1713,7 +1853,13 @@ pub fn decide_process_proposal(
                         Some(decided),
                         started_out,
                     );
-                    Ok(view_from_stored(&row, &argv, cwd, false))
+                    Ok(view_from_stored(
+                        &row,
+                        &argv,
+                        cwd,
+                        false,
+                        rule_receipt.as_ref(),
+                    ))
                 }
                 Err(GovernedProcessError::CleanupUnproven) => {
                     quarantine_live(proposal_id);
@@ -1725,8 +1871,20 @@ pub fn decide_process_proposal(
                 }
             }
         }
-        ExecDecisionOutcome::Accepted(row) => Ok(view_from_stored(&row, &argv, cwd, false)),
-        ExecDecisionOutcome::Terminal(row) => Ok(view_from_stored(&row, &argv, cwd, false)),
+        ExecDecisionOutcome::Accepted(row) => Ok(view_from_stored(
+            &row,
+            &argv,
+            cwd,
+            false,
+            rule_receipt.as_ref(),
+        )),
+        ExecDecisionOutcome::Terminal(row) => Ok(view_from_stored(
+            &row,
+            &argv,
+            cwd,
+            false,
+            rule_receipt.as_ref(),
+        )),
         ExecDecisionOutcome::Conflict(_) => Err(GovernedProcessBridgeError::DecisionDenied),
         ExecDecisionOutcome::Expired(row) => {
             publish_terminal_for_waiter(proposal_id, row, None, None, None, None);
@@ -1817,6 +1975,8 @@ fn live_view_from_entry(
         truncated: meta.truncated,
         encoding_lossy: meta.encoding_lossy,
         captured_bytes: meta.captured_bytes,
+        rule_subject: canonical_process_subject(&entry.program, &entry.argv),
+        auto_approved_by_rule: entry.auto_approved_by_rule.clone(),
     }
 }
 
@@ -1825,6 +1985,7 @@ fn view_from_stored(
     argv: &[String],
     portable_cwd: Option<String>,
     decision_available: bool,
+    rule_receipt: Option<&StoredPermissionRuleReceipt>,
 ) -> LiveProcessProposalView {
     let cwd = portable_cwd.or_else(|| row.portable_cwd.clone());
     let summary = if argv.is_empty() {
@@ -1851,6 +2012,10 @@ fn view_from_stored(
         truncated: row.truncated,
         encoding_lossy: row.encoding_lossy,
         captured_bytes: row.captured_bytes,
+        rule_subject: rule_receipt
+            .map(|receipt| receipt.match_subject.clone())
+            .unwrap_or_else(|| canonical_process_subject(&row.program, argv)),
+        auto_approved_by_rule: rule_receipt.map(attribution_from_receipt),
     }
 }
 

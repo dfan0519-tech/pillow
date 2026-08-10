@@ -260,6 +260,7 @@ function createExecGateway(
       summary: "done",
       expiresAt: "2026-08-04T00:10:00.000Z",
       decisionAvailable: false,
+      ruleSubject: "cargo test",
     }),
     openExecOutput: async (input) => {
       outputCalls.push({ ...input });

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  MockPermissionRulesGateway,
+  TauriPermissionRulesGateway,
+  type PermissionRulesGateway,
+} from "../../lib/permissionRulesGateway";
+import { PermissionRulesSection } from "../permissions/PermissionRulesSection";
+import {
   GROK_CLI_LOGIN_SETTINGS_HELP,
 } from "./loginGuidance";
 import {
@@ -23,6 +29,11 @@ export type SettingsPanelProps = {
   onClose: () => void;
   /** Called after a successful theme write so the shell can re-apply. */
   onThemeChanged?: (theme: UiThemeLabel) => void;
+  /**
+   * Optional permission-rules gateway. Defaults to Tauri when the IPC bridge
+   * is present; otherwise an in-memory mock (unit tests / non-desktop).
+   */
+  permissionRulesGateway?: PermissionRulesGateway;
 };
 
 const ADAPTER_OPTIONS_BASE: { value: RuntimeAdapterLabel; label: string }[] = [
@@ -54,11 +65,22 @@ const THEME_OPTIONS: { value: UiThemeLabel; label: string }[] = [
  * Env overrides are visible and read-only (ADR-0003).
  * Content form — high contrast, small radius, no per-row glass.
  */
+function defaultPermissionRulesGateway(): PermissionRulesGateway {
+  if (
+    typeof window !== "undefined"
+    && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+  ) {
+    return new TauriPermissionRulesGateway();
+  }
+  return new MockPermissionRulesGateway();
+}
+
 export function SettingsPanel({
   gateway,
   projectId,
   onClose,
   onThemeChanged,
+  permissionRulesGateway: permissionRulesGatewayProp,
 }: SettingsPanelProps) {
   const [scope, setScope] = useState<SettingsScope>("global");
   const [settings, setSettings] = useState<RuntimeSettingsView | null>(null);
@@ -73,6 +95,9 @@ export function SettingsPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [permissionRulesGateway] = useState<PermissionRulesGateway>(
+    () => permissionRulesGatewayProp ?? defaultPermissionRulesGateway(),
+  );
 
   const effectiveProjectId = scope === "project" ? projectId : null;
 
@@ -447,6 +472,11 @@ export function SettingsPanel({
             </div>
           </form>
         )}
+
+        <PermissionRulesSection
+          gateway={permissionRulesGateway}
+          projectId={projectId}
+        />
       </div>
     </div>
   );

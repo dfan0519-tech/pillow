@@ -64,6 +64,7 @@ fn process_event_payloads_round_trip_and_validate() {
                 program: "node".into(),
                 decision: ExecDecision::ApproveOnce,
                 state: ExecProposalState::Approved,
+                auto_approved_by_rule: None,
             })
             .unwrap(),
         ),
@@ -203,6 +204,7 @@ fn process_event_order_requested_decided_started_terminal() {
         program: "node".into(),
         decision: ExecDecision::Reject,
         state: ExecProposalState::Rejected,
+        auto_approved_by_rule: None,
     };
     validate_payload(
         RuntimeEventKind::ProcessProposalDecided,

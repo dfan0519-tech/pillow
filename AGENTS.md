@@ -34,6 +34,16 @@ design change.
   design system supersedes it.
 - Upstream code reuse must retain required license and attribution notices.
 - New modules require focused tests and must remain independently replaceable.
+- **Adding a field to a host DTO is a breaking change.** The renderer
+  gateways (`tauriExecGateway.ts`, `tauriWriteApprovalGateway.ts`,
+  `tauriConversationGateway.ts`, …) validate host payloads against a *closed
+  key allowlist* and throw on anything unrecognised — that defence is what
+  stops a host from smuggling grants or native paths into the UI. A widened
+  Rust DTO whose new key is not admitted there makes every call to that
+  command throw, which surfaces only as a feature silently not appearing.
+  Widen the Rust struct and the renderer allowlist in the *same* change, and
+  pin the accept direction with a test: a suite that only asserts rejection
+  stays green when the validator rejects everything.
 
 ## Multi-runtime isolation (principle)
 

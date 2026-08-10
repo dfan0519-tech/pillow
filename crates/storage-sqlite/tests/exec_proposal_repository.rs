@@ -13,8 +13,11 @@ use keeper_agent_protocol::RunId as ProtocolRunId;
 use keeper_policy::{EXEC_PROPOSAL_TTL_SECS, ExecDecision, ExecProposalState};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    ExecDecisionOutcome, ExecProposalReserveInput, ExecReservationOutcome, ExecRunClaimOutcome,
-    ExecTerminalReceipt, SqliteExecProposalRepository, StoredExecProposal,
+    AddPermissionRule, ExecDecisionOutcome, ExecProposalReserveInput, ExecReservationOutcome,
+    ExecRunClaimOutcome, ExecTerminalReceipt, PermissionRuleAction, PermissionRuleMatchSnapshot,
+    PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
+    PermissionRuleScope, SqliteExecProposalRepository, SqlitePermissionRuleRepository,
+    StoredExecProposal,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -159,6 +162,94 @@ fn claim(fx: &Fixture, proposal_id: &str, owner: &str, lease_ms: u64) {
     fx.store
         .claim_run(proposal_id, owner, lease_ms, Utc::now())
         .unwrap();
+}
+
+fn stored_rule_match(
+    fx: &Fixture,
+    scope: PermissionRuleScope,
+    action: PermissionRuleAction,
+    pattern: &str,
+    subject: &str,
+) -> PermissionRuleMatchSnapshot {
+    let rules = SqlitePermissionRuleRepository::open(&fx.db_path).unwrap();
+    let rule = rules
+        .add(AddPermissionRule {
+            scope,
+            project_id: (scope == PermissionRuleScope::Project).then(|| fx.project_id.clone()),
+            prefix: PermissionRulePrefix::Process,
+            pattern: pattern.to_owned(),
+            action,
+        })
+        .unwrap();
+    PermissionRuleMatchSnapshot {
+        rule,
+        match_subject: subject.to_owned(),
+    }
+}
+
+#[test]
+fn project_rule_deny_persists_reject_by_rule_with_complete_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let input = reserve_input(&fx, "rule-deny", 0xD3);
+    fx.store.reserve(&input).unwrap();
+    let matched = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Project,
+        PermissionRuleAction::Deny,
+        "cargo publish*",
+        "cargo publish --dry-run",
+    );
+    let decided_at = Utc::now();
+
+    let outcome = fx
+        .store
+        .decide_by_rule(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &matched,
+            &grant_digest(0xD3),
+            &input.proposal_fingerprint,
+            decided_at,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ExecDecisionOutcome::Accepted(ref row) if row.state == ExecProposalState::Rejected
+    ));
+
+    let receipt = fx
+        .store
+        .get_rule_receipt(&input.proposal_id)
+        .unwrap()
+        .expect("durable process rule receipt");
+    assert_eq!(
+        receipt.decision,
+        PermissionRuleReceiptDecision::RejectByRule
+    );
+    assert_eq!(receipt.actor, PermissionRuleReceiptActor::RuleEngine);
+    assert_eq!(receipt.rule_id, matched.rule.rule_id);
+    assert_eq!(receipt.rule_scope, PermissionRuleScope::Project);
+    assert_eq!(
+        receipt.rule_project_id.as_deref(),
+        Some(fx.project_id.as_str())
+    );
+    assert_eq!(receipt.rule_prefix, PermissionRulePrefix::Process);
+    assert_eq!(receipt.rule_pattern, "cargo publish*");
+    assert_eq!(receipt.rule_action, PermissionRuleAction::Deny);
+    assert_eq!(receipt.rule_content_digest, matched.rule.content_digest);
+    assert_eq!(receipt.match_subject, "cargo publish --dry-run");
+    assert_eq!(receipt.decided_at, decided_at);
+
+    let connection = Connection::open(&fx.db_path).unwrap();
+    let stored_decision: String = connection
+        .query_row(
+            "SELECT decision FROM exec_permission_rule_receipts WHERE proposal_id = ?1",
+            [&receipt.proposal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_decision, "reject_by_rule");
 }
 
 #[test]

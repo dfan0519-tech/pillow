@@ -108,6 +108,7 @@ function pendingWrite(
     summary: "Create example",
     expiresAt: futureExpiry(20),
     approvalGrant: grantSecret,
+    ruleSubject: "src/example.ts",
     ...overrides,
   };
 }
@@ -127,6 +128,7 @@ function pendingProcess(
     summary: "Run focused desktop tests",
     expiresAt: futureExpiry(10),
     decisionAvailable: true,
+    ruleSubject: "cargo test -p pillow-desktop",
     ...overrides,
   };
 }

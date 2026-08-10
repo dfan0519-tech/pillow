@@ -1,0 +1,418 @@
+/*
+ * Permission rules — settings list + always-rule dialog + timeline badges.
+ * Content surfaces: high contrast, small radius, no glass on rows.
+ * Lavender accent only for primary CTA / focus.
+ */
+
+.permission-rules {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.permission-rules__head h3 {
+  margin: 0 0 4px;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.permission-rules__head p {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.permission-rules__status,
+.permission-rules__hint,
+.permission-rules__notice {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.permission-rules-list-block {
+  display: grid;
+  gap: 6px;
+}
+
+.permission-rules-list-block__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.permission-rules-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.permission-rules-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.permission-rules-list__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.permission-rules-list__body code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.permission-rules-list__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
+.permission-rules-list__badge--allow {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.permission-rules-list__badge--deny {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.permission-rules-list__scope {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.permission-rules-list__delete {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.permission-rules-list__delete:hover {
+  background: var(--bg-hover);
+}
+
+.permission-rules-list__delete:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.permission-rules-form {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.permission-rules-form__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.permission-rules-form__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.permission-rules-form__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.permission-rules-form__actions button {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  border-radius: var(--radius-sm);
+  background: var(--accent-muted, var(--bg-input));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.permission-rules-form__actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-elevated));
+}
+
+.permission-rules-form__actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.permission-rules-form__actions button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.permission-rule-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.permission-rule-field__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.permission-rule-field__control {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.permission-rule-field__control:disabled {
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  cursor: not-allowed;
+}
+
+.permission-rule-field__control:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+  border-color: var(--border-focus);
+}
+
+.permission-rule-word-boundary {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.permission-rule-project-allow-block {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.permission-rule-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+/* Always-rule confirm dialog */
+.permission-rule-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(14, 14, 16, 0.5);
+  padding: 24px;
+}
+
+.permission-rule-dialog {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+.permission-rule-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.permission-rule-dialog__head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.permission-rule-dialog__close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.permission-rule-dialog__close:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.permission-rule-dialog__lead {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.permission-rule-dialog__exact {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.permission-rule-dialog__exact code {
+  display: inline-block;
+  margin-left: 4px;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.permission-rule-dialog__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.permission-rule-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.permission-rule-dialog__actions button {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.permission-rule-dialog__actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.permission-rule-dialog__submit {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong)) !important;
+  background: var(--accent-muted, var(--bg-input)) !important;
+  font-weight: 700 !important;
+}
+
+.permission-rule-dialog__submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.permission-rule-dialog__actions button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+/* Timeline auto-rule visibility (process rows + write outcomes) */
+.permission-auto-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.permission-auto-rule--deny {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-elevated));
+}
+
+.permission-auto-rule__label {
+  color: var(--text-primary);
+}
+
+.permission-auto-rule__summary {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}

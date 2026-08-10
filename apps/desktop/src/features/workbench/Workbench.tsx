@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConversationTimelineView,
   ResourceReferenceView,
@@ -29,6 +29,12 @@ import type {
   ExecGateway,
   ExecProposalView,
 } from "../../lib/execGateway";
+import {
+  MockPermissionRulesGateway,
+  TauriPermissionRulesGateway,
+  readRuleSubject,
+  type PermissionRulesGateway,
+} from "../../lib/permissionRulesGateway";
 import type {
   CommandDecision,
   CommandProposalView,
@@ -73,6 +79,12 @@ type WorkbenchProps = {
    * conversation. Triggers process re-list without polling.
    */
   execProposalRefreshToken?: number;
+  /**
+   * Optional permission-rules gateway for “always allow/deny this pattern”
+   * from approval bars. Defaults to Tauri when the IPC bridge is present;
+   * otherwise an in-memory mock (unit tests can inject a fixture).
+   */
+  permissionRulesGateway?: PermissionRulesGateway;
   /**
    * Host-owned Git Changes presentation model (C4 D3B4). Pass-through only —
    * Workbench never calls the Git gateway or owns discovery generation.
@@ -136,11 +148,22 @@ export function Workbench({
   writeProposalRefreshToken = 0,
   execGateway,
   execProposalRefreshToken = 0,
+  permissionRulesGateway: permissionRulesGatewayProp,
   gitChanges = null,
   gitChangesCapable = false,
   onGitChangesActive,
 }: WorkbenchProps) {
   const projectId = project?.id ?? null;
+  const permissionRulesGateway = useMemo(() => {
+    if (permissionRulesGatewayProp) return permissionRulesGatewayProp;
+    if (
+      typeof window !== "undefined"
+      && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      return new TauriPermissionRulesGateway();
+    }
+    return new MockPermissionRulesGateway();
+  }, [permissionRulesGatewayProp]);
   const [resourcePaneScope, setResourcePaneScope] =
     useState<{ projectId: string | null } | null>(null);
   /** Default resources — Changes is never an implicit body. */
@@ -769,7 +792,13 @@ export function Workbench({
               onDecide={handleWriteDecide}
               onExpiryDeadline={handleExpiryDeadline}
               onReviewDiff={handleReviewDiff}
+              permissionRulesGateway={permissionRulesGateway}
+              projectId={projectId}
               proposal={pendingWriteProposal}
+              ruleSubject={
+                readRuleSubject(pendingWriteProposal)
+                ?? pendingWriteProposal.path
+              }
             />
           ) : null}
           {showProcessBar && pendingProcessProposal ? (
@@ -779,7 +808,18 @@ export function Workbench({
               onDecide={handleProcessDecide}
               onExpiryDeadline={handleExpiryDeadline}
               onReview={handleProcessReview}
+              permissionRulesGateway={permissionRulesGateway}
+              projectId={projectId}
               proposal={toCommandProposal(pendingProcessProposal)}
+              ruleSubject={
+                readRuleSubject(pendingProcessProposal)
+                ?? [
+                  pendingProcessProposal.programLabel,
+                  ...pendingProcessProposal.argv,
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              }
             />
           ) : null}
           <Composer

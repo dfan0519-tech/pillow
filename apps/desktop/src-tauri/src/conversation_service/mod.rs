@@ -28,6 +28,7 @@ mod tests;
 pub use exec_service::{ExecOutputDto, ExecProposalDto};
 pub use service::ConversationService;
 pub use types::ConversationCommandError;
+pub use types::PermissionRuleAttributionDto;
 #[cfg(test)]
 pub use types::PumpRegistrationHooks;
 pub use write_service::{WriteDiffDto, WriteProposalDto};

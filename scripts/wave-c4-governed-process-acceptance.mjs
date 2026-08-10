@@ -241,6 +241,32 @@ async function loadPlaywright() {
   return playwright;
 }
 
+const RENDERER_DIAGNOSTICS = new WeakMap();
+const MAX_RENDERER_DIAGNOSTICS = 40;
+
+function attachRendererDiagnostics(page) {
+  const entries = [];
+  RENDERER_DIAGNOSTICS.set(page, entries);
+  const push = (line) => {
+    if (entries.length >= MAX_RENDERER_DIAGNOSTICS) return;
+    entries.push(line.length > 400 ? `${line.slice(0, 400)}…` : line);
+  };
+  page.on("console", (message) => {
+    const type = message.type();
+    if (type !== "error" && type !== "warning") return;
+    push(`console.${type}: ${message.text()}`);
+  });
+  page.on("pageerror", (error) => {
+    push(`pageerror: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function rendererDiagnostics(page) {
+  const entries = page ? RENDERER_DIAGNOSTICS.get(page) : undefined;
+  if (!entries?.length) return "renderer: (no console errors or page errors)";
+  return `renderer:\n${entries.map((line) => `  ${line}`).join("\n")}`;
+}
+
 async function connectWebViewPage(playwright, cdpPort) {
   await waitForCdpEndpoint(cdpPort);
   const browser = await playwright.chromium.connectOverCDP(
@@ -260,6 +286,11 @@ async function connectWebViewPage(playwright, cdpPort) {
     await browser.close().catch(() => undefined);
     throw new Error("WebView2 CDP page is missing.");
   }
+  // A failing renderer is otherwise invisible here: the app's stdout/stderr
+  // stays empty while an IPC rejection is swallowed into a null gateway
+  // result, so the only report is "the bar never appeared". Capture the
+  // renderer's own diagnostics so a failure names its cause.
+  attachRendererDiagnostics(page);
   await page.waitForLoadState("domcontentloaded").catch(() => undefined);
   await page.waitForSelector("[data-testid='app-sidebar']", { timeout: 60_000 });
   return { browser, page };
@@ -869,6 +900,7 @@ async function launchDesktopPhase({
     await supervisor.cleanup().catch(() => undefined);
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
+      + `${rendererDiagnostics(connectedPage)}\n`
       + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
     );
   }
@@ -906,6 +938,7 @@ async function runRegisterPhase({
   });
 
   let browser;
+  let connectedPage;
   try {
     const evidence = await waitForJsonFile(resultPath, {
       label: `${phaseLabel} registration evidence`,
@@ -920,6 +953,7 @@ async function runRegisterPhase({
     });
     const connected = await connectWebViewPage(playwright, cdpPort);
     browser = connected.browser;
+    connectedPage = connected.page;
     await closeDesktopNormally({
       page: connected.page,
       browser,
@@ -945,6 +979,7 @@ async function runRegisterPhase({
     const output = launched.processRun.output();
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
+      + `${rendererDiagnostics(connectedPage)}\n`
       + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
     );
   }
@@ -975,9 +1010,11 @@ async function withUiSession({
   });
 
   let browser;
+  let connectedPage;
   try {
     const connected = await connectWebViewPage(playwright, cdpPort);
     browser = connected.browser;
+    connectedPage = connected.page;
     const evidence = await drive(connected.page, launched);
     await closeDesktopNormally({
       page: connected.page,
@@ -1004,6 +1041,7 @@ async function withUiSession({
     const output = launched.processRun.output();
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
+      + `${rendererDiagnostics(connectedPage)}\n`
       + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
     );
   }
@@ -1971,9 +2009,11 @@ async function scenarioForcedRestart({
   });
 
   let browser;
+  let connectedPage;
   try {
     const connected = await connectWebViewPage(playwright, cdpPort);
     browser = connected.browser;
+    connectedPage = connected.page;
     const page = connected.page;
     await selectProject(page, PROJECT_A_NAME);
     await collapseResourcePaneIfOpen(page);

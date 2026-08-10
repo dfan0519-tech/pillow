@@ -12,10 +12,18 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import {
+  readRuleSubject,
+  type PermissionRulesGateway,
+} from "../../lib/permissionRulesGateway";
 import type {
   WriteDecision,
   WriteProposalView,
 } from "../../lib/writeApprovalGateway";
+import { AlwaysRuleDialog } from "../permissions/AlwaysRuleDialog";
+import {
+  writePrefixFromMode,
+} from "../permissions/permissionPattern";
 import "../../styles/write-approval.css";
 
 export type WriteApprovalBarProps = {
@@ -32,6 +40,15 @@ export type WriteApprovalBarProps = {
   onReviewDiff: () => void | Promise<void>;
   /** Called when the displayed deadline elapses (disable + parent re-list). */
   onExpiryDeadline?: () => void;
+  /**
+   * Optional host-normalized match subject (`rule_subject`). When omitted,
+   * falls back to the portable proposal path.
+   */
+  ruleSubject?: string;
+  /** When set, enables “always allow/deny this pattern” from the bar. */
+  permissionRulesGateway?: PermissionRulesGateway;
+  /** Active project — enables project-scoped deny rules from the dialog. */
+  projectId?: string | null;
 };
 
 function modeLabel(mode: WriteProposalView["mode"]): string {
@@ -55,6 +72,9 @@ export function WriteApprovalBar({
   onDecide,
   onReviewDiff,
   onExpiryDeadline,
+  ruleSubject: ruleSubjectProp,
+  permissionRulesGateway,
+  projectId = null,
 }: WriteApprovalBarProps) {
   const headingId = useId();
   const barRef = useRef<HTMLDivElement>(null);
@@ -67,11 +87,19 @@ export function WriteApprovalBar({
 
   const [submitting, setSubmitting] = useState(false);
   const [deadlinePassed, setDeadlinePassed] = useState(false);
+  const [alwaysRuleAction, setAlwaysRuleAction] = useState<
+    "allow" | "deny" | null
+  >(null);
   /** Approve/Reject require a live grant and a non-expired deadline. */
   const decisionLocked =
     disabled || submitting || deadlinePassed || !approvalGrant;
   /** Review diff is allowed without grant, but not after the displayed deadline. */
   const reviewLocked = disabled || submitting || deadlinePassed;
+  const ruleSubject =
+    ruleSubjectProp
+    ?? readRuleSubject(proposal)
+    ?? proposal.path;
+  const showAlwaysRule = Boolean(permissionRulesGateway && ruleSubject);
 
   useLayoutEffect(() => {
     approveRef.current?.focus();
@@ -217,7 +245,39 @@ export function WriteApprovalBar({
         >
           查看差异
         </button>
+        {showAlwaysRule ? (
+          <>
+            <button
+              className="write-approval-bar__btn"
+              data-testid="write-approval-always-allow"
+              disabled={disabled || submitting || deadlinePassed}
+              onClick={() => setAlwaysRuleAction("allow")}
+              type="button"
+            >
+              总是允许此模式
+            </button>
+            <button
+              className="write-approval-bar__btn"
+              data-testid="write-approval-always-deny"
+              disabled={disabled || submitting || deadlinePassed}
+              onClick={() => setAlwaysRuleAction("deny")}
+              type="button"
+            >
+              总是拒绝此模式
+            </button>
+          </>
+        ) : null}
       </div>
+      {alwaysRuleAction && permissionRulesGateway ? (
+        <AlwaysRuleDialog
+          gateway={permissionRulesGateway}
+          initialAction={alwaysRuleAction}
+          onClose={() => setAlwaysRuleAction(null)}
+          prefix={writePrefixFromMode(proposal.mode)}
+          projectId={projectId}
+          ruleSubject={ruleSubject}
+        />
+      ) : null}
     </div>
   );
 }

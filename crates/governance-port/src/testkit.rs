@@ -398,6 +398,7 @@ mod tests {
                 mode: WriteMode::Create,
                 state: WriteProposalState::Succeeded,
                 error_code: None,
+                auto_approved_by_rule: None,
             },
             provider_ok: Some(FsWriteOutput {
                 path: "src/a.ts".into(),

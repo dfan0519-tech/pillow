@@ -8,6 +8,10 @@ import {
   type ExecOutputView,
   type ExecProposalView,
 } from "./execGateway";
+import {
+  isAutoApprovedByRuleValue,
+  isRuleSubjectValue,
+} from "./permissionRulesGateway";
 
 const STATES = ["pending_approval", "approved", "running", "succeeded", "failed", "rejected", "expired", "cancelled", "interrupted"] as const;
 const ORIGINS = ["agent", "user"] as const;
@@ -22,7 +26,9 @@ const MAX_OUTPUT_LINES = 4_000;
 const MAX_CHUNKS = 4_000;
 const MAX_LIST = 256;
 
-const proposalKeys = ["proposalId", "conversationId", "origin", "state", "programLabel", "argv", "portableCwd", "riskClass", "summary", "expiresAt", "decisionAvailable", "errorCode"];
+const proposalKeys = ["proposalId", "conversationId", "origin", "state", "programLabel", "argv", "portableCwd", "riskClass", "summary", "expiresAt", "decisionAvailable", "errorCode", "ruleSubject", "autoApprovedByRule"];
+/** Process proposals can only ever be decided by a `process` rule. */
+const EXEC_RULE_PREFIXES = ["process"] as const;
 const outputKeys = ["proposalId", "state", "chunks", "liveRetained", "truncated", "encodingLossy", "capturedBytes", "exitCode", "durationMs"];
 
 function invalid(): ExecGatewayError {
@@ -45,7 +51,8 @@ function timestamp(value: unknown): value is string { return typeof value === "s
 export function normalizeExecProposal(value: unknown): ExecProposalView {
   if (!record(value) || !only(value, proposalKeys) || !bounded(value.proposalId, MAX_ID) || !bounded(value.conversationId, MAX_ID) || !enumValue(value.origin, ORIGINS) || !enumValue(value.state, STATES) || !bounded(value.programLabel, 32) || !Array.isArray(value.argv) || value.argv.length > MAX_ARGV || !portable(value.portableCwd) || !enumValue(value.riskClass, RISKS) || typeof value.summary !== "string" || value.summary.length > 1024 || !timestamp(value.expiresAt) || typeof value.decisionAvailable !== "boolean") throw invalid();
   if (!value.argv.every((arg) => typeof arg === "string") || utf8(value.programLabel) + value.argv.reduce<number>((sum, arg) => sum + utf8(arg), 0) > MAX_ARGV_BYTES || (value.errorCode !== undefined && !isExecPublicError(value.errorCode))) throw invalid();
-  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
+  if (!isRuleSubjectValue(value.ruleSubject) || (value.autoApprovedByRule !== undefined && !isAutoApprovedByRuleValue(value.autoApprovedByRule, EXEC_RULE_PREFIXES))) throw invalid();
+  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ruleSubject: value.ruleSubject, ...(value.autoApprovedByRule === undefined ? {} : { autoApprovedByRule: { prefix: value.autoApprovedByRule.prefix, pattern: value.autoApprovedByRule.pattern, action: value.autoApprovedByRule.action } }), ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
 }
 
 export function normalizeExecOutput(value: unknown): ExecOutputView {

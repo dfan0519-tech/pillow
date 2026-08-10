@@ -8,6 +8,7 @@ import type {
   RuntimeEventDto,
   WriteProposalResolvedPayload,
 } from "../../lib/conversationGateway";
+import { parseAutoApprovedByRule } from "../../lib/permissionRulesGateway";
 import type {
   AgentActivityNoticeInput,
   AgentActivityRecord,
@@ -93,12 +94,14 @@ export function writeOutcomesFromEvents(
       continue;
     }
     const payload = event.payload as WriteProposalResolvedPayload;
+    const autoApprovedByRule = parseAutoApprovedByRule(payload);
     outcomes.push({
       proposalId: payload.proposal_id,
       path: payload.path,
       mode: payload.mode,
       state: payload.state,
       ...(payload.error_code ? { errorCode: payload.error_code } : {}),
+      ...(autoApprovedByRule ? { autoApprovedByRule } : {}),
     });
   }
   return outcomes;

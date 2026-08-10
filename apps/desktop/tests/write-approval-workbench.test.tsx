@@ -120,6 +120,7 @@ function pending(
     summary: "Create example",
     expiresAt: futureExpiry(),
     approvalGrant: grantSecret,
+    ruleSubject: "src/example.ts",
     ...overrides,
   };
 }

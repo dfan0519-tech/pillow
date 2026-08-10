@@ -34,8 +34,9 @@ use keeper_runtime_host::{
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    ExecRunClaimOutcome, ExecTerminalReceipt, SqliteConversationRepository,
-    SqliteExecProposalRepository, SqliteProjectRepository,
+    AddPermissionRule, ExecRunClaimOutcome, ExecTerminalReceipt, PermissionRuleAction,
+    PermissionRulePrefix, PermissionRuleScope, SqliteConversationRepository,
+    SqliteExecProposalRepository, SqlitePermissionRuleRepository, SqliteProjectRepository,
 };
 use serde_json::json;
 
@@ -193,6 +194,105 @@ fn host_for(fx: &Fixture) -> RuntimeHost {
 fn register(host: &RuntimeHost, fx: &Fixture) {
     host.register_governed_process_run(fx.run_id, &fx.project_id, &fx.conversation_id, &fx.root)
         .unwrap();
+}
+
+fn add_process_rule(
+    fx: &Fixture,
+    pattern: &str,
+    action: PermissionRuleAction,
+) -> keeper_storage_sqlite::PermissionRule {
+    SqlitePermissionRuleRepository::open(&fx.db)
+        .unwrap()
+        .add(AddPermissionRule {
+            scope: PermissionRuleScope::Global,
+            project_id: None,
+            prefix: PermissionRulePrefix::Process,
+            pattern: pattern.to_owned(),
+            action,
+        })
+        .unwrap()
+}
+
+#[test]
+fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
+    let fx = fixture();
+    let rule = add_process_rule(&fx, "node --version", PermissionRuleAction::Allow);
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let mut lifecycle = Vec::new();
+
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_version("auto-node-version"),
+        &cancel,
+        |event| {
+            lifecycle.push(match event {
+                GovernedProcessLifecycle::Requested(_) => "requested",
+                GovernedProcessLifecycle::Decided(_) => "decided",
+                GovernedProcessLifecycle::Started(_) => "started",
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(receipt.state, ExecProposalState::Succeeded);
+    assert_eq!(lifecycle, vec!["requested", "decided", "started"]);
+    let store = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let stored = store
+        .get_rule_receipt(&receipt.proposal_id)
+        .unwrap()
+        .expect("rule-attributed process receipt");
+    assert_eq!(stored.rule_id, rule.rule_id);
+    assert_eq!(stored.rule_pattern, "node --version");
+    assert_eq!(stored.match_subject, "node --version");
+
+    let view = host
+        .list_process_proposals(&fx.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.proposal_id == receipt.proposal_id)
+        .unwrap();
+    assert_eq!(view.rule_subject, "node --version");
+    assert!(!view.decision_available);
+    let attribution = view.auto_approved_by_rule.expect("rule attribution view");
+    assert_eq!(attribution.prefix, "process");
+    assert_eq!(attribution.pattern, "node --version");
+    assert_eq!(attribution.action, "allow");
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn allow_rule_cannot_introduce_program_outside_structural_catalog() {
+    let fx = fixture();
+    add_process_rule(&fx, "*", PermissionRuleAction::Allow);
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let provider = ProviderProcessProposal {
+        call_id: "catalog-still-binds".into(),
+        tool_id: "process.run".into(),
+        tool_version: 1,
+        arguments: json!({
+            "program": "pnpm",
+            "argv": ["--version"],
+            "cwd": "."
+        }),
+    };
+
+    let error = execute_governed_process(fx.run_id, provider, &cancel, |_| Ok(()))
+        .expect_err("catalog must reject pnpm before rule evaluation");
+    assert_eq!(error, GovernedProcessBridgeError::InvalidProposal);
+    assert!(
+        SqliteExecProposalRepository::open(&fx.db)
+            .unwrap()
+            .list_for_conversation(&fx.conversation_id)
+            .unwrap()
+            .is_empty(),
+        "out-of-catalog program must not create a pending proposal"
+    );
+    host.shutdown().unwrap();
 }
 
 fn wait_live_pending(host: &RuntimeHost, conversation_id: &str) -> String {
@@ -1844,6 +1944,7 @@ fn process_event_payloads_never_carry_grant_or_output() {
         program: "node".into(),
         decision: ExecDecision::ApproveOnce,
         state: ExecProposalState::Approved,
+        auto_approved_by_rule: None,
     };
     let started = ProcessStartedPayload {
         proposal_id: "ep".into(),

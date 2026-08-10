@@ -204,6 +204,7 @@ export type WriteProposalResolvedPayload = {
     | "interrupted"
     | "failed";
   error_code?: string;
+  auto_approved_by_rule?: PermissionRuleAttribution;
 };
 
 /** Summary-only process proposal request. Never includes a grant or native path. */
@@ -215,6 +216,18 @@ export type ProcessProposalRequestedPayload = {
   summary: string;
   risk_class: "standard" | "high";
   expires_at: string;
+};
+
+/**
+ * Which permission rule decided an operation, when one did.
+ *
+ * Mirrors `keeper_agent_protocol::PermissionRuleAttribution`. Absent means a
+ * human decided; the timeline must be able to tell those apart.
+ */
+export type PermissionRuleAttribution = {
+  prefix: string;
+  pattern: string;
+  action: string;
 };
 
 /** Summary-only process decision. The approval grant remains host-private. */
@@ -232,6 +245,7 @@ export type ProcessProposalDecidedPayload = {
     | "expired"
     | "cancelled"
     | "interrupted";
+  auto_approved_by_rule?: PermissionRuleAttribution;
 };
 
 /** Process start notice. Output remains available only from ExecGateway. */

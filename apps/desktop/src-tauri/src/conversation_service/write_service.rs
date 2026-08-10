@@ -7,7 +7,7 @@ use keeper_runtime_host::GovernedWriteBridgeError;
 use serde::Serialize;
 
 use super::ConversationService;
-use super::types::ConversationCommandError;
+use super::types::{ConversationCommandError, PermissionRuleAttributionDto};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,9 @@ pub struct WriteProposalDto {
     pub approval_grant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    pub rule_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_approved_by_rule: Option<PermissionRuleAttributionDto>,
 }
 
 impl std::fmt::Debug for WriteProposalDto {
@@ -154,6 +157,8 @@ impl ConversationService {
                 expires_at: view.expires_at.to_rfc3339(),
                 approval_grant: view.approval_grant,
                 error_code: view.error_code.map(error_label).map(str::to_owned),
+                rule_subject: view.rule_subject,
+                auto_approved_by_rule: view.auto_approved_by_rule.map(Into::into),
             })
             .collect())
     }
@@ -182,6 +187,8 @@ impl ConversationService {
             expires_at: view.expires_at.to_rfc3339(),
             approval_grant: None,
             error_code: view.error_code.map(error_label).map(str::to_owned),
+            rule_subject: view.rule_subject,
+            auto_approved_by_rule: view.auto_approved_by_rule.map(Into::into),
         })
     }
 

@@ -17,8 +17,15 @@ import {
   type WriteProposalState,
   type WriteProposalView,
 } from "./writeApprovalGateway";
+import {
+  isAutoApprovedByRuleValue,
+  isRuleSubjectValue,
+} from "./permissionRulesGateway";
 
 const WRITE_MODES: WriteMode[] = ["create", "modify"];
+
+/** Write proposals can only ever be decided by a `write` or `edit` rule. */
+const WRITE_RULE_PREFIXES = ["write", "edit"] as const;
 
 const WRITE_STATES: WriteProposalState[] = [
   "pending_approval",
@@ -161,6 +168,8 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
       "expiresAt",
       "approvalGrant",
       "errorCode",
+      "ruleSubject",
+      "autoApprovedByRule",
     ])
   ) {
     throw invalidWriteResponse();
@@ -174,6 +183,9 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     || typeof value.summary !== "string"
     || value.summary.length > MAX_SUMMARY_CHARS
     || !isFiniteTimestamp(value.expiresAt)
+    || !isRuleSubjectValue(value.ruleSubject)
+    || (value.autoApprovedByRule !== undefined
+      && !isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES))
   ) {
     throw invalidWriteResponse();
   }
@@ -223,7 +235,15 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     state: value.state,
     summary: value.summary,
     expiresAt: value.expiresAt,
+    ruleSubject: value.ruleSubject,
   };
+  if (isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES)) {
+    view.autoApprovedByRule = {
+      prefix: value.autoApprovedByRule.prefix,
+      pattern: value.autoApprovedByRule.pattern,
+      action: value.autoApprovedByRule.action,
+    };
+  }
   if (isPending && typeof value.approvalGrant === "string") {
     view.approvalGrant = value.approvalGrant;
   }

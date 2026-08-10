@@ -11,9 +11,12 @@ use keeper_agent_protocol::{RunId as ProtocolRunId, WRITE_CONTENT_BYTE_CAP, Writ
 use keeper_policy::{WRITE_PROPOSAL_TTL_SECS, WriteDecision, WriteProposalState};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    MAX_APPLY_LEASE_MS, SqliteWriteProposalRepository, StoredWriteProposal, WriteApplyClaimOutcome,
-    WriteApplyErrorCode, WriteApplyReceipt, WriteApplyReconcileObservation, WriteDecisionOutcome,
-    WriteProposalReserveInput, WriteProposalStoreError, WriteReservationOutcome,
+    AddPermissionRule, MAX_APPLY_LEASE_MS, PermissionRuleAction, PermissionRuleMatchSnapshot,
+    PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
+    PermissionRuleScope, SqlitePermissionRuleRepository, SqliteWriteProposalRepository,
+    StoredWriteProposal, WriteApplyClaimOutcome, WriteApplyErrorCode, WriteApplyReceipt,
+    WriteApplyReconcileObservation, WriteDecisionOutcome, WriteProposalReserveInput,
+    WriteProposalStoreError, WriteReservationOutcome,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -29,6 +32,120 @@ struct Fixture {
     conversation_id: String,
     run_id: ProtocolRunId,
     db_path: std::path::PathBuf,
+}
+
+#[test]
+fn rule_allow_decision_persists_complete_snapshot_after_live_rule_deletion() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let input = reserve_input(&fx, "rule-allow", 0xD1);
+    fx.store.reserve(&input).unwrap();
+    let matched = stored_rule_match(
+        &fx,
+        PermissionRulePrefix::Write,
+        "src/**",
+        PermissionRuleAction::Allow,
+        &input.path,
+    );
+    let decided_at = Utc::now();
+
+    let outcome = fx
+        .store
+        .decide_by_rule(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &matched,
+            &grant_digest(0xD1),
+            &input.proposal_fingerprint,
+            decided_at,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        WriteDecisionOutcome::Accepted(ref row) if row.state == WriteProposalState::Approved
+    ));
+
+    SqlitePermissionRuleRepository::open(&fx.db_path)
+        .unwrap()
+        .delete(&matched.rule.rule_id)
+        .unwrap();
+    let receipt = fx
+        .store
+        .get_rule_receipt(&input.proposal_id)
+        .unwrap()
+        .expect("durable rule receipt");
+    assert_eq!(receipt.proposal_id, input.proposal_id);
+    assert_eq!(
+        receipt.decision,
+        PermissionRuleReceiptDecision::ApproveByRule
+    );
+    assert_eq!(receipt.actor, PermissionRuleReceiptActor::RuleEngine);
+    assert_eq!(receipt.rule_id, matched.rule.rule_id);
+    assert_eq!(receipt.rule_scope, PermissionRuleScope::Global);
+    assert_eq!(receipt.rule_project_id, None);
+    assert_eq!(receipt.rule_prefix, PermissionRulePrefix::Write);
+    assert_eq!(receipt.rule_pattern, "src/**");
+    assert_eq!(receipt.rule_action, PermissionRuleAction::Allow);
+    assert_eq!(receipt.rule_content_digest, matched.rule.content_digest);
+    assert_eq!(receipt.match_subject, input.path);
+    assert_eq!(receipt.decided_at, decided_at);
+
+    let connection = Connection::open(&fx.db_path).unwrap();
+    let stored_decision: String = connection
+        .query_row(
+            "SELECT decision FROM write_permission_rule_receipts WHERE proposal_id = ?1",
+            [&receipt.proposal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_decision, "approve_by_rule");
+}
+
+#[test]
+fn incompatible_rule_snapshot_rolls_back_before_write_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let input = reserve_input(&fx, "rule-wrong-prefix", 0xD2);
+    fx.store.reserve(&input).unwrap();
+    let matched = stored_rule_match(
+        &fx,
+        PermissionRulePrefix::Process,
+        "cargo *",
+        PermissionRuleAction::Allow,
+        "cargo test",
+    );
+
+    let error = fx
+        .store
+        .decide_by_rule(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &matched,
+            &grant_digest(0xD2),
+            &input.proposal_fingerprint,
+            Utc::now(),
+        )
+        .unwrap_err();
+    assert_eq!(error, WriteProposalStoreError::InvalidRuleReceipt);
+    assert_eq!(
+        fx.store.get(&input.proposal_id).unwrap().unwrap().state,
+        WriteProposalState::PendingApproval
+    );
+    assert!(
+        fx.store
+            .get_rule_receipt(&input.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    let connection = Connection::open(&fx.db_path).unwrap();
+    let decisions: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM write_approval_decisions WHERE proposal_id = ?1",
+            [&input.proposal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(decisions, 0);
 }
 
 fn fixture(temp: &tempfile::TempDir) -> Fixture {
@@ -153,6 +270,29 @@ fn claim(fx: &Fixture, proposal_id: &str, owner: &str, lease_ms: u64) {
     fx.store
         .claim_apply(proposal_id, owner, lease_ms, Utc::now())
         .unwrap();
+}
+
+fn stored_rule_match(
+    fx: &Fixture,
+    prefix: PermissionRulePrefix,
+    pattern: &str,
+    action: PermissionRuleAction,
+    subject: &str,
+) -> PermissionRuleMatchSnapshot {
+    let rules = SqlitePermissionRuleRepository::open(&fx.db_path).unwrap();
+    let rule = rules
+        .add(AddPermissionRule {
+            scope: PermissionRuleScope::Global,
+            project_id: None,
+            prefix,
+            pattern: pattern.to_owned(),
+            action,
+        })
+        .unwrap();
+    PermissionRuleMatchSnapshot {
+        rule,
+        match_subject: subject.to_owned(),
+    }
 }
 
 #[test]

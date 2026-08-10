@@ -13,6 +13,11 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import {
+  readRuleSubject,
+  type PermissionRulesGateway,
+} from "../../lib/permissionRulesGateway";
+import { AlwaysRuleDialog } from "../permissions/AlwaysRuleDialog";
 import type {
   CommandDecision,
   CommandProposalView,
@@ -34,6 +39,15 @@ export type CommandApprovalBarProps = {
   onReview: () => void | Promise<void>;
   /** Called when the displayed deadline elapses (disable + parent re-list). */
   onExpiryDeadline?: () => void;
+  /**
+   * Optional host-normalized match subject (`rule_subject`). When omitted,
+   * falls back to program + argv display text.
+   */
+  ruleSubject?: string;
+  /** When set, enables “always allow/deny this pattern” from the bar. */
+  permissionRulesGateway?: PermissionRulesGateway;
+  /** Active project — enables project-scoped deny rules from the dialog. */
+  projectId?: string | null;
 };
 
 function riskLabel(risk: CommandProposalView["riskClass"]): string {
@@ -50,6 +64,13 @@ function formatExpiry(expiresAt: string): string {
   }
 }
 
+function fallbackProcessSubject(proposal: CommandProposalView): string {
+  const argvText = proposal.argv.join(" ").trim();
+  return argvText
+    ? `${proposal.programLabel} ${argvText}`.trim()
+    : proposal.programLabel;
+}
+
 export function CommandApprovalBar({
   proposal,
   decisionAvailable,
@@ -57,6 +78,9 @@ export function CommandApprovalBar({
   onDecide,
   onReview,
   onExpiryDeadline,
+  ruleSubject: ruleSubjectProp,
+  permissionRulesGateway,
+  projectId = null,
 }: CommandApprovalBarProps) {
   const headingId = useId();
   const barRef = useRef<HTMLDivElement>(null);
@@ -66,9 +90,17 @@ export function CommandApprovalBar({
 
   const [submitting, setSubmitting] = useState(false);
   const [deadlinePassed, setDeadlinePassed] = useState(false);
+  const [alwaysRuleAction, setAlwaysRuleAction] = useState<
+    "allow" | "deny" | null
+  >(null);
   const decisionLocked =
     disabled || submitting || deadlinePassed || !decisionAvailable;
   const reviewLocked = disabled || submitting || deadlinePassed;
+  const ruleSubject =
+    ruleSubjectProp
+    ?? readRuleSubject(proposal)
+    ?? fallbackProcessSubject(proposal);
+  const showAlwaysRule = Boolean(permissionRulesGateway && ruleSubject);
 
   useLayoutEffect(() => {
     approveRef.current?.focus();
@@ -239,7 +271,39 @@ export function CommandApprovalBar({
         >
           查看命令
         </button>
+        {showAlwaysRule ? (
+          <>
+            <button
+              className="command-approval-bar__btn"
+              data-testid="command-approval-always-allow"
+              disabled={disabled || submitting || deadlinePassed}
+              onClick={() => setAlwaysRuleAction("allow")}
+              type="button"
+            >
+              总是允许此模式
+            </button>
+            <button
+              className="command-approval-bar__btn"
+              data-testid="command-approval-always-deny"
+              disabled={disabled || submitting || deadlinePassed}
+              onClick={() => setAlwaysRuleAction("deny")}
+              type="button"
+            >
+              总是拒绝此模式
+            </button>
+          </>
+        ) : null}
       </div>
+      {alwaysRuleAction && permissionRulesGateway ? (
+        <AlwaysRuleDialog
+          gateway={permissionRulesGateway}
+          initialAction={alwaysRuleAction}
+          onClose={() => setAlwaysRuleAction(null)}
+          prefix="process"
+          projectId={projectId}
+          ruleSubject={ruleSubject}
+        />
+      ) : null}
     </div>
   );
 }

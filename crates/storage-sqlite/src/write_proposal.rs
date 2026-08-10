@@ -25,6 +25,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::permission_rules::{
+    PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
+    PermissionRuleReceiptActor, PermissionRuleReceiptDecision, StoredPermissionRuleReceipt,
+    permission_rule_receipt_from_row, receipt_matches_snapshot, rule_snapshot_exists,
+    validate_rule_match_snapshot,
+};
+
 /// Maximum apply-lease duration the repository will accept (milliseconds).
 pub const MAX_APPLY_LEASE_MS: u64 = 300_000;
 
@@ -149,6 +156,11 @@ pub enum WriteDecisionOutcome {
     Expired(StoredWriteProposal),
 }
 
+enum WriteDecisionSource<'a> {
+    Human(WriteDecision),
+    Rule(&'a PermissionRuleMatchSnapshot),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteApplyClaimOutcome {
     Claimed(StoredWriteProposal),
@@ -170,6 +182,8 @@ pub enum WriteProposalStoreError {
     InvalidResult,
     #[error("write proposal reservation conflicts with durable state")]
     ReservationConflict,
+    #[error("write proposal rule receipt is invalid")]
+    InvalidRuleReceipt,
     #[error("SQLite write proposal store error")]
     Sqlite,
     #[error("write proposal store lock was poisoned")]
@@ -601,6 +615,64 @@ impl SqliteWriteProposalRepository {
         proposal_fingerprint: &str,
         now: DateTime<Utc>,
     ) -> Result<WriteDecisionOutcome, WriteProposalStoreError> {
+        self.decide_internal(
+            proposal_id,
+            conversation_id,
+            WriteDecisionSource::Human(decision),
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
+    pub fn decide_by_rule(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        matched: &PermissionRuleMatchSnapshot,
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WriteDecisionOutcome, WriteProposalStoreError> {
+        validate_rule_match_snapshot(matched)
+            .map_err(|_| WriteProposalStoreError::InvalidRuleReceipt)?;
+        self.decide_internal(
+            proposal_id,
+            conversation_id,
+            WriteDecisionSource::Rule(matched),
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
+    pub fn get_rule_receipt(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<StoredPermissionRuleReceipt>, WriteProposalStoreError> {
+        let connection = self.connection()?;
+        load_rule_receipt(&connection, proposal_id)
+    }
+
+    fn decide_internal(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        source: WriteDecisionSource<'_>,
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WriteDecisionOutcome, WriteProposalStoreError> {
+        let (decision, matched) = match source {
+            WriteDecisionSource::Human(decision) => (decision, None),
+            WriteDecisionSource::Rule(matched) => {
+                let decision = match matched.rule.action {
+                    PermissionRuleAction::Allow => WriteDecision::ApproveOnce,
+                    PermissionRuleAction::Deny => WriteDecision::Reject,
+                };
+                (decision, Some(matched))
+            }
+        };
         self.begin_mutation()?;
         validate_canonical_digest(approval_grant_digest)?;
         validate_canonical_digest(proposal_fingerprint)?;
@@ -613,12 +685,34 @@ impl SqliteWriteProposalRepository {
         if current.conversation_id != conversation_id {
             return Err(WriteProposalStoreError::OwnershipMismatch);
         }
+        if let Some(matched) = matched {
+            let expected_prefix = match current.mode {
+                WriteMode::Create => PermissionRulePrefix::Write,
+                WriteMode::Modify => PermissionRulePrefix::Edit,
+            };
+            if matched.rule.prefix != expected_prefix || matched.match_subject != current.path {
+                return Err(WriteProposalStoreError::InvalidRuleReceipt);
+            }
+        }
         if current.proposal_fingerprint != proposal_fingerprint {
             transaction.commit().map_err(map_sqlite)?;
             return Ok(WriteDecisionOutcome::Conflict(current));
         }
 
         if let Some(existing_decision) = load_decision(&transaction, proposal_id)? {
+            let existing_rule_receipt = load_rule_receipt(&transaction, proposal_id)?;
+            let same_source = match (matched, existing_rule_receipt.as_ref()) {
+                (None, None) => true,
+                (Some(matched), Some(receipt)) => {
+                    receipt_matches_snapshot(receipt, matched)
+                        && receipt.decision == rule_receipt_decision(matched.rule.action)
+                }
+                (None, Some(_)) | (Some(_), None) => false,
+            };
+            if !same_source {
+                transaction.commit().map_err(map_sqlite)?;
+                return Ok(WriteDecisionOutcome::Conflict(current));
+            }
             if is_terminal(current.state) {
                 if existing_decision.decision == decision
                     && existing_decision.approval_grant_digest == approval_grant_digest
@@ -637,6 +731,13 @@ impl SqliteWriteProposalRepository {
                 transaction.commit().map_err(map_sqlite)?;
                 return Ok(WriteDecisionOutcome::Accepted(current));
             }
+            transaction.commit().map_err(map_sqlite)?;
+            return Ok(WriteDecisionOutcome::Conflict(current));
+        }
+
+        if let Some(matched) = matched
+            && !rule_snapshot_exists(&transaction, matched).map_err(map_sqlite)?
+        {
             transaction.commit().map_err(map_sqlite)?;
             return Ok(WriteDecisionOutcome::Conflict(current));
         }
@@ -695,6 +796,10 @@ impl SqliteWriteProposalRepository {
                 return Ok(WriteDecisionOutcome::Conflict(current));
             }
             Err(error) => return Err(map_sqlite(error)),
+        }
+
+        if let Some(matched) = matched {
+            insert_rule_receipt(&transaction, proposal_id, matched, now)?;
         }
 
         let updated = force_transition(&transaction, &current, next, None, now)?;
@@ -1525,6 +1630,62 @@ fn load_decision(
         )
         .optional()
         .map_err(map_sqlite)
+}
+
+fn load_rule_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+) -> Result<Option<StoredPermissionRuleReceipt>, WriteProposalStoreError> {
+    connection
+        .query_row(
+            "SELECT proposal_id, decision, actor, rule_id, rule_scope, rule_project_id,
+                    rule_prefix, rule_pattern, rule_action, rule_content_digest,
+                    match_subject, decided_at
+             FROM write_permission_rule_receipts WHERE proposal_id = ?1",
+            [proposal_id],
+            permission_rule_receipt_from_row,
+        )
+        .optional()
+        .map_err(map_sqlite)
+}
+
+fn insert_rule_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+    matched: &PermissionRuleMatchSnapshot,
+    now: DateTime<Utc>,
+) -> Result<(), WriteProposalStoreError> {
+    connection
+        .execute(
+            "INSERT INTO write_permission_rule_receipts (
+                proposal_id, decision, actor, rule_id, rule_scope, rule_project_id,
+                rule_prefix, rule_pattern, rule_action, rule_content_digest,
+                match_subject, decided_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                proposal_id,
+                rule_receipt_decision(matched.rule.action).as_str(),
+                PermissionRuleReceiptActor::RuleEngine.as_str(),
+                matched.rule.rule_id,
+                matched.rule.scope.as_str(),
+                matched.rule.project_id,
+                matched.rule.prefix.as_str(),
+                matched.rule.pattern,
+                matched.rule.action.as_str(),
+                matched.rule.content_digest,
+                matched.match_subject,
+                now.to_rfc3339(),
+            ],
+        )
+        .map_err(map_sqlite)?;
+    Ok(())
+}
+
+fn rule_receipt_decision(action: PermissionRuleAction) -> PermissionRuleReceiptDecision {
+    match action {
+        PermissionRuleAction::Allow => PermissionRuleReceiptDecision::ApproveByRule,
+        PermissionRuleAction::Deny => PermissionRuleReceiptDecision::RejectByRule,
+    }
 }
 
 fn grant_digest_used(

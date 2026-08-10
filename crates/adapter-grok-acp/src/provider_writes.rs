@@ -301,6 +301,7 @@ mod tests {
                 mode: keeper_agent_protocol::WriteMode::Create,
                 state: keeper_agent_protocol::WriteProposalState::Succeeded,
                 error_code: None,
+                auto_approved_by_rule: None,
             },
             provider_ok: Some(output.clone()),
             provider_error: None,

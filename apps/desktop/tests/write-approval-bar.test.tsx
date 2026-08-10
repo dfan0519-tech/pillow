@@ -23,6 +23,7 @@ function pendingProposal(
     state: "pending_approval",
     summary: "Create example module",
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    ruleSubject: "src/example.ts",
     ...overrides,
   };
 }

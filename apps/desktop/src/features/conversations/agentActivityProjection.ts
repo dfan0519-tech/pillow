@@ -3,6 +3,10 @@
  * Filters by conversationId; never fabricates tools/sub-agents; strips raw IDs and host paths.
  */
 
+import {
+  autoRuleDecisionLabel,
+  formatRuleSummary,
+} from "../permissions/permissionPattern";
 import type {
   AgentActivityNoticeView,
   AgentActivityProjection,
@@ -351,13 +355,19 @@ function projectWriteOutcomes(
         ? outcome.path.trim()
         : null;
     const canOpenFile = state === "succeeded" && Boolean(portable);
-    views.push({
+    const view: AgentWriteOutcomeView = {
       key: stableKey(outcome.proposalId, `write-outcome-${index}`),
       message,
       state,
       canOpenFile,
       ...(canOpenFile && portable ? { relativePath: portable } : {}),
-    });
+    };
+    if (outcome.autoApprovedByRule) {
+      view.autoApprovedByRule = outcome.autoApprovedByRule;
+      view.autoRuleLabel = autoRuleDecisionLabel(outcome.autoApprovedByRule);
+      view.autoRuleSummary = formatRuleSummary(outcome.autoApprovedByRule);
+    }
+    views.push(view);
   }
   return views;
 }

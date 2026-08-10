@@ -1032,6 +1032,7 @@ describe("C4 D3B4 Git workbench composition", () => {
               summary: "Create example",
               expiresAt: writeExpiresAt,
               approvalGrant: grantSecret,
+              ruleSubject: "src/example.ts",
             } satisfies WriteProposalView,
           ],
         decideWriteProposal: async () => {
@@ -1084,6 +1085,7 @@ describe("C4 D3B4 Git workbench composition", () => {
               summary: "Run tests",
               expiresAt: processExpiresAt,
               decisionAvailable: true,
+              ruleSubject: "cargo test",
             } satisfies ExecProposalView,
           ],
         decideExecProposal: async () => {

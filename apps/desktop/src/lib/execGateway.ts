@@ -1,5 +1,7 @@
 /** C4 process DTOs. Renderer-facing values are bounded, portable, and authority-free. */
 
+import type { AutoApprovedByRule } from "./permissionRulesGateway";
+
 export type ExecOrigin = "agent" | "user";
 export type ExecState =
   | "pending_approval"
@@ -42,6 +44,10 @@ export type ExecProposalView = {
   expiresAt: string;
   /** Native retains any grant; renderer gets only this non-authority bit. */
   decisionAvailable: boolean;
+  /** Host-normalized permission-rule match subject (program + argv). */
+  ruleSubject: string;
+  /** Present only when a permission rule, not a human, decided this. */
+  autoApprovedByRule?: AutoApprovedByRule;
   errorCode?: ExecPublicError;
 };
 

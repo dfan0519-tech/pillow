@@ -94,6 +94,15 @@ export type AgentWriteOutcomeInput = {
   mode?: "create" | "modify" | string;
   state: string;
   errorCode?: string;
+  /**
+   * Host rule snapshot when the write was auto-decided.
+   * Renderer paints this; never silent.
+   */
+  autoApprovedByRule?: {
+    prefix: string;
+    pattern: string;
+    action: string;
+  };
 };
 
 /**
@@ -219,6 +228,16 @@ export type AgentWriteOutcomeView = {
   canOpenFile: boolean;
   /** Portable path for Open file; never a proposal/session/run id. */
   relativePath?: string;
+  /** Visible when host auto-decided via a permission rule. */
+  autoApprovedByRule?: {
+    prefix: string;
+    pattern: string;
+    action: string;
+  };
+  /** Human label for the auto-rule decision (e.g. 已由规则自动批准). */
+  autoRuleLabel?: string;
+  /** Compact rule summary chip text (e.g. allow edit:src/lib.rs). */
+  autoRuleSummary?: string;
 };
 
 /** Pure projection consumed by the disclosure renderer. */

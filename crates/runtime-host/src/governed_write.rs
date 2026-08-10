@@ -26,7 +26,9 @@ use keeper_agent_protocol::{
 use keeper_governance_port::CancellationProbe;
 use keeper_policy::WriteDecision;
 use keeper_storage_sqlite::{
-    StoredWriteProposal, WriteDecisionOutcome, WriteProposalReserveInput, WriteReservationOutcome,
+    PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
+    SqlitePermissionRuleRepository, StoredPermissionRuleReceipt, StoredWriteProposal,
+    WriteDecisionOutcome, WriteProposalReserveInput, WriteReservationOutcome,
 };
 use keeper_tool_executor::{
     BaseSnapshot, BoundedDiff, CancellationSignal, GovernedWriteApplyOutcome, GovernedWriteError,
@@ -36,6 +38,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::permission_rules::{
+    HostPermissionRuleEvaluation, PermissionRuleAttributionView, attribution_from_receipt,
+    evaluate_host_permission_rules,
+};
 
 /// Canonical raw approval grant: 32 CSPRNG bytes → base64url (no pad) = 43 chars.
 pub const APPROVAL_GRANT_RAW_LEN: usize = 43;
@@ -57,6 +64,8 @@ pub struct LiveWriteProposalView {
     pub approval_grant: Option<String>,
     pub error_code: Option<WritePublicErrorCode>,
     pub diff: Option<BoundedDiff>,
+    pub rule_subject: String,
+    pub auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 }
 
 impl std::fmt::Debug for LiveWriteProposalView {
@@ -127,6 +136,7 @@ struct BoundWriteRun {
     context: ToolActiveContext,
     capability: ProjectCapability,
     gateway: Arc<GovernedWriteToolGateway>,
+    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
 }
 
 struct LiveWriteEntry {
@@ -152,6 +162,8 @@ struct LiveWriteEntry {
     terminal_transition_in_progress: bool,
     #[allow(dead_code)]
     waiter_notified: bool,
+    auto_rule_pending: bool,
+    auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 }
 
 impl std::fmt::Debug for LiveWriteEntry {
@@ -210,6 +222,7 @@ pub(crate) fn open_write_gateway(
 pub(crate) fn bind_write_run(
     owner: Uuid,
     gateway: Arc<GovernedWriteToolGateway>,
+    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
     run_id: RunId,
     project_id: impl Into<String>,
     conversation_id: impl Into<String>,
@@ -234,6 +247,7 @@ pub(crate) fn bind_write_run(
             context,
             capability,
             gateway,
+            permission_rules,
         }),
     );
     Ok(())
@@ -660,6 +674,26 @@ pub fn execute_governed_write(
                 summary: summary.clone(),
                 expires_at: row.expires_at,
             };
+            let rule_prefix = match args.mode {
+                WriteMode::Create => PermissionRulePrefix::Write,
+                WriteMode::Modify => PermissionRulePrefix::Edit,
+            };
+            let rule_evaluation = match evaluate_host_permission_rules(
+                bound.permission_rules.as_deref(),
+                bound.context.project_id(),
+                rule_prefix,
+                &args.path,
+            ) {
+                Ok(evaluation) => evaluation,
+                Err(()) => {
+                    fail_closed_after_reserve(&proposal_id, &bound.gateway);
+                    return Err(GovernedWriteBridgeError::Gateway);
+                }
+            };
+            let auto_rule_pending = !matches!(
+                &rule_evaluation,
+                HostPermissionRuleEvaluation::RequireConfirmation
+            );
 
             {
                 let mut guard = coordinator()
@@ -705,6 +739,8 @@ pub fn execute_governed_write(
                         interrupted: false,
                         terminal_transition_in_progress: false,
                         waiter_notified: false,
+                        auto_rule_pending,
+                        auto_approved_by_rule: None,
                     },
                 );
             }
@@ -713,6 +749,22 @@ pub fn execute_governed_write(
             if let Err(error) = on_requested(&requested) {
                 fail_closed_after_reserve(&proposal_id, &bound.gateway);
                 return Err(error);
+            }
+
+            match rule_evaluation {
+                HostPermissionRuleEvaluation::Allow(matched)
+                | HostPermissionRuleEvaluation::Deny(matched) => {
+                    if let Err(error) = decide_write_proposal_by_rule(
+                        bound.owner,
+                        bound.context.conversation_id(),
+                        &proposal_id,
+                        &matched,
+                    ) {
+                        fail_closed_after_reserve(&proposal_id, &bound.gateway);
+                        return Err(error);
+                    }
+                }
+                HostPermissionRuleEvaluation::RequireConfirmation => {}
             }
 
             wait_for_resolution(run_id, &proposal_id, &bound, cancellation, requested)
@@ -870,7 +922,7 @@ fn finalize_requested_terminal(
             } else {
                 terminal_error(&row)
             };
-            let resolved = resolved_payload(&row, error_code);
+            let resolved = resolved_payload(&row, error_code, live_rule_attribution(proposal_id));
             take_live_entry_for_owner(proposal_id, bound.owner);
             Ok(GovernedWriteReceipt {
                 delivery: GovernedWriteDelivery::Executed,
@@ -949,7 +1001,11 @@ fn read_durable_terminal_after_transition(
 
     match durable {
         Ok(row) => {
-            let resolved = resolved_payload(&row, terminal_error(&row));
+            let resolved = resolved_payload(
+                &row,
+                terminal_error(&row),
+                live_rule_attribution(proposal_id),
+            );
             if let Ok(mut guard) = coordinator().state.lock() {
                 if let Some(entry) = guard
                     .live
@@ -1028,9 +1084,13 @@ fn take_live_entry_for_owner(proposal_id: &str, expected_owner: Uuid) {
     }
 }
 
+/// Attribution is passed in rather than looked up here: at some call sites the
+/// live entry is already gone, and silently emitting `None` would make a
+/// rule-driven decision indistinguishable from a human one in the timeline.
 fn resolved_payload(
     row: &StoredWriteProposal,
     error_code: Option<WritePublicErrorCode>,
+    auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 ) -> WriteProposalResolvedPayload {
     WriteProposalResolvedPayload {
         proposal_id: row.proposal_id.clone(),
@@ -1038,7 +1098,17 @@ fn resolved_payload(
         mode: row.mode,
         state: row.state,
         error_code,
+        auto_approved_by_rule,
     }
+}
+
+/// Read rule attribution off the live entry, if it is still present.
+fn live_rule_attribution(proposal_id: &str) -> Option<PermissionRuleAttributionView> {
+    coordinator()
+        .state
+        .lock()
+        .ok()
+        .and_then(|guard| guard.live.get(proposal_id)?.auto_approved_by_rule.clone())
 }
 
 fn replay_receipt(row: StoredWriteProposal) -> GovernedWriteReceipt {
@@ -1064,7 +1134,7 @@ fn replay_receipt(row: StoredWriteProposal) -> GovernedWriteReceipt {
     GovernedWriteReceipt {
         delivery: GovernedWriteDelivery::Replayed,
         requested: None,
-        resolved: resolved_payload(&row, error_code),
+        resolved: resolved_payload(&row, error_code, live_rule_attribution(&row.proposal_id)),
         provider_ok,
         provider_error: error_code,
     }
@@ -1107,6 +1177,7 @@ pub fn list_write_proposals(
     owner: Uuid,
     conversation_id: &str,
     gateway: Option<&GovernedWriteToolGateway>,
+    permission_rules: Option<&SqlitePermissionRuleRepository>,
 ) -> Result<Vec<LiveWriteProposalView>, GovernedWriteBridgeError> {
     reconcile_expired_for_owner(
         owner,
@@ -1131,7 +1202,8 @@ pub fn list_write_proposals(
             // Past-due live rows should already be terminalized; never expose grant.
             let include_grant = entry.terminal.is_none()
                 && entry.metadata.state == WriteProposalState::PendingApproval
-                && now < entry.expires_at;
+                && now < entry.expires_at
+                && !entry.auto_rule_pending;
             seen.insert(entry.proposal_id.clone());
             views.push(live_view_from_entry(entry, include_grant));
         }
@@ -1146,7 +1218,12 @@ pub fn list_write_proposals(
             if seen.contains(&row.proposal_id) {
                 continue;
             }
-            views.push(view_from_stored(&row, None, None));
+            let rule_receipt = permission_rules
+                .map(|rules| rules.get_write_rule_receipt(&row.proposal_id))
+                .transpose()
+                .map_err(|_| GovernedWriteBridgeError::Gateway)?
+                .flatten();
+            views.push(view_from_stored(&row, None, None, rule_receipt.as_ref()));
         }
     }
     Ok(views)
@@ -1210,7 +1287,44 @@ pub fn decide_write_proposal(
     if !is_canonical_grant(approval_grant) {
         return Err(GovernedWriteBridgeError::InvalidGrant);
     }
+    decide_write_proposal_inner(
+        owner,
+        conversation_id,
+        proposal_id,
+        Some(approval_grant),
+        decision,
+        None,
+    )
+}
 
+fn decide_write_proposal_by_rule(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    matched: &PermissionRuleMatchSnapshot,
+) -> Result<LiveWriteProposalView, GovernedWriteBridgeError> {
+    let decision = match matched.rule.action {
+        PermissionRuleAction::Allow => WriteDecision::ApproveOnce,
+        PermissionRuleAction::Deny => WriteDecision::Reject,
+    };
+    decide_write_proposal_inner(
+        owner,
+        conversation_id,
+        proposal_id,
+        None,
+        decision,
+        Some(matched),
+    )
+}
+
+fn decide_write_proposal_inner(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    approval_grant: Option<&str>,
+    decision: WriteDecision,
+    matched: Option<&PermissionRuleMatchSnapshot>,
+) -> Result<LiveWriteProposalView, GovernedWriteBridgeError> {
     // Expire first if past due so listing/decision never act on a stale grant.
     reconcile_expired_for_owner(
         owner,
@@ -1237,8 +1351,13 @@ pub fn decide_write_proposal(
         if Utc::now() >= entry.expires_at {
             return Err(GovernedWriteBridgeError::Expired);
         }
-        if !constant_time_eq(&entry.raw_grant, approval_grant) {
+        if let Some(approval_grant) = approval_grant
+            && !constant_time_eq(&entry.raw_grant, approval_grant)
+        {
             return Err(GovernedWriteBridgeError::InvalidGrant);
+        }
+        if approval_grant.is_none() && matched.is_none() {
+            return Err(GovernedWriteBridgeError::DecisionDenied);
         }
         let bound = guard
             .runs
@@ -1255,10 +1374,17 @@ pub fn decide_write_proposal(
     };
 
     let now = Utc::now();
-    let outcome = bound
-        .gateway
-        .store()
-        .decide(
+    let outcome = if let Some(matched) = matched {
+        bound.gateway.store().decide_by_rule(
+            proposal_id,
+            conversation_id,
+            matched,
+            &grant_digest,
+            &fingerprint,
+            now,
+        )
+    } else {
+        bound.gateway.store().decide(
             proposal_id,
             conversation_id,
             decision,
@@ -1266,21 +1392,45 @@ pub fn decide_write_proposal(
             &fingerprint,
             now,
         )
-        .map_err(|error| match error {
-            keeper_storage_sqlite::WriteProposalStoreError::OwnershipMismatch => {
-                GovernedWriteBridgeError::NotLive
-            }
-            _ => GovernedWriteBridgeError::Gateway,
-        })?;
+    }
+    .map_err(|error| match error {
+        keeper_storage_sqlite::WriteProposalStoreError::OwnershipMismatch => {
+            GovernedWriteBridgeError::NotLive
+        }
+        _ => GovernedWriteBridgeError::Gateway,
+    })?;
+
+    let rule_receipt = if matched.is_some() {
+        bound
+            .permission_rules
+            .as_deref()
+            .ok_or(GovernedWriteBridgeError::Gateway)?
+            .get_write_rule_receipt(proposal_id)
+            .map_err(|_| GovernedWriteBridgeError::Gateway)?
+    } else {
+        None
+    };
+    if matched.is_some()
+        && let Ok(mut guard) = coordinator().state.lock()
+        && let Some(entry) = guard.live.get_mut(proposal_id)
+    {
+        entry.auto_rule_pending = false;
+        entry.auto_approved_by_rule = rule_receipt.as_ref().map(attribution_from_receipt);
+    }
 
     match outcome {
         WriteDecisionOutcome::Accepted(row) if decision == WriteDecision::Reject => {
-            let resolved = resolved_payload(&row, Some(WritePublicErrorCode::ApprovalRejected));
+            let resolved = resolved_payload(
+                &row,
+                Some(WritePublicErrorCode::ApprovalRejected),
+                live_rule_attribution(proposal_id),
+            );
             publish_terminal_for_waiter(proposal_id, resolved, None);
             Ok(view_from_stored(
                 &row,
                 None,
                 Some(WritePublicErrorCode::ApprovalRejected),
+                rule_receipt.as_ref(),
             ))
         }
         WriteDecisionOutcome::Accepted(_accepted) if decision == WriteDecision::ApproveOnce => {
@@ -1314,7 +1464,12 @@ pub fn decide_write_proposal(
                     (row, None, Some(WritePublicErrorCode::WriteConflict))
                 }
                 GovernedWriteApplyOutcome::Terminal(row) => {
-                    return Ok(view_from_stored(&row, None, terminal_error(&row)));
+                    return Ok(view_from_stored(
+                        &row,
+                        None,
+                        terminal_error(&row),
+                        rule_receipt.as_ref(),
+                    ));
                 }
                 GovernedWriteApplyOutcome::Interrupted(row) => {
                     (row, None, Some(WritePublicErrorCode::Interrupted))
@@ -1323,17 +1478,31 @@ pub fn decide_write_proposal(
                     (row, None, Some(WritePublicErrorCode::ApprovalExpired))
                 }
             };
-            let resolved = resolved_payload(&row, error_code);
+            let resolved = resolved_payload(&row, error_code, live_rule_attribution(proposal_id));
             publish_terminal_for_waiter(proposal_id, resolved, provider_ok);
-            Ok(view_from_stored(&row, None, error_code))
+            Ok(view_from_stored(
+                &row,
+                None,
+                error_code,
+                rule_receipt.as_ref(),
+            ))
         }
-        WriteDecisionOutcome::Accepted(row) => Ok(view_from_stored(&row, None, None)),
-        WriteDecisionOutcome::Terminal(row) => {
-            Ok(view_from_stored(&row, None, terminal_error(&row)))
+        WriteDecisionOutcome::Accepted(row) => {
+            Ok(view_from_stored(&row, None, None, rule_receipt.as_ref()))
         }
+        WriteDecisionOutcome::Terminal(row) => Ok(view_from_stored(
+            &row,
+            None,
+            terminal_error(&row),
+            rule_receipt.as_ref(),
+        )),
         WriteDecisionOutcome::Conflict(_) => Err(GovernedWriteBridgeError::DecisionDenied),
         WriteDecisionOutcome::Expired(row) => {
-            let resolved = resolved_payload(&row, Some(WritePublicErrorCode::ApprovalExpired));
+            let resolved = resolved_payload(
+                &row,
+                Some(WritePublicErrorCode::ApprovalExpired),
+                live_rule_attribution(proposal_id),
+            );
             publish_terminal_for_waiter(proposal_id, resolved, None);
             Err(GovernedWriteBridgeError::Expired)
         }
@@ -1444,6 +1613,8 @@ fn live_view_from_entry(entry: &LiveWriteEntry, include_grant: bool) -> LiveWrit
         } else {
             None
         },
+        rule_subject: entry.path.clone(),
+        auto_approved_by_rule: entry.auto_approved_by_rule.clone(),
     }
 }
 
@@ -1451,6 +1622,7 @@ fn view_from_stored(
     row: &StoredWriteProposal,
     grant: Option<String>,
     error_code: Option<WritePublicErrorCode>,
+    rule_receipt: Option<&StoredPermissionRuleReceipt>,
 ) -> LiveWriteProposalView {
     LiveWriteProposalView {
         proposal_id: row.proposal_id.clone(),
@@ -1463,6 +1635,10 @@ fn view_from_stored(
         approval_grant: grant,
         error_code: error_code.or_else(|| terminal_error(row)),
         diff: None,
+        rule_subject: rule_receipt
+            .map(|receipt| receipt.match_subject.clone())
+            .unwrap_or_else(|| row.path.clone()),
+        auto_approved_by_rule: rule_receipt.map(attribution_from_receipt),
     }
 }
 
@@ -1625,6 +1801,8 @@ mod grant_tests {
             interrupted: false,
             terminal_transition_in_progress: false,
             waiter_notified: false,
+            auto_rule_pending: false,
+            auto_approved_by_rule: None,
         };
         let debug = format!("{entry:?}");
         assert!(!debug.contains("SECRET_GRANT"));
@@ -1679,6 +1857,8 @@ mod grant_tests {
             interrupted: false,
             terminal_transition_in_progress: false,
             waiter_notified: false,
+            auto_rule_pending: false,
+            auto_approved_by_rule: None,
         };
         // Past-due listing must never include the grant.
         let view = live_view_from_entry(&entry, false);

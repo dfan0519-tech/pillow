@@ -4,6 +4,8 @@
  * Never transports roots, content, digests, fingerprints, or base snapshots.
  */
 
+import type { AutoApprovedByRule } from "./permissionRulesGateway";
+
 export type WriteDecision = "approve_once" | "reject";
 
 export type WriteMode = "create" | "modify";
@@ -41,6 +43,10 @@ export type WriteProposalView = {
   expiresAt: string;
   /** Opaque one-shot grant — component memory only; never DOM/log/storage. */
   approvalGrant?: string;
+  /** Host-normalized permission-rule match subject (portable path). */
+  ruleSubject: string;
+  /** Present only when a permission rule, not a human, decided this. */
+  autoApprovedByRule?: AutoApprovedByRule;
   errorCode?: WritePublicErrorCode;
 };
 

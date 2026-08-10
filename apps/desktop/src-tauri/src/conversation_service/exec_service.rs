@@ -12,7 +12,7 @@ use keeper_runtime_host::{
 use serde::Serialize;
 
 use super::ConversationService;
-use super::types::ConversationCommandError;
+use super::types::{ConversationCommandError, PermissionRuleAttributionDto};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +31,9 @@ pub struct ExecProposalDto {
     pub decision_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<&'static str>,
+    pub rule_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_approved_by_rule: Option<PermissionRuleAttributionDto>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -164,6 +167,8 @@ pub(crate) fn proposal_dto(view: LiveProcessProposalView) -> ExecProposalDto {
         expires_at: view.expires_at.to_rfc3339(),
         decision_available: view.decision_available,
         error_code: None,
+        rule_subject: view.rule_subject,
+        auto_approved_by_rule: view.auto_approved_by_rule.map(Into::into),
     }
 }
 

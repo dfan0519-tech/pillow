@@ -11,6 +11,10 @@ import type {
   ProcessTerminalOutcomePayload,
   RuntimeEventDto,
 } from "../../lib/conversationGateway";
+import {
+  parseAutoApprovedByRule,
+  type AutoApprovedByRule,
+} from "../../lib/permissionRulesGateway";
 import type { CommandDecision, CommandState } from "./executionTypes";
 import { formatArgvDisplay } from "./executionTypes";
 
@@ -55,6 +59,11 @@ export type ProcessActivityModel = {
   statusLabel: string;
   decision?: CommandDecision;
   decisionLabel?: string;
+  /**
+   * When the host auto-decided via a permission rule, the snapshot of that
+   * rule. Must be painted in the timeline (auto-approve is never silent).
+   */
+  autoApprovedByRule?: AutoApprovedByRule;
   exitCode?: number | null;
   durationMs?: number | null;
   capturedBytes?: number | null;
@@ -75,6 +84,7 @@ type MutableGroup = {
   argv: string[];
   state: CommandState;
   decision?: CommandDecision;
+  autoApprovedByRule?: AutoApprovedByRule;
   exitCode?: number | null;
   durationMs?: number | null;
   capturedBytes?: number | null;
@@ -170,6 +180,10 @@ function applyEvent(group: MutableGroup, event: RuntimeEventDto): void {
       const payload = event.payload as ProcessProposalDecidedPayload;
       group.programLabel = safeProgramLabel(payload.program) || group.programLabel;
       group.decision = payload.decision;
+      const autoRule = parseAutoApprovedByRule(payload);
+      if (autoRule) {
+        group.autoApprovedByRule = autoRule;
+      }
       if (!group.started && !group.terminal) {
         group.state = mapDecisionState(payload);
       }
@@ -222,6 +236,9 @@ function finalize(group: MutableGroup): ProcessActivityModel {
   if (group.decision) {
     model.decision = group.decision;
     model.decisionLabel = DECISION_LABEL[group.decision];
+  }
+  if (group.autoApprovedByRule) {
+    model.autoApprovedByRule = group.autoApprovedByRule;
   }
   if (group.exitCode !== undefined) model.exitCode = group.exitCode;
   if (group.durationMs !== undefined) model.durationMs = group.durationMs;

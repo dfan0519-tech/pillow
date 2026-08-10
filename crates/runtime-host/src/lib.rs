@@ -12,6 +12,7 @@ mod governed_read;
 mod governed_tool_service;
 mod governed_write;
 mod host;
+mod permission_rules;
 mod sink;
 mod worker;
 
@@ -48,4 +49,5 @@ pub use host::{
     clear_pre_claim_hook_for_tests, force_live_process_expiry_for_tests,
     set_pre_claim_hook_for_tests,
 };
+pub use permission_rules::PermissionRuleAttributionView;
 pub use sink::{BoundedDeliverySink, CollectingSink, ProtocolGuardSink, TerminalGuardSink};

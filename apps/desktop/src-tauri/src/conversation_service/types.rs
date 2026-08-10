@@ -5,7 +5,27 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use keeper_runtime_host::PermissionRuleAttributionView;
 use keeper_session::{ConversationId, RunId};
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRuleAttributionDto {
+    pub prefix: String,
+    pub pattern: String,
+    pub action: String,
+}
+
+impl From<PermissionRuleAttributionView> for PermissionRuleAttributionDto {
+    fn from(value: PermissionRuleAttributionView) -> Self {
+        Self {
+            prefix: value.prefix,
+            pattern: value.pattern,
+            action: value.action,
+        }
+    }
+}
 
 /// Optional test seams for pump registration ordering and fail-closed paths.
 ///

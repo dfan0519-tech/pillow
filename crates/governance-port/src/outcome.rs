@@ -379,6 +379,7 @@ mod tests {
             mode: WriteMode::Create,
             state,
             error_code,
+            auto_approved_by_rule: None,
         }
     }
 
@@ -410,6 +411,7 @@ mod tests {
             program: "node".into(),
             decision: ExecDecision::ApproveOnce,
             state,
+            auto_approved_by_rule: None,
         }
     }
 
@@ -559,6 +561,7 @@ mod tests {
                 program: "node".into(),
                 decision: ExecDecision::Reject,
                 state: ExecProposalState::Rejected,
+                auto_approved_by_rule: None,
             }),
             started: None,
             terminal: Some(process_terminal(

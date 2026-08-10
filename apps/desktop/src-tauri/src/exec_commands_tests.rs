@@ -6,8 +6,8 @@ use chrono::{TimeZone, Utc};
 use keeper_policy::ExecProposalState;
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
-    GovernedProcessBridgeError, LiveProcessProposalView, ProcessOrigin, ProcessOutputView,
-    ProcessRiskClass,
+    GovernedProcessBridgeError, LiveProcessProposalView, PermissionRuleAttributionView,
+    ProcessOrigin, ProcessOutputView, ProcessRiskClass,
 };
 use keeper_storage_sqlite::SqliteProjectRepository;
 
@@ -47,6 +47,8 @@ fn exec_dtos_serialize_renderer_contract_without_authority() {
         expires_at: "2026-08-04T00:00:00Z".into(),
         decision_available: true,
         error_code: None,
+        rule_subject: "node --version".into(),
+        auto_approved_by_rule: None,
     };
     let output = ExecOutputDto {
         proposal_id: "proposal-1".into(),
@@ -66,6 +68,7 @@ fn exec_dtos_serialize_renderer_contract_without_authority() {
     assert!(proposal_json.get("approvalGrant").is_none());
     assert!(proposal_json.get("grant").is_none());
     assert!(proposal_json.get("errorCode").is_none());
+    assert_eq!(proposal_json["ruleSubject"], "node --version");
 
     let output_json = serde_json::to_value(output).unwrap();
     assert_eq!(output_json["durationMs"], 12);
@@ -116,10 +119,18 @@ fn proposal_projection_serializes_portable_project_root_and_relative_cwd() {
         truncated: None,
         encoding_lossy: None,
         captured_bytes: None,
+        rule_subject: "node --version".into(),
+        auto_approved_by_rule: Some(PermissionRuleAttributionView {
+            prefix: "process".into(),
+            pattern: "node --version".into(),
+            action: "allow".into(),
+        }),
     };
 
     let root_json = serde_json::to_value(proposal_dto(view(None))).unwrap();
     assert_eq!(root_json["portableCwd"], ".");
+    assert_eq!(root_json["ruleSubject"], "node --version");
+    assert_eq!(root_json["autoApprovedByRule"]["action"], "allow");
 
     let relative_json = serde_json::to_value(proposal_dto(view(Some("src/tools".into())))).unwrap();
     assert_eq!(relative_json["portableCwd"], "src/tools");
