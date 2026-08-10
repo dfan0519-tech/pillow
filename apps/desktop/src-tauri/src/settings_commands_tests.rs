@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+
+use tempfile::TempDir;
 
 use keeper_storage_sqlite::{
     ENV_GROK_EXECUTABLE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE, KEY_UI_THEME,
@@ -19,39 +20,32 @@ use crate::settings_commands::{
     theme_to_dto, to_dto,
 };
 
-fn temp_root(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "pillow-settings-cmd-{label}-{nanos}-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp root");
-    dir
+/// Owns the fixture tree; removing it is the guard's own `Drop`, never ours.
+fn temp_root(label: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("pillow-settings-cmd-{label}-"))
+        .tempdir()
+        .expect("temp root")
 }
 
 struct Harness {
-    _temp: PathBuf,
     app: AppState,
     settings: SqliteSettingsRepository,
     project_id: String,
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self._temp);
-    }
+    /// Last field on purpose: fields drop in declaration order, so `app` and
+    /// `settings` close their SQLite handles on `keeper.db` before the directory
+    /// holding that file is removed. Windows refuses to delete a file that is
+    /// still open, and a hand-written `impl Drop for Harness` runs *before* any
+    /// field — which is how this fixture used to leak its whole tree.
+    temp: TempDir,
 }
 
 impl Harness {
     fn new(label: &str) -> Self {
         let temp = temp_root(label);
-        let project_root = temp.join("project");
+        let project_root = temp.path().join("project");
         fs::create_dir_all(&project_root).expect("project root");
-        let db = temp.join("keeper.db");
+        let db = temp.path().join("keeper.db");
         let app = AppState::open(&db).expect("app state");
         app.register_picker_selection("main", &project_root)
             .expect("picker");
@@ -64,11 +58,15 @@ impl Harness {
             .expect("register project");
         let settings = SqliteSettingsRepository::open(&db).expect("settings");
         Self {
-            _temp: temp,
             app,
             settings,
             project_id: project.id,
+            temp,
         }
+    }
+
+    fn root(&self) -> &Path {
+        self.temp.path()
     }
 
     /// Resolve with an explicit env map (preferred — no process-env races).
@@ -98,6 +96,24 @@ fn empty_env() -> HashMap<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture hygiene
+// ---------------------------------------------------------------------------
+
+/// Both `app` and `settings` hold `keeper.db` open, so removal must wait for
+/// them. It used to run from an `impl Drop for Harness` — before either field
+/// was dropped — and the failed delete was discarded, leaking the tree.
+#[test]
+fn dropping_the_harness_removes_its_temp_root() {
+    let root = {
+        let h = Harness::new("temp-hygiene");
+        let root = h.root().to_path_buf();
+        assert!(root.join("keeper.db").is_file(), "fixture db should exist");
+        root
+    };
+    assert!(!root.exists(), "harness left {} behind", root.display());
+}
+
+// ---------------------------------------------------------------------------
 // 5. Command DTO has no secret fields (explicit assertion)
 // ---------------------------------------------------------------------------
 
@@ -113,7 +129,7 @@ fn runtime_settings_dto_has_no_secret_fields() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
-    let exe = h._temp.join("tools-grok.exe");
+    let exe = h.root().join("tools-grok.exe");
     fs::write(&exe, b"").unwrap();
     h.settings
         .upsert_path(
@@ -206,7 +222,7 @@ fn env_override_wins_over_stored_and_marks_source_env() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
-    let stored_exe = h._temp.join("stored-grok.exe");
+    let stored_exe = h.root().join("stored-grok.exe");
     fs::write(&stored_exe, b"").unwrap();
     h.settings
         .upsert_path(
@@ -310,7 +326,7 @@ fn global_and_project_writes_round_trip() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
-    let global_exe = h._temp.join("global-grok.exe");
+    let global_exe = h.root().join("global-grok.exe");
     fs::write(&global_exe, b"").unwrap();
     let global_exe_str = global_exe.to_string_lossy().into_owned();
     h.settings

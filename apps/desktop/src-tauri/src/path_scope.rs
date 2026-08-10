@@ -624,19 +624,16 @@ mod tests {
     use keeper_project::ProjectId;
     use keeper_session::ConversationId;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "pillow-path-scope-{label}-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&root).expect("temp");
-        root
+    /// Owns the tree for one test. Callers hold the guard for the whole test
+    /// body: it removes the directory on drop, including while a test panics,
+    /// which the trailing `remove_dir_all` calls it replaced never did.
+    fn temp_dir(label: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pillow-path-scope-{label}-"))
+            .tempdir()
+            .expect("temp")
     }
 
     fn bind_project(
@@ -660,9 +657,9 @@ mod tests {
         let conversation_id = ConversationId::new();
 
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("native picker selection should be accepted");
-        bind_project(&capabilities, "window-a", project_a, &root);
+        bind_project(&capabilities, "window-a", project_a, root.path());
         let bootstrap = capabilities
             .begin_conversation("window-a", project_a)
             .expect("conversation bootstrap");
@@ -670,12 +667,10 @@ mod tests {
 
         assert_eq!(
             capabilities
-                .require_conversation_root("window-a", project_b, conversation_id, &root)
+                .require_conversation_root("window-a", project_b, conversation_id, root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -687,9 +682,9 @@ mod tests {
         let second_conversation = ConversationId::new();
 
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("native picker selection should be accepted");
-        bind_project(&capabilities, "window-a", project_id, &root);
+        bind_project(&capabilities, "window-a", project_id, root.path());
         let bootstrap = capabilities
             .begin_conversation("window-a", project_id)
             .expect("project bootstrap should be consumable once");
@@ -698,12 +693,12 @@ mod tests {
 
         assert!(
             capabilities
-                .require_conversation_root("window-a", project_id, first_conversation, &root)
+                .require_conversation_root("window-a", project_id, first_conversation, root.path())
                 .is_ok()
         );
         assert_eq!(
             capabilities
-                .require_conversation_root("window-a", project_id, second_conversation, &root)
+                .require_conversation_root("window-a", project_id, second_conversation, root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
@@ -714,14 +709,12 @@ mod tests {
             first_nonce, second_bootstrap.grant.nonce,
             "a consumed bootstrap nonce must never be reused"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn picker_selection_rejects_parent_traversal_spelling() {
         let root = temp_dir("traversal");
-        let nested = root.join("nested");
+        let nested = root.path().join("nested");
         fs::create_dir_all(&nested).expect("nested directory");
         let capabilities = PathCapabilities::default();
 
@@ -731,8 +724,6 @@ mod tests {
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -740,17 +731,15 @@ mod tests {
         let root = temp_dir("expired");
         let capabilities = PathCapabilities::with_picker_ttl(std::time::Duration::ZERO);
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("picker selection");
 
         assert_eq!(
             capabilities
-                .consume_picker_selection("window-a", &root)
+                .consume_picker_selection("window-a", root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -759,19 +748,16 @@ mod tests {
         let second = temp_dir("picker-second");
         let capabilities = PathCapabilities::default();
         capabilities
-            .register_picker_selection("window-a", &first)
+            .register_picker_selection("window-a", first.path())
             .expect("first picker selection");
         capabilities
-            .register_picker_selection("window-a", &second)
+            .register_picker_selection("window-a", second.path())
             .expect("second picker selection");
 
         assert!(matches!(
-            capabilities.consume_picker_selection("window-a", &first),
+            capabilities.consume_picker_selection("window-a", first.path()),
             Err(PathScopeError::NotAllowed)
         ));
-
-        let _ = fs::remove_dir_all(&first);
-        let _ = fs::remove_dir_all(&second);
     }
 
     #[test]
@@ -779,7 +765,7 @@ mod tests {
         let root = temp_dir("picker-cancel");
         let capabilities = PathCapabilities::default();
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("picker selection");
 
         let operation = capabilities.begin_picker_operation("window-a");
@@ -791,11 +777,9 @@ mod tests {
         );
 
         assert!(matches!(
-            capabilities.consume_picker_selection("window-a", &root),
+            capabilities.consume_picker_selection("window-a", root.path()),
             Err(PathScopeError::NotAllowed)
         ));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -808,26 +792,23 @@ mod tests {
 
         assert_eq!(
             capabilities
-                .complete_picker_operation(first_operation, Some(&first))
+                .complete_picker_operation(first_operation, Some(first.path()))
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
         capabilities
-            .complete_picker_operation(second_operation, Some(&second))
+            .complete_picker_operation(second_operation, Some(second.path()))
             .expect("newest picker operation should complete");
 
         assert!(matches!(
-            capabilities.consume_picker_selection("window-a", &first),
+            capabilities.consume_picker_selection("window-a", first.path()),
             Err(PathScopeError::NotAllowed)
         ));
         assert!(
             capabilities
-                .consume_picker_selection("window-a", &second)
+                .consume_picker_selection("window-a", second.path())
                 .is_ok()
         );
-
-        let _ = fs::remove_dir_all(&first);
-        let _ = fs::remove_dir_all(&second);
     }
 
     #[test]
@@ -842,25 +823,22 @@ mod tests {
 
         assert_eq!(
             capabilities
-                .complete_picker_operation(stale_operation, Some(&stale_root))
+                .complete_picker_operation(stale_operation, Some(stale_root.path()))
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
         capabilities
-            .complete_picker_operation(current_operation, Some(&current_root))
+            .complete_picker_operation(current_operation, Some(current_root.path()))
             .expect("operation for the reopened window should complete");
         assert!(matches!(
-            capabilities.consume_picker_selection("window-a", &stale_root),
+            capabilities.consume_picker_selection("window-a", stale_root.path()),
             Err(PathScopeError::NotAllowed)
         ));
         assert!(
             capabilities
-                .consume_picker_selection("window-a", &current_root)
+                .consume_picker_selection("window-a", current_root.path())
                 .is_ok()
         );
-
-        let _ = fs::remove_dir_all(&stale_root);
-        let _ = fs::remove_dir_all(&current_root);
     }
 
     #[test]
@@ -871,13 +849,13 @@ mod tests {
         let project_a = ProjectId::new();
         let project_b = ProjectId::new();
         capabilities
-            .register_picker_selection("window-a", &first)
+            .register_picker_selection("window-a", first.path())
             .expect("first picker");
-        bind_project(&capabilities, "window-a", project_a, &first);
+        bind_project(&capabilities, "window-a", project_a, first.path());
         capabilities
-            .register_picker_selection("window-a", &second)
+            .register_picker_selection("window-a", second.path())
             .expect("second picker");
-        bind_project(&capabilities, "window-a", project_b, &second);
+        bind_project(&capabilities, "window-a", project_b, second.path());
 
         assert_eq!(
             capabilities
@@ -885,9 +863,6 @@ mod tests {
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&first);
-        let _ = fs::remove_dir_all(&second);
     }
 
     #[test]
@@ -898,28 +873,26 @@ mod tests {
         let permitted = ConversationId::new();
         let denied = ConversationId::new();
         capabilities
-            .activate_registered_project("window-a", project_id, &root)
+            .activate_registered_project("window-a", project_id, root.path())
             .expect("project activation");
         capabilities
-            .permit_existing_conversations("window-a", project_id, &root, &[permitted])
+            .permit_existing_conversations("window-a", project_id, root.path(), &[permitted])
             .expect("host permit");
 
         assert_eq!(
             capabilities
-                .bind_existing_conversation("window-a", project_id, denied, &root)
+                .bind_existing_conversation("window-a", project_id, denied, root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
         capabilities
-            .bind_existing_conversation("window-a", project_id, permitted, &root)
+            .bind_existing_conversation("window-a", project_id, permitted, root.path())
             .expect("matching permit");
         assert!(
             capabilities
-                .require_conversation_root("window-a", project_id, permitted, &root)
+                .require_conversation_root("window-a", project_id, permitted, root.path())
                 .is_ok()
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -928,7 +901,7 @@ mod tests {
         let capabilities = PathCapabilities::default();
         let project_id = ProjectId::new();
         capabilities
-            .activate_registered_project("window-a", project_id, &root)
+            .activate_registered_project("window-a", project_id, root.path())
             .expect("project activation");
         let bootstrap = capabilities
             .begin_conversation("window-a", project_id)
@@ -941,8 +914,6 @@ mod tests {
             .expect("failed persistence must restore the bootstrap");
 
         assert_eq!(retried.grant.nonce, nonce);
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -955,14 +926,14 @@ mod tests {
         let first_conversation = ConversationId::new();
         let second_conversation = ConversationId::new();
         capabilities
-            .activate_registered_project("window-a", first_project, &first_root)
+            .activate_registered_project("window-a", first_project, first_root.path())
             .expect("first project activation");
         let stale_bootstrap = capabilities
             .begin_conversation("window-a", first_project)
             .expect("first conversation bootstrap");
 
         capabilities
-            .activate_registered_project("window-a", second_project, &second_root)
+            .activate_registered_project("window-a", second_project, second_root.path())
             .expect("project switch");
 
         assert!(!capabilities.bind_new_conversation(stale_bootstrap, first_conversation));
@@ -972,7 +943,7 @@ mod tests {
                     "window-a",
                     first_project,
                     first_conversation,
-                    &first_root,
+                    first_root.path(),
                 )
                 .unwrap_err(),
             PathScopeError::NotAllowed
@@ -987,13 +958,10 @@ mod tests {
                     "window-a",
                     second_project,
                     second_conversation,
-                    &second_root,
+                    second_root.path(),
                 )
                 .is_ok()
         );
-
-        let _ = fs::remove_dir_all(&first_root);
-        let _ = fs::remove_dir_all(&second_root);
     }
 
     #[test]
@@ -1004,14 +972,14 @@ mod tests {
         let first_project = ProjectId::new();
         let second_project = ProjectId::new();
         capabilities
-            .activate_registered_project("window-a", first_project, &first_root)
+            .activate_registered_project("window-a", first_project, first_root.path())
             .expect("first project activation");
         let stale_bootstrap = capabilities
             .begin_conversation("window-a", first_project)
             .expect("first conversation bootstrap");
 
         capabilities
-            .activate_registered_project("window-a", second_project, &second_root)
+            .activate_registered_project("window-a", second_project, second_root.path())
             .expect("project switch");
         capabilities.restore_conversation_bootstrap(stale_bootstrap);
 
@@ -1026,9 +994,6 @@ mod tests {
                 .begin_conversation("window-a", second_project)
                 .is_ok()
         );
-
-        let _ = fs::remove_dir_all(&first_root);
-        let _ = fs::remove_dir_all(&second_root);
     }
 
     #[test]
@@ -1038,7 +1003,7 @@ mod tests {
         let project_id = ProjectId::new();
         let conversation_id = ConversationId::new();
         capabilities
-            .activate_registered_project("window-a", project_id, &root)
+            .activate_registered_project("window-a", project_id, root.path())
             .expect("project activation");
         let bootstrap = capabilities
             .begin_conversation("window-a", project_id)
@@ -1047,17 +1012,15 @@ mod tests {
 
         capabilities.revoke_window("window-a");
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("reused label receives a fresh window instance");
 
         assert_eq!(
             capabilities
-                .require_conversation_root("window-a", project_id, conversation_id, &root)
+                .require_conversation_root("window-a", project_id, conversation_id, root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1066,15 +1029,15 @@ mod tests {
         let capabilities = PathCapabilities::default();
         let project_id = ProjectId::new();
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("picker selection");
         let selection = capabilities
-            .consume_picker_selection("window-a", &root)
+            .consume_picker_selection("window-a", root.path())
             .expect("persistence reservation");
 
         capabilities.revoke_window("window-a");
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("new window instance");
         capabilities.bind_project(selection, project_id);
 
@@ -1084,8 +1047,6 @@ mod tests {
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1095,7 +1056,7 @@ mod tests {
         let project_id = ProjectId::new();
         let conversation_id = ConversationId::new();
         capabilities
-            .activate_registered_project("window-a", project_id, &root)
+            .activate_registered_project("window-a", project_id, root.path())
             .expect("project activation");
         let bootstrap = capabilities
             .begin_conversation("window-a", project_id)
@@ -1103,18 +1064,16 @@ mod tests {
 
         capabilities.revoke_window("window-a");
         capabilities
-            .register_picker_selection("window-a", &root)
+            .register_picker_selection("window-a", root.path())
             .expect("new window instance");
         capabilities.bind_new_conversation(bootstrap, conversation_id);
 
         assert_eq!(
             capabilities
-                .require_conversation_root("window-a", project_id, conversation_id, &root)
+                .require_conversation_root("window-a", project_id, conversation_id, root.path())
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
@@ -1143,8 +1102,8 @@ mod tests {
         use std::os::windows::fs::symlink_dir;
 
         let root = temp_dir("reparse");
-        let target = root.join("target");
-        let link = root.join("link");
+        let target = root.path().join("target");
+        let link = root.path().join("link");
         fs::create_dir_all(&target).expect("target directory");
         symlink_dir(&target, &link).expect("directory symlink");
         let capabilities = PathCapabilities::default();
@@ -1155,7 +1114,5 @@ mod tests {
                 .unwrap_err(),
             PathScopeError::NotAllowed
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

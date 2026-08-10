@@ -6,13 +6,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use tempfile::TempDir;
 
 use crate::app_state::AppState;
 use crate::git_commands::{GitCommandState, is_git_public_error};
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -45,43 +43,35 @@ fn which_git() -> PathBuf {
     panic!("host git required for git_commands_tests fixtures");
 }
 
-fn temp_root(label: &str) -> PathBuf {
-    let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "pillow-git-cmd-{label}-{nanos}-{n}-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp root");
-    dir
+/// Owns the fixture tree; removing it is the guard's own `Drop`, never ours.
+fn temp_root(label: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("pillow-git-cmd-{label}-"))
+        .tempdir()
+        .expect("temp root")
 }
 
 struct Harness {
-    _temp: PathBuf,
     app: AppState,
     git: GitCommandState,
     project_id: String,
     project_root: PathBuf,
     host_git: PathBuf,
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self._temp);
-    }
+    /// Last field on purpose: fields drop in declaration order, so `app` closes
+    /// its SQLite handles on `keeper.db` before the directory holding that file
+    /// is removed. Windows refuses to delete a file that is still open, and a
+    /// hand-written `impl Drop for Harness` runs *before* any field — which is
+    /// how this fixture used to leak its whole tree on every run.
+    temp: TempDir,
 }
 
 impl Harness {
     fn new(label: &str) -> Self {
         let host_git = which_git();
         let temp = temp_root(label);
-        let project_root = temp.join("project");
+        let project_root = temp.path().join("project");
         fs::create_dir_all(&project_root).expect("project root");
-        let app = AppState::open(temp.join("keeper.db")).expect("app state");
+        let app = AppState::open(temp.path().join("keeper.db")).expect("app state");
         app.register_picker_selection("main", &project_root)
             .expect("picker");
         let project = app
@@ -93,20 +83,20 @@ impl Harness {
             .expect("register project");
         let git = GitCommandState::with_git_executable(Some(host_git.clone()));
         Self {
-            _temp: temp,
             app,
             git,
             project_id: project.id,
             project_root,
             host_git,
+            temp,
         }
     }
 
     fn unavailable_git(label: &str) -> Self {
         let temp = temp_root(label);
-        let project_root = temp.join("project");
+        let project_root = temp.path().join("project");
         fs::create_dir_all(&project_root).expect("project root");
-        let app = AppState::open(temp.join("keeper.db")).expect("app state");
+        let app = AppState::open(temp.path().join("keeper.db")).expect("app state");
         app.register_picker_selection("main", &project_root)
             .expect("picker");
         let project = app
@@ -120,12 +110,12 @@ impl Harness {
             r"C:\pillow-missing-git-not-real\git.exe",
         )));
         Self {
-            _temp: temp,
             app,
             git,
             project_id: project.id,
             project_root,
             host_git: which_git(),
+            temp,
         }
     }
 
@@ -177,6 +167,10 @@ impl Harness {
         self.git_run(repo, &["add", "-A"]);
         self.git_run(repo, &["commit", "-m", msg]);
     }
+
+    fn root(&self) -> &Path {
+        self.temp.path()
+    }
 }
 
 fn assert_path_free(err: &crate::app_state::CommandError) {
@@ -203,6 +197,25 @@ fn assert_path_free(err: &crate::app_state::CommandError) {
         "message must stay path-free: {}",
         err.message
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fixture hygiene
+// ---------------------------------------------------------------------------
+
+/// The harness used to remove its tree from an `impl Drop for Harness`, which
+/// runs before any field: `app` still held `keeper.db` open, Windows refused the
+/// delete, and the discarded error left one directory behind per test, per gate
+/// run. Removal now belongs to the `TempDir` field that drops last.
+#[test]
+fn dropping_the_harness_removes_its_temp_root() {
+    let root = {
+        let h = Harness::new("temp-hygiene");
+        let root = h.root().to_path_buf();
+        assert!(root.join("keeper.db").is_file(), "fixture db should exist");
+        root
+    };
+    assert!(!root.exists(), "harness left {} behind", root.display());
 }
 
 // ---------------------------------------------------------------------------

@@ -2,23 +2,22 @@
 //! Written before command wiring to establish RED evidence.
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use tempfile::TempDir;
 
 use crate::app_state::AppState;
 
-fn test_state() -> (AppState, PathBuf) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after the Unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "pillow-resource-commands-{}-{nonce}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("test root should be created");
-    let state = AppState::open(temp_root.join("keeper.db")).expect("test state should open");
-    (state, temp_root)
+/// The guard comes first so callers declare it first — locals drop in reverse
+/// declaration order, so `state` closes its SQLite handles on `keeper.db` before
+/// the directory holding that file is removed. Windows will not delete a file
+/// that is still open, and the removal error is easy to lose.
+fn test_state() -> (TempDir, AppState) {
+    let temp_root = tempfile::Builder::new()
+        .prefix("pillow-resource-commands-")
+        .tempdir()
+        .expect("test root should be created");
+    let state = AppState::open(temp_root.path().join("keeper.db")).expect("test state should open");
+    (temp_root, state)
 }
 
 fn register_project(state: &AppState, temp_root: &std::path::Path, leaf: &str) -> String {
@@ -39,7 +38,7 @@ fn register_project(state: &AppState, temp_root: &std::path::Path, leaf: &str) -
 
 #[test]
 fn unknown_project_id_fails_closed_for_all_resource_ops() {
-    let (state, _temp_root) = test_state();
+    let (_temp_root, state) = test_state();
     let unknown = "00000000-0000-0000-0000-000000000099".to_owned();
 
     let list_err = state
@@ -70,8 +69,8 @@ fn unknown_project_id_fails_closed_for_all_resource_ops() {
 
 #[test]
 fn empty_or_malformed_project_id_fails_closed_without_fallback() {
-    let (state, temp_root) = test_state();
-    let _registered = register_project(&state, &temp_root, "only-project");
+    let (temp_root, state) = test_state();
+    let _registered = register_project(&state, temp_root.path(), "only-project");
 
     for bad_id in ["", "not-a-uuid", "00000000-0000-0000-0000-000000000001"] {
         let err = state
@@ -87,7 +86,7 @@ fn empty_or_malformed_project_id_fails_closed_without_fallback() {
         );
         assert!(
             !err.message
-                .contains(&temp_root.to_string_lossy().to_string()),
+                .contains(&temp_root.path().to_string_lossy().to_string()),
             "must not leak machine temp root"
         );
     }
@@ -95,12 +94,12 @@ fn empty_or_malformed_project_id_fails_closed_without_fallback() {
 
 #[test]
 fn resource_ops_are_isolated_by_project_id() {
-    let (state, temp_root) = test_state();
-    let project_a = register_project(&state, &temp_root, "project-a");
-    let project_b = register_project(&state, &temp_root, "project-b");
+    let (temp_root, state) = test_state();
+    let project_a = register_project(&state, temp_root.path(), "project-a");
+    let project_b = register_project(&state, temp_root.path(), "project-b");
 
-    let root_a = temp_root.join("project-a");
-    let root_b = temp_root.join("project-b");
+    let root_a = temp_root.path().join("project-a");
+    let root_b = temp_root.path().join("project-b");
     fs::write(root_a.join("only-a.txt"), b"alpha secret").expect("write a");
     fs::write(root_b.join("only-b.txt"), b"beta secret").expect("write b");
     fs::create_dir_all(root_a.join("src")).expect("src a");
@@ -155,9 +154,9 @@ fn resource_ops_are_isolated_by_project_id() {
 
 #[test]
 fn invalid_relative_paths_fail_closed_without_machine_paths() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "path-guard");
-    let root = temp_root.join("path-guard");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "path-guard");
+    let root = temp_root.path().join("path-guard");
     fs::write(root.join("ok.txt"), b"ok").expect("write");
 
     for bad in [
@@ -180,7 +179,7 @@ fn invalid_relative_paths_fail_closed_without_machine_paths() {
         );
         assert!(
             !err.message
-                .contains(&temp_root.to_string_lossy().to_string()),
+                .contains(&temp_root.path().to_string_lossy().to_string()),
             "error leaked temp root for {bad:?}: {}",
             err.message
         );
@@ -194,12 +193,16 @@ fn invalid_relative_paths_fail_closed_without_machine_paths() {
 
 #[test]
 fn resource_search_rejects_blank_queries_without_fallback_or_path_leakage() {
-    let (state, temp_root) = test_state();
-    let project_a = register_project(&state, &temp_root, "search-a");
-    let project_b = register_project(&state, &temp_root, "search-b");
-    fs::write(temp_root.join("search-a").join("visible.txt"), b"alpha").expect("write a");
+    let (temp_root, state) = test_state();
+    let project_a = register_project(&state, temp_root.path(), "search-a");
+    let project_b = register_project(&state, temp_root.path(), "search-b");
     fs::write(
-        temp_root.join("search-b").join("private.txt"),
+        temp_root.path().join("search-a").join("visible.txt"),
+        b"alpha",
+    )
+    .expect("write a");
+    fs::write(
+        temp_root.path().join("search-b").join("private.txt"),
         b"beta machine-private marker",
     )
     .expect("write b");
@@ -213,7 +216,7 @@ fn resource_search_rejects_blank_queries_without_fallback_or_path_leakage() {
         assert!(
             !error
                 .message
-                .contains(&temp_root.to_string_lossy().to_string())
+                .contains(&temp_root.path().to_string_lossy().to_string())
                 && !error.message.contains("machine-private")
                 && !error.message.contains("search-b"),
             "blank-query error must not fall back or leak a machine path: {}",
@@ -236,11 +239,11 @@ fn resource_search_rejects_blank_queries_without_fallback_or_path_leakage() {
 
 #[test]
 fn successful_read_updates_only_matching_project_recents() {
-    let (state, temp_root) = test_state();
-    let project_a = register_project(&state, &temp_root, "recent-a");
-    let project_b = register_project(&state, &temp_root, "recent-b");
-    fs::write(temp_root.join("recent-a").join("a.txt"), b"a").expect("write a");
-    fs::write(temp_root.join("recent-b").join("b.txt"), b"b").expect("write b");
+    let (temp_root, state) = test_state();
+    let project_a = register_project(&state, temp_root.path(), "recent-a");
+    let project_b = register_project(&state, temp_root.path(), "recent-b");
+    fs::write(temp_root.path().join("recent-a").join("a.txt"), b"a").expect("write a");
+    fs::write(temp_root.path().join("recent-b").join("b.txt"), b"b").expect("write b");
 
     state
         .read_project_resource(project_a.clone(), "a.txt".to_owned())
@@ -268,10 +271,14 @@ fn successful_read_updates_only_matching_project_recents() {
 
 #[test]
 fn binary_read_returns_preview_metadata_without_unbounded_bytes() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "binary-project");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "binary-project");
     let bytes = [0u8, 1, 2, 255, 0x80];
-    fs::write(temp_root.join("binary-project").join("blob.bin"), bytes).expect("write binary");
+    fs::write(
+        temp_root.path().join("binary-project").join("blob.bin"),
+        bytes,
+    )
+    .expect("write binary");
 
     let file = state
         .read_project_resource(project_id, "blob.bin".to_owned())
@@ -292,8 +299,8 @@ fn binary_read_returns_preview_metadata_without_unbounded_bytes() {
 
 #[test]
 fn resource_preview_unknown_and_empty_project_ids_fail_closed() {
-    let (state, temp_root) = test_state();
-    let _registered = register_project(&state, &temp_root, "preview-only");
+    let (temp_root, state) = test_state();
+    let _registered = register_project(&state, temp_root.path(), "preview-only");
 
     for bad_id in ["", "not-a-uuid", "00000000-0000-0000-0000-000000000099"] {
         let err = state
@@ -307,7 +314,7 @@ fn resource_preview_unknown_and_empty_project_ids_fail_closed() {
         );
         assert!(
             !err.message
-                .contains(&temp_root.to_string_lossy().to_string()),
+                .contains(&temp_root.path().to_string_lossy().to_string()),
             "preview error must not leak temp root"
         );
         assert!(
@@ -319,11 +326,11 @@ fn resource_preview_unknown_and_empty_project_ids_fail_closed() {
 
 #[test]
 fn resource_preview_is_isolated_by_project_id() {
-    let (state, temp_root) = test_state();
-    let project_a = register_project(&state, &temp_root, "preview-a");
-    let _project_b = register_project(&state, &temp_root, "preview-b");
-    let root_a = temp_root.join("preview-a");
-    let root_b = temp_root.join("preview-b");
+    let (temp_root, state) = test_state();
+    let project_a = register_project(&state, temp_root.path(), "preview-a");
+    let _project_b = register_project(&state, temp_root.path(), "preview-b");
+    let root_a = temp_root.path().join("preview-a");
+    let root_b = temp_root.path().join("preview-b");
     fs::write(root_a.join("only-a.txt"), b"alpha secret").expect("write a");
     fs::write(root_b.join("only-b.txt"), b"beta secret").expect("write b");
 
@@ -352,9 +359,9 @@ fn resource_preview_is_isolated_by_project_id() {
 
 #[test]
 fn resource_preview_classifies_markdown_and_text() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-text");
-    let root = temp_root.join("preview-text");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-text");
+    let root = temp_root.path().join("preview-text");
     fs::create_dir_all(root.join("docs")).expect("docs");
     fs::write(root.join("docs").join("guide.MD"), b"# Title\n\nHello").expect("md");
     fs::write(root.join("plain.txt"), b"hello plain").expect("txt");
@@ -389,9 +396,9 @@ fn write_image_fixture(root: &std::path::Path, name: &str, bytes: &[u8]) {
 
 #[test]
 fn resource_preview_allowlisted_images_require_extension_and_signature() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-images");
-    let root = temp_root.join("preview-images");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-images");
+    let root = temp_root.path().join("preview-images");
 
     let png = b"\x89PNG\r\n\x1a\nIHDR-payload";
     let jpeg = b"\xFF\xD8\xFF\xE0JFIF-payload";
@@ -443,9 +450,9 @@ fn resource_preview_allowlisted_images_require_extension_and_signature() {
 
 #[test]
 fn resource_preview_mismatched_or_unsupported_binary_is_metadata_only() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-binary");
-    let root = temp_root.join("preview-binary");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-binary");
+    let root = temp_root.path().join("preview-binary");
 
     // Extension says PNG but payload is JPEG signature.
     fs::write(root.join("fake.png"), b"\xFF\xD8\xFFnot-a-png").expect("fake png");
@@ -474,9 +481,9 @@ fn resource_preview_mismatched_or_unsupported_binary_is_metadata_only() {
 
 #[test]
 fn resource_preview_truncated_binary_never_becomes_image() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-trunc");
-    let root = temp_root.join("preview-trunc");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-trunc");
+    let root = temp_root.path().join("preview-trunc");
 
     // Larger than MAX_READ_BYTES (1 MiB) with a valid PNG signature prefix.
     let mut huge = vec![0u8; 1_048_576 + 64];
@@ -498,9 +505,9 @@ fn resource_preview_truncated_binary_never_becomes_image() {
 
 #[test]
 fn resource_preview_serialized_dto_never_includes_bytes() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-serde");
-    let root = temp_root.join("preview-serde");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-serde");
+    let root = temp_root.path().join("preview-serde");
     fs::write(root.join("a.txt"), b"text").expect("text");
     fs::write(root.join("b.bin"), [0u8, 255]).expect("bin");
     fs::write(root.join("c.png"), b"\x89PNG\r\n\x1a\nxx").expect("png");
@@ -519,9 +526,9 @@ fn resource_preview_serialized_dto_never_includes_bytes() {
 
 #[test]
 fn resource_preview_errors_are_opaque_without_machine_paths() {
-    let (state, temp_root) = test_state();
-    let project_id = register_project(&state, &temp_root, "preview-err");
-    let root = temp_root.join("preview-err");
+    let (temp_root, state) = test_state();
+    let project_id = register_project(&state, temp_root.path(), "preview-err");
+    let root = temp_root.path().join("preview-err");
     fs::write(root.join("ok.txt"), b"ok").expect("write");
 
     for bad in [
@@ -544,7 +551,7 @@ fn resource_preview_errors_are_opaque_without_machine_paths() {
         );
         assert!(
             !err.message
-                .contains(&temp_root.to_string_lossy().to_string()),
+                .contains(&temp_root.path().to_string_lossy().to_string()),
             "error leaked temp root for {bad:?}: {}",
             err.message
         );
@@ -560,11 +567,19 @@ fn resource_preview_errors_are_opaque_without_machine_paths() {
 
 #[test]
 fn resource_preview_updates_only_matching_project_recents() {
-    let (state, temp_root) = test_state();
-    let project_a = register_project(&state, &temp_root, "preview-recent-a");
-    let project_b = register_project(&state, &temp_root, "preview-recent-b");
-    fs::write(temp_root.join("preview-recent-a").join("a.txt"), b"a").expect("write a");
-    fs::write(temp_root.join("preview-recent-b").join("b.txt"), b"b").expect("write b");
+    let (temp_root, state) = test_state();
+    let project_a = register_project(&state, temp_root.path(), "preview-recent-a");
+    let project_b = register_project(&state, temp_root.path(), "preview-recent-b");
+    fs::write(
+        temp_root.path().join("preview-recent-a").join("a.txt"),
+        b"a",
+    )
+    .expect("write a");
+    fs::write(
+        temp_root.path().join("preview-recent-b").join("b.txt"),
+        b"b",
+    )
+    .expect("write b");
 
     state
         .preview_project_resource(project_a.clone(), "a.txt".to_owned())

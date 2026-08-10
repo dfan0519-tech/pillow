@@ -1,28 +1,28 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use tempfile::TempDir;
 
 use pillow_desktop::app_state::AppState;
 use pillow_desktop::directory_ops::project_name_from_path;
 
-fn test_state() -> (AppState, PathBuf) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after the Unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "pillow-project-commands-{}-{nonce}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("test root should be created");
-    let state = AppState::open(temp_root.join("keeper.db")).expect("test state should open");
+/// The guard comes first so callers declare it first — locals drop in reverse
+/// declaration order, so `state` closes its SQLite handles on `keeper.db` before
+/// the directory holding that file is removed. Windows will not delete a file
+/// that is still open, and the removal error is easy to lose.
+fn test_state() -> (TempDir, AppState) {
+    let temp_root = tempfile::Builder::new()
+        .prefix("pillow-project-commands-")
+        .tempdir()
+        .expect("test root should be created");
+    let state = AppState::open(temp_root.path().join("keeper.db")).expect("test state should open");
 
-    (state, temp_root)
+    (temp_root, state)
 }
 
 #[test]
 fn selected_project_must_exist() {
-    let (state, _temp_root) = test_state();
+    let (_temp_root, state) = test_state();
 
     let error = state
         .select_project("00000000-0000-0000-0000-000000000001".to_owned())
@@ -33,8 +33,8 @@ fn selected_project_must_exist() {
 
 #[test]
 fn selection_is_not_persisted_as_global_project_status() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("project-a");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("project-a");
     fs::create_dir_all(&project_root).expect("project root should be created");
     state
         .register_picker_selection("main", &project_root)
@@ -59,8 +59,8 @@ fn selection_is_not_persisted_as_global_project_status() {
 
 #[test]
 fn open_or_register_selects_existing_canonical_path() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("shared-app");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("shared-app");
     fs::create_dir_all(&project_root).expect("project root");
     state
         .register_picker_selection("main", &project_root)
@@ -86,8 +86,8 @@ fn open_or_register_selects_existing_canonical_path() {
 
 #[test]
 fn open_or_register_registers_new_folder_using_leaf_name() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("brand-new");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("brand-new");
     fs::create_dir_all(&project_root).expect("project root");
     state
         .register_picker_selection("main", &project_root)
@@ -104,8 +104,8 @@ fn open_or_register_registers_new_folder_using_leaf_name() {
 
 #[test]
 fn open_or_register_rejects_existing_folder_without_native_picker_capability() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("renderer-supplied");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("renderer-supplied");
     fs::create_dir_all(&project_root).expect("project root");
 
     let error = state
@@ -121,8 +121,8 @@ fn open_or_register_rejects_existing_folder_without_native_picker_capability() {
 
 #[test]
 fn open_or_register_consumes_picker_capability_and_stores_canonical_root() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("picker-backed");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("picker-backed");
     fs::create_dir_all(&project_root).expect("project root");
     state
         .register_picker_selection("window-a", &project_root)
@@ -154,8 +154,8 @@ fn open_or_register_consumes_picker_capability_and_stores_canonical_root() {
 
 #[test]
 fn renderer_create_project_requires_native_picker_capability() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("direct-renderer-root");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("direct-renderer-root");
     fs::create_dir_all(&project_root).expect("project root");
 
     let error = state
@@ -182,8 +182,8 @@ fn renderer_create_project_requires_native_picker_capability() {
 
 #[test]
 fn create_project_with_folder_is_explicitly_disabled_even_when_parent_is_granted() {
-    let (state, temp_root) = test_state();
-    let parent = temp_root.join("parents");
+    let (temp_root, state) = test_state();
+    let parent = temp_root.path().join("parents");
     fs::create_dir_all(&parent).expect("parent");
     state
         .register_picker_selection("window-a", &parent)
@@ -203,8 +203,8 @@ fn create_project_with_folder_is_explicitly_disabled_even_when_parent_is_granted
 
 #[test]
 fn create_project_with_folder_rejects_parent_without_picker_capability() {
-    let (state, temp_root) = test_state();
-    let parent = temp_root.join("ungranted-parent");
+    let (temp_root, state) = test_state();
+    let parent = temp_root.path().join("ungranted-parent");
     fs::create_dir_all(&parent).expect("parent");
     // Intentionally do not grant parent.
 
@@ -222,8 +222,8 @@ fn create_project_with_folder_rejects_parent_without_picker_capability() {
 
 #[test]
 fn standalone_folder_creation_is_disabled_without_consuming_picker_authority() {
-    let (state, temp_root) = test_state();
-    let parent = temp_root.join("standalone-parent");
+    let (temp_root, state) = test_state();
+    let parent = temp_root.path().join("standalone-parent");
     fs::create_dir_all(&parent).expect("parent");
     state
         .register_picker_selection("window-a", &parent)
@@ -246,8 +246,8 @@ fn standalone_folder_creation_is_disabled_without_consuming_picker_authority() {
 
 #[test]
 fn failed_project_persist_restores_the_one_use_picker_grant() {
-    let (state, temp_root) = test_state();
-    let project_root = temp_root.join("duplicate-project");
+    let (temp_root, state) = test_state();
+    let project_root = temp_root.path().join("duplicate-project");
     fs::create_dir_all(&project_root).expect("project root");
     state
         .register_picker_selection("window-a", &project_root)

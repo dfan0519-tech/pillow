@@ -75,19 +75,16 @@ fn command_error(code: &'static str, message: &'static str) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
-    fn temp_root(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "pillow-dir-ops-{label}-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&root).expect("temp root");
-        root
+    /// Owns the tree for one test. Callers hold the guard for the whole test
+    /// body: it removes the directory on drop, including while a test panics,
+    /// which the trailing `remove_dir_all` calls it replaced never did.
+    fn temp_root(label: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("pillow-dir-ops-{label}-"))
+            .tempdir()
+            .expect("temp root")
     }
 
     #[test]
@@ -107,26 +104,23 @@ mod tests {
     #[test]
     fn creates_a_child_directory_under_parent() {
         let parent = temp_root("create");
-        let child = create_child_directory(&parent, "  demo-project  ").unwrap();
+        let child = create_child_directory(parent.path(), "  demo-project  ").unwrap();
         assert!(child.is_dir());
         assert_eq!(child.file_name().unwrap(), "demo-project");
-        let _ = fs::remove_dir_all(&parent);
     }
 
     #[test]
     fn rejects_existing_child_directory() {
         let parent = temp_root("exists");
-        fs::create_dir(parent.join("taken")).unwrap();
-        let error = create_child_directory(&parent, "taken").unwrap_err();
+        fs::create_dir(parent.path().join("taken")).unwrap();
+        let error = create_child_directory(parent.path(), "taken").unwrap_err();
         assert_eq!(error.code, "project_directory_exists");
-        let _ = fs::remove_dir_all(&parent);
     }
 
     #[test]
     fn rejects_path_separators_in_project_name() {
         let parent = temp_root("sep");
-        let error = create_child_directory(&parent, "a/b").unwrap_err();
+        let error = create_child_directory(parent.path(), "a/b").unwrap_err();
         assert_eq!(error.code, "invalid_project_name");
-        let _ = fs::remove_dir_all(&parent);
     }
 }
