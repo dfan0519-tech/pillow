@@ -66,6 +66,11 @@ import {
   waitForComposerIdle,
   waitForWriteOutcome,
 } from "./lib/c3-governed-write-acceptance.mjs";
+import {
+  formatCapturedStream,
+  parseJsonFromCapturedText,
+  sanitizeControlCharsVisible,
+} from "./lib/json-text-sanitize.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const desktopRoot = path.join(repositoryRoot, "apps", "desktop");
@@ -113,10 +118,11 @@ function resolveModule(name) {
 }
 
 function redactText(value) {
-  return String(value)
+  const redacted = String(value)
     .replace(/[A-Za-z]:\\[^\s"'`]+/gu, "<path>")
     .replace(/\/(?:tmp|var|home|Users)\/[^\s"'`]+/gu, "<path>")
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/giu, "<uuid>");
+  return sanitizeControlCharsVisible(redacted).text;
 }
 
 function sha256Hex(buffer) {
@@ -243,6 +249,33 @@ async function loadPlaywright() {
   return playwright;
 }
 
+const RENDERER_DIAGNOSTICS = new WeakMap();
+const MAX_RENDERER_DIAGNOSTICS = 40;
+
+function attachRendererDiagnostics(page) {
+  const entries = [];
+  RENDERER_DIAGNOSTICS.set(page, entries);
+  const push = (line) => {
+    if (entries.length >= MAX_RENDERER_DIAGNOSTICS) return;
+    const safe = sanitizeControlCharsVisible(line).text;
+    entries.push(safe.length > 400 ? `${safe.slice(0, 400)}…` : safe);
+  };
+  page.on("console", (message) => {
+    const type = message.type();
+    if (type !== "error" && type !== "warning") return;
+    push(`console.${type}: ${message.text()}`);
+  });
+  page.on("pageerror", (error) => {
+    push(`pageerror: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function rendererDiagnostics(page) {
+  const entries = page ? RENDERER_DIAGNOSTICS.get(page) : undefined;
+  if (!entries?.length) return "renderer: (no console errors or page errors)";
+  return `renderer:\n${entries.map((line) => `  ${line}`).join("\n")}`;
+}
+
 async function connectWebViewPage(playwright, cdpPort) {
   await waitForCdpEndpoint(cdpPort);
   const browser = await playwright.chromium.connectOverCDP(
@@ -262,6 +295,11 @@ async function connectWebViewPage(playwright, cdpPort) {
     await browser.close().catch(() => undefined);
     throw new Error("WebView2 CDP page is missing.");
   }
+  // A failing renderer is otherwise invisible here: the app's stdout/stderr
+  // stays empty while an IPC rejection is swallowed into a null gateway
+  // result, so the only report is "the bar never appeared". Capture the
+  // renderer's own diagnostics so a failure names its cause.
+  attachRendererDiagnostics(page);
   await page.waitForLoadState("domcontentloaded").catch(() => undefined);
   await page.waitForSelector("[data-testid='app-sidebar']", { timeout: 60_000 });
   return { browser, page };
@@ -313,7 +351,7 @@ function snapshotWindowsProcessesWithCommandLine() {
   }
   const trimmed = (result.stdout ?? "").trim();
   if (!trimmed) return [];
-  const value = JSON.parse(trimmed);
+  const { value } = parseJsonFromCapturedText(trimmed);
   const rows = Array.isArray(value) ? value : [value];
   return rows.map((entry) => ({
     commandLine: entry.commandLine ?? "",
@@ -656,7 +694,8 @@ async function launchDesktopPhase({
     await supervisor.cleanup().catch(() => undefined);
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }
@@ -693,6 +732,7 @@ async function runRegisterPhase({
   });
 
   let browser;
+  let connectedPage;
   try {
     const evidence = await waitForJsonFile(resultPath, {
       label: `${phaseLabel} registration evidence`,
@@ -707,6 +747,7 @@ async function runRegisterPhase({
     });
     const connected = await connectWebViewPage(playwright, cdpPort);
     browser = connected.browser;
+    connectedPage = connected.page;
     await closeDesktopNormally({
       page: connected.page,
       browser,
@@ -732,7 +773,9 @@ async function runRegisterPhase({
     const output = launched.processRun.output();
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `${rendererDiagnostics(connectedPage)}\n`
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }
@@ -762,9 +805,11 @@ async function withUiSession({
   });
 
   let browser;
+  let connectedPage;
   try {
     const connected = await connectWebViewPage(playwright, cdpPort);
     browser = connected.browser;
+    connectedPage = connected.page;
     const evidence = await drive(connected.page, launched);
     await closeDesktopNormally({
       page: connected.page,
@@ -791,7 +836,9 @@ async function withUiSession({
     const output = launched.processRun.output();
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `${rendererDiagnostics(connectedPage)}\n`
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }

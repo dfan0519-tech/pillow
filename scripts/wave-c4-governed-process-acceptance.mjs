@@ -68,6 +68,11 @@ import {
   waitForCommandApproval,
   waitForComposerIdle,
 } from "./lib/c4-governed-process-acceptance.mjs";
+import {
+  formatCapturedStream,
+  parseJsonFromCapturedText,
+  sanitizeControlCharsVisible,
+} from "./lib/json-text-sanitize.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const packageManager = process.platform === "win32" ? "cmd.exe" : "pnpm";
@@ -121,13 +126,14 @@ function resolveModule(name) {
 }
 
 function redactText(value) {
-  return String(value)
+  const redacted = String(value)
     .replace(/[A-Za-z]:\\[^\s"'`]+/gu, "<path>")
     .replace(/\/(?:tmp|var|home|Users)\/[^\s"'`]+/gu, "<path>")
     .replace(
       /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/giu,
       "<uuid>",
     );
+  return sanitizeControlCharsVisible(redacted).text;
 }
 
 function allocateCdpPort() {
@@ -249,7 +255,10 @@ function attachRendererDiagnostics(page) {
   RENDERER_DIAGNOSTICS.set(page, entries);
   const push = (line) => {
     if (entries.length >= MAX_RENDERER_DIAGNOSTICS) return;
-    entries.push(line.length > 400 ? `${line.slice(0, 400)}…` : line);
+    // Visible control-char placeholders; path redaction happens in redactText
+    // when the line is folded into a failed harness record.
+    const safe = sanitizeControlCharsVisible(line).text;
+    entries.push(safe.length > 400 ? `${safe.slice(0, 400)}…` : safe);
   };
   page.on("console", (message) => {
     const type = message.type();
@@ -419,7 +428,7 @@ function snapshotWindowsProcessesWithCommandLine(options = {}) {
   }
   const trimmed = (result.stdout ?? "").trim();
   if (!trimmed) return [];
-  const value = JSON.parse(trimmed);
+  const { value } = parseJsonFromCapturedText(trimmed);
   const rows = Array.isArray(value) ? value : [value];
   return rows.map((entry) => ({
     commandLine: entry.commandLine ?? "",
@@ -898,10 +907,11 @@ async function launchDesktopPhase({
   } catch (error) {
     const output = processRun.output();
     await supervisor.cleanup().catch(() => undefined);
+    // Launch has no WebView page yet — renderer diagnostics do not apply.
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
-      + `${rendererDiagnostics(connectedPage)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }
@@ -980,7 +990,8 @@ async function runRegisterPhase({
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
       + `${rendererDiagnostics(connectedPage)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }
@@ -1042,7 +1053,8 @@ async function withUiSession({
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n`
       + `${rendererDiagnostics(connectedPage)}\n`
-      + `stdout:\n${output.stdout}\nstderr:\n${output.stderr}`,
+      + `stdout:\n${formatCapturedStream("stdout", output.stdout)}\n`
+      + `stderr:\n${formatCapturedStream("stderr", output.stderr)}`,
     );
   }
 }

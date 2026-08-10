@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import {
+  formatCapturedStream,
+  parseJsonFromCapturedText,
+} from "./json-text-sanitize.mjs";
 
 const POLL_INTERVAL_MS = 50;
 const CLEANUP_ATTEMPTS = 120;
@@ -38,7 +42,8 @@ export function isProcessAlive(pid) {
 function parseJsonArray(text) {
   const trimmed = text.trim();
   if (!trimmed) return [];
-  const value = JSON.parse(trimmed);
+  // Sanitize-at-capture: PowerShell ConvertTo-Json may emit raw controls.
+  const { value } = parseJsonFromCapturedText(trimmed);
   return Array.isArray(value) ? value : [value];
 }
 
@@ -746,8 +751,9 @@ export async function runChecked(command, args, options = {}) {
   });
   if (code !== 0) {
     const output = processRun.output();
+    const detail = output.stderr || output.stdout;
     throw new Error(
-      `${command} exited with code ${code}.\n${output.stderr || output.stdout}`,
+      `${command} exited with code ${code}.\n${formatCapturedStream("output", detail)}`,
     );
   }
 }
