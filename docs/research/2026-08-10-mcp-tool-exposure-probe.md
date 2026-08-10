@@ -1,7 +1,10 @@
 # P1 实盘探针结论 —— MCP 路通了,但治理边界是假的
 
 Date: 2026-08-10
-Status: **Live-probed. Two findings, one enabling and one blocking.**
+Status: **Live-probed. §1–§5 是首轮结论;根因与修法见 §7,§7 覆盖 §5。**
+
+> ⚠️ **先读 §7。** 首轮把"profile 无效"读成了"机制不存在",并据此建议架构级隔离。
+> 那是错的:机制存在且可用,是我们发的 payload 从未解析成功。§7 有实测。
 Probe: `scripts/probe-mcp-tool-exposure.mjs`(opt-in `PILLOW_MCP_PROBE=1`,不进门)
 Runtime: 真实 Grok CLI,`agent --no-leader stdio`,默认 profile(`grok1` 语义,未覆盖 HOME)
 
@@ -30,7 +33,12 @@ Runtime: 真实 Grok CLI,`agent --no-leader stdio`,默认 profile(`grok1` 语义
 | Q6 `agentProfile` 到底生不生效? | **完全不生效** | 正向 allowlist `tools:["read_file"]`(不含 write)下,写**照样成功** |
 
 Q6 是关键区分:如果只是 denylist 坏了,正向 allowlist 应该能挡住写。它没挡住。
-所以 **`_meta.agentProfile` 在 ACP 这条线上是惰性的**,不是"某个字段写错了"。
+
+⚠️ **Q6 的推论已被 §7 推翻。** 观测本身没错(那个 payload 确实什么都没挡住),
+但"通道是惰性的"这个解释是错的:两个变体**都缺必填 `name`/`description`**,
+所以两个都在 `from_json` 就失败了、静默回落全工具集。
+我以为自己在对比两种 profile 语义,实际上在对比**两个同样无效的 payload**。
+**教训:对照实验里,两组必须只差要测的那一个变量。**
 
 MCP 侧完整握手每次都齐:`initialize → notifications/initialized → tools/list → tools/call`,
 模型侧看到的名字是 `pillowprobe__ping`(印证 README 的 `server__tool` 命名规则)。
@@ -75,12 +83,7 @@ C3/C4 那整套 `提案 → 一次性批准 → 宿主执行 → durable 收据 
 
 1. 🔴 **先堵边界,再谈接工具。** 在边界修好之前,**不要把 Pillow 指向真实项目**。
    现在接进去,代理可以不经审批改你的代码。
-2. 候选修法(需各自验证,**不要挑一个就信**):
-   - Grok 侧是否有**真正生效**的工具限制入口(headless `--tools`?
-     `config.toml`?ACP 之外的 profile 机制?)—— 需要再探。
-   - 若无:Pillow 必须假定**代理拥有完整原生工具**,治理层不能靠"禁用"成立,
-     而要靠**隔离**(代理只能看到受控工作区,真实项目在它够不到的地方)。
-     这是架构级改动。
+2. ~~候选修法待探~~ **已由 §7 回答:机制存在,用 allowlist。不需要架构级隔离。**
 3. MCP 治理工具的接入(原任务 #19 的 1–4 步)**技术上已确认可行**,
    但在第 1 步完成前接它没有意义 —— 治理工具旁边就摆着一个不受管的 `write`。
 
