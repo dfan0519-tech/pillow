@@ -33,14 +33,18 @@ use keeper_agent_protocol::{
     ToolProposal, canonical_arguments_digest,
 };
 use keeper_governance_port::CancellationProbe;
-use keeper_policy::{ExecDecision, ExecProposalState, canonical_process_subject, is_exec_terminal};
+use keeper_policy::{
+    ExecDecision, ExecProposalState, canonical_process_subject,
+    conservative_shell_command_segments, is_exec_terminal,
+};
 use keeper_process_executor::{
     CancellationSignal as ProcessCancellationSignal, OutputChunk as RunnerOutputChunk,
     OutputObserver,
 };
 use keeper_storage_sqlite::{
-    ExecDecisionOutcome, PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
-    SqlitePermissionRuleRepository, StoredExecProposal, StoredPermissionRuleReceipt,
+    ExecDecisionOutcome, PermissionRuleAction, PermissionRulePrefix,
+    PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository, StoredExecProposal,
+    StoredPermissionRuleReceipt,
 };
 use keeper_tool_executor::{
     ClaimedObserver, GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
@@ -54,8 +58,8 @@ use uuid::Uuid;
 
 use crate::governed_write::{generate_approval_grant, grant_digest};
 use crate::permission_rules::{
-    HostPermissionRuleEvaluation, PermissionRuleAttributionView, attribution_from_receipt,
-    evaluate_host_permission_rules,
+    HostPermissionRuleConjunctionEvaluation, PermissionRuleAttributionView,
+    attribution_from_receipt, evaluate_host_permission_rule_conjunction,
 };
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -258,7 +262,9 @@ struct LiveProcessEntry {
     observer_failure_cleanup_in_progress: bool,
     observer_quarantine_deferred: bool,
     auto_rule_pending: bool,
-    /// Empty for S1 shell commands: no rule/auto-decision surface exists.
+    /// Structured commands expose one canonical subject. Shell audit subjects
+    /// live in ordered durable segment receipts, so this compatibility string
+    /// stays empty rather than flattening away segment boundaries.
     rule_subject: String,
     auto_approved_by_rule: Option<PermissionRuleAttributionView>,
     #[cfg(any(test, feature = "test-support"))]
@@ -283,6 +289,13 @@ impl SealedCommandAuthority {
         match self {
             Self::Structured(sealed) => sealed.argv(),
             Self::Shell(sealed) => sealed.argv(),
+        }
+    }
+
+    fn shell_command(&self) -> Option<&str> {
+        match self {
+            Self::Structured(_) => None,
+            Self::Shell(sealed) => Some(sealed.command()),
         }
     }
 
@@ -369,7 +382,7 @@ impl SealedCommandAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalPolicy {
     StructuredRules,
-    HumanOnly,
+    ShellRules,
 }
 
 impl std::fmt::Debug for LiveProcessEntry {
@@ -842,7 +855,8 @@ pub fn execute_governed_process(
 
 /// Execute one ACP shell-string proposal through the same reserve, approval,
 /// claim, supervised process, cancellation, timeout and durable receipt path
-/// as [`execute_governed_process`]. S1 always requires a human decision.
+/// as [`execute_governed_process`]. Conservative S2 rules may auto-decide only
+/// when every reliably segmented command has an allow (or any segment denies).
 pub fn execute_governed_shell(
     run_id: RunId,
     provider: ProviderShellProposal,
@@ -868,7 +882,7 @@ pub fn execute_governed_shell(
         provider.call_id,
         Arc::clone(&bound),
         sealed,
-        ApprovalPolicy::HumanOnly,
+        ApprovalPolicy::ShellRules,
         cancellation,
         &mut on_lifecycle,
     )?;
@@ -954,35 +968,41 @@ fn execute_governed_sealed(
     let summary = process_summary(sealed.program(), sealed.argv());
     let risk_class = match approval_policy {
         ApprovalPolicy::StructuredRules => classify_risk(sealed.program(), sealed.argv()),
-        ApprovalPolicy::HumanOnly => ProcessRiskClass::High,
+        ApprovalPolicy::ShellRules => ProcessRiskClass::High,
     };
     let process_cancel = ProcessCancellationSignal::new();
     let proposal_id = row.proposal_id.clone();
-    let (rule_subject, rule_evaluation) = match approval_policy {
+    let (rule_subject, rule_subjects) = match approval_policy {
         ApprovalPolicy::StructuredRules => {
             let subject = canonical_process_subject(sealed.program(), sealed.argv());
-            let evaluation = match evaluate_host_permission_rules(
-                bound.permission_rules.as_deref(),
-                bound.context.project_id(),
-                PermissionRulePrefix::Process,
-                &subject,
-            ) {
-                Ok(evaluation) => evaluation,
-                Err(()) => {
-                    fail_closed_after_reserve(&proposal_id, &bound);
-                    return Err(GovernedProcessBridgeError::Gateway);
-                }
-            };
-            (subject, evaluation)
+            (subject.clone(), Some(vec![subject]))
         }
-        ApprovalPolicy::HumanOnly => (
+        ApprovalPolicy::ShellRules => (
             String::new(),
-            HostPermissionRuleEvaluation::RequireConfirmation,
+            sealed
+                .shell_command()
+                .and_then(conservative_shell_command_segments),
         ),
+    };
+    let rule_evaluation = if let Some(subjects) = rule_subjects {
+        match evaluate_host_permission_rule_conjunction(
+            bound.permission_rules.as_deref(),
+            bound.context.project_id(),
+            PermissionRulePrefix::Process,
+            &subjects,
+        ) {
+            Ok(evaluation) => evaluation,
+            Err(()) => {
+                fail_closed_after_reserve(&proposal_id, &bound);
+                return Err(GovernedProcessBridgeError::Gateway);
+            }
+        }
+    } else {
+        HostPermissionRuleConjunctionEvaluation::RequireConfirmation
     };
     let auto_rule_pending = !matches!(
         &rule_evaluation,
-        HostPermissionRuleEvaluation::RequireConfirmation
+        HostPermissionRuleConjunctionEvaluation::RequireConfirmation
     );
 
     let requested = ProcessProposalRequestedView {
@@ -1062,20 +1082,21 @@ fn execute_governed_sealed(
         return Err(error);
     }
 
-    match rule_evaluation {
-        HostPermissionRuleEvaluation::Allow(matched)
-        | HostPermissionRuleEvaluation::Deny(matched) => {
-            if let Err(error) = decide_process_proposal_by_rule(
-                bound.owner,
-                bound.context.conversation_id(),
-                &proposal_id,
-                &matched,
-            ) {
-                fail_closed_after_reserve(&proposal_id, &bound);
-                return Err(error);
-            }
-        }
-        HostPermissionRuleEvaluation::RequireConfirmation => {}
+    let rule_matches = match rule_evaluation {
+        HostPermissionRuleConjunctionEvaluation::Allow(matched) => Some(matched),
+        HostPermissionRuleConjunctionEvaluation::Deny(matched) => Some(vec![matched]),
+        HostPermissionRuleConjunctionEvaluation::RequireConfirmation => None,
+    };
+    if let Some(matched) = rule_matches
+        && let Err(error) = decide_process_proposal_by_rules(
+            bound.owner,
+            bound.context.conversation_id(),
+            &proposal_id,
+            &matched,
+        )
+    {
+        fail_closed_after_reserve(&proposal_id, &bound);
+        return Err(error);
     }
 
     wait_for_resolution(
@@ -1810,13 +1831,16 @@ pub fn decide_process_proposal(
     decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, None)
 }
 
-fn decide_process_proposal_by_rule(
+fn decide_process_proposal_by_rules(
     owner: Uuid,
     conversation_id: &str,
     proposal_id: &str,
-    matched: &PermissionRuleMatchSnapshot,
+    matched: &[PermissionRuleSegmentMatchSnapshot],
 ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
-    let decision = match matched.rule.action {
+    let first = matched
+        .first()
+        .ok_or(GovernedProcessBridgeError::DecisionDenied)?;
+    let decision = match first.matched.rule.action {
         PermissionRuleAction::Allow => ExecDecision::ApproveOnce,
         PermissionRuleAction::Deny => ExecDecision::Reject,
     };
@@ -1828,7 +1852,7 @@ fn decide_process_proposal_inner(
     conversation_id: &str,
     proposal_id: &str,
     decision: ExecDecision,
-    matched: Option<&PermissionRuleMatchSnapshot>,
+    matched: Option<&[PermissionRuleSegmentMatchSnapshot]>,
 ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
     reconcile_expired_for_owner(owner, Some(conversation_id))?;
 
@@ -1889,7 +1913,7 @@ fn decide_process_proposal_inner(
             .permission_rules
             .as_deref()
             .ok_or(GovernedProcessBridgeError::Gateway)?
-            .decide_exec_by_rule(
+            .decide_exec_by_rule_segments(
                 proposal_id,
                 conversation_id,
                 matched,

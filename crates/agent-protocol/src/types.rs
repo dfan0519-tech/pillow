@@ -332,20 +332,24 @@ pub struct ProcessProposalDecidedPayload {
     pub program: String,
     pub decision: ExecDecision,
     pub state: ExecProposalState,
-    /// Set when a permission rule decided this instead of a human.
+    /// Set when permission rules decided this instead of a human.
     ///
     /// The timeline is built from events, so attribution has to ride on the
     /// event: an auto-approval the user cannot see afterwards is the same as no
-    /// approval at all. Absent means a human decided.
+    /// approval at all. For a conjunctive process approval this compatibility
+    /// projection is the lowest-index segment's contributing rule; the durable
+    /// process receipt owns the complete per-segment rule snapshots. Absent
+    /// means a human decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_approved_by_rule: Option<PermissionRuleAttribution>,
 }
 
-/// Which permission rule decided an operation, for display and audit.
+/// Representative permission-rule attribution for display and event history.
 ///
 /// Lives here rather than in the host so the event contract and the host share
 /// one definition — this repository has already paid for the same invariant
-/// existing in several places.
+/// existing in several places. Process audit code must use the durable ordered
+/// segment receipts when a command was approved by a conjunction of rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionRuleAttribution {

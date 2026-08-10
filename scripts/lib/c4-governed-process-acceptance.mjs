@@ -387,10 +387,16 @@ export async function assertSingleApprovalSlot(page) {
  * Optional `debug` writes a phase-labeled DOM dump + screenshot on timeout so
  * intermittent `command-approval-bar` misses leave RED forensics on disk.
  *
+ * Shell proposals (`commandKind: "shell"`) render as kind + full command text
+ * (no `command-approval-program` node). Pass `expectedExactCommand` for the
+ * character-identical sealed-command assertion that catches JSON escape drift.
+ *
  * @param {{
  *   page: import('playwright-core').Page,
  *   expectedProgram?: string,
  *   expectedArgvNeedle?: string,
+ *   expectedExactCommand?: string,
+ *   commandKind?: "structured" | "shell",
  *   timeoutMs?: number,
  *   debug?: {
  *     dumpDir?: string,
@@ -403,11 +409,19 @@ export async function waitForCommandApproval({
   page,
   expectedProgram = "node",
   expectedArgvNeedle,
+  expectedExactCommand,
+  commandKind = "structured",
   timeoutMs = DEFAULT_TIMEOUT_MS,
   debug = null,
 }) {
   assertPage(page);
-  assertNonEmptyString(expectedProgram, "expectedProgram");
+  const isShell = commandKind === "shell";
+  if (!isShell) {
+    assertNonEmptyString(expectedProgram, "expectedProgram");
+  }
+  if (expectedExactCommand !== undefined) {
+    assertNonEmptyString(expectedExactCommand, "expectedExactCommand");
+  }
 
   const bar = page.getByTestId(PROCESS_TEST_IDS.approval);
   const t0 = performance.now();
@@ -446,6 +460,8 @@ export async function waitForCommandApproval({
     dump.waitMs = Math.round(performance.now() - t0);
     dump.expectedProgram = expectedProgram;
     dump.expectedArgvNeedle = expectedArgvNeedle ?? null;
+    dump.expectedExactCommand = expectedExactCommand ?? null;
+    dump.commandKind = commandKind;
     dump.waitError = cause instanceof Error ? cause.message : String(cause);
     if (debug?.dumpDir) {
       const { mkdir, writeFile } = await import("node:fs/promises");
@@ -483,22 +499,84 @@ export async function waitForCommandApproval({
     throw err;
   }
 
-  const programText = (
-    await page.getByTestId("command-approval-program").innerText()
-  ).trim();
-  assert.ok(
-    programText.includes(expectedProgram) || programText === "命令",
-    `approval program must include ${expectedProgram} or redacted 命令, got ${JSON.stringify(programText)}`,
+  // Hard requirement: the bar must actually render. "No crash" alone is not
+  // enough — that is how shell proposals previously stayed invisible while
+  // the suite stayed green.
+  assert.equal(
+    await bar.isVisible(),
+    true,
+    "command-approval-bar must be visible (data-testid present and shown)",
   );
 
-  if (expectedArgvNeedle) {
-    const argvText = (
-      await page.getByTestId("command-approval-argv").innerText()
+  let programText = "";
+  let displayedCommand = "";
+
+  if (isShell) {
+    const kindAttr = await bar.getAttribute("data-command-kind");
+    assert.equal(
+      kindAttr,
+      "shell",
+      `shell approval bar must set data-command-kind=shell, got ${JSON.stringify(kindAttr)}`,
+    );
+    const kindText = (
+      await page.getByTestId("command-approval-kind").innerText().catch(() => "")
     ).trim();
     assert.ok(
-      argvText.includes(expectedArgvNeedle),
-      `approval argv must include ${JSON.stringify(expectedArgvNeedle)}, got ${JSON.stringify(argvText)}`,
+      kindText.includes("Shell") || kindText.includes("shell"),
+      `shell approval kind label missing, got ${JSON.stringify(kindText)}`,
     );
+    programText = kindText || "shell";
+
+    const argv = page.getByTestId("command-approval-argv");
+    await argv.waitFor({ state: "visible", timeout: timeoutMs });
+    // Prefer data-full-command (not CSS-truncated); fall back to textContent.
+    const fullAttr = await argv.getAttribute("data-full-command");
+    displayedCommand = (fullAttr ?? (await argv.innerText())).trimEnd();
+    // Host/UI must not strip a trailing newline if the proposal had one; our
+    // sealed command has none, so compare as sealed.
+    if (expectedExactCommand !== undefined) {
+      assert.equal(
+        displayedCommand,
+        expectedExactCommand,
+        "shell approval command must match the sealed proposal character-for-character "
+        + `(expected ${JSON.stringify(expectedExactCommand)}, got ${JSON.stringify(displayedCommand)})`,
+      );
+    } else if (expectedArgvNeedle) {
+      assert.ok(
+        displayedCommand.includes(expectedArgvNeedle),
+        `shell approval command must include ${JSON.stringify(expectedArgvNeedle)}, `
+        + `got ${JSON.stringify(displayedCommand)}`,
+      );
+    }
+  } else {
+    programText = (
+      await page.getByTestId("command-approval-program").innerText()
+    ).trim();
+    assert.ok(
+      programText.includes(expectedProgram) || programText === "命令",
+      `approval program must include ${expectedProgram} or redacted 命令, got ${JSON.stringify(programText)}`,
+    );
+
+    if (expectedArgvNeedle) {
+      const argvText = (
+        await page.getByTestId("command-approval-argv").innerText()
+      ).trim();
+      assert.ok(
+        argvText.includes(expectedArgvNeedle),
+        `approval argv must include ${JSON.stringify(expectedArgvNeedle)}, got ${JSON.stringify(argvText)}`,
+      );
+      displayedCommand = argvText;
+    }
+    if (expectedExactCommand !== undefined) {
+      const argv = page.getByTestId("command-approval-argv");
+      const fullAttr = await argv.getAttribute("data-full-command");
+      displayedCommand = (fullAttr ?? (await argv.innerText())).trimEnd();
+      assert.equal(
+        displayedCommand,
+        expectedExactCommand,
+        "approval argv must match expectedExactCommand character-for-character",
+      );
+    }
   }
 
   await assertSingleApprovalSlot(page);
@@ -513,11 +591,44 @@ export async function waitForCommandApproval({
   return {
     barVisible: true,
     program: programText,
+    displayedCommand,
+    commandKind,
     approveFocused: true,
     singleBar: true,
     everVisibleDuringWait: everVisible,
     visibilitySamples,
   };
+}
+
+/**
+ * Shell-specific approval wait: bar must render and the displayed command must
+ * equal the sealed proposal string character-for-character.
+ *
+ * @param {{
+ *   page: import('playwright-core').Page,
+ *   expectedCommand: string,
+ *   timeoutMs?: number,
+ *   debug?: {
+ *     dumpDir?: string,
+ *     label?: string,
+ *     phase?: string,
+ *   },
+ * }} args
+ */
+export async function waitForShellCommandApproval({
+  page,
+  expectedCommand,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  debug = null,
+}) {
+  assertNonEmptyString(expectedCommand, "expectedCommand");
+  return waitForCommandApproval({
+    page,
+    commandKind: "shell",
+    expectedExactCommand: expectedCommand,
+    timeoutMs,
+    debug,
+  });
 }
 
 /**

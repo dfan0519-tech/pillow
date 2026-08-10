@@ -48,7 +48,7 @@ fn add(
 }
 
 #[test]
-fn migration_0012_is_idempotent_and_creates_rule_and_receipt_tables() {
+fn permission_rule_migrations_are_idempotent_and_create_rule_and_receipt_tables() {
     let temp = tempfile::tempdir().unwrap();
     let path = db_path(&temp);
 
@@ -60,6 +60,7 @@ fn migration_0012_is_idempotent_and_creates_rule_and_receipt_tables() {
         "permission_rules",
         "write_permission_rule_receipts",
         "exec_permission_rule_receipts",
+        "exec_permission_rule_segment_receipts",
     ] {
         let count: i64 = connection
             .query_row(

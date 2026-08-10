@@ -26,9 +26,10 @@ use uuid::Uuid;
 
 use crate::permission_rules::{
     PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
-    PermissionRuleReceiptActor, PermissionRuleReceiptDecision, StoredPermissionRuleReceipt,
-    permission_rule_receipt_from_row, receipt_matches_snapshot, rule_snapshot_exists,
-    validate_rule_match_snapshot,
+    PermissionRuleReceiptActor, PermissionRuleReceiptDecision, PermissionRuleSegmentMatchSnapshot,
+    StoredPermissionRuleReceipt, StoredPermissionRuleSegmentReceipt,
+    permission_rule_receipt_from_row, permission_rule_segment_receipt_from_row,
+    receipt_matches_snapshot, rule_snapshot_exists, validate_rule_match_snapshot,
 };
 
 /// Maximum run-lease duration the repository will accept (milliseconds).
@@ -119,7 +120,7 @@ pub enum ExecDecisionOutcome {
 
 enum ExecDecisionSource<'a> {
     Human(ExecDecision),
-    Rule(&'a PermissionRuleMatchSnapshot),
+    Rule(&'a [PermissionRuleSegmentMatchSnapshot]),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,11 +367,57 @@ impl SqliteExecProposalRepository {
         proposal_fingerprint: &str,
         now: DateTime<Utc>,
     ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
-        validate_rule_match_snapshot(matched)
-            .map_err(|_| ExecProposalStoreError::InvalidRuleReceipt)?;
-        if matched.rule.prefix != PermissionRulePrefix::Process {
-            return Err(ExecProposalStoreError::InvalidRuleReceipt);
-        }
+        self.decide_by_rules(
+            proposal_id,
+            conversation_id,
+            std::slice::from_ref(matched),
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
+    pub fn decide_by_rules(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        matched: &[PermissionRuleMatchSnapshot],
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
+        let matched = matched
+            .iter()
+            .enumerate()
+            .map(|(segment_index, matched)| {
+                u32::try_from(segment_index)
+                    .map(|segment_index| PermissionRuleSegmentMatchSnapshot {
+                        segment_index,
+                        matched: matched.clone(),
+                    })
+                    .map_err(|_| ExecProposalStoreError::InvalidRuleReceipt)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.decide_by_rule_segments(
+            proposal_id,
+            conversation_id,
+            &matched,
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
+    pub fn decide_by_rule_segments(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        matched: &[PermissionRuleSegmentMatchSnapshot],
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
+        validate_rule_decision(matched)?;
         self.decide_internal(
             proposal_id,
             conversation_id,
@@ -389,6 +436,14 @@ impl SqliteExecProposalRepository {
         load_rule_receipt(&connection, proposal_id)
     }
 
+    pub fn get_rule_receipts(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<StoredPermissionRuleSegmentReceipt>, ExecProposalStoreError> {
+        let connection = self.connection()?;
+        load_rule_receipts(&connection, proposal_id)
+    }
+
     fn decide_internal(
         &self,
         proposal_id: &str,
@@ -400,13 +455,7 @@ impl SqliteExecProposalRepository {
     ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
         let (decision, matched) = match source {
             ExecDecisionSource::Human(decision) => (decision, None),
-            ExecDecisionSource::Rule(matched) => {
-                let decision = match matched.rule.action {
-                    PermissionRuleAction::Allow => ExecDecision::ApproveOnce,
-                    PermissionRuleAction::Deny => ExecDecision::Reject,
-                };
-                (decision, Some(matched))
-            }
+            ExecDecisionSource::Rule(matched) => (validate_rule_decision(matched)?, Some(matched)),
         };
         self.begin_mutation()?;
         validate_canonical_digest(approval_grant_digest)?;
@@ -420,10 +469,16 @@ impl SqliteExecProposalRepository {
         if current.conversation_id != conversation_id {
             return Err(ExecProposalStoreError::OwnershipMismatch);
         }
-        if let Some(matched) = matched {
+        if let Some(matched) = matched
+            && current.program != "shell"
+        {
             let program_prefix = format!("{} ", current.program);
-            if matched.match_subject != current.program
-                && !matched.match_subject.starts_with(&program_prefix)
+            if matched.len() != 1
+                || (matched[0].matched.match_subject != current.program
+                    && !matched[0]
+                        .matched
+                        .match_subject
+                        .starts_with(&program_prefix))
             {
                 return Err(ExecProposalStoreError::InvalidRuleReceipt);
             }
@@ -435,11 +490,18 @@ impl SqliteExecProposalRepository {
 
         if let Some(existing_decision) = load_decision(&transaction, proposal_id)? {
             let existing_rule_receipt = load_rule_receipt(&transaction, proposal_id)?;
+            let existing_rule_receipts = load_rule_receipts(&transaction, proposal_id)?;
             let same_source = match (matched, existing_rule_receipt.as_ref()) {
-                (None, None) => true,
+                (None, None) => existing_rule_receipts.is_empty(),
                 (Some(matched), Some(receipt)) => {
-                    receipt_matches_snapshot(receipt, matched)
-                        && receipt.decision == rule_receipt_decision(matched.rule.action)
+                    let first = &matched[0].matched;
+                    receipt_matches_snapshot(receipt, first)
+                        && receipt.decision == rule_receipt_decision(first.rule.action)
+                        && if existing_rule_receipts.is_empty() {
+                            matched.len() == 1
+                        } else {
+                            rule_receipts_match_snapshots(&existing_rule_receipts, matched)
+                        }
                 }
                 (None, Some(_)) | (Some(_), None) => false,
             };
@@ -469,11 +531,13 @@ impl SqliteExecProposalRepository {
             return Ok(ExecDecisionOutcome::Conflict(current));
         }
 
-        if let Some(matched) = matched
-            && !rule_snapshot_exists(&transaction, matched).map_err(map_sqlite)?
-        {
-            transaction.commit().map_err(map_sqlite)?;
-            return Ok(ExecDecisionOutcome::Conflict(current));
+        if let Some(matched) = matched {
+            for snapshot in matched {
+                if !rule_snapshot_exists(&transaction, &snapshot.matched).map_err(map_sqlite)? {
+                    transaction.commit().map_err(map_sqlite)?;
+                    return Ok(ExecDecisionOutcome::Conflict(current));
+                }
+            }
         }
 
         if is_exec_terminal(current.state) {
@@ -532,7 +596,8 @@ impl SqliteExecProposalRepository {
         }
 
         if let Some(matched) = matched {
-            insert_rule_receipt(&transaction, proposal_id, matched, now)?;
+            insert_rule_receipt(&transaction, proposal_id, &matched[0].matched, now)?;
+            insert_rule_segment_receipts(&transaction, proposal_id, matched, now)?;
         }
 
         let updated = force_transition(&transaction, &current, next, None, now)?;
@@ -1248,6 +1313,27 @@ fn load_rule_receipt(
         .map_err(map_sqlite)
 }
 
+fn load_rule_receipts(
+    connection: &Connection,
+    proposal_id: &str,
+) -> Result<Vec<StoredPermissionRuleSegmentReceipt>, ExecProposalStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT proposal_id, decision, actor, rule_id, rule_scope, rule_project_id,
+                    rule_prefix, rule_pattern, rule_action, rule_content_digest,
+                    match_subject, decided_at, segment_index
+             FROM exec_permission_rule_segment_receipts
+             WHERE proposal_id = ?1
+             ORDER BY segment_index ASC",
+        )
+        .map_err(map_sqlite)?;
+    statement
+        .query_map([proposal_id], permission_rule_segment_receipt_from_row)
+        .map_err(map_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_sqlite)
+}
+
 fn insert_rule_receipt(
     connection: &Connection,
     proposal_id: &str,
@@ -1278,6 +1364,82 @@ fn insert_rule_receipt(
         )
         .map_err(map_sqlite)?;
     Ok(())
+}
+
+fn insert_rule_segment_receipts(
+    connection: &Connection,
+    proposal_id: &str,
+    matched: &[PermissionRuleSegmentMatchSnapshot],
+    now: DateTime<Utc>,
+) -> Result<(), ExecProposalStoreError> {
+    for snapshot in matched {
+        connection
+            .execute(
+                "INSERT INTO exec_permission_rule_segment_receipts (
+                    proposal_id, segment_index, decision, actor, rule_id, rule_scope,
+                    rule_project_id, rule_prefix, rule_pattern, rule_action,
+                    rule_content_digest, match_subject, decided_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    proposal_id,
+                    snapshot.segment_index,
+                    rule_receipt_decision(snapshot.matched.rule.action).as_str(),
+                    PermissionRuleReceiptActor::RuleEngine.as_str(),
+                    snapshot.matched.rule.rule_id,
+                    snapshot.matched.rule.scope.as_str(),
+                    snapshot.matched.rule.project_id,
+                    snapshot.matched.rule.prefix.as_str(),
+                    snapshot.matched.rule.pattern,
+                    snapshot.matched.rule.action.as_str(),
+                    snapshot.matched.rule.content_digest,
+                    snapshot.matched.match_subject,
+                    now.to_rfc3339(),
+                ],
+            )
+            .map_err(map_sqlite)?;
+    }
+    Ok(())
+}
+
+fn validate_rule_decision(
+    matched: &[PermissionRuleSegmentMatchSnapshot],
+) -> Result<ExecDecision, ExecProposalStoreError> {
+    let first = matched
+        .first()
+        .ok_or(ExecProposalStoreError::InvalidRuleReceipt)?;
+    let action = first.matched.rule.action;
+    for (position, snapshot) in matched.iter().enumerate() {
+        validate_rule_match_snapshot(&snapshot.matched)
+            .map_err(|_| ExecProposalStoreError::InvalidRuleReceipt)?;
+        if snapshot.matched.rule.prefix != PermissionRulePrefix::Process
+            || snapshot.matched.rule.action != action
+            || (action == PermissionRuleAction::Allow
+                && snapshot.segment_index
+                    != u32::try_from(position)
+                        .map_err(|_| ExecProposalStoreError::InvalidRuleReceipt)?)
+        {
+            return Err(ExecProposalStoreError::InvalidRuleReceipt);
+        }
+    }
+    if action == PermissionRuleAction::Deny && matched.len() != 1 {
+        return Err(ExecProposalStoreError::InvalidRuleReceipt);
+    }
+    Ok(match action {
+        PermissionRuleAction::Allow => ExecDecision::ApproveOnce,
+        PermissionRuleAction::Deny => ExecDecision::Reject,
+    })
+}
+
+fn rule_receipts_match_snapshots(
+    receipts: &[StoredPermissionRuleSegmentReceipt],
+    matched: &[PermissionRuleSegmentMatchSnapshot],
+) -> bool {
+    receipts.len() == matched.len()
+        && receipts.iter().zip(matched).all(|(receipt, snapshot)| {
+            receipt.segment_index == snapshot.segment_index
+                && receipt_matches_snapshot(&receipt.receipt, &snapshot.matched)
+                && receipt.receipt.decision == rule_receipt_decision(snapshot.matched.rule.action)
+        })
 }
 
 fn rule_receipt_decision(action: PermissionRuleAction) -> PermissionRuleReceiptDecision {

@@ -1,13 +1,16 @@
 //! Host-side permission-rule loading, pure-policy evaluation and view mapping.
 
 use keeper_policy::{
-    PermissionRuleAction as PolicyAction, PermissionRuleEvaluation as PolicyEvaluation,
-    PermissionRulePrefix as PolicyPrefix, PermissionRuleScope as PolicyScope, PermissionRuleSpec,
+    MatchedPermissionRuleSegment, PermissionRuleAction as PolicyAction,
+    PermissionRuleConjunctionEvaluation as PolicyConjunctionEvaluation,
+    PermissionRuleEvaluation as PolicyEvaluation, PermissionRulePrefix as PolicyPrefix,
+    PermissionRuleScope as PolicyScope, PermissionRuleSpec, evaluate_permission_rule_conjunction,
     evaluate_permission_rules,
 };
 use keeper_storage_sqlite::{
     PermissionRule, PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
-    PermissionRuleScope, SqlitePermissionRuleRepository, StoredPermissionRuleReceipt,
+    PermissionRuleScope, PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository,
+    StoredPermissionRuleReceipt,
 };
 
 /// Rule attribution for host-side views.
@@ -20,6 +23,12 @@ pub type PermissionRuleAttributionView = keeper_agent_protocol::PermissionRuleAt
 pub(crate) enum HostPermissionRuleEvaluation {
     Deny(PermissionRuleMatchSnapshot),
     Allow(PermissionRuleMatchSnapshot),
+    RequireConfirmation,
+}
+
+pub(crate) enum HostPermissionRuleConjunctionEvaluation {
+    Deny(PermissionRuleSegmentMatchSnapshot),
+    Allow(Vec<PermissionRuleSegmentMatchSnapshot>),
     RequireConfirmation,
 }
 
@@ -42,10 +51,40 @@ pub(crate) fn evaluate_host_permission_rules(
         PolicyEvaluation::RequireConfirmation => {
             Ok(HostPermissionRuleEvaluation::RequireConfirmation)
         }
-        PolicyEvaluation::Allow(matched) => find_match(stored, matched.rule.rule_id, subject)
+        PolicyEvaluation::Allow(matched) => find_match(&stored, &matched.rule.rule_id, subject)
             .map(HostPermissionRuleEvaluation::Allow),
-        PolicyEvaluation::Deny(matched) => find_match(stored, matched.rule.rule_id, subject)
+        PolicyEvaluation::Deny(matched) => find_match(&stored, &matched.rule.rule_id, subject)
             .map(HostPermissionRuleEvaluation::Deny),
+    }
+}
+
+pub(crate) fn evaluate_host_permission_rule_conjunction(
+    repository: Option<&SqlitePermissionRuleRepository>,
+    project_id: &str,
+    prefix: PermissionRulePrefix,
+    subjects: &[String],
+) -> Result<HostPermissionRuleConjunctionEvaluation, ()> {
+    let Some(repository) = repository else {
+        return Ok(HostPermissionRuleConjunctionEvaluation::RequireConfirmation);
+    };
+    let stored = repository
+        .list_effective(Some(project_id))
+        .map_err(|_| ())?;
+    let policy_prefix = policy_prefix(prefix);
+    let policy_rules = stored.iter().map(policy_rule).collect::<Vec<_>>();
+
+    match evaluate_permission_rule_conjunction(policy_prefix, subjects, &policy_rules) {
+        PolicyConjunctionEvaluation::RequireConfirmation => {
+            Ok(HostPermissionRuleConjunctionEvaluation::RequireConfirmation)
+        }
+        PolicyConjunctionEvaluation::Allow(matched) => matched
+            .into_iter()
+            .map(|matched| find_segment_match(&stored, matched))
+            .collect::<Result<Vec<_>, _>>()
+            .map(HostPermissionRuleConjunctionEvaluation::Allow),
+        PolicyConjunctionEvaluation::Deny(matched) => {
+            find_segment_match(&stored, matched).map(HostPermissionRuleConjunctionEvaluation::Deny)
+        }
     }
 }
 
@@ -60,17 +99,32 @@ pub(crate) fn attribution_from_receipt(
 }
 
 fn find_match(
-    rules: Vec<PermissionRule>,
-    rule_id: String,
+    rules: &[PermissionRule],
+    rule_id: &str,
     subject: &str,
 ) -> Result<PermissionRuleMatchSnapshot, ()> {
     let rule = rules
-        .into_iter()
+        .iter()
         .find(|rule| rule.rule_id == rule_id)
+        .cloned()
         .ok_or(())?;
     Ok(PermissionRuleMatchSnapshot {
         rule,
         match_subject: subject.to_owned(),
+    })
+}
+
+fn find_segment_match(
+    rules: &[PermissionRule],
+    matched: MatchedPermissionRuleSegment,
+) -> Result<PermissionRuleSegmentMatchSnapshot, ()> {
+    Ok(PermissionRuleSegmentMatchSnapshot {
+        segment_index: u32::try_from(matched.segment_index).map_err(|_| ())?,
+        matched: find_match(
+            rules,
+            &matched.matched.rule.rule_id,
+            &matched.matched.match_subject,
+        )?,
     })
 }
 

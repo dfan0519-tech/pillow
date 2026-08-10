@@ -14,6 +14,8 @@ const SETTINGS_MIGRATION: &str = include_str!("../migrations/0009_settings.sql")
 const KNOWLEDGE_MIGRATION: &str = include_str!("../migrations/0010_knowledge.sql");
 const KNOWLEDGE_TASKS_MIGRATION: &str = include_str!("../migrations/0011_knowledge_tasks.sql");
 const PERMISSION_RULES_MIGRATION: &str = include_str!("../migrations/0012_permission_rules.sql");
+const EXEC_PERMISSION_RULE_SEGMENTS_MIGRATION: &str =
+    include_str!("../migrations/0013_exec_permission_rule_segments.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -25,6 +27,7 @@ const PERMISSION_RULES_MIGRATION: &str = include_str!("../migrations/0012_permis
 /// Migration 0010 adds the knowledge document registry and multi-valued links.
 /// Migration 0011 adds the dispatch / acceptance ledger (tasks + verdicts).
 /// Migration 0012 adds permission rules and rule-attributed decision receipts.
+/// Migration 0013 adds ordered per-segment process-rule receipt snapshots.
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -38,6 +41,7 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(KNOWLEDGE_MIGRATION)?;
     connection.execute_batch(KNOWLEDGE_TASKS_MIGRATION)?;
     connection.execute_batch(PERMISSION_RULES_MIGRATION)?;
+    connection.execute_batch(EXEC_PERMISSION_RULE_SEGMENTS_MIGRATION)?;
     Ok(())
 }
 

@@ -16,8 +16,8 @@ use keeper_storage_sqlite::{
     AddPermissionRule, ExecDecisionOutcome, ExecProposalReserveInput, ExecReservationOutcome,
     ExecRunClaimOutcome, ExecTerminalReceipt, PermissionRuleAction, PermissionRuleMatchSnapshot,
     PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
-    PermissionRuleScope, SqliteExecProposalRepository, SqlitePermissionRuleRepository,
-    StoredExecProposal,
+    PermissionRuleScope, PermissionRuleSegmentMatchSnapshot, SqliteExecProposalRepository,
+    SqlitePermissionRuleRepository, StoredExecProposal,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -250,6 +250,178 @@ fn project_rule_deny_persists_reject_by_rule_with_complete_snapshot() {
         )
         .unwrap();
     assert_eq!(stored_decision, "reject_by_rule");
+}
+
+#[test]
+fn conjunctive_shell_allow_persists_an_ordered_complete_snapshot_for_every_segment() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let mut input = reserve_input(&fx, "rule-conjunction", 0xA11);
+    input.program = "shell".into();
+    fx.store.reserve(&input).unwrap();
+    let cargo = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Global,
+        PermissionRuleAction::Allow,
+        "cargo test",
+        "cargo test",
+    );
+    let rustc = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Global,
+        PermissionRuleAction::Allow,
+        "rustc --version",
+        "rustc --version",
+    );
+    let decided_at = Utc::now();
+
+    let outcome = fx
+        .store
+        .decide_by_rules(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &[cargo.clone(), rustc.clone()],
+            &grant_digest(0xA11),
+            &input.proposal_fingerprint,
+            decided_at,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ExecDecisionOutcome::Accepted(ref row) if row.state == ExecProposalState::Approved
+    ));
+
+    let receipts = fx.store.get_rule_receipts(&input.proposal_id).unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0].segment_index, 0);
+    assert_eq!(receipts[0].receipt.rule_id, cargo.rule.rule_id);
+    assert_eq!(receipts[0].receipt.rule_pattern, "cargo test");
+    assert_eq!(
+        receipts[0].receipt.rule_content_digest,
+        cargo.rule.content_digest
+    );
+    assert_eq!(receipts[0].receipt.match_subject, "cargo test");
+    assert_eq!(receipts[0].receipt.decided_at, decided_at);
+    assert_eq!(receipts[1].segment_index, 1);
+    assert_eq!(receipts[1].receipt.rule_id, rustc.rule.rule_id);
+    assert_eq!(receipts[1].receipt.rule_pattern, "rustc --version");
+    assert_eq!(
+        receipts[1].receipt.rule_content_digest,
+        rustc.rule.content_digest
+    );
+    assert_eq!(receipts[1].receipt.match_subject, "rustc --version");
+
+    let representative = fx
+        .store
+        .get_rule_receipt(&input.proposal_id)
+        .unwrap()
+        .expect("backward-compatible representative receipt");
+    assert_eq!(representative.rule_id, cargo.rule.rule_id);
+    assert_eq!(representative.match_subject, "cargo test");
+
+    let rules = SqlitePermissionRuleRepository::open(&fx.db_path).unwrap();
+    assert!(rules.delete(&cargo.rule.rule_id).unwrap());
+    assert!(rules.delete(&rustc.rule.rule_id).unwrap());
+    let retained = fx.store.get_rule_receipts(&input.proposal_id).unwrap();
+    assert_eq!(
+        retained, receipts,
+        "rule deletion must not erase audit history"
+    );
+
+    let connection = Connection::open(&fx.db_path).unwrap();
+    let row_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM exec_permission_rule_segment_receipts WHERE proposal_id = ?1",
+            [&input.proposal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(row_count, 2);
+}
+
+#[test]
+fn mixed_rule_actions_cannot_create_a_partial_conjunctive_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let mut input = reserve_input(&fx, "rule-mixed-actions", 0xA12);
+    input.program = "shell".into();
+    fx.store.reserve(&input).unwrap();
+    let allow = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Global,
+        PermissionRuleAction::Allow,
+        "cargo test",
+        "cargo test",
+    );
+    let deny = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Project,
+        PermissionRuleAction::Deny,
+        "rm -rf",
+        "rm -rf x",
+    );
+
+    assert_eq!(
+        fx.store.decide_by_rules(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &[allow, deny],
+            &grant_digest(0xA12),
+            &input.proposal_fingerprint,
+            Utc::now(),
+        ),
+        Err(keeper_storage_sqlite::ExecProposalStoreError::InvalidRuleReceipt)
+    );
+    assert!(
+        fx.store
+            .get_rule_receipts(&input.proposal_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fx.store.get(&input.proposal_id).unwrap().unwrap().state,
+        ExecProposalState::PendingApproval
+    );
+}
+
+#[test]
+fn denied_shell_segment_receipt_retains_its_original_command_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let mut input = reserve_input(&fx, "rule-deny-index", 0xA13);
+    input.program = "shell".into();
+    fx.store.reserve(&input).unwrap();
+    let deny = stored_rule_match(
+        &fx,
+        PermissionRuleScope::Project,
+        PermissionRuleAction::Deny,
+        "rm -rf",
+        "rm -rf x",
+    );
+
+    let outcome = fx
+        .store
+        .decide_by_rule_segments(
+            &input.proposal_id,
+            &fx.conversation_id,
+            &[PermissionRuleSegmentMatchSnapshot {
+                segment_index: 2,
+                matched: deny.clone(),
+            }],
+            &grant_digest(0xA13),
+            &input.proposal_fingerprint,
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ExecDecisionOutcome::Accepted(ref row) if row.state == ExecProposalState::Rejected
+    ));
+    let receipts = fx.store.get_rule_receipts(&input.proposal_id).unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].segment_index, 2);
+    assert_eq!(receipts[0].receipt.rule_id, deny.rule.rule_id);
+    assert_eq!(receipts[0].receipt.match_subject, "rm -rf x");
 }
 
 #[test]

@@ -202,11 +202,20 @@ fn add_process_rule(
     pattern: &str,
     action: PermissionRuleAction,
 ) -> keeper_storage_sqlite::PermissionRule {
+    add_process_rule_scoped(fx, PermissionRuleScope::Global, pattern, action)
+}
+
+fn add_process_rule_scoped(
+    fx: &Fixture,
+    scope: PermissionRuleScope,
+    pattern: &str,
+    action: PermissionRuleAction,
+) -> keeper_storage_sqlite::PermissionRule {
     SqlitePermissionRuleRepository::open(&fx.db)
         .unwrap()
         .add(AddPermissionRule {
-            scope: PermissionRuleScope::Global,
-            project_id: None,
+            scope,
+            project_id: (scope == PermissionRuleScope::Project).then(|| fx.project_id.clone()),
             prefix: PermissionRulePrefix::Process,
             pattern: pattern.to_owned(),
             action,
@@ -265,17 +274,14 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
 }
 
 #[test]
-fn shell_command_ignores_auto_allow_and_retains_the_exact_approved_subject_and_output() {
+fn ambiguous_shell_command_requires_human_and_retains_the_exact_approved_subject_and_output() {
     let fx = fixture();
     add_process_rule(&fx, "*", PermissionRuleAction::Allow);
     let host = Arc::new(host_for(&fx));
     register(&host, &fx);
     let conversation_id = fx.conversation_id.clone();
     let decision_host = Arc::clone(&host);
-    #[cfg(windows)]
-    let command = "echo governed shell exact && echo second";
-    #[cfg(not(windows))]
-    let command = "printf 'governed shell exact' && printf second";
+    let command = "echo \"governed shell exact\"";
     let expected = command.to_owned();
     let decide = thread::spawn(move || {
         let proposal_id = wait_live_pending(&decision_host, &conversation_id);
@@ -307,7 +313,7 @@ fn shell_command_ignores_auto_allow_and_retains_the_exact_approved_subject_and_o
     let receipt = execute_governed_shell(
         fx.run_id,
         ProviderShellProposal {
-            call_id: "shell-human-only".into(),
+            call_id: "shell-ambiguous-human".into(),
             command: command.into(),
             portable_cwd: Some(".".into()),
         },
@@ -334,7 +340,7 @@ fn shell_command_ignores_auto_allow_and_retains_the_exact_approved_subject_and_o
             .get_rule_receipt(&receipt.process.proposal_id)
             .unwrap(),
         None,
-        "S1 shell commands must never receive rule attribution"
+        "an ambiguous shell command must not fabricate rule attribution"
     );
 
     let structured_error = execute_governed_process(
@@ -354,6 +360,198 @@ fn shell_command_ignores_auto_allow_and_retains_the_exact_approved_subject_and_o
         GovernedProcessBridgeError::InvalidProposal
     );
     host.shutdown().unwrap();
+}
+
+#[test]
+fn simple_shell_conjunction_auto_executes_and_persists_each_contributing_rule() {
+    let fx = fixture();
+    let first_rule = add_process_rule(&fx, "echo s2-first", PermissionRuleAction::Allow);
+    let second_rule = add_process_rule(&fx, "echo s2-second", PermissionRuleAction::Allow);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    let fallback_used = Arc::new(AtomicBool::new(false));
+    let fallback_flag = Arc::clone(&fallback_used);
+    let fallback_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let fallback = thread::spawn(move || {
+        for _ in 0..200 {
+            if let Ok(list) = fallback_host.list_process_proposals(&conversation_id)
+                && let Some(view) = list.into_iter().find(|view| view.decision_available)
+            {
+                fallback_flag.store(true, Ordering::SeqCst);
+                fallback_host
+                    .decide_process_proposal(
+                        &conversation_id,
+                        &view.proposal_id,
+                        ExecDecision::Reject,
+                    )
+                    .unwrap();
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_shell(
+        fx.run_id,
+        ProviderShellProposal {
+            call_id: "shell-conjunctive-auto".into(),
+            command: "echo s2-first && echo s2-second".into(),
+            portable_cwd: Some(".".into()),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    fallback.join().unwrap();
+
+    assert_eq!(receipt.process.state, ExecProposalState::Succeeded);
+    assert!(!fallback_used.load(Ordering::SeqCst), "human fallback ran");
+    assert!(receipt.output.as_ref().is_some_and(
+        |output| output.output.contains("s2-first") && output.output.contains("s2-second")
+    ));
+    let segment_receipts = SqliteExecProposalRepository::open(&fx.db)
+        .unwrap()
+        .get_rule_receipts(&receipt.process.proposal_id)
+        .unwrap();
+    assert_eq!(segment_receipts.len(), 2);
+    assert_eq!(segment_receipts[0].segment_index, 0);
+    assert_eq!(segment_receipts[0].receipt.rule_id, first_rule.rule_id);
+    assert_eq!(segment_receipts[0].receipt.match_subject, "echo s2-first");
+    assert_eq!(segment_receipts[1].segment_index, 1);
+    assert_eq!(segment_receipts[1].receipt.rule_id, second_rule.rule_id);
+    assert_eq!(segment_receipts[1].receipt.match_subject, "echo s2-second");
+
+    let representative = receipt
+        .process
+        .decided
+        .as_ref()
+        .and_then(|payload| payload.auto_approved_by_rule.as_ref())
+        .expect("existing DTO keeps a representative contributing rule");
+    assert_eq!(representative.pattern, "echo s2-first");
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn project_deny_in_a_later_shell_segment_beats_global_allow_without_execution() {
+    let fx = fixture();
+    add_process_rule(&fx, "*", PermissionRuleAction::Allow);
+    let deny = add_process_rule_scoped(
+        &fx,
+        PermissionRuleScope::Project,
+        "rm -rf",
+        PermissionRuleAction::Deny,
+    );
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    let fallback_used = Arc::new(AtomicBool::new(false));
+    let fallback_flag = Arc::clone(&fallback_used);
+    let fallback_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let fallback = thread::spawn(move || {
+        for _ in 0..200 {
+            if let Ok(list) = fallback_host.list_process_proposals(&conversation_id)
+                && let Some(view) = list.into_iter().find(|view| view.decision_available)
+            {
+                fallback_flag.store(true, Ordering::SeqCst);
+                fallback_host
+                    .decide_process_proposal(
+                        &conversation_id,
+                        &view.proposal_id,
+                        ExecDecision::Reject,
+                    )
+                    .unwrap();
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_shell(
+        fx.run_id,
+        ProviderShellProposal {
+            call_id: "shell-later-deny".into(),
+            command: "echo safe-marker; rm -rf x".into(),
+            portable_cwd: Some(".".into()),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    fallback.join().unwrap();
+
+    assert_eq!(receipt.process.state, ExecProposalState::Rejected);
+    assert!(receipt.process.started.is_none());
+    assert!(
+        !fallback_used.load(Ordering::SeqCst),
+        "deny required a human"
+    );
+    let segment_receipts = SqliteExecProposalRepository::open(&fx.db)
+        .unwrap()
+        .get_rule_receipts(&receipt.process.proposal_id)
+        .unwrap();
+    assert_eq!(segment_receipts.len(), 1);
+    assert_eq!(segment_receipts[0].segment_index, 1);
+    assert_eq!(segment_receipts[0].receipt.rule_id, deny.rule_id);
+    assert_eq!(segment_receipts[0].receipt.match_subject, "rm -rf x");
+    host.shutdown().unwrap();
+}
+
+fn assert_shell_requires_confirmation(command: &str, allow_pattern: &str) {
+    let fx = fixture();
+    add_process_rule(&fx, allow_pattern, PermissionRuleAction::Allow);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let decision_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&decision_host, &conversation_id);
+        decision_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+    });
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_shell(
+        fx.run_id,
+        ProviderShellProposal {
+            call_id: format!("adversarial-{}", command.len()),
+            command: command.to_owned(),
+            portable_cwd: Some(".".into()),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+    assert_eq!(receipt.process.state, ExecProposalState::Rejected);
+    assert!(receipt.process.started.is_none());
+    assert!(
+        SqliteExecProposalRepository::open(&fx.db)
+            .unwrap()
+            .get_rule_receipts(&receipt.process.proposal_id)
+            .unwrap()
+            .is_empty(),
+        "human rejection must not create rule receipts"
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn adversarial_chains_quotes_substitution_redirection_and_inline_shell_all_ask() {
+    let cases = [
+        ("cargo test; rm -rf x", "cargo test"),
+        ("sh -c \"cargo test && rm -rf x\"", "*"),
+        ("cargo test --features \"fast\"", "*"),
+        ("cargo test $(touch marker)", "*"),
+        ("cargo test > result.txt", "*"),
+    ];
+    for (command, allow_pattern) in cases {
+        assert_shell_requires_confirmation(command, allow_pattern);
+    }
 }
 
 #[test]

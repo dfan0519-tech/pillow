@@ -7,6 +7,7 @@
 //! `spawn-descendant`, `hold-descendant`, `race-session-operation`, `ignore-cancel`,
 //! `governed-write-create`, `governed-write-modify`, `governed-write-conflict`,
 //! `acp-governed-write-snake`, `acp-governed-write-camel`,
+//! `acp-governed-shell`, `acp-governed-shell-reject`,
 //! `governed-write-desktop`, `governed-process-approve`,
 //! `governed-process-reject`, `governed-process-replay`,
 //! `governed-process-conflict`, `governed-process-nonzero`,

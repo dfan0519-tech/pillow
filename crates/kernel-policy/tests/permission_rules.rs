@@ -1,7 +1,8 @@
 use keeper_policy::{
-    PermissionRuleAction, PermissionRuleEvaluation, PermissionRulePrefix, PermissionRuleScope,
-    PermissionRuleSpec, canonical_process_subject, evaluate_permission_rules,
-    permission_rule_matches,
+    PermissionRuleAction, PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation,
+    PermissionRulePrefix, PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
+    conservative_shell_command_segments, evaluate_permission_rule_conjunction,
+    evaluate_permission_rules, permission_rule_matches,
 };
 
 fn rule(
@@ -246,5 +247,175 @@ fn no_matching_rule_still_requires_confirmation() {
     assert!(matches!(
         evaluate_permission_rules(PermissionRulePrefix::Process, "cargo check", &rules),
         PermissionRuleEvaluation::RequireConfirmation
+    ));
+}
+
+#[test]
+fn conservative_shell_segmenter_accepts_only_simple_tokens_and_pinned_operators() {
+    assert_eq!(
+        conservative_shell_command_segments("cargo test"),
+        Some(vec!["cargo test".to_owned()])
+    );
+    assert_eq!(
+        conservative_shell_command_segments(
+            "cargo   test\t-p kernel-policy && rustc --version || node --version; python -V | cargo check"
+        ),
+        Some(vec![
+            "cargo test -p kernel-policy".to_owned(),
+            "rustc --version".to_owned(),
+            "node --version".to_owned(),
+            "python -V".to_owned(),
+            "cargo check".to_owned(),
+        ])
+    );
+}
+
+#[test]
+fn conservative_shell_segmenter_fails_closed_on_ambiguous_constructs() {
+    let cases = [
+        ("quoted", "cargo test --features 'fast'"),
+        ("double quoted", "cargo test --features \"fast\""),
+        ("command substitution", "cargo test $(touch marker)"),
+        ("backtick substitution", "cargo test `touch marker`"),
+        ("redirect output", "cargo test > result.txt"),
+        ("redirect input", "cargo test < input.txt"),
+        ("here document", "cargo test <<EOF"),
+        ("variable expansion", "cargo test $TARGET"),
+        ("windows variable expansion", "cargo test %TARGET%"),
+        ("wildcard", "cargo test crates/*"),
+        ("question wildcard", "cargo test crate?"),
+        ("bracket wildcard", "cargo test crate[12]"),
+        ("escape", "cargo\\ test"),
+        ("windows escape", "cargo^ test"),
+        ("newline", "cargo test\nrm -rf x"),
+        ("background operator", "cargo test & rm -rf x"),
+        ("leading operator", "; cargo test"),
+        ("trailing operator", "cargo test &&"),
+        ("empty segment", "cargo test || ; rm -rf x"),
+        ("environment assignment", "MODE=fast cargo test"),
+        ("append environment assignment", "MODE+=fast cargo test"),
+        ("environment export", "export MODE=fast"),
+        ("windows environment mutation", "set MODE=fast"),
+        ("compound time keyword", "time cargo test"),
+        ("windows command launcher", "start cargo test"),
+        ("inline sh", "sh -c \"cargo test && rm -rf x\""),
+        ("inline bash", "bash -c cargo"),
+        ("inline bash executable", "bash.exe -c cargo"),
+        ("inline cmd", "cmd /c cargo test"),
+    ];
+
+    for (label, command) in cases {
+        assert_eq!(
+            conservative_shell_command_segments(command),
+            None,
+            "{label} must require human confirmation: {command:?}"
+        );
+    }
+}
+
+#[test]
+fn conjunctive_allow_proves_normal_cargo_test_and_requires_every_segment() {
+    let cargo_allow = rule(
+        "cargo-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "cargo test",
+        PermissionRuleAction::Allow,
+    );
+    let rustc_allow = rule(
+        "rustc-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "rustc --version",
+        PermissionRuleAction::Allow,
+    );
+
+    let cargo_only = conservative_shell_command_segments("cargo test").unwrap();
+    match evaluate_permission_rule_conjunction(
+        PermissionRulePrefix::Process,
+        &cargo_only,
+        std::slice::from_ref(&cargo_allow),
+    ) {
+        PermissionRuleConjunctionEvaluation::Allow(matched) => {
+            assert_eq!(matched.len(), 1);
+            assert_eq!(matched[0].segment_index, 0);
+            assert_eq!(matched[0].matched.rule.rule_id, "cargo-allow");
+            assert_eq!(matched[0].matched.match_subject, "cargo test");
+        }
+        other => panic!("normal cargo test must be allowed, got {other:?}"),
+    }
+
+    let mixed = conservative_shell_command_segments("cargo test && rustc --version").unwrap();
+    match evaluate_permission_rule_conjunction(
+        PermissionRulePrefix::Process,
+        &mixed,
+        &[cargo_allow.clone(), rustc_allow],
+    ) {
+        PermissionRuleConjunctionEvaluation::Allow(matched) => assert_eq!(
+            matched
+                .iter()
+                .map(|entry| (entry.segment_index, entry.matched.rule.rule_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "cargo-allow"), (1, "rustc-allow")]
+        ),
+        other => panic!("each segment has an allow, got {other:?}"),
+    }
+
+    let dangerous = conservative_shell_command_segments("cargo test; rm -rf x").unwrap();
+    assert!(matches!(
+        evaluate_permission_rule_conjunction(
+            PermissionRulePrefix::Process,
+            &dangerous,
+            &[cargo_allow],
+        ),
+        PermissionRuleConjunctionEvaluation::RequireConfirmation
+    ));
+}
+
+#[test]
+fn deny_in_any_segment_beats_allows_and_an_earlier_unmatched_segment() {
+    let subjects = conservative_shell_command_segments("unknown command; cargo test; rm -rf x")
+        .expect("simple adversarial chain is reliably segmented");
+    let rules = [
+        rule(
+            "cargo-allow",
+            PermissionRuleScope::Global,
+            PermissionRulePrefix::Process,
+            "cargo test",
+            PermissionRuleAction::Allow,
+        ),
+        rule(
+            "rm-deny",
+            PermissionRuleScope::Project,
+            PermissionRulePrefix::Process,
+            "rm -rf",
+            PermissionRuleAction::Deny,
+        ),
+    ];
+
+    match evaluate_permission_rule_conjunction(PermissionRulePrefix::Process, &subjects, &rules) {
+        PermissionRuleConjunctionEvaluation::Deny(matched) => {
+            assert_eq!(matched.segment_index, 2);
+            assert_eq!(matched.matched.rule.rule_id, "rm-deny");
+            assert_eq!(matched.matched.match_subject, "rm -rf x");
+        }
+        other => panic!("deny must win across the whole chain, got {other:?}"),
+    }
+}
+
+#[test]
+fn corrupt_project_allow_cannot_satisfy_a_segmented_conjunction() {
+    let subjects = conservative_shell_command_segments("cargo test").unwrap();
+    let rules = [rule(
+        "project-allow",
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Process,
+        "cargo test",
+        PermissionRuleAction::Allow,
+    )];
+
+    assert!(matches!(
+        evaluate_permission_rule_conjunction(PermissionRulePrefix::Process, &subjects, &rules),
+        PermissionRuleConjunctionEvaluation::RequireConfirmation
     ));
 }

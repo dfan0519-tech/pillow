@@ -118,6 +118,12 @@ pub struct PermissionRuleMatchSnapshot {
     pub match_subject: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRuleSegmentMatchSnapshot {
+    pub segment_index: u32,
+    pub matched: PermissionRuleMatchSnapshot,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionRuleReceiptDecision {
     ApproveByRule,
@@ -170,6 +176,12 @@ pub struct StoredPermissionRuleReceipt {
     pub rule_content_digest: String,
     pub match_subject: String,
     pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPermissionRuleSegmentReceipt {
+    pub segment_index: u32,
+    pub receipt: StoredPermissionRuleReceipt,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -380,6 +392,25 @@ impl SqlitePermissionRuleRepository {
         )
     }
 
+    pub fn decide_exec_by_rule_segments(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        matched: &[PermissionRuleSegmentMatchSnapshot],
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<crate::ExecDecisionOutcome, crate::ExecProposalStoreError> {
+        crate::SqliteExecProposalRepository::open(&self.database_path)?.decide_by_rule_segments(
+            proposal_id,
+            conversation_id,
+            matched,
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
     pub fn get_write_rule_receipt(
         &self,
         proposal_id: &str,
@@ -392,6 +423,16 @@ impl SqlitePermissionRuleRepository {
         proposal_id: &str,
     ) -> Result<Option<StoredPermissionRuleReceipt>, PermissionRuleError> {
         self.get_rule_receipt("exec_permission_rule_receipts", proposal_id)
+    }
+
+    pub fn get_exec_rule_receipts(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<StoredPermissionRuleSegmentReceipt>, PermissionRuleError> {
+        crate::SqliteExecProposalRepository::open(&self.database_path)
+            .map_err(|_| PermissionRuleError::Sqlite)?
+            .get_rule_receipts(proposal_id)
+            .map_err(|_| PermissionRuleError::Sqlite)
     }
 
     fn get_rule_receipt(
@@ -539,6 +580,18 @@ pub(crate) fn permission_rule_receipt_from_row(
         decided_at: DateTime::parse_from_rfc3339(&decided_at)
             .map(|time| time.with_timezone(&Utc))
             .map_err(|error| conversion_error(11, error))?,
+    })
+}
+
+pub(crate) fn permission_rule_segment_receipt_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<StoredPermissionRuleSegmentReceipt> {
+    let raw_segment_index: i64 = row.get(12)?;
+    let segment_index = u32::try_from(raw_segment_index)
+        .map_err(|_| conversion_error(12, PermissionRuleError::InvalidStoredRule))?;
+    Ok(StoredPermissionRuleSegmentReceipt {
+        segment_index,
+        receipt: permission_rule_receipt_from_row(row)?,
     })
 }
 

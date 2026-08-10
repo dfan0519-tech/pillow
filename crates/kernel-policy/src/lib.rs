@@ -9,9 +9,11 @@ mod process;
 mod write;
 
 pub use permission_rules::{
-    MatchedPermissionRule, PermissionRuleAction, PermissionRuleEvaluation, PermissionRulePrefix,
-    PermissionRuleScope, PermissionRuleSpec, canonical_process_subject, evaluate_permission_rules,
-    permission_rule_matches,
+    MatchedPermissionRule, MatchedPermissionRuleSegment, PermissionRuleAction,
+    PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation, PermissionRulePrefix,
+    PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
+    conservative_shell_command_segments, evaluate_permission_rule_conjunction,
+    evaluate_permission_rules, permission_rule_matches,
 };
 
 pub use process::{

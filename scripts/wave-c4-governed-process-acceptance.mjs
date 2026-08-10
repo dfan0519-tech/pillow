@@ -67,6 +67,7 @@ import {
   waitForCommandActivity,
   waitForCommandApproval,
   waitForComposerIdle,
+  waitForShellCommandApproval,
 } from "./lib/c4-governed-process-acceptance.mjs";
 import {
   formatCapturedStream,
@@ -101,6 +102,9 @@ const VIEWPORTS = Object.freeze([
 const REQUIRED_SCENARIOS = Object.freeze([
   "reject",
   "approve-success",
+  // Shell via terminal/*: bar must render + command character-identical + receipt.
+  "shell-approve",
+  "shell-reject",
   "terminal-output",
   "replay-conflict",
   "nonzero-exit",
@@ -111,6 +115,14 @@ const REQUIRED_SCENARIOS = Object.freeze([
   "conversation-switch",
   "forced-restart",
 ]);
+
+/**
+ * Sealed shell command used by fake agent `acp-governed-shell` /
+ * `[c4p:shell-approve]` / `[c4p:shell-reject]`. Must stay byte-identical to
+ * `SHELL_E2E_QUOTED_COMMAND` in fake_acp_agent/scripts.rs — the E2E asserts
+ * the approval bar shows this string character-for-character.
+ */
+const SHELL_E2E_QUOTED_COMMAND = `echo shell-e2e "double" 'single'`;
 
 const desktopRequire = createRequire(
   path.join(repositoryRoot, "apps", "desktop", "package.json"),
@@ -1158,6 +1170,130 @@ async function scenarioApproveSuccess({ page, evidenceDir }) {
     .waitFor({ state: "visible", timeout: 60_000 });
 
   return { scenario: "approve-success", activity };
+}
+
+/**
+ * Shell approve path (terminal/* → UI).
+ *
+ * Core regression for the empty-ruleSubject seam: the approval bar must
+ * actually appear, the displayed command must equal the sealed string
+ * character-for-character (including `"` and `'`), then approve → execute →
+ * receipt. A suite that only asserts "no crash" is exactly what let the prior
+ * bug ship green.
+ */
+async function scenarioShellApprove({ page, evidenceDir }) {
+  await selectProject(page, PROJECT_A_NAME);
+  await collapseResourcePaneIfOpen(page);
+  await sendProcessPrompt({
+    page,
+    prompt: "[c4p:shell-approve] approve this shell command once",
+  });
+  const bar = await waitForShellCommandApproval({
+    page,
+    expectedCommand: SHELL_E2E_QUOTED_COMMAND,
+    debug: {
+      dumpDir: evidenceDir,
+      label: "shell-approve",
+      phase: "wait-bar",
+    },
+  });
+  assert.equal(bar.barVisible, true, "shell approval bar must render");
+  assert.equal(
+    bar.displayedCommand,
+    SHELL_E2E_QUOTED_COMMAND,
+    "shell displayed command must equal sealed proposal character-for-character",
+  );
+  // Embedded quotes are the mutation canary for JSON escape / truncation.
+  assert.ok(
+    bar.displayedCommand.includes('"') && bar.displayedCommand.includes("'"),
+    "shell command fixture must retain both quote styles in the UI",
+  );
+  await assertConversationDominant(page);
+  await assertSingleApprovalSlot(page);
+  await capturePrivacySafeScreenshot({
+    page,
+    path: path.join(evidenceDir, "shell-approve-bar-1440x960.png"),
+    label: "shell-approve-bar",
+  });
+  await approveCommandOnce(page);
+  const activity = await waitForCommandActivity({
+    page,
+    status: PROCESS_STATUS.succeeded,
+    exitCode: 0,
+    argvNeedle: "shell-e2e",
+  });
+  await page
+    .getByTestId("timeline-assistant-message")
+    .filter({ hasText: /acp-governed-shell-ok/ })
+    .waitFor({ state: "visible", timeout: 60_000 });
+
+  return {
+    scenario: "shell-approve",
+    bar,
+    activity,
+    exactCommandMatch: true,
+    sealedCommand: SHELL_E2E_QUOTED_COMMAND,
+  };
+}
+
+/**
+ * Shell reject path: bar must render, reject must not execute.
+ */
+async function scenarioShellReject({ page, evidenceDir }) {
+  await selectProject(page, PROJECT_A_NAME);
+  await collapseResourcePaneIfOpen(page);
+  await sendProcessPrompt({
+    page,
+    prompt: "[c4p:shell-reject] reject this shell command",
+  });
+  const bar = await waitForShellCommandApproval({
+    page,
+    expectedCommand: SHELL_E2E_QUOTED_COMMAND,
+    debug: {
+      dumpDir: evidenceDir,
+      label: "shell-reject",
+      phase: "wait-bar",
+    },
+  });
+  assert.equal(bar.barVisible, true, "shell reject approval bar must render");
+  assert.equal(
+    bar.displayedCommand,
+    SHELL_E2E_QUOTED_COMMAND,
+    "shell reject displayed command must equal sealed proposal character-for-character",
+  );
+  await assertConversationDominant(page);
+  await assertSingleApprovalSlot(page);
+  await capturePrivacySafeScreenshot({
+    page,
+    path: path.join(evidenceDir, "shell-reject-bar-1440x960.png"),
+    label: "shell-reject-bar",
+  });
+  await rejectCommand(page);
+  const activity = await waitForCommandActivity({
+    page,
+    status: PROCESS_STATUS.rejected,
+    argvNeedle: "shell-e2e",
+  });
+  // Rejection must not start the process.
+  const body = await page.locator("body").innerText();
+  assert.ok(
+    !body.includes(PROCESS_STATUS.running)
+      || body.includes(PROCESS_STATUS.rejected),
+    "shell reject must not leave a running process",
+  );
+  await page
+    .getByTestId("timeline-assistant-message")
+    .filter({ hasText: /acp-governed-shell-reject-ok|acp-governed-shell-reject-failed/ })
+    .waitFor({ state: "visible", timeout: 60_000 })
+    .catch(() => undefined);
+
+  return {
+    scenario: "shell-reject",
+    bar,
+    activity,
+    exactCommandMatch: true,
+    sealedCommand: SHELL_E2E_QUOTED_COMMAND,
+  };
 }
 
 async function scenarioTerminalOutput({ page, evidenceDir }) {
@@ -2227,6 +2363,14 @@ try {
       results.push(
         await withStep("approve-success", () =>
           scenarioApproveSuccess({ page, evidenceDir })),
+      );
+      results.push(
+        await withStep("shell-approve", () =>
+          scenarioShellApprove({ page, evidenceDir })),
+      );
+      results.push(
+        await withStep("shell-reject", () =>
+          scenarioShellReject({ page, evidenceDir })),
       );
       results.push(
         await withStep("terminal-output", () =>

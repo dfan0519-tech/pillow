@@ -108,6 +108,221 @@ pub enum PermissionRuleEvaluation {
     RequireConfirmation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedPermissionRuleSegment {
+    pub segment_index: usize,
+    pub matched: MatchedPermissionRule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionRuleConjunctionEvaluation {
+    Deny(MatchedPermissionRuleSegment),
+    Allow(Vec<MatchedPermissionRuleSegment>),
+    RequireConfirmation,
+}
+
+/// Split only shell command shapes whose token and operator boundaries are
+/// unambiguous without a shell parser.
+///
+/// `None` is a security result, not a parse error: callers must require human
+/// confirmation. Quotes, expansion, redirection, globbing, escaping, compound
+/// grammar and nested shell interpreters are deliberately outside this small
+/// accepted language.
+pub fn conservative_shell_command_segments(command: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' => finish_shell_token(&mut token, &mut tokens),
+            ';' => finish_shell_segment(&mut token, &mut tokens, &mut segments)?,
+            '|' => {
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                }
+                finish_shell_segment(&mut token, &mut tokens, &mut segments)?;
+            }
+            '&' => {
+                chars.next_if_eq(&'&')?;
+                finish_shell_segment(&mut token, &mut tokens, &mut segments)?;
+            }
+            '\'' | '"' | '`' | '$' | '\\' | '<' | '>' | '*' | '?' | '[' | ']' | '{' | '}' | '('
+            | ')' | '~' | '#' | '%' | '!' | '^' => return None,
+            other if other.is_control() || other.is_whitespace() => return None,
+            other => token.push(other),
+        }
+    }
+
+    finish_shell_segment(&mut token, &mut tokens, &mut segments)?;
+    Some(segments)
+}
+
+/// Evaluate a segmented command as a conjunction of independently authorized
+/// subjects. A deny on any segment wins, while allow succeeds only when every
+/// segment has its own allow match.
+pub fn evaluate_permission_rule_conjunction(
+    prefix: PermissionRulePrefix,
+    subjects: &[String],
+    rules: &[PermissionRuleSpec],
+) -> PermissionRuleConjunctionEvaluation {
+    if subjects.is_empty() {
+        return PermissionRuleConjunctionEvaluation::RequireConfirmation;
+    }
+
+    let mut first_deny = None;
+    let mut allows = Vec::with_capacity(subjects.len());
+    let mut missing_allow = false;
+    for (segment_index, subject) in subjects.iter().enumerate() {
+        match evaluate_permission_rules(prefix, subject, rules) {
+            PermissionRuleEvaluation::Deny(matched) => {
+                if first_deny.is_none() {
+                    first_deny = Some(MatchedPermissionRuleSegment {
+                        segment_index,
+                        matched,
+                    });
+                }
+            }
+            PermissionRuleEvaluation::Allow(matched) => {
+                allows.push(MatchedPermissionRuleSegment {
+                    segment_index,
+                    matched,
+                });
+            }
+            PermissionRuleEvaluation::RequireConfirmation => missing_allow = true,
+        }
+    }
+
+    if let Some(matched) = first_deny {
+        PermissionRuleConjunctionEvaluation::Deny(matched)
+    } else if missing_allow {
+        PermissionRuleConjunctionEvaluation::RequireConfirmation
+    } else {
+        PermissionRuleConjunctionEvaluation::Allow(allows)
+    }
+}
+
+fn finish_shell_token(token: &mut String, tokens: &mut Vec<String>) {
+    if !token.is_empty() {
+        tokens.push(std::mem::take(token));
+    }
+}
+
+fn finish_shell_segment(
+    token: &mut String,
+    tokens: &mut Vec<String>,
+    segments: &mut Vec<String>,
+) -> Option<()> {
+    finish_shell_token(token, tokens);
+    if tokens.is_empty() || !simple_shell_tokens_are_reliable(tokens) {
+        return None;
+    }
+    segments.push(tokens.join(" "));
+    tokens.clear();
+    Some(())
+}
+
+fn simple_shell_tokens_are_reliable(tokens: &[String]) -> bool {
+    let first = tokens.first().map(String::as_str).unwrap_or_default();
+    !looks_like_environment_assignment(first)
+        && !matches!(
+            first.to_ascii_lowercase().as_str(),
+            "env"
+                | "eval"
+                | "source"
+                | "."
+                | "call"
+                | "if"
+                | "then"
+                | "else"
+                | "elif"
+                | "fi"
+                | "for"
+                | "while"
+                | "until"
+                | "do"
+                | "done"
+                | "case"
+                | "esac"
+                | "function"
+                | "select"
+                | "in"
+                | "time"
+                | "coproc"
+                | "export"
+                | "readonly"
+                | "declare"
+                | "typeset"
+                | "local"
+                | "set"
+                | "unset"
+                | "setlocal"
+                | "endlocal"
+                | "command"
+                | "builtin"
+                | "exec"
+                | "trap"
+                | "alias"
+                | "unalias"
+                | "start"
+                | "goto"
+        )
+        && !tokens.iter().any(|token| is_shell_interpreter(token))
+}
+
+fn looks_like_environment_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_shell_interpreter(token: &str) -> bool {
+    let basename = token
+        .rsplit('/')
+        .next()
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+    matches!(
+        basename.as_str(),
+        "sh" | "sh.exe"
+            | "bash"
+            | "bash.exe"
+            | "dash"
+            | "dash.exe"
+            | "ash"
+            | "ash.exe"
+            | "zsh"
+            | "zsh.exe"
+            | "fish"
+            | "fish.exe"
+            | "ksh"
+            | "ksh.exe"
+            | "mksh"
+            | "yash"
+            | "csh"
+            | "tcsh"
+            | "xonsh"
+            | "nu"
+            | "elvish"
+            | "cmd"
+            | "cmd.exe"
+            | "command.com"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+            | "wsl"
+            | "wsl.exe"
+    )
+}
+
 /// Canonical process subject: catalog label followed by literal argv tokens,
 /// each separated by one ASCII space. No shell quoting or parsing occurs.
 pub fn canonical_process_subject(program: &str, argv: &[String]) -> String {

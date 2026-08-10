@@ -12,6 +12,9 @@ const RECORD_PREFIX = "KEEPER_WAVE_C4_GOVERNED_PROCESS_ACCEPTANCE";
 const REQUIRED_SCENARIOS = [
   "reject",
   "approve-success",
+  // terminal/* shell path: bar renders + command character-identical + receipt.
+  "shell-approve",
+  "shell-reject",
   "terminal-output",
   "replay-conflict",
   "nonzero-exit",

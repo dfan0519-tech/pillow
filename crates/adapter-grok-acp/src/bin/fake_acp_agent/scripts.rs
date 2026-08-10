@@ -326,6 +326,30 @@ pub(crate) fn run_prompt_script(
                 "created through governed ACP camel write\n",
             );
         }
+        // Shell via standard ACP terminal/* (not pillow/process_tool).
+        // Command embeds both " and ' so UI exact-match catches JSON escape drift.
+        "acp-governed-shell" => {
+            run_acp_governed_shell(
+                stdout,
+                rx,
+                session_id,
+                session_root,
+                id,
+                &cancelled,
+                ShellScriptMode::Approve,
+            );
+        }
+        "acp-governed-shell-reject" => {
+            run_acp_governed_shell(
+                stdout,
+                rx,
+                session_id,
+                session_root,
+                id,
+                &cancelled,
+                ShellScriptMode::Reject,
+            );
+        }
         "governed-write-desktop" => {
             // Desktop acceptance: one ACP child, prompt tags select the action.
             // Tags are harness-owned and must not appear as secret-bearing IDs.
@@ -405,7 +429,15 @@ pub(crate) fn run_prompt_script(
         "governed-process-desktop" => {
             // Desktop acceptance: one ACP child, prompt tags select the action.
             // Tags are harness-owned and must not appear as secret-bearing IDs.
-            run_governed_process_desktop(stdout, rx, session_id, id, &cancelled, prompt_text);
+            run_governed_process_desktop(
+                stdout,
+                rx,
+                session_id,
+                session_root,
+                id,
+                &cancelled,
+                prompt_text,
+            );
         }
         "governed-read-replay" => {
             let target = std::path::Path::new(session_root).join("note.txt");
@@ -637,6 +669,143 @@ pub(crate) fn run_prompt_script(
             );
         }
     }
+}
+
+/// Full shell command with both quote styles.
+///
+/// Desktop E2E asserts the approval bar shows this string **character-identical**
+/// to the sealed proposal (no JSON escape, no truncation). Embedding `"` and
+/// `'` means reintroduced stringify/escape immediately fails the suite.
+///
+/// Windows host shell is `cmd.exe`; this command is a built-in and exits 0.
+pub(crate) const SHELL_E2E_QUOTED_COMMAND: &str = r#"echo shell-e2e "double" 'single'"#;
+
+#[derive(Clone, Copy)]
+enum ShellScriptMode {
+    Approve,
+    Reject,
+}
+
+/// ACP `terminal/*` shell proposal: create → (human decision) → wait/output/release.
+///
+/// Mirrors production Grok foreground lifecycle (`create`, `wait_for_exit`,
+/// `output`, `release`) with `args=[]` and the original command string intact.
+fn run_acp_governed_shell(
+    stdout: &mut impl Write,
+    rx: &Receiver<InMsg>,
+    session_id: &str,
+    session_root: &str,
+    id: Value,
+    cancelled: &AtomicBool,
+    mode: ShellScriptMode,
+) {
+    let command = SHELL_E2E_QUOTED_COMMAND;
+    let mut create_params = json!({
+        "sessionId": session_id,
+        "command": command,
+        "args": [],
+        "env": [],
+        "outputByteLimit": 4096
+    });
+    if !session_root.is_empty() {
+        create_params
+            .as_object_mut()
+            .expect("create params object")
+            .insert("cwd".into(), json!(session_root));
+    }
+    write_json(
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 161,
+            "method": "terminal/create",
+            "params": create_params
+        }),
+    );
+    let create_response = wait_for_response(rx, cancelled, 161);
+
+    match mode {
+        ShellScriptMode::Reject => {
+            let rejected = create_response.as_ref().is_some_and(|value| {
+                value
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| {
+                        message.contains("governed_terminal_rejected")
+                            || message.contains("governed_process_rejected")
+                            || message.contains("rejected")
+                    })
+            });
+            finish_process_script(
+                stdout,
+                session_id,
+                id,
+                if rejected {
+                    "acp-governed-shell-reject-ok"
+                } else {
+                    "acp-governed-shell-reject-failed"
+                },
+            );
+            return;
+        }
+        ShellScriptMode::Approve => {}
+    }
+
+    let Some(terminal_id) = create_response
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .and_then(|result| result.get("terminalId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        finish_process_script(stdout, session_id, id, "acp-governed-shell-failed");
+        return;
+    };
+
+    let request = |request_id: u64, method: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": { "sessionId": session_id, "terminalId": terminal_id }
+        })
+    };
+    // Production foreground lifecycle: wait → output → release (kill only on timeout).
+    write_json(stdout, &request(162, "terminal/wait_for_exit"));
+    let waited = wait_for_result(rx, cancelled, 162);
+    write_json(stdout, &request(163, "terminal/output"));
+    let output = wait_for_result(rx, cancelled, 163);
+    write_json(stdout, &request(164, "terminal/release"));
+    let released = wait_for_result(rx, cancelled, 164);
+
+    let exit_ok = waited
+        .as_ref()
+        .and_then(|result| result.get("exitCode"))
+        .and_then(Value::as_u64)
+        == Some(0)
+        || waited
+            .as_ref()
+            .and_then(|result| result.get("exitCode"))
+            .and_then(Value::as_i64)
+            == Some(0);
+    let output_present = output
+        .as_ref()
+        .and_then(|result| result.get("output"))
+        .and_then(Value::as_str)
+        .is_some();
+    let released_ok = released.as_ref().is_some_and(Value::is_object);
+    let ok = exit_ok && output_present && released_ok;
+    finish_process_script(
+        stdout,
+        session_id,
+        id,
+        if ok {
+            "acp-governed-shell-ok"
+        } else {
+            "acp-governed-shell-failed"
+        },
+    );
 }
 
 fn run_governed_terminal_roundtrip(
@@ -1157,11 +1326,32 @@ fn run_governed_process_desktop(
     stdout: &mut impl Write,
     rx: &Receiver<InMsg>,
     session_id: &str,
+    session_root: &str,
     id: Value,
     cancelled: &AtomicBool,
     prompt_text: &str,
 ) {
-    if prompt_text.contains("[c4p:reject]") {
+    if prompt_text.contains("[c4p:shell-approve]") {
+        run_acp_governed_shell(
+            stdout,
+            rx,
+            session_id,
+            session_root,
+            id,
+            cancelled,
+            ShellScriptMode::Approve,
+        );
+    } else if prompt_text.contains("[c4p:shell-reject]") {
+        run_acp_governed_shell(
+            stdout,
+            rx,
+            session_id,
+            session_root,
+            id,
+            cancelled,
+            ShellScriptMode::Reject,
+        );
+    } else if prompt_text.contains("[c4p:reject]") {
         run_governed_process_reject(stdout, rx, session_id, id, cancelled);
     } else if prompt_text.contains("[c4p:replay]") {
         run_governed_process_replay(stdout, rx, session_id, id, cancelled);
