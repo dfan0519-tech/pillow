@@ -91,6 +91,31 @@ describe("C4 gateway contract", () => {
     ).toThrow();
   });
 
+  // The host sends an empty rule subject for shell proposals because they are
+  // decided per command by a human, so no rule matches them yet. Rejecting that
+  // made every shell proposal fail to parse, which shows up only as "the
+  // approval bar never appeared" — the governed shell was unusable in the real
+  // app while gate and E2E stayed green, because no E2E covers shell -> UI.
+  it("accepts a shell proposal with no rule subject", () => {
+    const shell = {
+      ...hostProposal,
+      programLabel: "shell",
+      argv: ['node -e "require(\'fs\').writeFileSync(\'x\',\'1\')"'],
+      ruleSubject: "",
+    };
+    expect(normalizeExecProposal(shell)).toMatchObject({
+      programLabel: "shell",
+      ruleSubject: "",
+    });
+    // The command must survive the boundary byte for byte — what is approved
+    // has to be what runs.
+    expect(normalizeExecProposal(shell).argv[0]).toBe(shell.argv[0]);
+  });
+
+  it("still requires a rule subject on a structured proposal", () => {
+    expect(() => normalizeExecProposal({ ...hostProposal, ruleSubject: "" })).toThrow();
+  });
+
   it("requires the host-normalized rule subject", () => {
     const { ruleSubject: _dropped, ...missing } = hostProposal;
     expect(() => normalizeExecProposal(missing)).toThrow();

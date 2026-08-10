@@ -4,7 +4,10 @@
  */
 
 import type { CommandActivityView, CommandState } from "./executionTypes";
-import { formatArgvDisplay } from "./executionTypes";
+import {
+  formatCommandArgvDisplay,
+  isShellProgram,
+} from "./executionTypes";
 import "../../styles/execution.css";
 
 export type CommandActivityRowProps = {
@@ -44,7 +47,11 @@ export function CommandActivityRow({
   activity,
   onOpenOutput,
 }: CommandActivityRowProps) {
-  const argvText = formatArgvDisplay(activity.argv);
+  const isShell = isShellProgram(activity.programLabel);
+  const argvText = formatCommandArgvDisplay(
+    activity.programLabel,
+    activity.argv,
+  );
   const hasTail =
     (activity.outputTail?.length ?? 0) > 0
     || Boolean(activity.truncated)
@@ -63,6 +70,7 @@ export function CommandActivityRow({
   return (
     <article
       className="command-activity-row"
+      data-command-kind={isShell ? "shell" : "structured"}
       data-origin={activity.origin}
       data-status={activity.state}
       data-testid="command-activity-row"
@@ -101,15 +109,26 @@ export function CommandActivityRow({
           >
             {statusLabel(activity.state)}
           </span>
-          <code
-            className="command-activity-row__program"
-            data-testid="command-activity-program"
-          >
-            {activity.programLabel}
-          </code>
+          {isShell ? (
+            <span
+              className="command-activity-row__kind"
+              data-testid="command-activity-kind"
+            >
+              Shell 命令
+            </span>
+          ) : (
+            <code
+              className="command-activity-row__program"
+              data-testid="command-activity-program"
+            >
+              {activity.programLabel}
+            </code>
+          )}
           <code
             className="command-activity-row__argv"
+            data-full-command={argvText}
             data-testid="command-activity-argv"
+            title={argvText}
           >
             {argvText}
           </code>

@@ -12,6 +12,7 @@ import {
   isAutoApprovedByRuleValue,
   isRuleSubjectValue,
 } from "./permissionRulesGateway";
+import { SHELL_PROGRAM_LABEL } from "../features/execution/executionTypes";
 
 const STATES = ["pending_approval", "approved", "running", "succeeded", "failed", "rejected", "expired", "cancelled", "interrupted"] as const;
 const ORIGINS = ["agent", "user"] as const;
@@ -51,8 +52,17 @@ function timestamp(value: unknown): value is string { return typeof value === "s
 export function normalizeExecProposal(value: unknown): ExecProposalView {
   if (!record(value) || !only(value, proposalKeys) || !bounded(value.proposalId, MAX_ID) || !bounded(value.conversationId, MAX_ID) || !enumValue(value.origin, ORIGINS) || !enumValue(value.state, STATES) || !bounded(value.programLabel, 32) || !Array.isArray(value.argv) || value.argv.length > MAX_ARGV || !portable(value.portableCwd) || !enumValue(value.riskClass, RISKS) || typeof value.summary !== "string" || value.summary.length > 1024 || !timestamp(value.expiresAt) || typeof value.decisionAvailable !== "boolean") throw invalid();
   if (!value.argv.every((arg) => typeof arg === "string") || utf8(value.programLabel) + value.argv.reduce<number>((sum, arg) => sum + utf8(arg), 0) > MAX_ARGV_BYTES || (value.errorCode !== undefined && !isExecPublicError(value.errorCode))) throw invalid();
-  if (!isRuleSubjectValue(value.ruleSubject) || (value.autoApprovedByRule !== undefined && !isAutoApprovedByRuleValue(value.autoApprovedByRule, EXEC_RULE_PREFIXES))) throw invalid();
-  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ruleSubject: value.ruleSubject, ...(value.autoApprovedByRule === undefined ? {} : { autoApprovedByRule: { prefix: value.autoApprovedByRule.prefix, pattern: value.autoApprovedByRule.pattern, action: value.autoApprovedByRule.action } }), ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
+  // A shell proposal legitimately has no rule subject: it is decided by a human
+  // per command, so there is nothing for a rule to match yet. The host says so
+  // by sending an empty string. Requiring non-empty here rejected every shell
+  // proposal, which surfaced as the approval bar simply never appearing — the
+  // same failure shape as the widened-DTO seam, from the opposite direction.
+  const ruleSubject = typeof value.ruleSubject === "string" ? value.ruleSubject : undefined;
+  const subjectOk = ruleSubject !== undefined
+    && (isRuleSubjectValue(ruleSubject)
+      || (value.programLabel === SHELL_PROGRAM_LABEL && ruleSubject === ""));
+  if (!subjectOk || (value.autoApprovedByRule !== undefined && !isAutoApprovedByRuleValue(value.autoApprovedByRule, EXEC_RULE_PREFIXES))) throw invalid();
+  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ruleSubject, ...(value.autoApprovedByRule === undefined ? {} : { autoApprovedByRule: { prefix: value.autoApprovedByRule.prefix, pattern: value.autoApprovedByRule.pattern, action: value.autoApprovedByRule.action } }), ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
 }
 
 export function normalizeExecOutput(value: unknown): ExecOutputView {

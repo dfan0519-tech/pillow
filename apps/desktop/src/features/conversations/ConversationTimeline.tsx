@@ -27,6 +27,7 @@ import {
   formatProcessArgvDisplay,
   type ProcessActivityModel,
 } from "../execution/processActivityModel";
+import { isShellProgram } from "../execution/executionTypes";
 import {
   autoRuleDecisionLabel,
   formatRuleSummary,
@@ -266,7 +267,8 @@ function ProcessCommandActivityRow({
     model.state === "pending_approval"
     || model.state === "approved"
     || model.state === "running";
-  const argvText = formatProcessArgvDisplay(model.argv);
+  const isShell = isShellProgram(model.programLabel);
+  const argvText = formatProcessArgvDisplay(model.programLabel, model.argv);
   const hasDetails =
     model.argv.length > 0
     || model.decisionLabel
@@ -284,6 +286,7 @@ function ProcessCommandActivityRow({
   return (
     <article
       className="command-activity-row"
+      data-command-kind={isShell ? "shell" : "structured"}
       data-origin="agent"
       data-status={model.state}
       data-testid="command-activity-row"
@@ -322,12 +325,21 @@ function ProcessCommandActivityRow({
           >
             {model.statusLabel}
           </span>
-          <code
-            className="command-activity-row__program"
-            data-testid="command-activity-program"
-          >
-            {model.programLabel}
-          </code>
+          {isShell ? (
+            <span
+              className="command-activity-row__kind"
+              data-testid="command-activity-kind"
+            >
+              Shell 命令
+            </span>
+          ) : (
+            <code
+              className="command-activity-row__program"
+              data-testid="command-activity-program"
+            >
+              {model.programLabel}
+            </code>
+          )}
           {autoRuleLabel ? (
             <span
               className={
@@ -360,7 +372,9 @@ function ProcessCommandActivityRow({
             {model.argv.length > 0 ? (
               <code
                 className="command-activity-row__argv"
+                data-full-command={argvText}
                 data-testid="command-activity-argv"
+                title={argvText}
               >
                 {argvText}
               </code>

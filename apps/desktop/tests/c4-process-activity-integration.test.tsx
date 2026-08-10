@@ -16,7 +16,11 @@ import type {
   ConversationTimelineView,
   RunActivityView,
 } from "../src/features/conversations/conversationTypes";
-import { buildProcessActivityModels } from "../src/features/execution/processActivityModel";
+import {
+  buildProcessActivityModels,
+  formatProcessArgvDisplay,
+} from "../src/features/execution/processActivityModel";
+import { formatArgvDisplay } from "../src/features/execution/executionTypes";
 import { Workbench } from "../src/features/workbench/Workbench";
 import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import type {
@@ -316,6 +320,69 @@ describe("buildProcessActivityModels", () => {
       processProposalAltId,
     ]);
   });
+
+  it("shell proposals keep full command character-identical (no JSON escape, no path-redact of command body)", () => {
+    // Command includes backslashes that would trigger structured path redaction
+    // if the whole shell string were treated as one path token.
+    const shellCmd =
+      `node -e "require('fs').writeFileSync('out.txt', 'hello \"world\"')" && echo path\\segment`;
+    const events = [
+      processEvent("process_proposal_requested", 1, {
+        proposal_id: processProposalId,
+        program: "shell",
+        argv: [shellCmd],
+        portable_cwd: ".",
+        summary: "shell",
+        risk_class: "high",
+        expires_at: "2026-08-04T00:10:00.000Z",
+      }),
+    ];
+    const models = buildProcessActivityModels(events, conversationId, runId);
+    expect(models).toHaveLength(1);
+    const model = models[0]!;
+    expect(model.programLabel).toBe("shell");
+    expect(model.argv).toEqual([shellCmd]);
+    expect(model.argv[0]).toBe(shellCmd);
+    // Display helper: char-equal for shell, not JSON-encoded.
+    expect(formatProcessArgvDisplay(model.programLabel, model.argv)).toBe(
+      shellCmd,
+    );
+    expect(formatProcessArgvDisplay(model.programLabel, model.argv)).not.toBe(
+      formatArgvDisplay(model.argv),
+    );
+  });
+
+  it("timeline paints shell command literally under Shell 命令 label", () => {
+    const shellCmd = `echo "nested 'quotes' and \\"escapes\\""`;
+    const events = [
+      processEvent("process_proposal_requested", 1, {
+        proposal_id: processProposalId,
+        program: "shell",
+        argv: [shellCmd],
+        portable_cwd: ".",
+        summary: "shell",
+        risk_class: "high",
+        expires_at: "2026-08-04T00:10:00.000Z",
+      }),
+    ];
+    render(
+      <ConversationTimeline
+        run={null}
+        timeline={timelineWithProcess(events)}
+      />,
+    );
+    const row = screen.getByTestId("command-activity-row");
+    expect(row).toHaveAttribute("data-command-kind", "shell");
+    expect(within(row).getByTestId("command-activity-kind")).toHaveTextContent(
+      "Shell 命令",
+    );
+    expect(within(row).queryByTestId("command-activity-program")).toBeNull();
+    // Full command lives in the expanded body argv for timeline process rows.
+    const argvEl = within(row).getByTestId("command-activity-argv");
+    expect(argvEl.textContent).toBe(shellCmd);
+    expect(argvEl.getAttribute("data-full-command")).toBe(shellCmd);
+  });
+
 
   it("ignores foreign conversation and foreign run events", () => {
     const events = [

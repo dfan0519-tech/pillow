@@ -16,7 +16,10 @@ import {
   type AutoApprovedByRule,
 } from "../../lib/permissionRulesGateway";
 import type { CommandDecision, CommandState } from "./executionTypes";
-import { formatArgvDisplay } from "./executionTypes";
+import {
+  formatCommandArgvDisplay,
+  isShellProgram,
+} from "./executionTypes";
 
 const PROCESS_KINDS = new Set<RuntimeEventDto["kind"]>([
   "process_proposal_requested",
@@ -139,9 +142,17 @@ export function buildProcessActivityModels(
   return order.map((id) => finalize(groups.get(id)!));
 }
 
-/** Display-only argv string; never re-parse for execution. */
-export function formatProcessArgvDisplay(argv: readonly string[]): string {
-  return formatArgvDisplay(argv);
+/**
+ * Display-only command body for timeline rows.
+ * Shell: character-identical full command (single argv element).
+ * Structured: JSON-stringified sealed argv (legacy).
+ * Never re-parse for execution.
+ */
+export function formatProcessArgvDisplay(
+  programLabel: string,
+  argv: readonly string[],
+): string {
+  return formatCommandArgvDisplay(programLabel, argv);
 }
 
 /**
@@ -169,7 +180,7 @@ function applyEvent(group: MutableGroup, event: RuntimeEventDto): void {
     case "process_proposal_requested": {
       const payload = event.payload as ProcessProposalRequestedPayload;
       group.programLabel = safeProgramLabel(payload.program);
-      group.argv = redactArgv(payload.argv ?? []);
+      group.argv = argvForDisplay(group.programLabel, payload.argv ?? []);
       // Request without later decision/start stays pending.
       if (!group.started && !group.terminal && !group.decision) {
         group.state = "pending_approval";
@@ -193,7 +204,7 @@ function applyEvent(group: MutableGroup, event: RuntimeEventDto): void {
       const payload = event.payload as ProcessStartedPayload;
       group.programLabel = safeProgramLabel(payload.program) || group.programLabel;
       if (payload.argv && payload.argv.length > 0) {
-        group.argv = redactArgv(payload.argv);
+        group.argv = argvForDisplay(group.programLabel, payload.argv);
       }
       group.started = true;
       if (!group.terminal) {
@@ -294,6 +305,22 @@ function safeProgramLabel(program: string | undefined): string {
     return "命令";
   }
   return trimmed;
+}
+
+/**
+ * Argv stored on the activity model for display / Terminal open.
+ * Shell: keep the full command string character-identical (do not treat the
+ * whole command as a path token just because it contains `\` or drive letters).
+ * Structured: redact native absolute / UNC-looking tokens only.
+ */
+function argvForDisplay(
+  programLabel: string,
+  argv: readonly string[],
+): string[] {
+  if (isShellProgram(programLabel)) {
+    return [...argv];
+  }
+  return redactArgv(argv);
 }
 
 function looksLikeNativeOrAbsolutePath(token: string): boolean {

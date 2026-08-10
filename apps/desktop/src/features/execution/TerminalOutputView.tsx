@@ -4,7 +4,10 @@
  */
 
 import type { TerminalOutputModel } from "./executionTypes";
-import { formatArgvDisplay } from "./executionTypes";
+import {
+  formatCommandArgvDisplay,
+  isShellProgram,
+} from "./executionTypes";
 import "../../styles/execution.css";
 
 export type TerminalOutputViewProps = {
@@ -17,11 +20,17 @@ export function TerminalOutputView({ output }: TerminalOutputViewProps) {
     .sort((a, b) => a.sequence - b.sequence)
     .map((chunk) => chunk.text)
     .join("");
+  const isShell = isShellProgram(output.programLabel);
+  const commandText = formatCommandArgvDisplay(
+    output.programLabel,
+    output.argv,
+  );
 
   return (
     <section
       aria-label="终端输出"
       className="terminal-output-view"
+      data-command-kind={isShell ? "shell" : "structured"}
       data-status={output.state}
       data-live-retained={output.liveRetained ? "true" : "false"}
       data-testid="terminal-output-view"
@@ -29,12 +38,25 @@ export function TerminalOutputView({ output }: TerminalOutputViewProps) {
       <header className="terminal-output-view__header">
         <h3 className="terminal-output-view__title">终端输出</h3>
         <p className="terminal-output-view__command">
-          <code data-testid="terminal-output-program">{output.programLabel}</code>
+          {isShell ? (
+            <span
+              className="terminal-output-view__kind"
+              data-testid="terminal-output-kind"
+            >
+              Shell 命令
+            </span>
+          ) : (
+            <code data-testid="terminal-output-program">{output.programLabel}</code>
+          )}
           <span aria-hidden="true" className="terminal-output-view__sep">
             {" "}
           </span>
-          <code data-testid="terminal-output-argv">
-            {formatArgvDisplay(output.argv)}
+          <code
+            data-full-command={commandText}
+            data-testid="terminal-output-argv"
+            title={commandText}
+          >
+            {commandText}
           </code>
         </p>
         <p className="terminal-output-view__meta">

@@ -93,13 +93,53 @@ export type TerminalOutputModel = {
 };
 
 /**
+ * Host label for governed shell proposals (`SHELL_PROGRAM_LABEL` on the host).
+ * Shape: `programLabel === "shell"`, `argv === [fullCommandString]`.
+ */
+export const SHELL_PROGRAM_LABEL = "shell";
+
+/** True when the proposal/activity is a governed shell command (not structured argv). */
+export function isShellProgram(programLabel: string): boolean {
+  return programLabel === SHELL_PROGRAM_LABEL;
+}
+
+/**
  * Format sealed argv as a display-only literal string.
  *
  * Encoding: each argument is `JSON.stringify`'d, then joined with a single
  * space. This preserves empty strings, quotes, backslashes, whitespace and
  * Unicode, and keeps sealed argument boundaries unambiguous for approval and
  * review. Display only — never parse, shell-join, or execute the result.
+ *
+ * For shell proposals (`programLabel === "shell"`), use
+ * {@link formatCommandArgvDisplay} instead so the full command string is not
+ * JSON-escaped.
  */
 export function formatArgvDisplay(argv: readonly string[]): string {
   return argv.map((arg) => JSON.stringify(arg)).join(" ");
 }
+
+/**
+ * Display text for the command body (argv area) on approval / activity surfaces.
+ *
+ * - **shell**: host seals the full command as a single argv element. Return that
+ *   string **character-identical** to what will execute — no JSON escape, no
+ *   whitespace normalize, no rejoin.
+ * - **structured**: existing {@link formatArgvDisplay} (JSON-stringify each arg).
+ *
+ * Display only — never parse, shell-join, or execute the result.
+ */
+export function formatCommandArgvDisplay(
+  programLabel: string,
+  argv: readonly string[],
+): string {
+  if (isShellProgram(programLabel)) {
+    // Host contract: argv is exactly one element — the full command string.
+    // Do not join, trim, or re-encode; empty argv yields empty display.
+    return argv.length === 0 ? "" : argv[0]!;
+  }
+  return formatArgvDisplay(argv);
+}
+
+/** Visual length above which approval UIs offer expand (DOM still holds full text). */
+export const COMMAND_DISPLAY_EXPAND_THRESHOLD = 96;

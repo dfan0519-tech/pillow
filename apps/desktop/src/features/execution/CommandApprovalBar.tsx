@@ -22,7 +22,11 @@ import type {
   CommandDecision,
   CommandProposalView,
 } from "./executionTypes";
-import { formatArgvDisplay } from "./executionTypes";
+import {
+  COMMAND_DISPLAY_EXPAND_THRESHOLD,
+  formatCommandArgvDisplay,
+  isShellProgram,
+} from "./executionTypes";
 import "../../styles/execution.css";
 
 export type CommandApprovalBarProps = {
@@ -64,7 +68,15 @@ function formatExpiry(expiresAt: string): string {
   }
 }
 
+/**
+ * Fallback match subject when the host omits `ruleSubject`.
+ * Shell: raw command string only (no JSON escape, no invented rejoin).
+ * Structured: program + space-joined argv (legacy shape).
+ */
 function fallbackProcessSubject(proposal: CommandProposalView): string {
+  if (isShellProgram(proposal.programLabel)) {
+    return proposal.argv.length === 0 ? proposal.programLabel : proposal.argv[0]!;
+  }
   const argvText = proposal.argv.join(" ").trim();
   return argvText
     ? `${proposal.programLabel} ${argvText}`.trim()
@@ -90,6 +102,7 @@ export function CommandApprovalBar({
 
   const [submitting, setSubmitting] = useState(false);
   const [deadlinePassed, setDeadlinePassed] = useState(false);
+  const [commandExpanded, setCommandExpanded] = useState(false);
   const [alwaysRuleAction, setAlwaysRuleAction] = useState<
     "allow" | "deny" | null
   >(null);
@@ -101,6 +114,12 @@ export function CommandApprovalBar({
     ?? readRuleSubject(proposal)
     ?? fallbackProcessSubject(proposal);
   const showAlwaysRule = Boolean(permissionRulesGateway && ruleSubject);
+  const isShell = isShellProgram(proposal.programLabel);
+  const commandText = formatCommandArgvDisplay(
+    proposal.programLabel,
+    proposal.argv,
+  );
+  const isLongCommand = commandText.length > COMMAND_DISPLAY_EXPAND_THRESHOLD;
 
   useLayoutEffect(() => {
     approveRef.current?.focus();
@@ -109,6 +128,7 @@ export function CommandApprovalBar({
   useEffect(() => {
     setSubmitting(false);
     setDeadlinePassed(false);
+    setCommandExpanded(false);
   }, [proposal.proposalId, proposal.expiresAt]);
 
   useEffect(() => {
@@ -177,14 +197,13 @@ export function CommandApprovalBar({
     buttons[nextIndex]?.focus();
   }
 
-  const argvText = formatArgvDisplay(proposal.argv);
-
   return (
     <div
       ref={barRef}
       aria-labelledby={headingId}
       className="command-approval-bar"
       data-testid="command-approval-bar"
+      data-command-kind={isShell ? "shell" : "structured"}
       onKeyDown={handleBarKeyDown}
       role="region"
     >
@@ -192,15 +211,69 @@ export function CommandApprovalBar({
         <h2 className="command-approval-bar__title" id={headingId}>
           命令批准
         </h2>
-        <p className="command-approval-bar__command">
-          <code data-testid="command-approval-program">
-            {proposal.programLabel}
-          </code>
-          <span aria-hidden="true" className="command-approval-bar__sep">
-            {" "}
-          </span>
-          <code data-testid="command-approval-argv">{argvText}</code>
-        </p>
+        {isShell ? (
+          <p className="command-approval-bar__command command-approval-bar__command--shell">
+            <span
+              className="command-approval-bar__kind"
+              data-testid="command-approval-kind"
+            >
+              Shell 命令
+            </span>
+            <code
+              className={
+                commandExpanded
+                  ? "command-approval-bar__command-text command-approval-bar__command-text--expanded"
+                  : "command-approval-bar__command-text"
+              }
+              data-full-command={commandText}
+              data-testid="command-approval-argv"
+              title={commandText}
+            >
+              {commandText}
+            </code>
+            {isLongCommand ? (
+              <button
+                className="command-approval-bar__expand"
+                data-testid="command-approval-expand-command"
+                onClick={() => setCommandExpanded((open) => !open)}
+                type="button"
+              >
+                {commandExpanded ? "收起" : "展开完整命令"}
+              </button>
+            ) : null}
+          </p>
+        ) : (
+          <p className="command-approval-bar__command">
+            <code data-testid="command-approval-program">
+              {proposal.programLabel}
+            </code>
+            <span aria-hidden="true" className="command-approval-bar__sep">
+              {" "}
+            </span>
+            <code
+              className={
+                commandExpanded
+                  ? "command-approval-bar__command-text command-approval-bar__command-text--expanded"
+                  : "command-approval-bar__command-text"
+              }
+              data-full-command={commandText}
+              data-testid="command-approval-argv"
+              title={commandText}
+            >
+              {commandText}
+            </code>
+            {isLongCommand ? (
+              <button
+                className="command-approval-bar__expand"
+                data-testid="command-approval-expand-command"
+                onClick={() => setCommandExpanded((open) => !open)}
+                type="button"
+              >
+                {commandExpanded ? "收起" : "展开完整命令"}
+              </button>
+            ) : null}
+          </p>
+        )}
         <p className="command-approval-bar__details">
           <span data-testid="command-approval-cwd">
             <code>{proposal.portableCwd}</code>
@@ -232,7 +305,9 @@ export function CommandApprovalBar({
             data-testid="command-approval-risk-note"
             role="note"
           >
-            高风险参数可见为字面参数；项目路径约束不是操作系统沙箱。
+            {isShell
+              ? "Shell 命令按字面执行；项目路径约束不是操作系统沙箱。"
+              : "高风险参数可见为字面参数；项目路径约束不是操作系统沙箱。"}
           </p>
         ) : null}
       </div>

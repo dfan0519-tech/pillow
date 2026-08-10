@@ -13,7 +13,11 @@ import { CommandApprovalBar } from "../src/features/execution/CommandApprovalBar
 import { GitChangesView } from "../src/features/execution/GitChangesView";
 import { TerminalOutputView } from "../src/features/execution/TerminalOutputView";
 import {
+  COMMAND_DISPLAY_EXPAND_THRESHOLD,
   formatArgvDisplay,
+  formatCommandArgvDisplay,
+  isShellProgram,
+  SHELL_PROGRAM_LABEL,
   type CommandActivityView,
   type CommandProposalView,
   type TerminalOutputModel,
@@ -745,6 +749,246 @@ describe("GitChangesView", () => {
 });
 
 /**
+ * Shell vs structured command display (approval + activity surfaces).
+ * Hard rule: shell display text must be character-identical to the sealed
+ * command string — no JSON escape, no whitespace normalize.
+ */
+describe("shell command approval display", () => {
+  /**
+   * Nested quotes — the sealed command as the host stores it (single argv
+   * element). Under formatArgvDisplay this becomes a JSON-escaped blob;
+   * shell display must keep this string character-identical.
+   */
+  const NESTED_QUOTE_CMD =
+    `node -e "require('fs').writeFileSync('out.txt', 'hello \"world\"')"`;
+
+  function shellProposal(
+    command: string,
+    overrides: Partial<CommandProposalView> = {},
+  ): CommandProposalView {
+    return pendingProposal({
+      programLabel: SHELL_PROGRAM_LABEL,
+      argv: [command],
+      riskClass: "high",
+      summary: "governed shell",
+      ...overrides,
+    });
+  }
+
+  it("formatCommandArgvDisplay: shell is character-identical; structured stays JSON-encoded", () => {
+    expect(isShellProgram(SHELL_PROGRAM_LABEL)).toBe(true);
+    expect(isShellProgram("cargo")).toBe(false);
+
+    // Positive accept: rendered text === sealed command, char by char.
+    expect(formatCommandArgvDisplay("shell", [NESTED_QUOTE_CMD])).toBe(
+      NESTED_QUOTE_CMD,
+    );
+    expect(formatCommandArgvDisplay("shell", [NESTED_QUOTE_CMD])).not.toBe(
+      formatArgvDisplay([NESTED_QUOTE_CMD]),
+    );
+    // Empty shell argv → empty string (not "shell", not '""').
+    expect(formatCommandArgvDisplay("shell", [])).toBe("");
+    // Multi-element shell is out of host contract; still use argv[0] only
+    // (no rejoin that would invent a different command string).
+    expect(formatCommandArgvDisplay("shell", ["echo a", "echo b"])).toBe(
+      "echo a",
+    );
+
+    // Structured regression: same encoding as formatArgvDisplay.
+    const structured = ["test", "-p", "keeper-tool-executor"];
+    expect(formatCommandArgvDisplay("cargo", structured)).toBe(
+      formatArgvDisplay(structured),
+    );
+    expect(formatCommandArgvDisplay("cargo", structured)).toBe(
+      '"test" "-p" "keeper-tool-executor"',
+    );
+    expect(formatCommandArgvDisplay("node", ["-e", 'say "hi"'])).toBe(
+      '"-e" "say \\"hi\\""',
+    );
+  });
+
+  it("CommandApprovalBar: shell nested-quote command textContent equals input char-for-char", () => {
+    render(
+      <CommandApprovalBar
+        decisionAvailable={true}
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={shellProposal(NESTED_QUOTE_CMD)}
+      />,
+    );
+
+    const bar = screen.getByTestId("command-approval-bar");
+    expect(bar).toHaveAttribute("data-command-kind", "shell");
+    expect(within(bar).getByTestId("command-approval-kind")).toHaveTextContent(
+      "Shell 命令",
+    );
+    // No separate program chip for shell — label is "Shell 命令".
+    expect(within(bar).queryByTestId("command-approval-program")).toBeNull();
+
+    const argvEl = within(bar).getByTestId("command-approval-argv");
+    // Character-identical (not toHaveTextContent, which normalizes whitespace).
+    expect(argvEl.textContent).toBe(NESTED_QUOTE_CMD);
+    expect(argvEl.getAttribute("data-full-command")).toBe(NESTED_QUOTE_CMD);
+    expect(argvEl.getAttribute("title")).toBe(NESTED_QUOTE_CMD);
+    // Must not be the JSON-escaped form users previously saw.
+    const escaped = formatArgvDisplay([NESTED_QUOTE_CMD]);
+    expect(escaped).not.toBe(NESTED_QUOTE_CMD);
+    expect(argvEl.textContent).not.toBe(escaped);
+  });
+
+  it("CommandApprovalBar: structured proposal presentation is unchanged", () => {
+    render(
+      <CommandApprovalBar
+        decisionAvailable={true}
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={pendingProposal({
+          programLabel: "node",
+          argv: ["-e", "console.log(1)"],
+          riskClass: "high",
+        })}
+      />,
+    );
+
+    const bar = screen.getByTestId("command-approval-bar");
+    expect(bar).toHaveAttribute("data-command-kind", "structured");
+    expect(within(bar).queryByTestId("command-approval-kind")).toBeNull();
+    expect(within(bar).getByTestId("command-approval-program")).toHaveTextContent(
+      "node",
+    );
+    const argvEl = within(bar).getByTestId("command-approval-argv");
+    expect(argvEl.textContent).toBe('"-e" "console.log(1)"');
+    expect(argvEl.getAttribute("data-full-command")).toBe(
+      '"-e" "console.log(1)"',
+    );
+  });
+
+  it("CommandApprovalBar: long shell command keeps full text available after visual truncate affordance", async () => {
+    const user = userEvent.setup();
+    const longCmd =
+      "node -e " +
+      JSON.stringify(
+        "console.log(" + "x".repeat(COMMAND_DISPLAY_EXPAND_THRESHOLD) + ")",
+      );
+    expect(longCmd.length).toBeGreaterThan(COMMAND_DISPLAY_EXPAND_THRESHOLD);
+
+    render(
+      <CommandApprovalBar
+        decisionAvailable={true}
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={shellProposal(longCmd)}
+      />,
+    );
+
+    const argvEl = screen.getByTestId("command-approval-argv");
+    // Full command is always in the DOM / title / data attr — never only a
+    // truncated copy that the user could approve without access to the rest.
+    expect(argvEl.textContent).toBe(longCmd);
+    expect(argvEl.getAttribute("data-full-command")).toBe(longCmd);
+    expect(argvEl.getAttribute("title")).toBe(longCmd);
+
+    const expand = screen.getByTestId("command-approval-expand-command");
+    expect(expand).toHaveTextContent("展开完整命令");
+    await user.click(expand);
+    expect(expand).toHaveTextContent("收起");
+    expect(argvEl).toHaveClass("command-approval-bar__command-text--expanded");
+    // Still character-identical after expand.
+    expect(argvEl.textContent).toBe(longCmd);
+    expect(argvEl.getAttribute("data-full-command")).toBe(longCmd);
+  });
+
+  it("same suite: shell and structured both render correctly side by side", () => {
+    const shellCmd = `echo 'a "b" c' && printf "%s" 'nested'`;
+    const structuredArgv = ["test", "-p", "pillow-desktop"] as const;
+
+    const { rerender } = render(
+      <CommandApprovalBar
+        decisionAvailable={true}
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={shellProposal(shellCmd)}
+      />,
+    );
+    expect(screen.getByTestId("command-approval-bar")).toHaveAttribute(
+      "data-command-kind",
+      "shell",
+    );
+    expect(screen.getByTestId("command-approval-argv").textContent).toBe(
+      shellCmd,
+    );
+
+    rerender(
+      <CommandApprovalBar
+        decisionAvailable={true}
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={pendingProposal({
+          programLabel: "cargo",
+          argv: [...structuredArgv],
+        })}
+      />,
+    );
+    expect(screen.getByTestId("command-approval-bar")).toHaveAttribute(
+      "data-command-kind",
+      "structured",
+    );
+    expect(screen.getByTestId("command-approval-program")).toHaveTextContent(
+      "cargo",
+    );
+    expect(screen.getByTestId("command-approval-argv").textContent).toBe(
+      '"test" "-p" "pillow-desktop"',
+    );
+  });
+
+  it("CommandActivityRow: shell command is not JSON-escaped", () => {
+    const cmd = `python -c "print('hi \"x\"')"`;
+    const { container } = render(
+      <CommandActivityRow
+        activity={activityFixture({
+          programLabel: SHELL_PROGRAM_LABEL,
+          argv: [cmd],
+          state: "pending_approval",
+        })}
+      />,
+    );
+    const row = screen.getByTestId("command-activity-row");
+    expect(row).toHaveAttribute("data-command-kind", "shell");
+    expect(within(row).getByTestId("command-activity-kind")).toHaveTextContent(
+      "Shell 命令",
+    );
+    expect(within(row).queryByTestId("command-activity-program")).toBeNull();
+    const rowArgv = within(row).getByTestId("command-activity-argv");
+    expect(rowArgv.textContent).toBe(cmd);
+    expect(rowArgv.getAttribute("data-full-command")).toBe(cmd);
+    expect(rowArgv.textContent).not.toBe(formatArgvDisplay([cmd]));
+    // No native path / grant leakage from this fixture.
+    expect(container.textContent).not.toContain(RAW_GRANT);
+  });
+
+  it("TerminalOutputView: shell command is not JSON-escaped", () => {
+    const cmd = `python -c "print('hi \"x\"')"`;
+    render(
+      <TerminalOutputView
+        output={terminalFixture({
+          programLabel: SHELL_PROGRAM_LABEL,
+          argv: [cmd],
+        })}
+      />,
+    );
+    const term = screen.getByTestId("terminal-output-view");
+    expect(term).toHaveAttribute("data-command-kind", "shell");
+    expect(within(term).getByTestId("terminal-output-kind")).toHaveTextContent(
+      "Shell 命令",
+    );
+    expect(within(term).queryByTestId("terminal-output-program")).toBeNull();
+    expect(within(term).getByTestId("terminal-output-argv").textContent).toBe(
+      cmd,
+    );
+  });
+});
+
+/**
  * Display-only encoding for sealed argv. Must preserve argument boundaries
  * without shell parsing. Encoding: JSON-string per argument, space-separated.
  */
@@ -808,10 +1052,16 @@ describe("formatArgvDisplay", () => {
     expect(first).toBe(
       '"$HOME" "$(id)" "`uname`" "a|b" "c&d" ";rm" ">" "<"',
     );
-    // Display only: source must not shell-join or spawn from the helper.
+    // Display only: structured helper body must stay JSON-stringify join —
+    // no exec/spawn. Shell-aware path is formatCommandArgvDisplay (suite above).
     const source = readFileSync(join(featureDir, "executionTypes.ts"), "utf8");
-    const helper = source.slice(source.indexOf("function formatArgvDisplay"));
-    expect(helper).not.toMatch(/exec|spawn|shell|cmd\.exe|powershell/i);
-    expect(helper).toMatch(/JSON\.stringify/);
+    const start = source.indexOf("export function formatArgvDisplay");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = source.indexOf("\n}", start);
+    expect(end).toBeGreaterThan(start);
+    const helper = source.slice(start, end + 2);
+    expect(helper).toMatch(/^export function formatArgvDisplay[\s\S]*JSON\.stringify[\s\S]*\}$/);
+    expect(helper).not.toMatch(/exec\b|spawn\b|cmd\.exe|powershell/i);
+    expect(helper).not.toMatch(/isShellProgram|formatCommandArgvDisplay/);
   });
 });

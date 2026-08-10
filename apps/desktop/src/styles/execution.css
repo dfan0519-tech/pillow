@@ -66,6 +66,13 @@
   color: var(--text-secondary, rgba(255, 255, 255, 0.68));
 }
 
+.command-activity-row__kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  flex-shrink: 0;
+}
+
 .command-activity-row__program,
 .command-activity-row__argv {
   font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
@@ -183,7 +190,20 @@
   gap: 0 4px;
 }
 
-.command-approval-bar__command code {
+.command-approval-bar__command--shell {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.command-approval-bar__kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.command-approval-bar__command code,
+.command-approval-bar__command-text {
   font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
   font-size: 13px;
   color: var(--text-primary, rgba(255, 255, 255, 0.92));
@@ -191,6 +211,40 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Expanded: full command always readable; never approve against truncated text alone. */
+.command-approval-bar__command-text--expanded {
+  display: block;
+  width: 100%;
+  overflow: auto;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 12rem;
+}
+
+.command-approval-bar__expand {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.command-approval-bar__expand:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.command-approval-bar__expand:focus-visible {
+  outline: 2px solid var(--border-focus, rgba(140, 170, 255, 0.55));
+  outline-offset: 2px;
 }
 
 .command-approval-bar__details,
@@ -294,6 +348,13 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0 4px;
+}
+
+.terminal-output-view__kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  flex-shrink: 0;
 }
 
 .terminal-output-view__command code {
