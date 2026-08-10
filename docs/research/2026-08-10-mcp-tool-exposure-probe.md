@@ -259,3 +259,48 @@ denylist 在上游 `builder.rs` L882 **先于** allowlist 执行,所以客户端
 
 判据不变:任何新路线都必须先被本探针实测,
 且**不得重新打开 ambient MCP 的洞**(§9)。
+
+---
+
+## 11. 治理路线已实测打通:ACP 反向 RPC(2026-08-11)
+
+调研:`docs/research/2026-08-11-governed-tool-route.md`。
+它把两条关键行都标了 **实盘未确定**,并点名要跑
+`acp-fs-localfs-trap` / `acp-fs-write-governed`。以下是实测。
+
+上游按 `use_acp_fs = client_fs_read && client_fs_write` 选择文件后端 ——
+**两个都要为真**。
+
+| 变体 | profile | `clientCapabilities.fs` | 磁盘 | 代理→客户端请求 |
+| --- | --- | --- | --- | --- |
+| `acp-fs-localfs-trap` | allowlist 含原生 `write` | read=true, **write=false** | 🔴 **落盘** | **`[]`** |
+| `acp-fs-write-governed` | 同上 | read=true, **write=true** | ✅ **不存在** | **`["fs/read_text_file","fs/write_text_file"]`** |
+
+两个变体的 profile **完全相同**,只差 `writeTextFile` 一个布尔值。
+
+### 结论一:拦截点存在且可用
+
+双开之后,代理的写**真的走到客户端手上**。探针回了成功但**没有写盘**,
+磁盘上就什么都没有 —— 说明**客户端就是闸**。
+`fs/write_text_file` 这个位置正是提案 → 审批 → 宿主执行 → 收据要挂的地方。
+
+这条路的性质比 MCP 好:**它是客户端能力,环境侧配置插不进来**,
+不存在 ambient 那种"用户装了什么我们不知道"的问题。
+
+### 结论二:陷阱是真的,而且无声
+
+只放行原生 `write` 却让 `writeTextFile` 保持 `false` →
+上游走 LocalFs,**代理进程直接写盘,一次都不联系客户端**(`agentRequests: []`)。
+没有报错、没有拒绝、没有任何信号。
+
+⚠️ **这两个改动必须同时上,不能分两步。** 先放 allowlist 再补 capability,
+中间那段时间治理是关着的而看起来是开着的。
+
+### 现状与下一步
+
+Pillow 当前 `initialize_params` 是 `readTextFile: true, writeTextFile: false`
+—— 即 `use_acp_fs = false`。今天没出事,只因为 allowlist 里没有 `write`。
+**这正是"两个改动必须同时上"所指的那种半开状态。**
+
+进程方向(C4)未测:`terminal/*` 与 Pillow 的"目录表 + 结构化 argv"差距较大,
+调研列为次优先,**未确定**。
