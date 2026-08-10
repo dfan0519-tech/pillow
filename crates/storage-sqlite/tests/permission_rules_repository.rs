@@ -7,6 +7,9 @@ use keeper_storage_sqlite::{
     PermissionRuleScope, SqlitePermissionRuleRepository, SqliteProjectRepository,
 };
 use rusqlite::Connection;
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
 
 fn db_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
     temp.path().join("keeper.db")
@@ -126,6 +129,47 @@ fn global_rules_roundtrip_restart_list_and_delete() {
             .list(PermissionRuleScope::Global, None)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn permission_rule_connection_waits_for_a_short_cross_connection_write_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = db_path(&temp);
+    let repo = SqlitePermissionRuleRepository::open(&path).unwrap();
+    let blocker = Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let start = Arc::new(Barrier::new(2));
+    let worker_start = Arc::clone(&start);
+    let worker = thread::spawn(move || {
+        worker_start.wait();
+        repo.add(add(
+            PermissionRuleScope::Global,
+            None,
+            PermissionRulePrefix::Process,
+            "cargo test *",
+            PermissionRuleAction::Allow,
+        ))
+    });
+
+    start.wait();
+    thread::sleep(Duration::from_millis(100));
+    blocker.execute_batch("ROLLBACK").unwrap();
+
+    let rule = worker
+        .join()
+        .expect("rule writer thread")
+        .expect("repository must wait out a short SQLite writer lock");
+    assert_eq!(rule.pattern, "cargo test *");
+}
+
+#[test]
+fn permission_rule_repository_explicitly_pins_busy_timeout() {
+    let source = include_str!("../src/permission_rules.rs");
+    assert!(
+        source.contains(".busy_timeout(Duration::from_secs(5))"),
+        "permission-rule connections must not rely on rusqlite's changeable default busy timeout"
     );
 }
 

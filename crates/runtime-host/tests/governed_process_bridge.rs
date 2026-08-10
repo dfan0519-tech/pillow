@@ -264,6 +264,64 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
 }
 
 #[test]
+fn project_directory_permission_files_never_authorize_and_no_match_requires_confirmation() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join(".pillow")).unwrap();
+    fs::create_dir_all(fx.root.join(".grok")).unwrap();
+    fs::write(
+        fx.root.join(".pillow/permissions.toml"),
+        "allow = [\"Bash(node --version)\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        fx.root.join(".grok/config.toml"),
+        "allow = [\"Bash(node --version)\"]\n",
+    )
+    .unwrap();
+
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let conversation_id = fx.conversation_id.clone();
+    let decision_host = Arc::clone(&host);
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&decision_host, &conversation_id);
+        let view = decision_host
+            .list_process_proposals(&conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.proposal_id == proposal_id)
+            .expect("pending proposal view");
+        assert!(view.decision_available, "no SQLite rule must ask the user");
+        assert_eq!(view.auto_approved_by_rule, None);
+        decision_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_version("project-file-cannot-authorize"),
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    assert_eq!(receipt.state, ExecProposalState::Rejected);
+    assert!(receipt.started.is_none());
+    assert_eq!(
+        SqliteExecProposalRepository::open(&fx.db)
+            .unwrap()
+            .get_rule_receipt(&receipt.proposal_id)
+            .unwrap(),
+        None,
+        "human confirmation/rejection must not fabricate rule attribution"
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn allow_rule_cannot_introduce_program_outside_structural_catalog() {
     let fx = fixture();
     add_process_rule(&fx, "*", PermissionRuleAction::Allow);

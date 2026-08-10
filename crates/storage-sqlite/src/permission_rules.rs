@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use keeper_agent_protocol::canonical_arguments_digest;
@@ -221,6 +222,12 @@ impl SqlitePermissionRuleRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, PermissionRuleError> {
         let database_path = path.as_ref().to_path_buf();
         let connection = Connection::open(&database_path).map_err(map_sqlite)?;
+        // Command and runtime-host repositories intentionally use separate
+        // connections. Wait through brief cross-connection lock contention
+        // instead of relying on rusqlite's changeable default busy timeout.
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(map_sqlite)?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(map_sqlite)?;
