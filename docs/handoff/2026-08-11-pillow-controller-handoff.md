@@ -1,13 +1,12 @@
 # Pillow 总控交接手册(2026-08-11)
 
 工作目录:`<repo>`
-分支 / HEAD:`main` / `87e067d`(**本地 = 远程**)
+分支 / HEAD:`main` / `963dcbb`(**本地 = 远程**,工作树干净)
 远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
 
 > 取代 `docs/handoff/2026-08-10-*.md`。那份写于边界尚未成立时,
 > **§3「真实代理没有手」已被推翻**,不得作为真相源。
-> 运维细节(槽位、claim/release、Codex 沙箱限制)在
-> **`.superpowers/RUNBOOK.md`**(gitignored)。开工前先读。
+> 运维细节在 **`.superpowers/RUNBOOK.md`**(gitignored)。开工前先读。
 
 ---
 
@@ -15,9 +14,9 @@
 
 **代理有两只受管的手(写文件、跑命令),槽位可配自有 key 并按端点选模型。**
 
-自 `9b2abba` 起 **25 个提交**。门 OK,E2E **10/10**。
+自 `9b2abba` 起 **34 个提交**。门 OK,E2E 10/10,**在途 Worker:0**。
 
-⚠️ **有 1 个 Worker 在途**,见 §7。
+🔴 **用户仍未真正跑过一轮任务。这是项目现在最大的未知。**
 
 ---
 
@@ -34,7 +33,7 @@
 数月间治理链**只有 fixture agent 跑过**。是**实盘探针**发现的,不是评审。
 
 **修的方向也错过一次**:我先建议"那就先不给进程能力"。用户否掉,理由正确 ——
-**不要因为自建模型接不住就砍功能,去看市面上怎么解的。** 上游 `policy.rs` 里就有答案。
+**不要因为自建模型接不住就砍功能,去看市面上怎么解的。**
 
 ---
 
@@ -50,31 +49,26 @@ mcpServers:         []
 
 | 面 | 机制 |
 | --- | --- |
-| **写** | 原生 `write` → `fs/write_text_file` → 既有治理链 |
+| **写** | 原生 `write` → `fs/write_text_file` → 治理链 |
 | **进程** | 原生 `run_terminal_cmd` → `terminal/*` → 同一条链 |
 | **MCP** | **切断**(环境侧 MCP 关不掉,禁元工具是唯一杠杆) |
 
 **allowlist 管原生工具(fail-closed);denylist 只关一扇门,不是列举房间。**
-代码里有测试:denylist 出现第三个名字就红。
+有测试钉死:denylist 出现第三个名字就红。
 
-### 权限规则与模式
+**规则**:保守拆段,allow **逐段合取**,任一段 deny 即拒,拆不动就问。
+`Bash(cargo*)` **不会**放行 `cargo test; rm -rf x`。批准时可**逐段**存规则
+(拆不动则不给入口,**绝不回退整串**)。
 
-- **规则**:保守拆段,allow **逐段合取**,任一段 deny 即拒,拆不动就问。
-  `Bash(cargo*)` **不会**放行 `cargo test; rm -rf x`。
-  批准时可**逐段**存规则(拆不动则不给入口,**绝不回退整串**)。
-- **模式**:`default` / `accept_edits` / `bypass`。
-  🔴 **`bypass` 关的是"问",不是治理** —— 提案/执行/收据一条不少,
-  deny 规则仍赢,坏枚举值 fail-closed 回 `default`,项目目录不能选模式。
-- 🔴 **批准权绝不交给 provider**:`methods.rs` 有测试禁止会话参数出现
-  `yolomode`/`automode`/`always-approve`。交出去,收据就是虚构。
+**模式**:`default` / `accept_edits` / `bypass`。
+🔴 **`bypass` 关的是"问",不是治理** —— 提案/执行/收据一条不少,deny 仍赢,
+坏枚举值 fail-closed 回 `default`,项目目录不能选模式。
+🔴 **批准权绝不交给 provider**(`methods.rs` 有禁令测试)。
 
-### 槽位
-
-- `governed_grok`(受治理)+ `external_cli`(**登记用,不治理** —— 模型里是显式属性)
-- API key 走 **DPAPI 加密**,Debug 脱敏、drop 清零、不进任何 DTO;非 Windows **fail-closed**
-- 每槽位可拉模型目录(端点 `/models` 或 `grok models`);
-  **端点不支持时返回明确的 unsupported,不是错误** —— 渲染层据此回落手敲
-- 🔴 **换模型必须重启活跃 runtime**(模型是 `-m` 启动参数,会话内固定)
+**槽位**:`governed_grok`(受治理)/ `external_cli`(**登记用,不治理**,模型里是显式属性)。
+API key 走 **DPAPI 加密**,Debug 脱敏、drop 清零、不进 DTO;非 Windows fail-closed。
+每槽位可拉模型目录;**端点不支持 `/models` 时返回明确 unsupported 而非错误**,
+渲染层据此回落手敲。🔴 **换模型必须重启活跃 runtime**(模型是 `-m` 启动参数)。
 
 ---
 
@@ -101,11 +95,10 @@ mcpServers:         []
 2. 归属放提案视图而非事件载荷 → replay 看不见
 3. 宿主对 shell 发合法的空 `rule_subject` → 我写的校验器要求非空 → shell 审批条全死
 
-**规矩:**
-- 说清是**命令返回的 DTO** 还是**事件载荷**
-- 宿主 DTO 加字段 = **破坏性变更**,必须同批放宽
-  `apps/desktop/src/lib/tauriExecGateway.ts` 的 `only(value, proposalKeys)`
-- **只断言"拒绝"的测试是假绿**
+**规矩**:说清是**命令返回的 DTO** 还是**事件载荷**;
+宿主 DTO 加字段 = **破坏性变更**,必须同批放宽
+`apps/desktop/src/lib/tauriExecGateway.ts` 的 `only(value, proposalKeys)`;
+**只断言"拒绝"的测试是假绿**。
 
 ---
 
@@ -115,8 +108,6 @@ mcpServers:         []
 PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 # 窄跑 PILLOW_MCP_PROBE_ONLY=<id>;"not run" 永不算过
 ```
-
-不设变量时输出 `skipped` 返回 0,**永不进门**。
 
 | id | 期望 |
 | --- | --- |
@@ -131,59 +122,74 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ---
 
-## 7. 在途 Worker
+## 7. 用户上手所需(**下一步就是这个**)
 
-**grok1 —— 模型选择器 UI**(`.superpowers/round33/`,台账 `a20f1164`)。
-只动 `apps/desktop/src/**`。已产出 `RuntimeSlotModelPicker.tsx` 与测试,**未提交**。
+- **启动**:桌面 / 开始菜单的 **Pillow** 快捷方式 → `target\release\pillow.exe`
+- **试用项目**:`<repo>-tryout`(10 通过 / 3 失败,README 有六步试用顺序)
+- 🔴 **Grok 当前未登录**(`grok models` 报 not authenticated)。
+  第一次**不要选登录型槽位**,用 API key 槽位:
+  端点 `https://opencode.ai/zen/v1`,key 在桌面 `opencode key.txt`,
+  **实测可用,61 个模型**(建议先用 `claude-haiku-4-5`)。
 
-验收要点:三态(可用/不支持/失败)各有测试;`runtimeRestarted` **两个分支都如实呈现**
-(不许编乐观提示);密钥不进 DOM。
+### 图标与快捷方式的三个坑(都已修,别再踩)
+
+1. **cargo 不把图标当构建脚本输入** —— 重新生成图标后不 touch `build.rs`,
+   二进制里还是旧图标,而**所有命令都报成功**。
+   `scripts/generate-app-icons.mjs` 现在会自己 touch。
+2. **Windows 图标缓存按"目标路径 + 索引"做键** —— 反复重建同一路径的快捷方式
+   永远命中旧值。快捷方式现在指向 `pillow.ico`(独立文件)。
+3. **运行中的 exe 无法被覆盖** —— 每次改前端都要先关 Pillow 再构建。
+   用 PowerShell `CloseMainWindow()`;
+   🔴 **`taskkill /IM` 在 MSYS 下会被转成 `F:/Git/IM` 而失败。**
 
 ---
 
-## 8. 待办(按顺序)
-
-1. 模型选择器 UI 验收提交
-2. E2E 负载假红根因(任务 #10)
-3. 🔴 **外审** —— `docs/references/external-audit-brief.md` **已按当前系统重写**,自带上下文可直接粘出去
-4. **打包**(用户明确:最后一轮)
-
-**用户从未真正用过。** 这是现在最大的未知。
-
----
-
-## 9. 已知缺口(**不要当新发现重报**)
+## 8. 已知缺口(**不要当新发现重报**)
 
 - 解释器确认表有限:不认识的 wrapper + 过宽规则 = 最可能的错放路径
 - `node*` 这类规则合法地授权 `node any-script.js`
 - 事件载荷只带**代表**规则,durable 收据才是全的 —— **审计看收据**
-- 重启恢复的行拿不到段,故不可自动决策(刻意没把原始命令写进 durable 存储)
+- 重启恢复的行拿不到段,故不可自动决策
 - **不是 OS 沙箱**:治理的是已验证的 provider 工具路径
+- E2E 满负载偶发假红(任务 #10),单跑通过
 - `search_replace` 故意未暴露
 
 ---
 
-## 10. 我的坑位表(**新增在前**)
+## 9. 我的坑位表(**这一天付出的代价**)
 
-1. **一次性进程快照不能判定 worker 死亡。** 卡死后我据此判它死了,
-   在**还在被写的树上**跑了三轮验证,自造 4 个 E2E 失败,还据此给了用户
-   一个错误结论。**要观察日志/工作树是否还在增长。**
-2. **门自己会假红。** `PROBE_COUNT` 是进程级 static,新测试启动 runtime 却不持锁,
-   3 次全量红 1 次。**门是验收权威,它假红则后面全部判断不可信。**
-   守卫要**容忍毒化** —— 否则 1 个真失败级联成 7 个,埋掉真凶。
-3. **对照实验必须只差一个变量。** 我拿"两个 profile 都挡不住写"当决定性证据,
-   但它们**都没解析成功** —— 在对比两个同样无效的 payload。
-4. **工具名出现在调用列表 ≠ 调用成功。** 把成功的 `tasks__create` 读成"试了没成"。
-5. **数量不等于对应关系。** 补丁脚本断言"3 个声明 / 3 个 catch",数量对上就放行,
-   留下会掩盖真实错误的 `ReferenceError`。
-6. **管道吃退出码。** `cmd | tail` 让我**把红的 E2E 报成了绿**。
-   一律 `cmd > log 2>&1; echo EXIT=$?`。
-7. **`cargo check` 不编译 `#[cfg(test)]`。** 收口用 `cargo test --workspace --no-run`。
-8. **Worker 的门结论不可采信**(沙箱起不动门,交过自己看不见的红 clippy)。
-9. **从代码推断运行时行为** —— 前后栽三次。
-10. **别把自建模型当固定条件去砍需求。**
-11. **已有明确指令时不要再问。** 用户早已定"照市面成熟产品做",
-    我却把全局权限模式包装成需要他拍板的产品定位问题,白耗一轮。
+1. **抑制输出后从残缺信号下结论** —— 今天犯了三次:
+   `cmd | tail` 把红的 E2E 报成绿;`taskkill` 一直失败而我把 stderr 丢了;
+   构建失败却按"已修好"向用户描述。
+   **一律 `cmd > log 2>&1; echo EXIT=$?`,并看输出本身。**
+2. **退出码不等于结果。** 图标生成 exit 0 但底板没了;构建 exit 0 但图标没进去。
+   **看产物,不看返回码。**
+3. **一次性进程快照不能判定 worker 死亡** —— 我据此在**还在被写的树上**
+   跑了三轮验证,自造 4 个 E2E 失败,并给了用户一个错误结论。
+   **要观察日志/工作树是否还在增长。**
+4. **门自己会假红。** 进程级 static 计数被不持锁的新测试污染,3 次红 1 次。
+   **门是验收权威,它假红则后面全部判断不可信。** 守卫要容忍毒化。
+5. **对照实验必须只差一个变量。** 我对比的两个 profile **都没解析成功**。
+6. **工具名出现在调用列表 ≠ 调用成功。**
+7. **数量不等于对应关系**(补丁脚本断言计数相等就放行,留下 `ReferenceError`)。
+8. **`cargo check` 不编译 `#[cfg(test)]`** —— 收口用 `cargo test --workspace --no-run`。
+9. **Worker 的门结论不可采信**(沙箱起不动门,交过自己看不见的红 clippy)。
+10. **从代码推断运行时行为** —— 前后栽三次。
+11. **别把自建模型当固定条件去砍需求。**
+12. **已有明确指令时不要再问。**
+13. **修 UI 只修截图里那一处是不够的** —— 四个 banner 共用同一个布局前提,
+    只修一个,换个状态就再撞一次。而且**要把所有 fixed 元素都算进避让**,
+    我第一次只算了窗口控件,漏了悬浮的设置按钮,用户看到的是"跟没改一样"。
+
+---
+
+## 10. 下一步
+
+1. 🔴 **用户跑一轮真实任务**(见 §7)
+2. 任务 #10:E2E 负载假红根因
+3. **外审** —— `docs/references/external-audit-brief.md` **已按当前系统重写**,
+   自带上下文可直接粘出去
+4. **打包**(用户明确:最后一轮)
 
 ---
 
@@ -192,6 +198,5 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 - 门:`node scripts/run-worker-gate.mjs`(唯一合规入口)
 - E2E:`pnpm desktop:test:e2e`,约 25 分钟,**总控独占**
 - 并行:多写码单各自 `CARGO_TARGET_DIR`;门是 workspace 级,
-  邻居半成品让 Worker 报 `BLOCKED-BY-CONCURRENT`,别去修
+  邻居半成品让 Worker 报 `BLOCKED-BY-CONCURRENT`
 - 台账:`node scripts/run-cargo.mjs run -q -p keeper-knowledge-indexer --bin knowledge-indexer -- ledger status --db .superpowers/ledger/pillow.db --project pillow`
-- **已可上手**:`target\release\pillow.exe`,启动约 1.6 秒
