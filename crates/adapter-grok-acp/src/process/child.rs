@@ -7,7 +7,9 @@ use std::process::{ChildStdin, ChildStdout};
 use std::time::Duration;
 
 use keeper_agent_protocol::RuntimeError;
-use keeper_process_executor::{ProcessSpec, SupervisedChild, SupervisedProcessRunner};
+use keeper_process_executor::{
+    ProcessSpec, SecretEnvironment, SupervisedChild, SupervisedProcessRunner,
+};
 
 use crate::error::internal;
 
@@ -61,6 +63,7 @@ pub fn spawn_child(
     args: &[String],
     cwd: Option<&Path>,
     env: &HashMap<String, String>,
+    secret_env: Option<SecretEnvironment>,
 ) -> Result<ChildHandle, RuntimeError> {
     let mut clean_env = BTreeMap::new();
     #[cfg(debug_assertions)]
@@ -88,9 +91,12 @@ pub fn spawn_child(
         timeout: Duration::from_secs(180),
         output_byte_cap: 1_048_576,
     };
-    let child = SupervisedProcessRunner::new()
-        .spawn_piped(spec)
-        .map_err(map_error)?;
+    let runner = SupervisedProcessRunner::new();
+    let child = match secret_env {
+        Some(secret_env) => runner.spawn_piped_with_secret_env(spec, secret_env),
+        None => runner.spawn_piped(spec),
+    }
+    .map_err(map_error)?;
     Ok(ChildHandle {
         child,
         #[cfg(debug_assertions)]

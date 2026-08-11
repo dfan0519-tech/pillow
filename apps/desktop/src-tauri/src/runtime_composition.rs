@@ -22,6 +22,7 @@ use keeper_storage_sqlite::{
     ResolvedRuntimeSettings, RuntimeAdapterSetting, SettingSource, SettingsError,
     SqliteSettingsRepository, process_env_map,
 };
+use pillow_runtime_slots::PreparedGrokSlot;
 
 use crate::conversation_events::RuntimeEventEmitter;
 use crate::conversation_service::{ConversationCommandError, ConversationService};
@@ -362,7 +363,16 @@ fn open_with_grok_adapter(
     emitter: Arc<dyn RuntimeEventEmitter>,
     config: GrokAcpConfig,
 ) -> Result<(ConversationService, RuntimeSelection), ConversationCommandError> {
-    let service = ConversationService::open_with_adapter_factory(
+    let service = open_conversation_service_with_grok_config(db_path, emitter, config)?;
+    Ok((service, RuntimeSelection::GrokAcp))
+}
+
+pub(crate) fn open_conversation_service_with_grok_config(
+    db_path: impl AsRef<Path>,
+    emitter: Arc<dyn RuntimeEventEmitter>,
+    config: GrokAcpConfig,
+) -> Result<ConversationService, ConversationCommandError> {
+    ConversationService::open_with_adapter_factory(
         db_path,
         emitter,
         production_grok_host_config(),
@@ -375,8 +385,41 @@ fn open_with_grok_adapter(
             })?;
             Ok(Arc::new(adapter) as Arc<dyn AgentRuntimeAdapter>)
         },
-    )?;
-    Ok((service, RuntimeSelection::GrokAcp))
+    )
+}
+
+/// Convert a host-prepared slot into the adapter's typed launch config.
+///
+/// Login intentionally leaves `honor_isolated_home` unset: the adapter copies
+/// the current profile variables without redirecting them. API-key slots use a
+/// Pillow-owned private home. Such homes never contain login `auth.json` files;
+/// their generated config names an env key and the secret enters only through
+/// the adapter-private typed launch channel.
+pub fn build_slot_grok_config(
+    executable: PathBuf,
+    prepared: PreparedGrokSlot,
+) -> Result<GrokAcpConfig, ConversationCommandError> {
+    let config = match prepared {
+        PreparedGrokSlot::Login => GrokAcpConfig::new(executable),
+        PreparedGrokSlot::ApiKey {
+            private_home,
+            model_id,
+            api_key,
+        } => {
+            let mut config = GrokAcpConfig::new(executable)
+                .with_model(model_id)
+                .with_api_key(api_key.into_bytes());
+            config.honor_isolated_home = Some(private_home);
+            config
+        }
+    };
+    config.validate().map_err(|_| {
+        ConversationCommandError::new(
+            "runtime_slot_config_invalid",
+            "Runtime slot Grok configuration is invalid.",
+        )
+    })?;
+    Ok(config)
 }
 
 /// Discover non-secret Grok launch configuration from env / PATH / home.
@@ -400,17 +443,7 @@ pub fn discover_grok_config_with_overrides(
     executable_override: Option<&str>,
     profile_override: Option<&str>,
 ) -> Result<GrokAcpConfig, ConversationCommandError> {
-    let executable = match executable_override {
-        Some(raw) => require_executable_file(raw)?,
-        None => find_grok_on_path().ok_or_else(|| {
-            ConversationCommandError::new(
-                "runtime_executable_missing",
-                format!(
-                    "Grok executable not found on PATH. Set {ENV_GROK_EXECUTABLE} or a settings path to the Grok CLI, or set {ENV_RUNTIME_SELECTION}=fake for explicit development mode."
-                ),
-            )
-        })?,
-    };
+    let executable = discover_grok_executable_with_override(executable_override)?;
     let profile = match profile_override {
         Some(raw) => require_profile_dir(raw)?,
         None => match current_user_home_dir()? {
@@ -427,6 +460,22 @@ pub fn discover_grok_config_with_overrides(
         },
     };
     finish_grok_config(executable, profile)
+}
+
+pub fn discover_grok_executable_with_override(
+    executable_override: Option<&str>,
+) -> Result<PathBuf, ConversationCommandError> {
+    match executable_override {
+        Some(raw) => require_executable_file(raw),
+        None => find_grok_on_path().ok_or_else(|| {
+            ConversationCommandError::new(
+                "runtime_executable_missing",
+                format!(
+                    "Grok executable not found on PATH. Set {ENV_GROK_EXECUTABLE} or a settings path to the Grok CLI, or set {ENV_RUNTIME_SELECTION}=fake for explicit development mode."
+                ),
+            )
+        }),
+    }
 }
 
 fn finish_grok_config(

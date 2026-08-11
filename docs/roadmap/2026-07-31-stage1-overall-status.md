@@ -1,10 +1,13 @@
 # Pillow Stage 1 Overall Status
 
-Date: 2026-07-31; updated 2026-08-07
+Date: 2026-07-31; updated 2026-08-11
 
-Status: Stage 1 active; C3 accepted; C4 checkpointed through D3B4 (governed
-process and read-only Git Changes), with one intermittent D3B3 scenario carried
-as an open risk
+Status: Stage 1 active. C3 accepted. C4 checkpointed through D3B4, then
+**superseded on 2026-08-11**: the governed boundary that C1-C4 assumed did not
+actually exist, was rebuilt, and governed write and governed shell now run over
+ACP for a real agent. See "2026-08-11 Boundary Rebuild" below before reading the
+milestone table — several rows describe capability that was, at the time,
+exercised only by the fixture agent.
 
 Authority:
 
@@ -26,6 +29,48 @@ Authority:
 Only Stage 1 is active. `legacy Keeper (out of tree)` remains a frozen,
 independent resource manager and is not a Pillow product-code destination.
 
+## 2026-08-11 Boundary Rebuild (read this first)
+
+A live probe against a real Grok established that Pillow's tool boundary had
+never taken effect. Three independent failures stacked:
+
+1. `_meta.agentProfile` omitted the required `name` / `description`, so upstream
+   failed to parse it, logged one line, and **silently fell back to its full
+   default toolset**;
+2. `tools: []` means *inherit all* upstream, not "none";
+3. several disallowed names were wrong (the real short ids are `write` and
+   `run_terminal_cmd`).
+
+Net effect: through C1-C4 the governance chain was exercised **only by the
+fixture agent**. A real agent could read and write freely without raising a
+proposal. Evidence and reproduction:
+`docs/research/2026-08-10-mcp-tool-exposure-probe.md`.
+
+What replaced it:
+
+| Surface | Mechanism |
+| --- | --- |
+| Native tools | Allowlist (fail-closed). A denylist is an enumeration, and a live probe watched the agent leave through a cell nobody had enumerated |
+| Ambient MCP | Cut by denying the two MCP meta-tools — the only lever a client has, because `mcpServers: []` does not mean "no MCP" |
+| Write | Native `write` -> ACP `fs/write_text_file` -> existing governed write chain |
+| Process | Native `run_terminal_cmd` -> ACP `terminal/*` -> same chain |
+| Rules | Conservative segmentation, allow is conjunctive per segment, deny wins, unsplittable asks |
+| Modes | `default` / `accept_edits` / `bypass`; bypass turns asking off, not governance |
+
+Three half-open traps are documented in the controller handoff: giving the agent
+a hand without opening the line to the host makes it act locally, silently, with
+no error. Two coupling tests pin them.
+
+**Only Grok Build speaks ACP.** Codex exposes `mcp-server` and `app-server` but
+no ACP mode, so a CLI that does not speak ACP cannot be governed by Pillow at
+all — it can only be launched. That is why the built-in agent shell is Grok
+Build, with the model swapped via the user's own key.
+
+Standing rule from this day: **a boundary claim needs live evidence.** Reading
+configuration code produced three wrong conclusions in a row.
+
+---
+
 ## Stage 1 Capability Ladder
 
 | Milestone | State | Current truth |
@@ -37,8 +82,8 @@ independent resource manager and is not a Pillow product-code destination.
 | C1 provider-to-B3 loop | Accepted checkpoint | Provider proposals reach governed reads and owning timeline |
 | C2 read-only workbench | Accepted checkpoint | Project-scoped resources/activity, isolation, restart recovery, full gates and independent review accepted |
 | C3 governed write/diff/approval | Accepted checkpoint | One bounded UTF-8 create/modify, host diff, approve-once/reject, base-hash CAS, atomic apply, receipts, isolation and restart invalidation; full controller gates green |
-| C4 terminal and Git | Checkpointed through D3B4 | D1-D3B1 foundations, D3B2 process workbench mounting, D3B3 provider-to-governed-process real desktop loop, and D3B4 read-only Git Changes have each passed controller source review and full gates. D3B4 Round 4 gate: `pnpm check` exit 0 (renderer 370/370, Rust 731, Clippy `-D warnings`), production build. That gate found and repaired a Critical regression (Git Changes displaced the accepted C2 resource browser) and an Important defect (one untracked directory failed whole-repository Git status). Checkpointed on 2026-08-07 after three consecutive 10/10 serial desktop E2E runs; the intermittent D3B3 `cancel-tree` scenario is carried as an open risk with an unproven root cause (see the checkpoint record). Interactive shell and Git mutation remain unstarted |
-| D Codex/OpenCode expansion | Not started | No new runtime before C4 boundary |
+| C4 terminal and Git | Superseded by the 2026-08-11 rebuild | D1-D3B1 foundations, D3B2 process workbench mounting, D3B3 provider-to-governed-process real desktop loop, and D3B4 read-only Git Changes have each passed controller source review and full gates. D3B4 Round 4 gate: `pnpm check` exit 0 (renderer 370/370, Rust 731, Clippy `-D warnings`), production build. That gate found and repaired a Critical regression (Git Changes displaced the accepted C2 resource browser) and an Important defect (one untracked directory failed whole-repository Git status). Checkpointed on 2026-08-07 after three consecutive 10/10 serial desktop E2E runs; the intermittent D3B3 `cancel-tree` scenario is carried as an open risk with an unproven root cause (see the checkpoint record). Interactive shell and Git mutation remain unstarted |
+| D multi-slot runtimes | In progress (2026-08-11) | Slots with API-key or login auth, Grok Build as the built-in shell. Non-ACP CLIs are recorded and their account shown, but explicitly **not governed** |
 | E industrial Alpha | Not started | Packaging, import, security, performance, diagnostics |
 
 ## C2 Status

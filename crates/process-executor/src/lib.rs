@@ -1,8 +1,9 @@
 //! Runtime-neutral, structured-argv supervised process execution.
 //!
 //! This crate never invokes a shell. Callers select an already-approved
-//! executable and arguments; the child starts with only the supplied,
-//! non-sensitive environment entries.
+//! executable and arguments. Ordinary calls start with only supplied,
+//! non-sensitive environment entries; one explicit host-only spawn API adds a
+//! typed secret environment value without putting it in a receipt or spec.
 
 mod env;
 #[cfg(windows)]
@@ -49,6 +50,53 @@ pub struct ProcessReceipt {
     pub cancelled: bool,
     pub timed_out: bool,
     pub cleanup_proven: bool,
+}
+
+/// Host-only secret environment for one owned child process.
+///
+/// Ordinary [`ProcessSpec::env`] remains non-secret and rejects sensitive
+/// names. This type is intentionally non-`Debug`, non-`Clone`, and
+/// non-serializable; callers must opt into the separate spawn API.
+pub struct SecretEnvironment {
+    name: OsString,
+    value: Vec<u8>,
+}
+
+impl SecretEnvironment {
+    pub fn single(name: &str, value: Vec<u8>) -> Result<Self, ProcessError> {
+        if name.is_empty()
+            || name.contains(['\0', '='])
+            || !sensitive_name(std::ffi::OsStr::new(name))
+            || value.is_empty()
+            || value.len() > 65_536
+            || value.contains(&0)
+            || std::str::from_utf8(&value).is_err()
+        {
+            return Err(ProcessError::EnvironmentRejected);
+        }
+        Ok(Self {
+            name: OsString::from(name),
+            value,
+        })
+    }
+
+    fn apply(&self, command: &mut Command) -> Result<(), ProcessError> {
+        let value =
+            std::str::from_utf8(&self.value).map_err(|_| ProcessError::EnvironmentRejected)?;
+        command.env(&self.name, value);
+        Ok(())
+    }
+}
+
+impl Drop for SecretEnvironment {
+    fn drop(&mut self) {
+        use std::sync::atomic::{Ordering, compiler_fence};
+        for byte in &mut self.value {
+            // SAFETY: `byte` is a valid uniquely borrowed byte in this vector.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +160,7 @@ impl SupervisedProcessRunner {
     ) -> Result<ProcessReceipt, ProcessError> {
         validate_spec(&spec)?;
         let started = Instant::now();
-        let mut child = SupervisedChild::spawn(spec, true, true)?;
+        let mut child = SupervisedChild::spawn(spec, true, true, None)?;
         let stdout = child.take_stdout().ok_or(ProcessError::Setup)?;
         let stderr = child.take_stderr().ok_or(ProcessError::Setup)?;
         let capture = Capture::new_with_observer(child.output_cap, observer);
@@ -167,7 +215,20 @@ impl SupervisedProcessRunner {
     /// Job Object lifecycle but leaves stdout consumption to the protocol.
     pub fn spawn_piped(&self, spec: ProcessSpec) -> Result<SupervisedChild, ProcessError> {
         validate_spec(&spec)?;
-        let mut child = SupervisedChild::spawn(spec, true, false)?;
+        let mut child = SupervisedChild::spawn(spec, true, false, None)?;
+        child.resume()?;
+        Ok(child)
+    }
+
+    /// Spawn a piped owned child with one host-supplied secret environment
+    /// value. The general process API cannot use this path implicitly.
+    pub fn spawn_piped_with_secret_env(
+        &self,
+        spec: ProcessSpec,
+        secret_env: SecretEnvironment,
+    ) -> Result<SupervisedChild, ProcessError> {
+        validate_spec(&spec)?;
+        let mut child = SupervisedChild::spawn(spec, true, false, Some(secret_env))?;
         child.resume()?;
         Ok(child)
     }
@@ -185,7 +246,12 @@ pub struct SupervisedChild {
 }
 
 impl SupervisedChild {
-    fn spawn(spec: ProcessSpec, stdin: bool, capture_stderr: bool) -> Result<Self, ProcessError> {
+    fn spawn(
+        spec: ProcessSpec,
+        stdin: bool,
+        capture_stderr: bool,
+        secret_env: Option<SecretEnvironment>,
+    ) -> Result<Self, ProcessError> {
         #[cfg(windows)]
         let job = job_windows::JobObject::create()?;
         let mut command = Command::new(&spec.executable);
@@ -194,6 +260,9 @@ impl SupervisedChild {
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(&spec.env);
+        if let Some(secret_env) = &secret_env {
+            secret_env.apply(&mut command)?;
+        }
         command.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
         command.stdout(Stdio::piped());
         command.stderr(if capture_stderr {

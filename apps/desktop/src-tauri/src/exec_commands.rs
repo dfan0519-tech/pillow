@@ -1,13 +1,10 @@
 //! C4 typed Tauri commands for conversation-owned process views.
 
-use std::sync::Arc;
-
 use tauri::{State, WebviewWindow};
 
 use crate::app_state::{AppState, CommandError};
-use crate::conversation_service::{
-    ConversationCommandError, ConversationService, ExecOutputDto, ExecProposalDto,
-};
+use crate::conversation_service::{ConversationCommandError, ExecOutputDto, ExecProposalDto};
+use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 
 fn map_error(error: ConversationCommandError) -> CommandError {
     CommandError {
@@ -19,52 +16,65 @@ fn map_error(error: ConversationCommandError) -> CommandError {
 #[tauri::command]
 pub fn list_exec_proposals<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
 ) -> Result<Vec<ExecProposalDto>, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .list_exec_proposals(conversation_id)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.list_exec_proposals(conversation_id)
+        })
         .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn decide_exec_proposal<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
     proposal_id: String,
     decision: String,
 ) -> Result<ExecProposalDto, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .decide_exec_proposal(conversation_id, proposal_id, decision)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.decide_exec_proposal(conversation_id, proposal_id, decision)
+        })
         .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn open_exec_output<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
     proposal_id: String,
 ) -> Result<ExecOutputDto, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .open_exec_output(conversation_id, proposal_id)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.open_exec_output(conversation_id, proposal_id)
+        })
         .map_err(map_error)
+}
+
+fn command_to_conversation(error: CommandError) -> ConversationCommandError {
+    ConversationCommandError::new(error.code, error.message)
 }
 
 /// Fixed public-error vocabulary mirrored from `apps/desktop/src/lib/execGateway.ts`

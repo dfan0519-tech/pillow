@@ -354,6 +354,12 @@ pub fn permission_rule_matches(prefix: PermissionRulePrefix, pattern: &str, subj
 
 /// Evaluate deny before allow. Input order breaks ties within the same action.
 /// A project-scoped allow is ignored even if a corrupt caller supplies one.
+///
+/// Process **allow** is gated by [`process_subject_confirmed_for_allow`]: a
+/// matching allow only auto-approves when the subject shape can be confirmed
+/// free of opaque evaluation / command-delegation payloads. Anything we cannot
+/// confirm fails closed to [`PermissionRuleEvaluation::RequireConfirmation`].
+/// Deny is never weakened by this gate.
 pub fn evaluate_permission_rules(
     prefix: PermissionRulePrefix,
     subject: &str,
@@ -385,10 +391,263 @@ pub fn evaluate_permission_rules(
     if let Some(matched) = first_deny {
         PermissionRuleEvaluation::Deny(matched)
     } else if let Some(matched) = first_allow {
-        PermissionRuleEvaluation::Allow(matched)
+        if prefix == PermissionRulePrefix::Process && !process_subject_confirmed_for_allow(subject)
+        {
+            PermissionRuleEvaluation::RequireConfirmation
+        } else {
+            PermissionRuleEvaluation::Allow(matched)
+        }
     } else {
         PermissionRuleEvaluation::RequireConfirmation
     }
+}
+
+/// Whether a process subject is confirmed free of opaque evaluation and
+/// command-delegation payloads for allow auto-approval.
+///
+/// Failure direction is **allowlist of confirmed-safe shapes**, not a denylist
+/// of interpreters: unknown programs that introduce code/command payloads are
+/// unconfirmed and must prompt. Programs that reuse common short flags for
+/// non-eval meanings (e.g. `git -c key=value`, `grep -e pattern`, `ls -c`,
+/// `ps -e`) are positively confirmed for those flag letters only.
+///
+/// This is pure shape analysis on the already-canonical space-joined subject.
+pub fn process_subject_confirmed_for_allow(subject: &str) -> bool {
+    let tokens: Vec<&str> = subject
+        .split(' ')
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let program = program_basename(tokens[0]);
+    if command_delegation_program(program) {
+        // Outer subject alone cannot confirm what the delegated command is.
+        return false;
+    }
+
+    let mut index = 1usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+
+        if matches!(token, "-exec" | "-execdir") {
+            return false;
+        }
+
+        if token == "eval" {
+            // Subcommand form (`deno eval …`) is an opaque code payload.
+            return false;
+        }
+
+        if let Some(rest) = token.strip_prefix("--") {
+            if rest.is_empty() {
+                // `--` end-of-options: remaining tokens are operands, not flags.
+                return true;
+            }
+            let name = rest.split_once('=').map_or(rest, |(name, _)| name);
+            if long_option_introduces_code_payload(name) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if token.starts_with('-') && token != "-" {
+            let flags = &token[1..];
+            if flags.is_empty() {
+                index += 1;
+                continue;
+            }
+            // Only single-letter short options and short clusters (`-e`, `-xc`).
+            // Multi-character single-dash words (`-name`, `-type`, `-module`) are
+            // not short clusters; `-exec` is handled by the exact match above.
+            if is_short_flag_cluster(flags)
+                && short_flags_introduce_unconfirmed_payload(program, flags)
+            {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    true
+}
+
+fn program_basename(program: &str) -> &str {
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    if base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &base[..base.len() - 4]
+    } else {
+        base
+    }
+}
+
+fn command_delegation_program(program: &str) -> bool {
+    let program = program.to_ascii_lowercase();
+    // These programs exist primarily to launch another command or package.
+    // The outer subject cannot confirm the delegated payload is safe.
+    matches!(
+        program.as_str(),
+        "xargs" | "npx" | "pnpx" | "bunx" | "uvx" | "env"
+    )
+}
+
+fn long_option_introduces_code_payload(name: &str) -> bool {
+    matches!(
+        name,
+        "eval" | "print" | "command" | "execute" | "expression"
+    )
+}
+
+/// True for single-letter short options and compact clusters (`-e`, `-ef`,
+/// `-xc`). Longer single-dash tokens are treated as multi-character options
+/// (find `-name`, etc.), not as clustered short flags.
+fn is_short_flag_cluster(flags: &str) -> bool {
+    let len = flags.chars().count();
+    (1..=3).contains(&len) && flags.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+/// Short-flag clusters that introduce an unconfirmed code/command payload
+/// unless this program positively reuses the letter for a non-eval meaning.
+fn short_flags_introduce_unconfirmed_payload(program: &str, flags: &str) -> bool {
+    let program = program.to_ascii_lowercase();
+    let program = program.strip_suffix(".exe").unwrap_or(program.as_str());
+
+    for flag in flags.chars() {
+        match flag {
+            'e' if !program_confirms_non_eval_e(program) => return true,
+            'c' if !program_confirms_non_eval_c(program) => return true,
+            // PHP and some hosts use `-r` for raw/eval code.
+            'r' if !program_confirms_non_eval_r(program) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn program_confirms_non_eval_e(program: &str) -> bool {
+    // These tools use `-e` for pattern/select semantics, not arbitrary code.
+    matches!(
+        program,
+        "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "ag"
+            | "ps"
+            | "git"
+            | "ls"
+            | "dir"
+            | "echo"
+            | "printf"
+            | "head"
+            | "tail"
+            | "sort"
+            | "uniq"
+            | "wc"
+            | "cut"
+            | "tr"
+            | "cat"
+            | "chmod"
+            | "chown"
+            | "date"
+            | "tar"
+            | "rsync"
+            | "ssh"
+            | "scp"
+            | "curl"
+            | "wget"
+            | "cargo"
+            | "rustc"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "pip"
+            | "pip3"
+            | "git-lfs"
+    )
+}
+
+fn program_confirms_non_eval_c(program: &str) -> bool {
+    // `-c` as config/cipher/sort/count — not script body — for these tools.
+    matches!(
+        program,
+        "git"
+            | "ssh"
+            | "scp"
+            | "ls"
+            | "dir"
+            | "ps"
+            | "wc"
+            | "curl"
+            | "wget"
+            | "tar"
+            | "rsync"
+            | "chmod"
+            | "chown"
+            | "cargo"
+            | "rustc"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "pip"
+            | "pip3"
+            | "head"
+            | "tail"
+            | "sort"
+            | "uniq"
+            | "cut"
+            | "tr"
+            | "cat"
+            | "echo"
+            | "printf"
+            | "date"
+    )
+}
+
+fn program_confirms_non_eval_r(program: &str) -> bool {
+    // `-r` is recursive/reverse for many tools; only leave interpreters unconfirmed.
+    matches!(
+        program,
+        "rm" | "cp"
+            | "mv"
+            | "ls"
+            | "dir"
+            | "chmod"
+            | "chown"
+            | "grep"
+            | "rg"
+            | "git"
+            | "ssh"
+            | "scp"
+            | "rsync"
+            | "tar"
+            | "sort"
+            | "ps"
+            | "cargo"
+            | "rustc"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "pip"
+            | "pip3"
+            | "curl"
+            | "wget"
+            | "head"
+            | "tail"
+            | "cat"
+            | "echo"
+            | "printf"
+            | "date"
+            | "wc"
+            | "cut"
+            | "tr"
+            | "uniq"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

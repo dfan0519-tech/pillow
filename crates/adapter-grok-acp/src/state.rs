@@ -55,8 +55,9 @@ pub(crate) fn ensure_connection(
     }
 
     let env = build_child_env(config)?;
+    let secret_env = config.launch_secret_environment()?;
     let argv = config.launch_argv();
-    let mut child = spawn_child(&config.executable, &argv, None, &env)?;
+    let mut child = spawn_child(&config.executable, &argv, None, &env, secret_env)?;
     let stdin = child
         .take_stdin()
         .ok_or_else(|| internal("child stdin missing"))?;

@@ -2693,6 +2693,7 @@ dependencies = [
  "keeper-session",
  "keeper-storage-sqlite",
  "keeper-tool-executor",
+ "pillow-runtime-slots",
  "rfd",
  "serde",
  "serde_json",
@@ -2700,6 +2701,21 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "pillow-runtime-slots"
+version = "0.1.0"
+dependencies = [
+ "keeper-process-executor",
+ "keeper-project",
+ "keeper-storage-sqlite",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml 0.9.12+spec-1.1.0",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

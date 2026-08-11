@@ -20,7 +20,7 @@ mod state;
 mod turn;
 
 pub use adapter::GrokAcpAdapter;
-pub use config::{GrokAcpConfig, PRODUCTION_ACP_ARGV};
+pub use config::{GROK_API_KEY_ENV, GrokAcpConfig, PRODUCTION_ACP_ARGV};
 
 /// Re-export for process-tree cleanup tests (PID liveness without secrets).
 #[doc(hidden)]

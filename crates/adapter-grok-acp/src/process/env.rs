@@ -22,9 +22,11 @@ const PROFILE_ENV_NAMES: &[&str] = &["HOME", "USERPROFILE", "APPDATA", "LOCALAPP
 
 /// Build a new environment map for the ACP child.
 ///
-/// Does **not** inherit the parent wholesale. HOME/USERPROFILE are set only
-/// when an isolated home is configured. Extra env from config is applied last
-/// for test harness control (still filtered for sensitive names).
+/// Does **not** inherit the parent wholesale. In login mode, current profile
+/// variables are copied through the allowlist without redirecting them. In
+/// API-key mode, an isolated home replaces them. Extra env remains test-only
+/// and is always filtered for sensitive names; secrets use a separate typed
+/// spawn channel and never enter this map.
 pub fn build_child_env(config: &GrokAcpConfig) -> Result<HashMap<String, String>, RuntimeError> {
     let mut env = HashMap::new();
 
@@ -35,6 +37,9 @@ pub fn build_child_env(config: &GrokAcpConfig) -> Result<HashMap<String, String>
             || upper == "APPDATA"
             || upper == "LOCALAPPDATA"
         {
+            if config.honor_isolated_home.is_none() {
+                env.insert(name, value);
+            }
             continue;
         }
         if !ALLOWED_ENV_NAMES.iter().any(|a| *a == upper) {
@@ -157,5 +162,47 @@ mod tests {
             cfg.extra_env.push((name.into(), "C:\\escape".into()));
             assert!(build_child_env(&cfg).is_err(), "{name} must be rejected");
         }
+    }
+
+    #[test]
+    fn login_mode_preserves_current_profile_without_a_home_redirect() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_profile = std::env::var_os("USERPROFILE");
+        // SAFETY: tests serialize env mutation via env_lock.
+        unsafe {
+            std::env::set_var("HOME", "C:\\Users\\current");
+            std::env::set_var("USERPROFILE", "C:\\Users\\current");
+        }
+        let cfg = GrokAcpConfig::new("grok");
+        let env = build_child_env(&cfg).expect("env");
+        assert_eq!(
+            env.get("HOME").map(String::as_str),
+            Some("C:\\Users\\current")
+        );
+        assert_eq!(
+            env.get("USERPROFILE").map(String::as_str),
+            Some("C:\\Users\\current")
+        );
+        // SAFETY: tests serialize env mutation via env_lock.
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match previous_profile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    #[test]
+    fn dedicated_api_key_never_enters_the_generic_environment_map() {
+        let marker = "pillow-test-canary-not-a-real-key";
+        let cfg = GrokAcpConfig::new("grok").with_api_key(marker.as_bytes().to_vec());
+        let env = build_child_env(&cfg).expect("generic environment");
+        assert!(!env.values().any(|value| value.contains(marker)));
+        assert!(!env.contains_key(crate::GROK_API_KEY_ENV));
     }
 }

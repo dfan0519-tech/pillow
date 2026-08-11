@@ -13,7 +13,7 @@ pub use permission_rules::{
     PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation, PermissionRulePrefix,
     PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
     conservative_shell_command_segments, evaluate_permission_rule_conjunction,
-    evaluate_permission_rules, permission_rule_matches,
+    evaluate_permission_rules, permission_rule_matches, process_subject_confirmed_for_allow,
 };
 
 pub use process::{

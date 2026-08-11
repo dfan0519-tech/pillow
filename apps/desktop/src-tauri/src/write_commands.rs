@@ -1,13 +1,10 @@
 //! Typed Tauri commands for governed write proposals.
 
-use std::sync::Arc;
-
 use tauri::{State, WebviewWindow};
 
 use crate::app_state::{AppState, CommandError};
-use crate::conversation_service::{
-    ConversationCommandError, ConversationService, WriteDiffDto, WriteProposalDto,
-};
+use crate::conversation_service::{ConversationCommandError, WriteDiffDto, WriteProposalDto};
+use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 
 fn map_error(error: ConversationCommandError) -> CommandError {
     CommandError {
@@ -19,55 +16,65 @@ fn map_error(error: ConversationCommandError) -> CommandError {
 #[tauri::command]
 pub fn list_write_proposals<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
 ) -> Result<Vec<WriteProposalDto>, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    // Require an already-bound window conversation capability — never create or
-    // consume conversation authority as part of a write list request.
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .list_write_proposals(conversation_id)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            // Listing never creates or consumes conversation authority.
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.list_write_proposals(conversation_id)
+        })
         .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn decide_write_proposal<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
     proposal_id: String,
     approval_grant: String,
     decision: String,
 ) -> Result<WriteProposalDto, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
-    // Reject decision payloads that try to smuggle digests/content via unused params:
-    // the command signature only accepts conversationId, proposalId, approvalGrant, decision.
     service
-        .decide_write_proposal(conversation_id, proposal_id, approval_grant, decision)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.decide_write_proposal(conversation_id, proposal_id, approval_grant, decision)
+        })
         .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn open_write_proposal_diff<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
     proposal_id: String,
 ) -> Result<WriteDiffDto, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    let _ = state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .open_write_proposal_diff(conversation_id, proposal_id)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.open_write_proposal_diff(conversation_id, proposal_id)
+        })
         .map_err(map_error)
+}
+
+fn command_to_conversation(error: CommandError) -> ConversationCommandError {
+    ConversationCommandError::new(error.code, error.message)
 }

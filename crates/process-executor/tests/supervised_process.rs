@@ -3,7 +3,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use keeper_process_executor::{CancellationSignal, ProcessSpec, SupervisedProcessRunner};
+use keeper_process_executor::{
+    CancellationSignal, ProcessSpec, SecretEnvironment, SupervisedProcessRunner,
+};
 
 fn fixture_path() -> PathBuf {
     std::env::current_exe().expect("test executable")
@@ -141,6 +143,29 @@ fn secret_environment_names_are_denied() {
 }
 
 #[test]
+fn typed_secret_environment_reaches_only_the_owned_child() {
+    use std::io::Read;
+
+    let marker = "pillow-test-canary-not-a-real-key";
+    let secret = SecretEnvironment::single("PILLOW_GROK_SLOT_API_KEY", marker.as_bytes().to_vec())
+        .expect("typed secret environment");
+    let mut child = SupervisedProcessRunner::new()
+        .spawn_piped_with_secret_env(spec("secret-present", 4096), secret)
+        .expect("spawn with secret");
+    let mut stdout = String::new();
+    child
+        .take_stdout()
+        .expect("stdout")
+        .read_to_string(&mut stdout)
+        .expect("read child output");
+    child
+        .kill_tree(Duration::from_secs(2))
+        .expect("owned cleanup");
+    assert!(stdout.contains("secret-present"));
+    assert!(!stdout.contains(marker));
+}
+
+#[test]
 fn receipt_carries_stream_tagged_chunks_with_real_text() {
     let receipt = SupervisedProcessRunner::new()
         .run(spec("mixed", 4096), CancellationSignal::new())
@@ -249,6 +274,13 @@ fn fixture_child() {
             command.env("KPE_FIXTURE_MODE", "sleep");
             let _child = command.spawn().expect("fixture grandchild");
             std::thread::sleep(Duration::from_secs(10));
+        }
+        Some("secret-present") => {
+            let expected = b"pillow-test-canary-not-a-real-key";
+            match std::env::var_os("PILLOW_GROK_SLOT_API_KEY") {
+                Some(value) if value.as_encoded_bytes() == expected => print!("secret-present"),
+                _ => std::process::exit(23),
+            }
         }
         _ => {}
     }

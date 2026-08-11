@@ -1,12 +1,17 @@
 //! Adapter configuration and hard limits.
 
 use std::path::PathBuf;
+use std::sync::atomic::{Ordering, compiler_fence};
 use std::time::Duration;
 
 use keeper_agent_protocol::RuntimeError;
+use keeper_process_executor::SecretEnvironment;
 
 /// Production ACP launch argv. Fixed; not overridable from untrusted product input.
 pub const PRODUCTION_ACP_ARGV: &[&str] = &["agent", "--no-leader", "stdio"];
+
+/// Fixed name referenced by Pillow-generated, slot-private Grok config.
+pub const GROK_API_KEY_ENV: &str = "PILLOW_GROK_SLOT_API_KEY";
 
 /// Default per-request timeout (legacy ACP client: 3 minutes).
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -21,7 +26,6 @@ pub const DEFAULT_MAX_RESPONSE_CHARS: usize = 12_000;
 pub const DEFAULT_MAX_TOOL_ACTIVITY: usize = 24;
 
 /// Configuration for launching and talking to a Grok ACP child.
-#[derive(Debug, Clone)]
 pub struct GrokAcpConfig {
     /// Path to the Grok CLI (or fake child binary in tests).
     pub executable: PathBuf,
@@ -41,6 +45,39 @@ pub struct GrokAcpConfig {
     ///
     /// Must never be populated from untrusted product configuration.
     argv_override: Option<Vec<String>>,
+    /// Typed product model selector; never accepts arbitrary argv fragments.
+    model_id: Option<String>,
+    /// Host-only launch secret. Never enters `extra_env`, Debug, or serde.
+    api_key: Option<SecretValue>,
+}
+
+struct SecretValue(Vec<u8>);
+
+impl Drop for SecretValue {
+    fn drop(&mut self) {
+        for byte in &mut self.0 {
+            // SAFETY: `byte` is a valid uniquely borrowed byte in this vector.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+impl std::fmt::Debug for GrokAcpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrokAcpConfig")
+            .field("executable", &self.executable)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_line_bytes", &self.max_line_bytes)
+            .field("max_response_chars", &self.max_response_chars)
+            .field("honor_isolated_home", &self.honor_isolated_home)
+            .field("extra_env", &self.extra_env)
+            .field("cancel_grace", &self.cancel_grace)
+            .field("argv_override", &self.argv_override)
+            .field("model_id", &self.model_id)
+            .field("api_key_configured", &self.api_key.is_some())
+            .finish()
+    }
 }
 
 impl GrokAcpConfig {
@@ -55,6 +92,8 @@ impl GrokAcpConfig {
             extra_env: Vec::new(),
             cancel_grace: Duration::from_millis(250),
             argv_override: None,
+            model_id: None,
+            api_key: None,
         }
     }
 
@@ -65,11 +104,44 @@ impl GrokAcpConfig {
     pub fn launch_argv(&self) -> Vec<String> {
         match &self.argv_override {
             Some(args) => args.clone(),
-            None => PRODUCTION_ACP_ARGV
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            None => {
+                let mut args = Vec::with_capacity(PRODUCTION_ACP_ARGV.len() + 2);
+                if let Some(model_id) = &self.model_id {
+                    args.push("-m".to_owned());
+                    args.push(model_id.clone());
+                }
+                args.extend(PRODUCTION_ACP_ARGV.iter().map(|s| (*s).to_string()));
+                args
+            }
         }
+    }
+
+    /// Select one configured model without opening arbitrary launch argv.
+    pub fn with_model(mut self, model_id: String) -> Self {
+        self.model_id = Some(model_id);
+        self
+    }
+
+    /// Supply a host-private API key for the fixed slot environment variable.
+    /// The value is owned, redacted from Debug, and zeroed on drop.
+    pub fn with_api_key(mut self, api_key: Vec<u8>) -> Self {
+        self.api_key = Some(SecretValue(api_key));
+        self
+    }
+
+    pub(crate) fn launch_secret_environment(
+        &self,
+    ) -> Result<Option<SecretEnvironment>, RuntimeError> {
+        self.api_key
+            .as_ref()
+            .map(|value| {
+                SecretEnvironment::single(GROK_API_KEY_ENV, value.0.clone()).map_err(|_| {
+                    RuntimeError::Internal {
+                        message: "grok api key launch environment is invalid".into(),
+                    }
+                })
+            })
+            .transpose()
     }
 
     /// Override launch argv for deterministic fake-child tests.
@@ -105,6 +177,25 @@ impl GrokAcpConfig {
         }
         if let Some(home) = &self.honor_isolated_home {
             validate_local_path(home, "isolated home")?;
+        }
+        if let Some(model_id) = &self.model_id
+            && (model_id.trim().is_empty()
+                || model_id.chars().count() > 4_096
+                || model_id.chars().any(char::is_control))
+        {
+            return Err(RuntimeError::Internal {
+                message: "grok model selector is invalid".into(),
+            });
+        }
+        if let Some(api_key) = &self.api_key
+            && (api_key.0.is_empty()
+                || api_key.0.len() > 65_536
+                || api_key.0.contains(&0)
+                || std::str::from_utf8(&api_key.0).is_err())
+        {
+            return Err(RuntimeError::Internal {
+                message: "grok api key is invalid".into(),
+            });
         }
         Ok(())
     }
@@ -166,5 +257,28 @@ mod tests {
         let mut cfg = GrokAcpConfig::new("grok");
         cfg.honor_isolated_home = Some(PathBuf::from(r"\\server\share"));
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn model_selector_extends_only_the_fixed_production_argv() {
+        let cfg = GrokAcpConfig::new("grok").with_model("model-one".into());
+        assert_eq!(
+            cfg.launch_argv(),
+            vec!["-m", "model-one", "agent", "--no-leader", "stdio"]
+        );
+    }
+
+    #[test]
+    fn debug_output_redacts_the_dedicated_api_key() {
+        let marker = b"pillow-test-canary-not-a-real-key".to_vec();
+        let cfg = GrokAcpConfig::new("grok").with_api_key(marker.clone());
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug
+                .as_bytes()
+                .windows(marker.len())
+                .any(|part| part == marker)
+        );
+        assert!(debug.contains("api_key_configured"));
     }
 }

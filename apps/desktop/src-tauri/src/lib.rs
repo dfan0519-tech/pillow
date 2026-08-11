@@ -11,6 +11,8 @@ mod permission_rule_commands;
 mod project_commands;
 mod resource_commands;
 pub mod runtime_composition;
+mod runtime_service_state;
+mod runtime_slot_commands;
 mod settings_commands;
 mod write_commands;
 
@@ -23,6 +25,8 @@ mod permission_rule_commands_tests;
 #[cfg(test)]
 mod resource_commands_tests;
 #[cfg(test)]
+mod runtime_slot_commands_tests;
+#[cfg(test)]
 mod settings_commands_tests;
 #[cfg(test)]
 mod write_commands_tests;
@@ -34,8 +38,7 @@ use conversation_commands::{
     cancel_run, complete_conversation_acceptance, create_conversation,
     get_conversation_acceptance_scenario, list_conversations, load_timeline, send_turn,
 };
-use conversation_events::TauriEmitter;
-use conversation_service::ConversationService;
+use conversation_events::{RuntimeEventEmitter, TauriEmitter};
 use desktop_lifecycle::{
     ConversationExitDecision, DesktopLifecycleState, app_data_override, complete_native_acceptance,
     conversation_exit_decision, get_native_acceptance_scenario, mark_project_launcher_ready,
@@ -48,6 +51,7 @@ use keeper_storage_sqlite::SqliteSettingsRepository;
 use permission_rule_commands::{
     add_permission_rule, delete_permission_rule, list_permission_rules,
 };
+use pillow_runtime_slots::RuntimeSlotService;
 use project_commands::{
     create_project, create_project_directory, create_project_with_folder, list_projects,
     open_or_register_project, pick_directory, select_project,
@@ -57,6 +61,11 @@ use resource_commands::{
     read_project_resource, search_project_resources,
 };
 use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degrade};
+use runtime_service_state::RuntimeServiceState;
+use runtime_slot_commands::{
+    create_external_cli_slot, create_grok_api_key_slot, create_grok_login_slot,
+    get_external_cli_status, list_runtime_slots, start_runtime_slot,
+};
 use settings_commands::{
     RuntimeStartupState, clear_runtime_setting, get_onboarding_settings, get_permission_mode,
     get_runtime_settings, get_runtime_startup, get_theme_settings, set_grok_executable,
@@ -113,7 +122,13 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         get_permission_mode,
         set_permission_mode,
         get_onboarding_settings,
-        set_onboarding_dismissed
+        set_onboarding_dismissed,
+        list_runtime_slots,
+        create_grok_login_slot,
+        create_grok_api_key_slot,
+        create_external_cli_slot,
+        get_external_cli_status,
+        start_runtime_slot
     ])
 }
 
@@ -131,7 +146,8 @@ pub fn run() {
                 .map_err(|error| format!("settings store open failed: {error}"))?;
             let permission_rules = SqlitePermissionRuleRepository::open(&db_path)
                 .map_err(|error| format!("permission rule store open failed: {error}"))?;
-            let emitter = Arc::new(TauriEmitter::new(app.handle().clone()));
+            let emitter: Arc<dyn RuntimeEventEmitter> =
+                Arc::new(TauriEmitter::new(app.handle().clone()));
             // Production default: GrokAcpAdapter. Fake only when explicitly
             // selected via env or stored settings (env wins). Never silent-
             // fallback from a missing Grok install to Fake.
@@ -139,31 +155,35 @@ pub fn run() {
             // Runtime-config failures (bad exe/profile paths, release stored
             // Fake) degrade: shell + Settings stay up; conversation stays off.
             // SQLite / non-config failures remain fatal (not user-fixable).
-            let outcome = open_conversation_service_or_degrade(&db_path, emitter)
+            let outcome = open_conversation_service_or_degrade(&db_path, Arc::clone(&emitter))
                 .map_err(|error| format!("runtime open failed: {error}"))?;
             let startup = RuntimeStartupState::from_outcome(&outcome);
-            match outcome {
+            let service = match outcome {
                 RuntimeOpenOutcome::Ready { service, selection } => {
                     eprintln!("Pillow runtime selection: {}", selection.as_str());
-                    let conversations = Arc::new(service);
-                    let recovered = conversations.recover_inflight()?;
+                    let recovered = service.recover_inflight()?;
                     if recovered > 0 {
                         eprintln!("Pillow recovered {recovered} interrupted run(s) as Interrupted");
                     }
-                    app.manage(conversations);
+                    Some(service)
                 }
                 RuntimeOpenOutcome::Degraded { code, message, .. } => {
                     eprintln!(
                         "Pillow runtime degraded ({code}): {message}. Settings remain available."
                     );
-                    // Deliberately do not manage ConversationService and do not
-                    // open Fake. Conversation commands fail closed until restart
-                    // after the user fixes Settings.
+                    // Do not open Fake. The replaceable runtime state starts
+                    // empty and remains fail-closed until a governed slot starts.
+                    None
                 }
-            }
+            };
+            let runtime = RuntimeServiceState::new(&db_path, emitter, service);
+            let runtime_slots = RuntimeSlotService::open(&db_path, &app_data_dir)
+                .map_err(|error| format!("runtime slot store open failed: {error}"))?;
             app.manage(state);
             app.manage(settings);
             app.manage(permission_rules);
+            app.manage(runtime);
+            app.manage(runtime_slots);
             app.manage(Arc::new(startup));
             app.manage(GitCommandState::new());
             app.manage(DesktopLifecycleState::from_app_data_dir(app_data_dir));
@@ -187,8 +207,12 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
-                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>() {
-                    match conversation_exit_decision(service.shutdown()) {
+                if let Some(service) = app_handle.try_state::<RuntimeServiceState>() {
+                    let shutdown = service.shutdown_if_active();
+                    if matches!(&shutdown, Ok(false)) {
+                        return;
+                    }
+                    match conversation_exit_decision(shutdown.map(|_| ())) {
                         ConversationExitDecision::AllowExit => {
                             // Marker only after successful ConversationService::shutdown.
                             write_conversation_shutdown_success_marker();
@@ -206,9 +230,10 @@ pub fn run() {
                 // Best-effort idempotent cleanup if Exit fires without a prior
                 // successful ExitRequested drain (e.g. forced termination paths).
                 // Do not treat this as recovery for a failed prevent_exit drain.
-                if let Some(service) = app_handle.try_state::<Arc<ConversationService>>() {
-                    match service.shutdown() {
-                        Ok(()) => write_conversation_shutdown_success_marker(),
+                if let Some(service) = app_handle.try_state::<RuntimeServiceState>() {
+                    match service.shutdown_if_active() {
+                        Ok(true) => write_conversation_shutdown_success_marker(),
+                        Ok(false) => {}
                         Err(error) => {
                             eprintln!("Pillow conversation shutdown on Exit: {error}");
                         }

@@ -1,7 +1,5 @@
 //! Typed Tauri commands for the conversation vertical slice.
 
-use std::sync::Arc;
-
 use keeper_project::ProjectId;
 use keeper_session::ConversationId;
 use serde::Serialize;
@@ -10,7 +8,8 @@ use uuid::Uuid;
 
 use crate::app_state::{AppState, CommandError};
 use crate::conversation_events::{ConversationDto, SendTurnResult, TimelineDto};
-use crate::conversation_service::{ConversationCommandError, ConversationService};
+use crate::conversation_service::ConversationCommandError;
+use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,37 +43,46 @@ fn map_error(error: ConversationCommandError) -> CommandError {
 #[tauri::command]
 pub fn list_conversations<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     project_id: String,
 ) -> Result<Vec<ConversationDto>, CommandError> {
-    let conversations = service
-        .list_conversations(project_id.clone())
-        .map_err(map_error)?;
-    let project_id = parse_project_id(&project_id)?;
-    let conversation_ids = conversations
-        .iter()
-        .map(|conversation| parse_conversation_id(&conversation.id))
-        .collect::<Result<Vec<_>, _>>()?;
-    state.permit_existing_conversations_for_window(
-        window.label(),
-        project_id,
-        &conversation_ids,
-    )?;
-    Ok(conversations)
+    service
+        .with_service(|service, active_project_id| {
+            require_project_scope(active_project_id, &project_id)?;
+            let conversations = service.list_conversations(project_id.clone())?;
+            let parsed_project = parse_project_id(&project_id).map_err(command_to_conversation)?;
+            let conversation_ids = conversations
+                .iter()
+                .map(|conversation| parse_conversation_id(&conversation.id))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(command_to_conversation)?;
+            state
+                .permit_existing_conversations_for_window(
+                    window.label(),
+                    parsed_project,
+                    &conversation_ids,
+                )
+                .map_err(command_to_conversation)?;
+            Ok(conversations)
+        })
+        .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn create_conversation<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     project_id: String,
     title: Option<String>,
 ) -> Result<ConversationDto, CommandError> {
     let bootstrap = state.begin_conversation_for_window(window.label(), project_id.clone())?;
     let (conversation, conversation_id) =
-        match service.create_conversation_with_id(project_id, title) {
+        match service.with_service(|service, active_project_id| {
+            require_project_scope(active_project_id, &project_id)?;
+            service.create_conversation_with_id(project_id, title)
+        }) {
             Ok(conversation) => conversation,
             Err(error) => {
                 state.restore_conversation_bootstrap(bootstrap);
@@ -88,40 +96,54 @@ pub fn create_conversation<R: tauri::Runtime>(
 #[tauri::command]
 pub fn load_timeline<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
 ) -> Result<TimelineDto, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    state.bind_existing_conversation_for_window(window.label(), project_id, id, &root)?;
-    service.load_timeline(conversation_id).map_err(map_error)
+    service
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            state
+                .bind_existing_conversation_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.load_timeline(conversation_id)
+        })
+        .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn send_turn<R: tauri::Runtime>(
     state: State<'_, AppState>,
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     window: WebviewWindow<R>,
     conversation_id: String,
     content: String,
 ) -> Result<SendTurnResult, CommandError> {
-    let (id, project_id, root) = service
-        .conversation_project_context(&conversation_id)
-        .map_err(map_error)?;
-    state.require_conversation_root_for_window(window.label(), project_id, id, &root)?;
     service
-        .send_turn(conversation_id, content)
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.send_turn(conversation_id, content)
+        })
         .map_err(map_error)
 }
 
 #[tauri::command]
 pub fn cancel_run(
-    service: State<'_, Arc<ConversationService>>,
+    service: State<'_, RuntimeServiceState>,
     run_id: String,
 ) -> Result<(), CommandError> {
-    service.cancel_run(run_id).map_err(map_error)
+    service
+        .with_service(|service, _active_project_id| service.cancel_run(run_id))
+        .map_err(map_error)
+}
+
+fn command_to_conversation(error: CommandError) -> ConversationCommandError {
+    ConversationCommandError::new(error.code, error.message)
 }
 
 /// Optional native conversation acceptance scenario (Slice B1 recovery).

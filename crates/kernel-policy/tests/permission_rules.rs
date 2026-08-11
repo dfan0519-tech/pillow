@@ -2,7 +2,7 @@ use keeper_policy::{
     PermissionRuleAction, PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation,
     PermissionRulePrefix, PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
     conservative_shell_command_segments, evaluate_permission_rule_conjunction,
-    evaluate_permission_rules, permission_rule_matches,
+    evaluate_permission_rules, permission_rule_matches, process_subject_confirmed_for_allow,
 };
 
 fn rule(
@@ -418,4 +418,181 @@ fn corrupt_project_allow_cannot_satisfy_a_segmented_conjunction() {
         evaluate_permission_rule_conjunction(PermissionRulePrefix::Process, &subjects, &rules),
         PermissionRuleConjunctionEvaluation::RequireConfirmation
     ));
+}
+
+fn process_allow(pattern: &str) -> PermissionRuleSpec {
+    rule(
+        "process-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        pattern,
+        PermissionRuleAction::Allow,
+    )
+}
+
+fn assert_process_allow(subject: &str, pattern: &str) {
+    match evaluate_permission_rules(
+        PermissionRulePrefix::Process,
+        subject,
+        &[process_allow(pattern)],
+    ) {
+        PermissionRuleEvaluation::Allow(matched) => {
+            assert_eq!(matched.match_subject, subject);
+            assert_eq!(matched.rule.pattern, pattern);
+        }
+        other => panic!("expected allow for {subject:?} under {pattern:?}, got {other:?}"),
+    }
+}
+
+fn assert_process_requires_confirmation(subject: &str, pattern: &str) {
+    assert!(
+        matches!(
+            evaluate_permission_rules(
+                PermissionRulePrefix::Process,
+                subject,
+                &[process_allow(pattern)],
+            ),
+            PermissionRuleEvaluation::RequireConfirmation
+        ),
+        "expected require-confirmation for {subject:?} under {pattern:?}"
+    );
+}
+
+#[test]
+fn opaque_eval_shapes_do_not_auto_allow_under_broad_program_rules() {
+    // Matching allow alone is not enough: opaque evaluation shapes must prompt.
+    let adversarial = [
+        ("node -e code", "node*"),
+        ("node --eval code", "node*"),
+        ("node.exe -e code", "node*"),
+        ("python -c code", "python*"),
+        ("python3 -c code", "python*"),
+        ("/usr/bin/python3 -c code", "python*"),
+        ("perl -e code", "perl*"),
+        ("ruby -e code", "ruby*"),
+        ("php -r code", "php*"),
+        ("deno eval code", "deno*"),
+        ("sh -c cargo test", "sh*"),
+        ("bash -c cargo test", "bash*"),
+        ("bash -xc cargo test", "bash*"),
+        ("env node --version", "env*"),
+        ("xargs rm -rf /", "xargs*"),
+        ("find . -exec rm {} ;", "find*"),
+        ("find . -execdir rm {} ;", "find*"),
+        ("npx cowsay hi", "npx*"),
+        ("uvx ruff check", "uvx*"),
+        ("bunx cowsay hi", "bunx*"),
+    ];
+
+    for (subject, pattern) in adversarial {
+        assert_process_requires_confirmation(subject, pattern);
+        assert!(
+            !process_subject_confirmed_for_allow(subject),
+            "shape must be unconfirmed: {subject}"
+        );
+    }
+}
+
+#[test]
+fn normal_toolchain_commands_still_auto_allow_under_matching_rules() {
+    // Positive direction: a reject-everything implementation would fail these.
+    let benign = [
+        ("cargo test", "cargo*"),
+        ("cargo test -p keeper-policy", "cargo test*"),
+        ("npm run build", "npm*"),
+        ("git status", "git*"),
+        ("git -c advice.detachedHead=false status", "git*"),
+        ("rustc --version", "rustc*"),
+        ("node --version", "node*"),
+        ("python --version", "python*"),
+        ("ls -c", "ls*"),
+        ("ps -ef", "ps*"),
+        ("grep -e pattern file.txt", "grep*"),
+        ("find . -name *.rs", "find*"),
+    ];
+
+    for (subject, pattern) in benign {
+        assert!(
+            process_subject_confirmed_for_allow(subject),
+            "shape must be confirmed: {subject}"
+        );
+        assert_process_allow(subject, pattern);
+    }
+}
+
+#[test]
+fn deny_still_wins_on_opaque_eval_shapes() {
+    let allow = process_allow("node*");
+    let deny = rule(
+        "node-deny",
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Process,
+        "node -e",
+        PermissionRuleAction::Deny,
+    );
+
+    match evaluate_permission_rules(
+        PermissionRulePrefix::Process,
+        "node -e code",
+        &[allow, deny],
+    ) {
+        PermissionRuleEvaluation::Deny(matched) => {
+            assert_eq!(matched.rule.rule_id, "node-deny");
+        }
+        other => panic!("deny must beat allow even for opaque shapes, got {other:?}"),
+    }
+}
+
+#[test]
+fn opaque_eval_segment_blocks_conjunctive_allow_of_a_chain() {
+    let cargo_allow = process_allow("cargo*");
+    let node_allow = rule(
+        "node-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "node*",
+        PermissionRuleAction::Allow,
+    );
+
+    // `node -e` cannot be confirmed, so the whole conjunction must prompt even
+    // though `cargo test` alone would auto-allow.
+    let chain = conservative_shell_command_segments("cargo test && node -e code")
+        .expect("simple chain segments");
+    assert!(matches!(
+        evaluate_permission_rule_conjunction(
+            PermissionRulePrefix::Process,
+            &chain,
+            &[cargo_allow, node_allow],
+        ),
+        PermissionRuleConjunctionEvaluation::RequireConfirmation
+    ));
+
+    // Positive control: both confirmed segments still allow.
+    let ok = conservative_shell_command_segments("cargo test && node --version").unwrap();
+    match evaluate_permission_rule_conjunction(
+        PermissionRulePrefix::Process,
+        &ok,
+        &[process_allow("cargo*"), process_allow("node*")],
+    ) {
+        PermissionRuleConjunctionEvaluation::Allow(matched) => assert_eq!(matched.len(), 2),
+        other => panic!("confirmed chain must allow, got {other:?}"),
+    }
+}
+
+#[test]
+fn write_and_edit_allows_are_not_gated_by_process_shape() {
+    let rules = [rule(
+        "edit-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Edit,
+        "src/**",
+        PermissionRuleAction::Allow,
+    )];
+
+    match evaluate_permission_rules(PermissionRulePrefix::Edit, "src/lib.rs", &rules) {
+        PermissionRuleEvaluation::Allow(matched) => {
+            assert_eq!(matched.match_subject, "src/lib.rs");
+        }
+        other => panic!("edit allow must not consult process shape, got {other:?}"),
+    }
 }

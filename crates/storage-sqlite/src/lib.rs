@@ -5,6 +5,7 @@ mod knowledge;
 mod migrations;
 mod permission_rules;
 mod resource_recent;
+mod runtime_slot;
 mod settings;
 mod tool_call;
 mod write_proposal;
@@ -30,6 +31,10 @@ pub use permission_rules::{
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
+};
+pub use runtime_slot::{
+    GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
+    RuntimeSlotKind, RuntimeSlotStoreError, SqliteRuntimeSlotRepository,
 };
 pub use settings::{
     ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,
