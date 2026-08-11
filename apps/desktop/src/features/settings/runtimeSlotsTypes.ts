@@ -61,6 +61,49 @@ export type RuntimeSlotStartView = {
   status: string;
 };
 
+/**
+ * Model catalog for one runtime slot (`get_runtime_slot_model_catalog`).
+ * `status === "unsupported"` is a normal result (not a command error): the
+ * endpoint lacks `/models`, or the slot kind cannot list models.
+ */
+export type RuntimeSlotModelCatalogStatus = "available" | "unsupported";
+
+export type RuntimeSlotModelCatalogSource =
+  | "openai_models"
+  | "grok_cli"
+  | "external_cli";
+
+export type RuntimeSlotModelCatalogReasonCode =
+  | "endpoint_not_supported"
+  | "external_cli_not_supported";
+
+export type RuntimeSlotModelCatalogView = {
+  slotId: string;
+  projectId: string;
+  status: RuntimeSlotModelCatalogStatus;
+  source: RuntimeSlotModelCatalogSource;
+  models: string[];
+  reasonCode: RuntimeSlotModelCatalogReasonCode | null;
+};
+
+/**
+ * Result of switching a slot model (`set_runtime_slot_model`).
+ * Model is a launch argument: when the slot was active, the host restarts the
+ * runtime (`runtimeRestarted: true`). UI must not invent "already applied to
+ * the current session" when restarted is false.
+ */
+export type RuntimeSlotModelSessionRestore =
+  | "not_applicable"
+  | "unavailable";
+
+export type RuntimeSlotModelSwitchView = {
+  slotId: string;
+  projectId: string;
+  modelId: string;
+  runtimeRestarted: boolean;
+  sessionRestore: RuntimeSlotModelSessionRestore;
+};
+
 export type CreateGrokLoginSlotInput = {
   projectId: string;
   displayName: string;
@@ -112,6 +155,8 @@ export type RuntimeSlotsGatewayErrorCode =
   | "runtime_slot_secret_unsupported"
   | "runtime_slot_private_home_contaminated"
   | "runtime_slot_config_unavailable"
+  | "runtime_slot_model_catalog_unavailable"
+  | "runtime_slot_model_catalog_invalid"
   | "external_cli_status_unavailable"
   | "external_cli_launch_unsupported"
   | "runtime_slot_id_invalid"
@@ -156,6 +201,23 @@ export interface RuntimeSlotsGateway {
     projectId: string,
     slotId: string,
   ): Promise<RuntimeSlotStartView>;
+  /**
+   * List models for a governed Grok slot. `unsupported` is a normal success
+   * payload (endpoint or kind cannot list) — not a thrown error.
+   */
+  getRuntimeSlotModelCatalog(
+    projectId: string,
+    slotId: string,
+  ): Promise<RuntimeSlotModelCatalogView>;
+  /**
+   * Persist model id and restart the active runtime when this slot is active.
+   * Return value carries `runtimeRestarted` for honest UI copy.
+   */
+  setRuntimeSlotModel(
+    projectId: string,
+    slotId: string,
+    modelId: string,
+  ): Promise<RuntimeSlotModelSwitchView>;
 }
 
 /**
@@ -178,3 +240,19 @@ export const GOVERNED_GROK_BADGE = "受 Pillow 完整治理";
 export const SECRET_CONFIGURED_LABEL = "已配置";
 
 export const SECRET_NOT_CONFIGURED_LABEL = "未配置";
+
+/** Honest copy when switch restarts an active runtime (session cannot restore). */
+export const MODEL_SWITCH_RESTARTED_MESSAGE =
+  "模型已更新，活跃 runtime 已重启。当前会话上下文无法恢复，下一轮将使用新模型。";
+
+/** Honest copy when slot was inactive — do not imply current session switched. */
+export const MODEL_SWITCH_SAVED_INACTIVE_MESSAGE =
+  "模型已保存。该槽位当前未激活，下次启动时将使用新模型。";
+
+/** Catalog unsupported: endpoint has no listable /models. */
+export const MODEL_CATALOG_UNSUPPORTED_ENDPOINT =
+  "该端点不提供模型目录（未实现 /models）。请手输模型 id。";
+
+/** Catalog unsupported: external CLI is registration-only. */
+export const MODEL_CATALOG_UNSUPPORTED_EXTERNAL_CLI =
+  "外部 CLI 槽位不适用模型目录，仅可登记与查询账号状态。";

@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { RuntimeSlotModelPicker } from "./RuntimeSlotModelPicker";
 import {
   MockRuntimeSlotsGateway,
   TauriRuntimeSlotsGateway,
@@ -20,6 +21,7 @@ import {
   SECRET_NOT_CONFIGURED_LABEL,
   type GrokSlotAuthMode,
   type RuntimeSlotKind,
+  type RuntimeSlotModelSwitchView,
   type RuntimeSlotView,
   type RuntimeSlotsGateway,
   RuntimeSlotsGatewayError,
@@ -297,6 +299,32 @@ export function RuntimeSlotsSection({
     }
   }
 
+  /**
+   * After quick model switch: update list modelId from host result, then
+   * reload for full consistency. Switch notice lives on the picker itself
+   * (runtimeRestarted honesty).
+   */
+  async function handleModelSwitched(
+    result: RuntimeSlotModelSwitchView,
+  ): Promise<void> {
+    setSlots((prev) =>
+      prev.map((slot) =>
+        slot.slotId === result.slotId
+          ? { ...slot, modelId: result.modelId }
+          : slot
+      ),
+    );
+    // Quiet reload — picker already showed restart/save outcome.
+    try {
+      if (projectId) {
+        const list = await gateway.listRuntimeSlots(projectId);
+        setSlots(list);
+      }
+    } catch {
+      // Keep optimistic modelId; list errors surface on next full reload.
+    }
+  }
+
   if (!projectId) {
     return (
       <section
@@ -415,8 +443,6 @@ export function RuntimeSlotsSection({
                 <p className="runtime-slots-list__detail">
                   端点：{slot.baseUrl ?? "—"}
                   {" · "}
-                  模型：{slot.modelId ?? "—"}
-                  {" · "}
                   密钥：
                   <span data-testid={`runtime-slot-secret-status-${slot.slotId}`}>
                     {slot.secretConfigured
@@ -424,6 +450,23 @@ export function RuntimeSlotsSection({
                       : SECRET_NOT_CONFIGURED_LABEL}
                   </span>
                 </p>
+              ) : null}
+
+              {/*
+                Quick model switch on the list row — core of "each slot like
+                desktop model switch". external_cli must not get a picker.
+              */}
+              {slot.kind === "governed_grok" && projectId ? (
+                <RuntimeSlotModelPicker
+                  currentModelId={slot.modelId}
+                  disabled={busy}
+                  gateway={gateway}
+                  onSwitched={(result) => {
+                    void handleModelSwitched(result);
+                  }}
+                  projectId={projectId}
+                  slotId={slot.slotId}
+                />
               ) : null}
 
               {slot.kind === "external_cli" ? (
@@ -570,7 +613,12 @@ export function RuntimeSlotsSection({
                 />
               </label>
               <label className="settings-field">
-                <span className="settings-field__label">模型 id</span>
+                <span className="settings-field__label">
+                  模型 id
+                  <span className="runtime-slots-badge">
+                    创建/编辑表单手输；已有槽位可在列表中快速切换
+                  </span>
+                </span>
                 <input
                   aria-label="模型 id"
                   autoComplete="off"

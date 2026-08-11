@@ -11,8 +11,18 @@ import {
   type CreateGrokLoginSlotInput,
   type ExternalCliStatusView,
   type GrokSlotAuthMode,
+  MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
+  MODEL_CATALOG_UNSUPPORTED_EXTERNAL_CLI,
+  MODEL_SWITCH_RESTARTED_MESSAGE,
+  MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
   type RuntimeSlotGovernance,
   type RuntimeSlotKind,
+  type RuntimeSlotModelCatalogReasonCode,
+  type RuntimeSlotModelCatalogSource,
+  type RuntimeSlotModelCatalogStatus,
+  type RuntimeSlotModelCatalogView,
+  type RuntimeSlotModelSessionRestore,
+  type RuntimeSlotModelSwitchView,
   type RuntimeSlotStartView,
   type RuntimeSlotView,
   type RuntimeSlotsGateway,
@@ -31,6 +41,10 @@ const MAX_ID_CHARS = 128;
 const MAX_NAME_CHARS = 256;
 const MAX_URL_CHARS = 4_096;
 const MAX_MODEL_CHARS = 4_096;
+/** Host catalog cap: single model id length (Unicode chars). */
+const MAX_CATALOG_MODEL_CHARS = 512;
+/** Host catalog cap: model count. */
+const MAX_CATALOG_MODELS = 256;
 const MAX_PATH_CHARS = 1_024;
 const MAX_ARGS = 64;
 const MAX_ARG_CHARS = 1_024;
@@ -77,9 +91,45 @@ export const RUNTIME_SLOT_START_DTO_KEYS = [
   "status",
 ] as const;
 
+/** Exact closed allowlist for `RuntimeSlotModelCatalogDto`. */
+export const RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS = [
+  "slotId",
+  "projectId",
+  "status",
+  "source",
+  "models",
+  "reasonCode",
+] as const;
+
+/** Exact closed allowlist for `RuntimeSlotModelSwitchDto`. */
+export const RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS = [
+  "slotId",
+  "projectId",
+  "modelId",
+  "runtimeRestarted",
+  "sessionRestore",
+] as const;
+
 const KINDS: readonly RuntimeSlotKind[] = ["governed_grok", "external_cli"];
 const GOVERNANCE: readonly RuntimeSlotGovernance[] = ["full", "none"];
 const AUTH_MODES: readonly GrokSlotAuthMode[] = ["login", "api_key"];
+const CATALOG_STATUSES: readonly RuntimeSlotModelCatalogStatus[] = [
+  "available",
+  "unsupported",
+];
+const CATALOG_SOURCES: readonly RuntimeSlotModelCatalogSource[] = [
+  "openai_models",
+  "grok_cli",
+  "external_cli",
+];
+const CATALOG_REASON_CODES: readonly RuntimeSlotModelCatalogReasonCode[] = [
+  "endpoint_not_supported",
+  "external_cli_not_supported",
+];
+const SESSION_RESTORES: readonly RuntimeSlotModelSessionRestore[] = [
+  "not_applicable",
+  "unavailable",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -334,6 +384,171 @@ export function parseRuntimeSlotStartView(
   };
 }
 
+function isCatalogStatus(
+  value: unknown,
+): value is RuntimeSlotModelCatalogStatus {
+  return typeof value === "string"
+    && (CATALOG_STATUSES as string[]).includes(value);
+}
+
+function isCatalogSource(
+  value: unknown,
+): value is RuntimeSlotModelCatalogSource {
+  return typeof value === "string"
+    && (CATALOG_SOURCES as string[]).includes(value);
+}
+
+function isCatalogReasonCode(
+  value: unknown,
+): value is RuntimeSlotModelCatalogReasonCode {
+  return typeof value === "string"
+    && (CATALOG_REASON_CODES as string[]).includes(value);
+}
+
+function isSessionRestore(
+  value: unknown,
+): value is RuntimeSlotModelSessionRestore {
+  return typeof value === "string"
+    && (SESSION_RESTORES as string[]).includes(value);
+}
+
+/**
+ * Closed parse for host model catalog. `unsupported` is a valid success shape
+ * (empty models + reasonCode). Rejects smuggled keys and over-long ids.
+ */
+export function parseRuntimeSlotModelCatalogView(
+  value: unknown,
+): RuntimeSlotModelCatalogView {
+  assertNoSecretPayloadFields(value);
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS)
+  ) {
+    throw invalidResponse();
+  }
+  if (
+    !isNonEmptyString(value.slotId)
+    || value.slotId.length > MAX_ID_CHARS
+    || !isNonEmptyString(value.projectId)
+    || value.projectId.length > MAX_ID_CHARS
+    || !isCatalogStatus(value.status)
+    || !isCatalogSource(value.source)
+    || !(
+      value.reasonCode === null
+      || value.reasonCode === undefined
+      || isCatalogReasonCode(value.reasonCode)
+    )
+    || !Array.isArray(value.models)
+    || value.models.length > MAX_CATALOG_MODELS
+    || !value.models.every(
+      (item) =>
+        typeof item === "string"
+        && item.length > 0
+        && item.length <= MAX_CATALOG_MODEL_CHARS,
+    )
+  ) {
+    throw invalidResponse();
+  }
+
+  // Host invariants: available must not carry a reason; unsupported must.
+  if (value.status === "available" && value.reasonCode != null) {
+    throw invalidResponse();
+  }
+  if (value.status === "unsupported") {
+    if (value.reasonCode == null) {
+      throw invalidResponse();
+    }
+    if (value.models.length > 0) {
+      throw invalidResponse();
+    }
+  }
+
+  return {
+    slotId: value.slotId,
+    projectId: value.projectId,
+    status: value.status,
+    source: value.source,
+    models: value.models.slice(),
+    reasonCode: value.reasonCode ?? null,
+  };
+}
+
+/**
+ * Closed parse for model switch result. `runtimeRestarted` drives honest UI.
+ */
+export function parseRuntimeSlotModelSwitchView(
+  value: unknown,
+): RuntimeSlotModelSwitchView {
+  assertNoSecretPayloadFields(value);
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS)
+  ) {
+    throw invalidResponse();
+  }
+  if (
+    !isNonEmptyString(value.slotId)
+    || value.slotId.length > MAX_ID_CHARS
+    || !isNonEmptyString(value.projectId)
+    || value.projectId.length > MAX_ID_CHARS
+    || !isNonEmptyString(value.modelId)
+    || value.modelId.length > MAX_CATALOG_MODEL_CHARS
+    || typeof value.runtimeRestarted !== "boolean"
+    || !isSessionRestore(value.sessionRestore)
+  ) {
+    throw invalidResponse();
+  }
+
+  // Host: active restart → sessionRestore unavailable; inactive → not_applicable.
+  if (value.runtimeRestarted && value.sessionRestore !== "unavailable") {
+    throw invalidResponse();
+  }
+  if (!value.runtimeRestarted && value.sessionRestore !== "not_applicable") {
+    throw invalidResponse();
+  }
+
+  return {
+    slotId: value.slotId,
+    projectId: value.projectId,
+    modelId: value.modelId,
+    runtimeRestarted: value.runtimeRestarted,
+    sessionRestore: value.sessionRestore,
+  };
+}
+
+/** Short display for untrusted remote model ids (layout safety). */
+export function truncateModelIdForDisplay(
+  modelId: string,
+  maxChars = 48,
+): string {
+  if (modelId.length <= maxChars) return modelId;
+  return `${modelId.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+/** Map catalog reason codes to user-facing fallback copy. */
+export function mapModelCatalogUnsupportedReason(
+  reasonCode: RuntimeSlotModelCatalogReasonCode | null,
+): string {
+  switch (reasonCode) {
+    case "endpoint_not_supported":
+      return MODEL_CATALOG_UNSUPPORTED_ENDPOINT;
+    case "external_cli_not_supported":
+      return MODEL_CATALOG_UNSUPPORTED_EXTERNAL_CLI;
+    default:
+      return "此槽位不支持自动拉取模型列表。请手输模型 id。";
+  }
+}
+
+/** Honest switch outcome copy — never invent "already applied to session". */
+export function mapModelSwitchResultMessage(
+  result: RuntimeSlotModelSwitchView,
+): string {
+  if (result.runtimeRestarted) {
+    return MODEL_SWITCH_RESTARTED_MESSAGE;
+  }
+  return MODEL_SWITCH_SAVED_INACTIVE_MESSAGE;
+}
+
 /**
  * Create invoke args — apiKey is always required and always sent once.
  * Caller must not log the returned object.
@@ -420,6 +635,10 @@ export function mapRuntimeSlotErrorMessage(code: string): string {
       return "槽位私有目录含有禁止的登录文件，请删除后重试。";
     case "runtime_slot_config_unavailable":
       return "无法写入槽位模型配置。";
+    case "runtime_slot_model_catalog_unavailable":
+      return "无法拉取模型目录：端点不可达、认证失败或服务暂时不可用。请手输模型 id 或稍后刷新。";
+    case "runtime_slot_model_catalog_invalid":
+      return "模型目录响应无效。请手输模型 id，或检查端点返回格式后刷新。";
     case "external_cli_status_unavailable":
       return "无法查询外部 CLI 账号状态：请检查可执行路径与状态参数。";
     case "external_cli_launch_unsupported":
@@ -623,6 +842,29 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
       parseRuntimeSlotStartView,
     );
   }
+
+  getRuntimeSlotModelCatalog(
+    projectId: string,
+    slotId: string,
+  ): Promise<RuntimeSlotModelCatalogView> {
+    return invokeSlotCommand(
+      "get_runtime_slot_model_catalog",
+      { projectId, slotId },
+      parseRuntimeSlotModelCatalogView,
+    );
+  }
+
+  setRuntimeSlotModel(
+    projectId: string,
+    slotId: string,
+    modelId: string,
+  ): Promise<RuntimeSlotModelSwitchView> {
+    return invokeSlotCommand(
+      "set_runtime_slot_model",
+      { projectId, slotId, modelId },
+      parseRuntimeSlotModelSwitchView,
+    );
+  }
 }
 
 /** In-memory mock for unit tests and non-desktop shells. */
@@ -635,12 +877,26 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   readonly lastUpdateApiKeyArgs: Array<ReturnType<
     typeof buildUpdateGrokApiKeySlotArgs
   >> = [];
+  readonly lastSetModelArgs: Array<{
+    projectId: string;
+    slotId: string;
+    modelId: string;
+  }> = [];
   /** Opaque secrets kept only in mock memory — never exposed on views. */
   private readonly secrets = new Map<string, string>();
   private probeMode: "success" | "fail" = "success";
   private probeFailCode = "runtime_slot_input_invalid";
   private externalStatusMode: "success" | "fail" = "success";
   private externalStdout = "Logged in using ChatGPT";
+  private catalogMode:
+    | "available"
+    | "unsupported_endpoint"
+    | "unsupported_external"
+    | "fail" = "available";
+  private catalogModels: string[] = ["grok-test", "grok-beta", "custom-listed"];
+  private catalogFailCode = "runtime_slot_model_catalog_unavailable";
+  /** When true, setRuntimeSlotModel reports runtimeRestarted. */
+  private modelSwitchRestarted = false;
 
   constructor(initial: RuntimeSlotView[] = []) {
     this.slots = initial.map((slot) => ({ ...slot }));
@@ -662,6 +918,27 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   ): void {
     this.externalStatusMode = mode;
     this.externalStdout = stdout;
+  }
+
+  setCatalogMode(
+    mode:
+      | "available"
+      | "unsupported_endpoint"
+      | "unsupported_external"
+      | "fail",
+    options?: { models?: string[]; failCode?: string },
+  ): void {
+    this.catalogMode = mode;
+    if (options?.models) {
+      this.catalogModels = [...options.models];
+    }
+    if (options?.failCode) {
+      this.catalogFailCode = options.failCode;
+    }
+  }
+
+  setModelSwitchRestarted(restarted: boolean): void {
+    this.modelSwitchRestarted = restarted;
   }
 
   getSlotsSnapshot(): RuntimeSlotView[] {
@@ -875,6 +1152,97 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       kind: "governed_grok",
       governance: "full",
       status: "active",
+    };
+  }
+
+  async getRuntimeSlotModelCatalog(
+    projectId: string,
+    slotId: string,
+  ): Promise<RuntimeSlotModelCatalogView> {
+    const slot = this.slots.find(
+      (row) => row.slotId === slotId && row.projectId === projectId,
+    );
+    if (!slot) {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_not_found",
+        mapRuntimeSlotErrorMessage("runtime_slot_not_found"),
+      );
+    }
+    if (slot.kind === "external_cli" || this.catalogMode === "unsupported_external") {
+      return {
+        slotId,
+        projectId,
+        status: "unsupported",
+        source: "external_cli",
+        models: [],
+        reasonCode: "external_cli_not_supported",
+      };
+    }
+    if (this.catalogMode === "fail") {
+      throw new RuntimeSlotsGatewayError(
+        this.catalogFailCode,
+        mapRuntimeSlotErrorMessage(this.catalogFailCode),
+      );
+    }
+    if (this.catalogMode === "unsupported_endpoint") {
+      return {
+        slotId,
+        projectId,
+        status: "unsupported",
+        source: "openai_models",
+        models: [],
+        reasonCode: "endpoint_not_supported",
+      };
+    }
+    return {
+      slotId,
+      projectId,
+      status: "available",
+      source: slot.authMode === "login" ? "grok_cli" : "openai_models",
+      models: [...this.catalogModels],
+      reasonCode: null,
+    };
+  }
+
+  async setRuntimeSlotModel(
+    projectId: string,
+    slotId: string,
+    modelId: string,
+  ): Promise<RuntimeSlotModelSwitchView> {
+    this.lastSetModelArgs.push({ projectId, slotId, modelId });
+    const trimmed = modelId.trim();
+    if (!trimmed) {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_input_invalid",
+        mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+      );
+    }
+    const index = this.slots.findIndex(
+      (row) => row.slotId === slotId && row.projectId === projectId,
+    );
+    if (index < 0) {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_not_found",
+        mapRuntimeSlotErrorMessage("runtime_slot_not_found"),
+      );
+    }
+    const current = this.slots[index]!;
+    if (current.kind !== "governed_grok") {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_not_governed_grok",
+        mapRuntimeSlotErrorMessage("runtime_slot_not_governed_grok"),
+      );
+    }
+    current.modelId = trimmed;
+    current.updatedAt = new Date().toISOString();
+    this.slots[index] = current;
+    const restarted = this.modelSwitchRestarted;
+    return {
+      slotId,
+      projectId,
+      modelId: trimmed,
+      runtimeRestarted: restarted,
+      sessionRestore: restarted ? "unavailable" : "not_applicable",
     };
   }
 }

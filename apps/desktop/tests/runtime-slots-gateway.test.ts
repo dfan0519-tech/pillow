@@ -8,6 +8,8 @@ import {
   EXTERNAL_CLI_STATUS_DTO_KEYS,
   MockRuntimeSlotsGateway,
   RUNTIME_SLOT_DTO_KEYS,
+  RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS,
+  RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS,
   RUNTIME_SLOT_START_DTO_KEYS,
   TauriRuntimeSlotsGateway,
   assertNoSecretPayloadFields,
@@ -15,12 +17,22 @@ import {
   buildUpdateGrokApiKeySlotArgs,
   classifyExternalCliStatus,
   mapGrokProbeFailureMessage,
+  mapModelCatalogUnsupportedReason,
+  mapModelSwitchResultMessage,
   mapRuntimeSlotErrorMessage,
   parseExternalCliStatusView,
+  parseRuntimeSlotModelCatalogView,
+  parseRuntimeSlotModelSwitchView,
   parseRuntimeSlotStartView,
   parseRuntimeSlotView,
+  truncateModelIdForDisplay,
 } from "../src/features/settings/runtimeSlotsGateway";
-import type { RuntimeSlotView } from "../src/features/settings/runtimeSlotsTypes";
+import {
+  MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
+  MODEL_SWITCH_RESTARTED_MESSAGE,
+  MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
+  type RuntimeSlotView,
+} from "../src/features/settings/runtimeSlotsTypes";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -187,6 +199,135 @@ describe("runtime slot DTO parsers", () => {
     expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(15);
     expect(EXTERNAL_CLI_STATUS_DTO_KEYS).toHaveLength(8);
     expect(RUNTIME_SLOT_START_DTO_KEYS).toHaveLength(5);
+    expect(RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS).toHaveLength(6);
+    expect(RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS).toHaveLength(5);
+  });
+});
+
+describe("model catalog / switch DTO parsers", () => {
+  it("accepts available catalog with real models and rejects smuggled keys", () => {
+    const good = {
+      slotId: SLOT,
+      projectId: PROJECT,
+      status: "available" as const,
+      source: "openai_models" as const,
+      models: ["grok-test", "grok-beta"],
+      reasonCode: null,
+    };
+    expect(parseRuntimeSlotModelCatalogView(good)).toEqual(good);
+
+    // Positive: models are actually returned, not just "parsed without throw".
+    expect(parseRuntimeSlotModelCatalogView(good).models).toContain("grok-beta");
+
+    expect(() =>
+      parseRuntimeSlotModelCatalogView({
+        ...good,
+        grant: "smuggled",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+
+    expect(() =>
+      parseRuntimeSlotModelCatalogView({
+        ...good,
+        apiKey: "nope",
+      })
+    ).toThrow(/secret field/i);
+  });
+
+  it("accepts unsupported catalog (normal result) and requires reason + empty models", () => {
+    const unsupported = parseRuntimeSlotModelCatalogView({
+      slotId: SLOT,
+      projectId: PROJECT,
+      status: "unsupported",
+      source: "openai_models",
+      models: [],
+      reasonCode: "endpoint_not_supported",
+    });
+    expect(unsupported.status).toBe("unsupported");
+    expect(unsupported.reasonCode).toBe("endpoint_not_supported");
+    expect(unsupported.models).toEqual([]);
+    expect(mapModelCatalogUnsupportedReason(unsupported.reasonCode)).toBe(
+      MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
+    );
+
+    // Negative: unsupported with models is invalid.
+    expect(() =>
+      parseRuntimeSlotModelCatalogView({
+        slotId: SLOT,
+        projectId: PROJECT,
+        status: "unsupported",
+        source: "openai_models",
+        models: ["should-not-be-here"],
+        reasonCode: "endpoint_not_supported",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+
+    // Negative: available must not carry a reason.
+    expect(() =>
+      parseRuntimeSlotModelCatalogView({
+        slotId: SLOT,
+        projectId: PROJECT,
+        status: "available",
+        source: "openai_models",
+        models: ["a"],
+        reasonCode: "endpoint_not_supported",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+  });
+
+  it("accepts switch DTO and pins runtimeRestarted/sessionRestore pairing", () => {
+    const restarted = parseRuntimeSlotModelSwitchView({
+      slotId: SLOT,
+      projectId: PROJECT,
+      modelId: "model-new",
+      runtimeRestarted: true,
+      sessionRestore: "unavailable",
+    });
+    expect(restarted.runtimeRestarted).toBe(true);
+    expect(mapModelSwitchResultMessage(restarted)).toBe(
+      MODEL_SWITCH_RESTARTED_MESSAGE,
+    );
+
+    const inactive = parseRuntimeSlotModelSwitchView({
+      slotId: SLOT,
+      projectId: PROJECT,
+      modelId: "model-new",
+      runtimeRestarted: false,
+      sessionRestore: "not_applicable",
+    });
+    expect(inactive.runtimeRestarted).toBe(false);
+    expect(mapModelSwitchResultMessage(inactive)).toBe(
+      MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
+    );
+
+    // Negative: restarted without unavailable restore is invalid.
+    expect(() =>
+      parseRuntimeSlotModelSwitchView({
+        slotId: SLOT,
+        projectId: PROJECT,
+        modelId: "m",
+        runtimeRestarted: true,
+        sessionRestore: "not_applicable",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+
+    expect(() =>
+      parseRuntimeSlotModelSwitchView({
+        slotId: SLOT,
+        projectId: PROJECT,
+        modelId: "m",
+        runtimeRestarted: false,
+        sessionRestore: "unavailable",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+  });
+
+  it("truncates long model ids for display while preserving prefix", () => {
+    const long = `prefix-${"z".repeat(100)}`;
+    const shown = truncateModelIdForDisplay(long, 48);
+    expect(shown.endsWith("…")).toBe(true);
+    expect(shown.length).toBe(48);
+    expect(shown.startsWith("prefix-")).toBe(true);
   });
 });
 
@@ -318,6 +459,67 @@ describe("TauriRuntimeSlotsGateway invoke contract", () => {
       modelId: "grok-test",
       apiKey: "sk-once",
     });
+  });
+
+  it("invokes catalog and set-model with closed-key parse on accept path", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        slotId: SLOT,
+        projectId: PROJECT,
+        status: "available",
+        source: "openai_models",
+        models: ["a", "b"],
+        reasonCode: null,
+      })
+      .mockResolvedValueOnce({
+        slotId: SLOT,
+        projectId: PROJECT,
+        modelId: "b",
+        runtimeRestarted: true,
+        sessionRestore: "unavailable",
+      });
+
+    const gateway = new TauriRuntimeSlotsGateway();
+    const catalog = await gateway.getRuntimeSlotModelCatalog(PROJECT, SLOT);
+    expect(catalog.models).toEqual(["a", "b"]);
+    expect(catalog.status).toBe("available");
+
+    const switched = await gateway.setRuntimeSlotModel(PROJECT, SLOT, "b");
+    expect(switched).toEqual({
+      slotId: SLOT,
+      projectId: PROJECT,
+      modelId: "b",
+      runtimeRestarted: true,
+      sessionRestore: "unavailable",
+    });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "get_runtime_slot_model_catalog", {
+      projectId: PROJECT,
+      slotId: SLOT,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "set_runtime_slot_model", {
+      projectId: PROJECT,
+      slotId: SLOT,
+      modelId: "b",
+    });
+  });
+
+  it("maps catalog host errors to fixed copy without host message echo", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce({
+      code: "runtime_slot_model_catalog_unavailable",
+      message: "auth failed apiKey=pillow-test-sentinel-must-not-echo",
+    });
+    const gateway = new TauriRuntimeSlotsGateway();
+    try {
+      await gateway.getRuntimeSlotModelCatalog(PROJECT, SLOT);
+      expect.unreachable("expected catalog invoke to reject");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "runtime_slot_model_catalog_unavailable",
+      });
+      expect(String((error as Error).message)).not.toContain("apiKey=");
+      expect(String((error as Error).message)).toMatch(/手输|模型目录/u);
+    }
   });
 
   it("update invoke omits empty apiKey", async () => {

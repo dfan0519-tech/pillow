@@ -253,3 +253,153 @@
 .runtime-slots-form .settings-actions {
   margin-top: 0;
 }
+
+/* ── Model picker (per-slot quick switch) ── */
+
+.runtime-slot-model-picker {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  min-width: 0;
+}
+
+.runtime-slot-model-picker__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.runtime-slot-model-picker__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.runtime-slot-model-picker__current {
+  flex: 1 1 8rem;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-slot-model-picker__refresh {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.runtime-slot-model-picker__refresh:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.runtime-slot-model-picker__refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.runtime-slot-model-picker__field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.runtime-slot-model-picker__select,
+.runtime-slot-model-picker__input {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.runtime-slot-model-picker__manual {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.runtime-slot-model-picker__manual button {
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.runtime-slot-model-picker__manual button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.runtime-slot-model-picker__manual button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.runtime-slot-model-picker__status,
+.runtime-slot-model-picker__hint,
+.runtime-slot-model-picker__notice {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.runtime-slot-model-picker__error {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.runtime-slot-model-picker__notice {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.runtime-slot-model-picker__link {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.runtime-slot-model-picker__link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.runtime-slot-model-picker__refresh:focus-visible,
+.runtime-slot-model-picker__manual button:focus-visible,
+.runtime-slot-model-picker__link:focus-visible,
+.runtime-slot-model-picker__select:focus-visible,
+.runtime-slot-model-picker__input:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
