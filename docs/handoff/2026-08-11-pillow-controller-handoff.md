@@ -126,10 +126,11 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 - **启动**:桌面 / 开始菜单的 **Pillow** 快捷方式 → `target\release\pillow.exe`
 - **试用项目**:`<repo>-tryout`(10 通过 / 3 失败,README 有六步试用顺序)
-- 🔴 **Grok 当前未登录**(`grok models` 报 not authenticated)。
-  第一次**不要选登录型槽位**,用 API key 槽位:
-  端点 `https://opencode.ai/zen/v1`,key 在桌面 `opencode key.txt`,
-  **实测可用,61 个模型**(建议先用 `claude-haiku-4-5`)。
+- **Grok 已登录**(2026-08-12 复验:`grok models` 报 logged in with grok.com,
+  默认 `grok-4.5`)。**本手册早前写的"未登录"已作废** —— 那条会把你导向
+  错误的第一步。登录型槽位与 API key 槽位现在都可用。
+- API key 槽位备选:端点 `https://opencode.ai/zen/v1`,key 在桌面
+  `opencode key.txt`,**实测可用,61 个模型**(建议先用 `claude-haiku-4-5`)。
 
 ### 图标与快捷方式的三个坑(都已修,别再踩)
 
