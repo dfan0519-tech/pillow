@@ -48,6 +48,7 @@ fn exec_dtos_serialize_renderer_contract_without_authority() {
         decision_available: true,
         error_code: None,
         rule_subject: "node --version".into(),
+        rule_segments: None,
         auto_approved_by_rule: None,
     };
     let output = ExecOutputDto {
@@ -68,6 +69,7 @@ fn exec_dtos_serialize_renderer_contract_without_authority() {
     assert!(proposal_json.get("approvalGrant").is_none());
     assert!(proposal_json.get("grant").is_none());
     assert!(proposal_json.get("errorCode").is_none());
+    assert!(proposal_json.get("ruleSegments").is_none());
     assert_eq!(proposal_json["ruleSubject"], "node --version");
 
     let output_json = serde_json::to_value(output).unwrap();
@@ -120,6 +122,7 @@ fn proposal_projection_serializes_portable_project_root_and_relative_cwd() {
         encoding_lossy: None,
         captured_bytes: None,
         rule_subject: "node --version".into(),
+        rule_segments: None,
         auto_approved_by_rule: Some(PermissionRuleAttributionView {
             prefix: "process".into(),
             pattern: "node --version".into(),
@@ -130,10 +133,24 @@ fn proposal_projection_serializes_portable_project_root_and_relative_cwd() {
     let root_json = serde_json::to_value(proposal_dto(view(None))).unwrap();
     assert_eq!(root_json["portableCwd"], ".");
     assert_eq!(root_json["ruleSubject"], "node --version");
+    assert!(root_json.get("ruleSegments").is_none());
     assert_eq!(root_json["autoApprovedByRule"]["action"], "allow");
 
     let relative_json = serde_json::to_value(proposal_dto(view(Some("src/tools".into())))).unwrap();
     assert_eq!(relative_json["portableCwd"], "src/tools");
+
+    let mut shell_view = view(None);
+    shell_view.program = "shell".into();
+    shell_view.argv = vec!["cargo test && cargo build".into()];
+    shell_view.risk_class = ProcessRiskClass::High;
+    shell_view.rule_subject.clear();
+    shell_view.rule_segments = Some(vec!["cargo test".into(), "cargo build".into()]);
+    shell_view.auto_approved_by_rule = None;
+    let shell_json = serde_json::to_value(proposal_dto(shell_view)).unwrap();
+    assert_eq!(
+        shell_json["ruleSegments"],
+        serde_json::json!(["cargo test", "cargo build"])
+    );
 }
 
 #[test]

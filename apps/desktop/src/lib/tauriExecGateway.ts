@@ -22,12 +22,13 @@ const MAX_ID = 256;
 const MAX_PATH = 1024;
 const MAX_ARGV = 64;
 const MAX_ARGV_BYTES = 32_768;
+const MAX_RULE_SEGMENTS = 64;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_OUTPUT_LINES = 4_000;
 const MAX_CHUNKS = 4_000;
 const MAX_LIST = 256;
 
-const proposalKeys = ["proposalId", "conversationId", "origin", "state", "programLabel", "argv", "portableCwd", "riskClass", "summary", "expiresAt", "decisionAvailable", "errorCode", "ruleSubject", "autoApprovedByRule"];
+const proposalKeys = ["proposalId", "conversationId", "origin", "state", "programLabel", "argv", "portableCwd", "riskClass", "summary", "expiresAt", "decisionAvailable", "errorCode", "ruleSubject", "ruleSegments", "autoApprovedByRule"];
 /** Process proposals can only ever be decided by a `process` rule. */
 const EXEC_RULE_PREFIXES = ["process"] as const;
 const outputKeys = ["proposalId", "state", "chunks", "liveRetained", "truncated", "encodingLossy", "capturedBytes", "exitCode", "durationMs"];
@@ -48,6 +49,12 @@ function portable(value: unknown): value is string {
 function utf8(value: string): number { return new TextEncoder().encode(value).length; }
 function lines(value: string): number { return value.length === 0 ? 0 : value.split("\n").length; }
 function timestamp(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= 128 && Number.isFinite(Date.parse(value)); }
+function isRuleSegmentsValue(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.length <= MAX_RULE_SEGMENTS
+    && value.every(isRuleSubjectValue);
+}
 
 export function normalizeExecProposal(value: unknown): ExecProposalView {
   if (!record(value) || !only(value, proposalKeys) || !bounded(value.proposalId, MAX_ID) || !bounded(value.conversationId, MAX_ID) || !enumValue(value.origin, ORIGINS) || !enumValue(value.state, STATES) || !bounded(value.programLabel, 32) || !Array.isArray(value.argv) || value.argv.length > MAX_ARGV || !portable(value.portableCwd) || !enumValue(value.riskClass, RISKS) || typeof value.summary !== "string" || value.summary.length > 1024 || !timestamp(value.expiresAt) || typeof value.decisionAvailable !== "boolean") throw invalid();
@@ -61,8 +68,12 @@ export function normalizeExecProposal(value: unknown): ExecProposalView {
   const subjectOk = ruleSubject !== undefined
     && (isRuleSubjectValue(ruleSubject)
       || (value.programLabel === SHELL_PROGRAM_LABEL && ruleSubject === ""));
-  if (!subjectOk || (value.autoApprovedByRule !== undefined && !isAutoApprovedByRuleValue(value.autoApprovedByRule, EXEC_RULE_PREFIXES))) throw invalid();
-  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ruleSubject, ...(value.autoApprovedByRule === undefined ? {} : { autoApprovedByRule: { prefix: value.autoApprovedByRule.prefix, pattern: value.autoApprovedByRule.pattern, action: value.autoApprovedByRule.action } }), ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
+  const ruleSegments = value.ruleSegments;
+  const segmentsOk = ruleSegments === undefined
+    || (value.programLabel === SHELL_PROGRAM_LABEL
+      && isRuleSegmentsValue(ruleSegments));
+  if (!subjectOk || !segmentsOk || (value.autoApprovedByRule !== undefined && !isAutoApprovedByRuleValue(value.autoApprovedByRule, EXEC_RULE_PREFIXES))) throw invalid();
+  return { proposalId: value.proposalId, conversationId: value.conversationId, origin: value.origin, state: value.state, programLabel: value.programLabel, argv: [...value.argv], portableCwd: value.portableCwd, riskClass: value.riskClass, summary: value.summary, expiresAt: value.expiresAt, decisionAvailable: value.decisionAvailable, ruleSubject, ...(ruleSegments === undefined ? {} : { ruleSegments: [...ruleSegments] }), ...(value.autoApprovedByRule === undefined ? {} : { autoApprovedByRule: { prefix: value.autoApprovedByRule.prefix, pattern: value.autoApprovedByRule.pattern, action: value.autoApprovedByRule.action } }), ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode }) };
 }
 
 export function normalizeExecOutput(value: unknown): ExecOutputView {

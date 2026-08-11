@@ -811,15 +811,8 @@ export function Workbench({
               permissionRulesGateway={permissionRulesGateway}
               projectId={projectId}
               proposal={toCommandProposal(pendingProcessProposal)}
-              ruleSubject={
-                readRuleSubject(pendingProcessProposal)
-                ?? [
-                  pendingProcessProposal.programLabel,
-                  ...pendingProcessProposal.argv,
-                ]
-                  .filter(Boolean)
-                  .join(" ")
-              }
+              ruleSegments={pendingProcessProposal.ruleSegments}
+              ruleSubject={readRuleSubject(pendingProcessProposal)}
             />
           ) : null}
           <Composer

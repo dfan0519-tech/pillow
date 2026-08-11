@@ -249,7 +249,8 @@
 
 .command-approval-bar__details,
 .command-approval-bar__summary,
-.command-approval-bar__risk-note {
+.command-approval-bar__risk-note,
+.command-approval-bar__rule-note {
   margin: 0;
   font-size: 12px;
   line-height: 1.4;
@@ -257,6 +258,10 @@
 }
 
 .command-approval-bar__risk-note {
+  color: var(--warning, #f0993d);
+}
+
+.command-approval-bar__rule-note--blocked {
   color: var(--warning, #f0993d);
 }
 

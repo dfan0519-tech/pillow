@@ -275,7 +275,7 @@ export function WriteApprovalBar({
           onClose={() => setAlwaysRuleAction(null)}
           prefix={writePrefixFromMode(proposal.mode)}
           projectId={projectId}
-          ruleSubject={ruleSubject}
+          ruleSubjects={[ruleSubject]}
         />
       ) : null}
     </div>

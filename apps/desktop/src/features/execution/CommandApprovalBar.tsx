@@ -48,6 +48,8 @@ export type CommandApprovalBarProps = {
    * falls back to program + argv display text.
    */
   ruleSubject?: string;
+  /** Host-normalized shell subjects from the same conservative split used for rules. */
+  ruleSegments?: readonly string[];
   /** When set, enables “always allow/deny this pattern” from the bar. */
   permissionRulesGateway?: PermissionRulesGateway;
   /** Active project — enables project-scoped deny rules from the dialog. */
@@ -69,14 +71,10 @@ function formatExpiry(expiresAt: string): string {
 }
 
 /**
- * Fallback match subject when the host omits `ruleSubject`.
- * Shell: raw command string only (no JSON escape, no invented rejoin).
- * Structured: program + space-joined argv (legacy shape).
+ * Fallback match subject for structured commands when the host omits
+ * `ruleSubject`. Shell commands must never invent a subject in the renderer.
  */
 function fallbackProcessSubject(proposal: CommandProposalView): string {
-  if (isShellProgram(proposal.programLabel)) {
-    return proposal.argv.length === 0 ? proposal.programLabel : proposal.argv[0]!;
-  }
   const argvText = proposal.argv.join(" ").trim();
   return argvText
     ? `${proposal.programLabel} ${argvText}`.trim()
@@ -91,6 +89,7 @@ export function CommandApprovalBar({
   onReview,
   onExpiryDeadline,
   ruleSubject: ruleSubjectProp,
+  ruleSegments: ruleSegmentsProp,
   permissionRulesGateway,
   projectId = null,
 }: CommandApprovalBarProps) {
@@ -109,12 +108,20 @@ export function CommandApprovalBar({
   const decisionLocked =
     disabled || submitting || deadlinePassed || !decisionAvailable;
   const reviewLocked = disabled || submitting || deadlinePassed;
-  const ruleSubject =
-    ruleSubjectProp
-    ?? readRuleSubject(proposal)
-    ?? fallbackProcessSubject(proposal);
-  const showAlwaysRule = Boolean(permissionRulesGateway && ruleSubject);
   const isShell = isShellProgram(proposal.programLabel);
+  const ruleSubject = isShell
+    ? ""
+    : ruleSubjectProp
+      ?? readRuleSubject(proposal)
+      ?? fallbackProcessSubject(proposal);
+  const ruleSubjects = isShell
+    ? [...(ruleSegmentsProp ?? [])]
+    : ruleSubject
+      ? [ruleSubject]
+      : [];
+  const showAlwaysRule = Boolean(
+    permissionRulesGateway && ruleSubjects.length > 0,
+  );
   const commandText = formatCommandArgvDisplay(
     proposal.programLabel,
     proposal.argv,
@@ -310,6 +317,21 @@ export function CommandApprovalBar({
               : "高风险参数可见为字面参数；项目路径约束不是操作系统沙箱。"}
           </p>
         ) : null}
+        {permissionRulesGateway && isShell ? (
+          <p
+            className={
+              ruleSubjects.length > 0
+                ? "command-approval-bar__rule-note"
+                : "command-approval-bar__rule-note command-approval-bar__rule-note--blocked"
+            }
+            data-testid="command-approval-shell-rule-note"
+            role="note"
+          >
+            {ruleSubjects.length > 0
+              ? `该 Shell 命令已拆为 ${ruleSubjects.length} 段；自动放行必须分别保存 ${ruleSubjects.length} 条允许规则。`
+              : "命令结构过于复杂，无法安全拆分；本次需逐次确认，不提供“总是允许”。"}
+          </p>
+        ) : null}
       </div>
       <div
         aria-label="命令批准操作"
@@ -355,28 +377,33 @@ export function CommandApprovalBar({
               onClick={() => setAlwaysRuleAction("allow")}
               type="button"
             >
-              总是允许此模式
+              {isShell
+                ? `逐段设置总是允许（${ruleSubjects.length} 条规则）`
+                : "总是允许此模式"}
             </button>
-            <button
-              className="command-approval-bar__btn"
-              data-testid="command-approval-always-deny"
-              disabled={disabled || submitting || deadlinePassed}
-              onClick={() => setAlwaysRuleAction("deny")}
-              type="button"
-            >
-              总是拒绝此模式
-            </button>
+            {!isShell ? (
+              <button
+                className="command-approval-bar__btn"
+                data-testid="command-approval-always-deny"
+                disabled={disabled || submitting || deadlinePassed}
+                onClick={() => setAlwaysRuleAction("deny")}
+                type="button"
+              >
+                总是拒绝此模式
+              </button>
+            ) : null}
           </>
         ) : null}
       </div>
       {alwaysRuleAction && permissionRulesGateway ? (
         <AlwaysRuleDialog
+          exactSubjectPatterns={isShell}
           gateway={permissionRulesGateway}
           initialAction={alwaysRuleAction}
           onClose={() => setAlwaysRuleAction(null)}
           prefix="process"
           projectId={projectId}
-          ruleSubject={ruleSubject}
+          ruleSubjects={ruleSubjects}
         />
       ) : null}
     </div>

@@ -33,6 +33,8 @@ pub struct ExecProposalDto {
     pub error_code: Option<&'static str>,
     pub rule_subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_segments: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_approved_by_rule: Option<PermissionRuleAttributionDto>,
 }
 
@@ -168,6 +170,7 @@ pub(crate) fn proposal_dto(view: LiveProcessProposalView) -> ExecProposalDto {
         decision_available: view.decision_available,
         error_code: None,
         rule_subject: view.rule_subject,
+        rule_segments: view.rule_segments,
         auto_approved_by_rule: view.auto_approved_by_rule.map(Into::into),
     }
 }

@@ -133,6 +133,9 @@ pub struct LiveProcessProposalView {
     pub encoding_lossy: Option<bool>,
     pub captured_bytes: Option<u64>,
     pub rule_subject: String,
+    /// Ordered host-normalized shell rule subjects. Structured proposals and
+    /// shell commands outside the conservative segmenter's language omit it.
+    pub rule_segments: Option<Vec<String>>,
     pub auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 }
 
@@ -266,6 +269,9 @@ struct LiveProcessEntry {
     /// live in ordered durable segment receipts, so this compatibility string
     /// stays empty rather than flattening away segment boundaries.
     rule_subject: String,
+    /// The exact ordered subjects used by shell conjunction evaluation.
+    /// Structured proposals and unreliable shell commands keep this absent.
+    rule_segments: Option<Vec<String>>,
     auto_approved_by_rule: Option<PermissionRuleAttributionView>,
     #[cfg(any(test, feature = "test-support"))]
     pre_claim_hook: Option<PreClaimHook>,
@@ -972,17 +978,17 @@ fn execute_governed_sealed(
     };
     let process_cancel = ProcessCancellationSignal::new();
     let proposal_id = row.proposal_id.clone();
-    let (rule_subject, rule_subjects) = match approval_policy {
+    let (rule_subject, rule_subjects, rule_segments) = match approval_policy {
         ApprovalPolicy::StructuredRules => {
             let subject = canonical_process_subject(sealed.program(), sealed.argv());
-            (subject.clone(), Some(vec![subject]))
+            (subject.clone(), Some(vec![subject]), None)
         }
-        ApprovalPolicy::ShellRules => (
-            String::new(),
-            sealed
+        ApprovalPolicy::ShellRules => {
+            let segments = sealed
                 .shell_command()
-                .and_then(conservative_shell_command_segments),
-        ),
+                .and_then(conservative_shell_command_segments);
+            (String::new(), segments.clone(), segments)
+        }
     };
     let rule_evaluation = if let Some(subjects) = rule_subjects {
         match evaluate_host_permission_rule_conjunction(
@@ -1070,6 +1076,7 @@ fn execute_governed_sealed(
                 observer_quarantine_deferred: false,
                 auto_rule_pending,
                 rule_subject,
+                rule_segments,
                 auto_approved_by_rule: None,
                 #[cfg(any(test, feature = "test-support"))]
                 pre_claim_hook: None,
@@ -2201,6 +2208,7 @@ fn live_view_from_entry(
         encoding_lossy: meta.encoding_lossy,
         captured_bytes: meta.captured_bytes,
         rule_subject: entry.rule_subject.clone(),
+        rule_segments: entry.rule_segments.clone(),
         auto_approved_by_rule: entry.auto_approved_by_rule.clone(),
     }
 }
@@ -2247,6 +2255,12 @@ fn view_from_stored(
             rule_receipt
                 .map(|receipt| receipt.match_subject.clone())
                 .unwrap_or_else(|| canonical_process_subject(&row.program, argv))
+        },
+        rule_segments: if row.program == "shell" && argv.len() == 1 {
+            argv.first()
+                .and_then(|command| conservative_shell_command_segments(command))
+        } else {
+            None
         },
         auto_approved_by_rule: rule_receipt.map(attribution_from_receipt),
     }

@@ -110,6 +110,57 @@ describe("C4 gateway contract", () => {
     // The command must survive the boundary byte for byte — what is approved
     // has to be what runs.
     expect(normalizeExecProposal(shell).argv[0]).toBe(shell.argv[0]);
+    expect(normalizeExecProposal(shell).ruleSegments).toBeUndefined();
+  });
+
+  it("accepts and preserves host-normalized shell rule segments", () => {
+    const shell = {
+      ...hostProposal,
+      programLabel: "shell",
+      argv: ["cargo test && cargo build"],
+      ruleSubject: "",
+      ruleSegments: ["cargo test", "cargo build"],
+    };
+
+    expect(normalizeExecProposal(shell)).toMatchObject({
+      programLabel: "shell",
+      ruleSubject: "",
+      ruleSegments: ["cargo test", "cargo build"],
+    });
+  });
+
+  it("rejects malformed or misplaced shell rule segments", () => {
+    const shell = {
+      ...hostProposal,
+      programLabel: "shell",
+      argv: ["cargo test && cargo build"],
+      ruleSubject: "",
+    };
+    const malformed = [
+      "cargo test",
+      [],
+      ["cargo test", ""],
+      ["cargo test", 7],
+      Array.from({ length: 65 }, () => "cargo test"),
+      ["x".repeat(8193)],
+    ];
+
+    for (const ruleSegments of malformed) {
+      expect(() => normalizeExecProposal({ ...shell, ruleSegments })).toThrow();
+    }
+    expect(() =>
+      normalizeExecProposal({ ...hostProposal, ruleSegments: ["cargo test"] }),
+    ).toThrow();
+  });
+
+  it("keeps the optional rule segments absent for structured and unreliable shell proposals", () => {
+    expect(normalizeExecProposal(hostProposal).ruleSegments).toBeUndefined();
+    expect(normalizeExecProposal({
+      ...hostProposal,
+      programLabel: "shell",
+      argv: ['echo "quoted"'],
+      ruleSubject: "",
+    }).ruleSegments).toBeUndefined();
   });
 
   it("still requires a rule subject on a structured proposal", () => {

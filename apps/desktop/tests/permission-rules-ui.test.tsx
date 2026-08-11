@@ -377,6 +377,112 @@ describe("Permission rules — always allow from approval bar", () => {
       (within(dialog).getByTestId("always-rule-pattern") as HTMLInputElement).value,
     ).toBe("cargo *");
   });
+
+  it("4c — shell allow is saved one normalized segment at a time", async () => {
+    const user = userEvent.setup();
+    const rulesGateway = new MockPermissionRulesGateway();
+    const shellProposal = pendingCommand({
+      programLabel: "shell",
+      argv: ["cargo test && cargo build"],
+      riskClass: "high",
+    });
+
+    render(
+      <CommandApprovalBar
+        decisionAvailable
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        permissionRulesGateway={rulesGateway}
+        projectId="proj-a"
+        proposal={shellProposal}
+        ruleSegments={["cargo test", "cargo build"]}
+        ruleSubject=""
+      />,
+    );
+
+    const barNote = screen.getByTestId("command-approval-shell-rule-note");
+    expect(barNote.textContent).toContain("2 段");
+    expect(barNote.textContent).toContain("分别保存 2 条允许规则");
+    const open = screen.getByTestId("command-approval-always-allow");
+    expect(open).toHaveTextContent("逐段设置总是允许（2 条规则）");
+    expect(screen.queryByTestId("command-approval-always-deny")).toBeNull();
+
+    await user.click(open);
+    const dialog = await screen.findByTestId("always-rule-dialog");
+    const conjunction = within(dialog).getByTestId("always-rule-conjunction-note");
+    expect(conjunction.textContent).toContain("每一段都有一条单独的允许规则");
+    expect(conjunction.textContent).toContain("缺少任一条");
+    expect(within(dialog).getByTestId("always-rule-progress")).toHaveTextContent(
+      "第 1 / 2 段",
+    );
+    expect(within(dialog).getByTestId("always-rule-action")).toBeDisabled();
+    expect(within(dialog).getByTestId("always-rule-scope")).toBeDisabled();
+    expect(
+      (within(dialog).getByTestId("always-rule-scope") as HTMLSelectElement).value,
+    ).toBe("global");
+    expect(
+      (within(dialog).getByTestId("always-rule-pattern") as HTMLInputElement).value,
+    ).toBe("cargo test");
+    expect(within(dialog).getByTestId("always-rule-submit")).toHaveTextContent(
+      "保存第 1 条规则并继续",
+    );
+
+    await user.click(within(dialog).getByTestId("always-rule-submit"));
+    await waitFor(() => expect(rulesGateway.getSnapshot()).toHaveLength(1));
+    expect(screen.getByTestId("always-rule-dialog")).toBeVisible();
+    expect(screen.getByTestId("always-rule-progress")).toHaveTextContent(
+      "第 2 / 2 段",
+    );
+    expect(
+      (screen.getByTestId("always-rule-pattern") as HTMLInputElement).value,
+    ).toBe("cargo build");
+    expect(screen.getByTestId("always-rule-submit")).toHaveTextContent(
+      "保存第 2 条规则并完成",
+    );
+
+    await user.click(screen.getByTestId("always-rule-submit"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("always-rule-dialog")).toBeNull();
+    });
+    expect(rulesGateway.getSnapshot()).toEqual([
+      expect.objectContaining({
+        scope: "global",
+        prefix: "process",
+        pattern: "cargo test",
+        action: "allow",
+      }),
+      expect.objectContaining({
+        scope: "global",
+        prefix: "process",
+        pattern: "cargo build",
+        action: "allow",
+      }),
+    ]);
+  });
+
+  it("4d — unreliable shell hides durable-rule actions and explains the fail-closed reason", () => {
+    render(
+      <CommandApprovalBar
+        decisionAvailable
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        permissionRulesGateway={new MockPermissionRulesGateway()}
+        projectId="proj-a"
+        proposal={pendingCommand({
+          programLabel: "shell",
+          argv: ['echo "quoted"'],
+          riskClass: "high",
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("command-approval-always-allow")).toBeNull();
+    expect(screen.queryByTestId("command-approval-always-deny")).toBeNull();
+    const note = screen.getByTestId("command-approval-shell-rule-note");
+    expect(note.textContent).toContain("命令结构过于复杂，无法安全拆分");
+    expect(note.textContent).toContain("本次需逐次确认");
+    expect(note.textContent).toContain("不提供“总是允许”");
+  });
 });
 
 // —— 5. Timeline auto-approve visibility ————————————————————————————————————

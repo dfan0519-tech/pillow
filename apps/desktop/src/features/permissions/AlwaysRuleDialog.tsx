@@ -23,8 +23,10 @@ import "../../styles/permission-rules.css";
 
 export type AlwaysRuleDialogProps = {
   gateway: PermissionRulesGateway;
-  /** Derived host match subject; used only as the initial pattern suggestion. */
-  ruleSubject: string;
+  /** Ordered host match subjects; each one becomes an independently saved rule. */
+  ruleSubjects: readonly string[];
+  /** Prefill the exact host subjects instead of generalizing them to prefixes. */
+  exactSubjectPatterns?: boolean;
   prefix: PermissionRulePrefix;
   /** Initial action the user chose from the approval bar. */
   initialAction: PermissionRuleAction;
@@ -37,7 +39,8 @@ export type AlwaysRuleDialogProps = {
 
 export function AlwaysRuleDialog({
   gateway,
-  ruleSubject,
+  ruleSubjects,
+  exactSubjectPatterns = false,
   prefix,
   initialAction,
   projectId,
@@ -46,7 +49,11 @@ export function AlwaysRuleDialog({
 }: AlwaysRuleDialogProps) {
   const titleId = useId();
   const patternId = useId();
-  const suggested = suggestPatternFromSubject(prefix, ruleSubject);
+  const suggestedPatterns = ruleSubjects.map((subject) =>
+    exactSubjectPatterns
+      ? subject
+      : suggestPatternFromSubject(prefix, subject)
+  );
 
   const [action, setAction] = useState<PermissionRuleAction>(initialAction);
   const [scope, setScope] = useState<PermissionRuleScope>(() => {
@@ -54,9 +61,13 @@ export function AlwaysRuleDialog({
     if (initialAction === "allow") return "global";
     return projectId ? "project" : "global";
   });
-  const [pattern, setPattern] = useState(suggested);
+  const [patterns, setPatterns] = useState(suggestedPatterns);
+  const [subjectIndex, setSubjectIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pattern = patterns[subjectIndex] ?? "";
+  const isMultiRule = patterns.length > 1;
+  const isLastSubject = subjectIndex === patterns.length - 1;
 
   const projectAllowBlocked = isProjectAllowForbidden(scope, action);
   const canSubmit =
@@ -78,8 +89,12 @@ export function AlwaysRuleDialog({
         pattern.trim(),
         action,
       );
-      onCreated?.();
-      onClose();
+      if (!isLastSubject) {
+        setSubjectIndex((current) => current + 1);
+      } else {
+        onCreated?.();
+        onClose();
+      }
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "添加权限规则失败。";
@@ -105,6 +120,12 @@ export function AlwaysRuleDialog({
     }
   }
 
+  function handlePatternChange(next: string) {
+    setPatterns((current) =>
+      current.map((value, index) => index === subjectIndex ? next : value)
+    );
+  }
+
   return (
     <div
       aria-labelledby={titleId}
@@ -119,7 +140,11 @@ export function AlwaysRuleDialog({
       >
         <header className="permission-rule-dialog__head">
           <h2 id={titleId}>
-            {action === "allow" ? "总是允许此模式" : "总是拒绝此模式"}
+            {isMultiRule && action === "allow"
+              ? "逐段设置总是允许"
+              : action === "allow"
+                ? "总是允许此模式"
+                : "总是拒绝此模式"}
           </h2>
           <button
             aria-label="关闭"
@@ -131,18 +156,38 @@ export function AlwaysRuleDialog({
           </button>
         </header>
 
-        <p className="permission-rule-dialog__lead">
-          将写入下列确切模式。请确认后再保存；保存后匹配的后续提案会按规则自动决定。
-        </p>
+        {isMultiRule && action === "allow" ? (
+          <p
+            className="permission-rule-dialog__lead"
+            data-testid="always-rule-conjunction-note"
+          >
+            此 Shell 命令已安全拆为 {patterns.length} 段。自动放行要求每一段都有一条单独的允许规则；缺少任一条，整条命令仍需逐次确认。请逐段保存。
+          </p>
+        ) : (
+          <p className="permission-rule-dialog__lead">
+            将写入下列确切模式。请确认后再保存；保存后匹配的后续提案会按规则自动决定。
+          </p>
+        )}
+
+        {isMultiRule ? (
+          <p
+            className="permission-rule-dialog__lead"
+            data-testid="always-rule-progress"
+          >
+            第 {subjectIndex + 1} / {patterns.length} 段
+          </p>
+        ) : null}
 
         <label className="permission-rule-field" htmlFor={patternId}>
-          <span className="permission-rule-field__label">确切模式</span>
+          <span className="permission-rule-field__label">
+            {isMultiRule ? "当前段的确切模式" : "确切模式"}
+          </span>
           <input
             autoComplete="off"
             className="permission-rule-field__control"
             data-testid="always-rule-pattern"
             id={patternId}
-            onChange={(event) => setPattern(event.target.value)}
+            onChange={(event) => handlePatternChange(event.target.value)}
             spellCheck={false}
             type="text"
             value={pattern}
@@ -187,6 +232,7 @@ export function AlwaysRuleDialog({
               aria-label="规则动作"
               className="permission-rule-field__control"
               data-testid="always-rule-action"
+              disabled={isMultiRule}
               onChange={(event) =>
                 handleActionChange(event.target.value as PermissionRuleAction)
               }
@@ -203,6 +249,7 @@ export function AlwaysRuleDialog({
               aria-label="规则作用域"
               className="permission-rule-field__control"
               data-testid="always-rule-scope"
+              disabled={isMultiRule && action === "allow"}
               onChange={(event) =>
                 handleScopeChange(event.target.value as PermissionRuleScope)
               }
@@ -246,7 +293,13 @@ export function AlwaysRuleDialog({
             disabled={!canSubmit}
             type="submit"
           >
-            {submitting ? "保存中…" : "保存规则"}
+            {submitting
+              ? "保存中…"
+              : isMultiRule
+                ? isLastSubject
+                  ? `保存第 ${subjectIndex + 1} 条规则并完成`
+                  : `保存第 ${subjectIndex + 1} 条规则并继续`
+                : "保存规则"}
           </button>
         </div>
       </form>

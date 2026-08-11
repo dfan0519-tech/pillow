@@ -265,6 +265,7 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
         .find(|view| view.proposal_id == receipt.proposal_id)
         .unwrap();
     assert_eq!(view.rule_subject, "node --version");
+    assert_eq!(view.rule_segments, None);
     assert!(!view.decision_available);
     let attribution = view.auto_approved_by_rule.expect("rule attribution view");
     assert_eq!(attribution.prefix, "process");
@@ -302,6 +303,7 @@ fn ambiguous_shell_command_requires_human_and_retains_the_exact_approved_subject
             "the approval surface must receive the complete reversible command, never a truncation"
         );
         assert!(view.rule_subject.is_empty());
+        assert_eq!(view.rule_segments, None);
         assert!(view.decision_available);
         assert_eq!(view.auto_approved_by_rule, None);
         decision_host
@@ -359,6 +361,53 @@ fn ambiguous_shell_command_requires_human_and_retains_the_exact_approved_subject
         structured_error,
         GovernedProcessBridgeError::InvalidProposal
     );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn reliable_shell_rule_segments_survive_live_and_stored_decision_views() {
+    let fx = fixture();
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let conversation_id = fx.conversation_id.clone();
+    let decision_host = Arc::clone(&host);
+    let expected_segments = vec!["cargo test".to_owned(), "cargo build".to_owned()];
+    let expected_in_thread = expected_segments.clone();
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&decision_host, &conversation_id);
+        let live = decision_host
+            .list_process_proposals(&conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.proposal_id == proposal_id)
+            .expect("pending shell proposal");
+        assert_eq!(live.rule_subject, "");
+        assert_eq!(live.rule_segments, Some(expected_in_thread.clone()));
+
+        let stored = decision_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+        assert_eq!(stored.rule_subject, "");
+        assert_eq!(stored.rule_segments, Some(expected_in_thread));
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_shell(
+        fx.run_id,
+        ProviderShellProposal {
+            call_id: "shell-rule-segments-live-stored".into(),
+            command: "  cargo   test  &&\tcargo build  ".into(),
+            portable_cwd: Some(".".into()),
+        },
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+
+    assert_eq!(receipt.process.state, ExecProposalState::Rejected);
+    assert_eq!(receipt.process.started, None);
+    assert_eq!(expected_segments, vec!["cargo test", "cargo build"]);
     host.shutdown().unwrap();
 }
 

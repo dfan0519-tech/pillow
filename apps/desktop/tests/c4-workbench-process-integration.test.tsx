@@ -353,6 +353,37 @@ describe("C4 workbench process integration — single approval bar", () => {
     expectNoSecrets();
   });
 
+  it("passes host shell rule segments through to the mounted approval bar", async () => {
+    const writeGateway = createWriteGateway();
+    writeGateway.setListResult([]);
+    const execGateway = createExecGateway();
+    execGateway.setListResult([
+      pendingProcess({
+        programLabel: "shell",
+        argv: ["cargo test && cargo build"],
+        riskClass: "high",
+        ruleSubject: "",
+        ruleSegments: ["cargo test", "cargo build"],
+      }),
+    ]);
+
+    renderWorkbench({
+      writeApprovalGateway: writeGateway,
+      execGateway,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("command-approval-bar")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("command-approval-shell-rule-note")).toHaveTextContent(
+      "分别保存 2 条允许规则",
+    );
+    expect(screen.getByTestId("command-approval-always-allow")).toHaveTextContent(
+      "逐段设置总是允许（2 条规则）",
+    );
+    expectNoSecrets();
+  });
+
   it("arbitrates simultaneous candidates to the oldest expiry", async () => {
     const writeGateway = createWriteGateway();
     writeGateway.setListResult([

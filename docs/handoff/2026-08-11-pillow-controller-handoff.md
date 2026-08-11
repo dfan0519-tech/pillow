@@ -15,10 +15,13 @@
 
 **代理现在有两只受管的手:写文件、跑命令,每一次都要人工批准。**
 
-自 `9b2abba` 起 15 个提交。门 OK,E2E 10/10(最后一次完整跑在 `32ef8b5`)。
+自 `9b2abba` 起 17 个提交,HEAD `7b2e50c`。门 OK,**E2E 10/10**
+(含 shell 场景,`7b2e50c` 那次是它们第一次真正执行)。
 
-⚠️ **当前有两个 Worker 在途**(S2 拆段 / shell E2E 覆盖),
-工作树是脏的,**接手第一件事是看 §7**。
+规则也能用了:`Bash(cargo*)` **不会**放行 `cargo test; rm -rf x` ——
+allow 逐段合取,拆不动就要求确认。
+
+⚠️ **有一个 Worker 在途**,见 §7。
 
 ---
 
@@ -121,23 +124,34 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ## 7. 在途 Worker(接手先看)
 
-| 槽位 | 单 | 范围 |
-| --- | --- | --- |
-| codex1 | S2 拆段 + 规则合取 | `kernel-policy` / `runtime-host` / `storage-sqlite` / `tool-executor` / `agent-protocol` |
-| grok1 | shell → UI 的 E2E 覆盖(**已回,未提交**) | fake agent / `tests/e2e/` / `scripts/` |
+**codex1 —— shell 命令的逐段「总是允许」**(`.superpowers/round28/`,台账 `3a6ddabe`)。
 
-🔴 **grok1 那批的 E2E 场景从未真正执行过**(它跑不了 E2E,变异证据做在 vitest 上)。
-**必须在两单都落地后跑一次完整 E2E 再提交。**
+缺口:S2 让规则对 shell 生效了(`ApprovalPolicy::ShellRules` 逐段合取求值),
+**但审批条上没有入口** —— 宿主对 shell 的 `rule_subject` 仍是空串
+(`host/process.rs:2244`),所以「总是允许此模式」拿不到主体。
+用户只能去设置面板手敲,**最自然的路径(批准时顺手加规则)不可用**。
 
-S2 已新增迁移 `0013_exec_permission_rule_segments.sql` 并动了
-`agent-protocol/src/types.rs` —— **大概率是事件载荷变更,按 §5 检查渲染层**。
+🔴 **这是一次跨宿主/渲染层的改动 —— 就是 §5 那个栽了三次的接缝。**
+契约已在简报里定死:新增可选 `rule_segments`,**拆不动就省略**,
+**绝不回退成整串一条规则**(否则 `cargo test && rm -rf x` 会变成一条可保存的 allow)。
+验收时**先查两侧是否同批落地**:宿主发的键必须在
+`tauriExecGateway.ts` 的 `only(value, proposalKeys)` 白名单里。
+
+已完成并验收的前一批:S2 拆段(变异证据:去掉逐段要求 → 两个测试红,
+其中一个同时钉正反两个方向)+ shell → UI 的 E2E 覆盖。
 
 ---
 
 ## 8. 已知缺口
 
-- **E2E 无 shell → UI 覆盖**(任务 #24,grok1 那批就是补这个,待验)
-- **S2 未完成**:目前**每条命令都要点**,没有自动放行
+- ~~E2E 无 shell → UI 覆盖~~ **已补**(`shell-approve` / `shell-reject`,
+  且在 spec 的 REQUIRED 列表里 —— 场景缺失会红,不会静默通过)
+- **规则有了,入口还没有**:见 §7,在途
+- **归属只显示一条规则**:合取可能由多条规则分别放行不同段,
+  durable 收据记了完整的逐段快照,**事件载荷只带代表规则**。
+  账本是全的,UI 不全。审计要看收据,不要看事件。
+- **解释器 deny 集是有限的**:不认识的 wrapper/applet 加上一条过宽的规则,
+  是目前最可能的错放路径(S2 报告残留风险 #3)
 - **进程不是 OS 沙箱**:治理的是**已验证的上游工具路径**,不声称进程级封闭
 - **`search_replace` 故意未暴露**,将来要加必须先实盘证明收敛到同一条客户端 RPC
 - E2E 满负载偶发假红(任务 #10);harness 的控制字符缺陷已修

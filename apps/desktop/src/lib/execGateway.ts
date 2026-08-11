@@ -46,6 +46,8 @@ export type ExecProposalView = {
   decisionAvailable: boolean;
   /** Host-normalized permission-rule match subject (program + argv). */
   ruleSubject: string;
+  /** Ordered host-normalized subjects for a conservatively segmented shell. */
+  ruleSegments?: string[];
   /** Present only when a permission rule, not a human, decided this. */
   autoApprovedByRule?: AutoApprovedByRule;
   errorCode?: ExecPublicError;
