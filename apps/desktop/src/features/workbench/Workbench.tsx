@@ -52,6 +52,26 @@ import {
   type WriteDiffTarget,
 } from "./ResourcePane";
 
+/**
+ * Approval re-list retry budget.
+ *
+ * A pending proposal is the LAST event of a turn: the agent blocks waiting for
+ * the human, so no further lifecycle event arrives to bump the refresh token.
+ * That makes a single transient list failure permanent — the bar clears and
+ * nothing ever re-lists, so the run looks hung with no error anywhere. Retry
+ * the list, and if it still fails say so instead of presenting a clean empty
+ * stage. Delays are short because the human is already waiting on this bar.
+ */
+const APPROVAL_LIST_ATTEMPTS = 3;
+const APPROVAL_LIST_RETRY_DELAYS_MS = [250, 1_000];
+/** Used if the delay table is ever shorter than the attempt budget. */
+const APPROVAL_LIST_FALLBACK_DELAY_MS = 1_000;
+
+const delay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 type WorkbenchProps = {
   project: ProjectDto | null;
   conversationId?: string | null;
@@ -202,6 +222,14 @@ export function Workbench({
     null,
   );
   const [decisionBusy, setDecisionBusy] = useState(false);
+  /**
+   * The approval list could not be read after every retry. Presented, never
+   * silent: an empty stage here would be indistinguishable from "nothing is
+   * pending", and a proposal may be durably waiting on the host.
+   */
+  const [approvalsUnavailable, setApprovalsUnavailable] = useState(false);
+  /** Manual retry in flight — the budget spans ~1.25s of silence otherwise. */
+  const [approvalsRetrying, setApprovalsRetrying] = useState(false);
 
   /**
    * Opaque write grants live only in this ref map. Never React state, DOM, log,
@@ -280,6 +308,7 @@ export function Workbench({
       setPendingProcessProposal(null);
       setVisibleApproval(null);
       setDecisionBusy(false);
+      setApprovalsUnavailable(false);
       setWriteDiffTarget(null);
       if (options?.clearTerminal !== false) {
         setTerminalOutputTarget(null);
@@ -402,28 +431,48 @@ export function Workbench({
       if (!project) return;
       if (!writeApprovalGateway && !execGateway) return;
 
-      try {
-        const [writeList, processList] = await Promise.all([
-          writeApprovalGateway
-            ? writeApprovalGateway.listWriteProposals(conversation)
-            : Promise.resolve([] as WriteProposalView[]),
-          execGateway
-            ? execGateway.listExecProposals(conversation)
-            : Promise.resolve([] as ExecProposalView[]),
-        ]);
-        if (!isScopeCurrent(generation, project, conversation)) return;
-        applyListedApprovals(project, conversation, writeList, processList);
-      } catch {
-        if (!isScopeCurrent(generation, project, conversation)) return;
-        // Never log the caught value — host errors may carry grants/secrets.
-        console.error("Failed to list governed approvals.");
-        grantByProposalRef.current.clear();
-        writeByIdRef.current.clear();
-        processByIdRef.current.clear();
-        setPendingWriteProposal(null);
-        setPendingProcessProposal(null);
-        setVisibleApproval(null);
-        setWriteDiffTarget(null);
+      for (let attempt = 0; attempt < APPROVAL_LIST_ATTEMPTS; attempt += 1) {
+        try {
+          const [writeList, processList] = await Promise.all([
+            writeApprovalGateway
+              ? writeApprovalGateway.listWriteProposals(conversation)
+              : Promise.resolve([] as WriteProposalView[]),
+            execGateway
+              ? execGateway.listExecProposals(conversation)
+              : Promise.resolve([] as ExecProposalView[]),
+          ]);
+          if (!isScopeCurrent(generation, project, conversation)) return;
+          applyListedApprovals(project, conversation, writeList, processList);
+          setApprovalsUnavailable(false);
+          return;
+        } catch {
+          if (!isScopeCurrent(generation, project, conversation)) return;
+          // Exhaustion is decided by the attempt counter, never by "is there a
+          // delay left": keying it off the delay table means a shorter table
+          // silently falls out of the loop reporting nothing, which is the
+          // exact defect this retry exists to remove.
+          if (attempt < APPROVAL_LIST_ATTEMPTS - 1) {
+            await delay(
+              APPROVAL_LIST_RETRY_DELAYS_MS[attempt]
+              ?? APPROVAL_LIST_FALLBACK_DELAY_MS,
+            );
+            // The scope may have moved while we waited.
+            if (!isScopeCurrent(generation, project, conversation)) return;
+            continue;
+          }
+          // Never log the caught value — host errors may carry grants/secrets.
+          console.error("Failed to list governed approvals.");
+          grantByProposalRef.current.clear();
+          writeByIdRef.current.clear();
+          processByIdRef.current.clear();
+          setPendingWriteProposal(null);
+          setPendingProcessProposal(null);
+          setVisibleApproval(null);
+          setWriteDiffTarget(null);
+          // A proposal may still be pending on the host. Say so — do not let
+          // this read as an idle stage.
+          setApprovalsUnavailable(true);
+        }
       }
     },
     [writeApprovalGateway, execGateway, isScopeCurrent, applyListedApprovals],
@@ -671,6 +720,21 @@ export function Workbench({
     );
   }, [relistApprovals]);
 
+  const handleRetryApprovals = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope.projectId || !scope.conversationId) return;
+    setApprovalsRetrying(true);
+    try {
+      await relistApprovals(
+        scope.generation,
+        scope.projectId,
+        scope.conversationId,
+      );
+    } finally {
+      setApprovalsRetrying(false);
+    }
+  }, [relistApprovals]);
+
   const grantForBar =
     pendingWriteProposal
       ? grantByProposalRef.current.get(pendingWriteProposal.proposalId) ?? null
@@ -811,6 +875,30 @@ export function Workbench({
         </div>
 
         <div className="composer-stack">
+          {approvalsUnavailable ? (
+            <div
+              className="approvals-unavailable"
+              data-testid="approvals-unavailable"
+              role="alert"
+            >
+              <div className="approvals-unavailable__text">
+                <strong>无法读取待批准项</strong>
+                <span>
+                  如果代理正在等待你批准,这里暂时看不到。请重试;重试无效时重新打开会话。
+                </span>
+              </div>
+              <button
+                className="approvals-unavailable__retry"
+                disabled={approvalsRetrying}
+                onClick={() => {
+                  void handleRetryApprovals();
+                }}
+                type="button"
+              >
+                {approvalsRetrying ? "重试中…" : "重试"}
+              </button>
+            </div>
+          ) : null}
           {showWriteBar && pendingWriteProposal ? (
             <WriteApprovalBar
               approvalGrant={grantForBar}

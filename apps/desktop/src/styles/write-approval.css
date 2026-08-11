@@ -252,3 +252,51 @@
   width: 100%;
   padding-top: 0;
 }
+
+/*
+ * Shown only when the approval list failed every retry. It sits where the bar
+ * would have been, because the alternative — an empty stage — reads as "the
+ * agent is idle" when a proposal may be durably pending on the host.
+ */
+.approvals-unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.approvals-unavailable__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.approvals-unavailable__text span {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.approvals-unavailable__retry {
+  flex: none;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.approvals-unavailable__retry:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.approvals-unavailable__retry:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
