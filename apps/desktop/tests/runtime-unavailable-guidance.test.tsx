@@ -49,6 +49,8 @@ function fixtureGovernedSlot(
 ): RuntimeSlotView {
   return {
     slotId: "slot-g1",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Grok login",
     kind: "governed_grok",
@@ -70,6 +72,8 @@ function fixtureGovernedSlot(
 function fixtureExternalSlot(): RuntimeSlotView {
   return {
     slotId: "slot-ext",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Codex CLI",
     kind: "external_cli",

@@ -20,6 +20,8 @@ const PERMISSION_MODES_MIGRATION: &str = include_str!("../migrations/0014_permis
 const RUNTIME_SLOTS_MIGRATION: &str = include_str!("../migrations/0015_runtime_slots.sql");
 const RUNTIME_SLOT_LOGIN_MODELS_MIGRATION: &str =
     include_str!("../migrations/0016_runtime_slot_login_models.sql");
+const UNIFORM_SLOT_MODEL_MIGRATION: &str =
+    include_str!("../migrations/0017_uniform_slot_model.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -35,6 +37,7 @@ const RUNTIME_SLOT_LOGIN_MODELS_MIGRATION: &str =
 /// Migration 0014 adds the global-only permission-mode guard.
 /// Migration 0015 adds project-scoped runtime slots with non-secret metadata.
 /// Migration 0016 lets login-auth Grok slots persist an optional selected model.
+/// Migration 0017 flattens slots to auth+role; governance is derived, not stored.
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -52,6 +55,7 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PERMISSION_MODES_MIGRATION)?;
     connection.execute_batch(RUNTIME_SLOTS_MIGRATION)?;
     upgrade_runtime_slot_login_models(connection)?;
+    upgrade_uniform_slot_model(connection)?;
     Ok(())
 }
 
@@ -90,7 +94,10 @@ fn login_model_accepted_by_runtime_slots_check(connection: &Connection) -> rusql
 }
 
 fn upgrade_runtime_slot_login_models(connection: &Connection) -> rusqlite::Result<()> {
+    // Must check uniform schema before the login-model probe: the probe INSERTs
+    // legacy columns (`kind`, `governance`) that no longer exist after 0017.
     if !table_exists(connection, "runtime_slots")?
+        || uniform_slot_schema_present(connection)?
         || login_model_accepted_by_runtime_slots_check(connection)?
     {
         return Ok(());
@@ -113,6 +120,48 @@ fn upgrade_runtime_slot_login_models(connection: &Connection) -> rusqlite::Resul
                     extended_code: 1,
                 },
                 Some("runtime slot login-model upgrade did not accept a model".into()),
+            ))
+        }
+        Err(error) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(error)
+        }
+    }
+}
+
+fn uniform_slot_schema_present(connection: &Connection) -> rusqlite::Result<bool> {
+    if !table_exists(connection, "runtime_slots")? {
+        return Ok(false);
+    }
+    let mut statement = connection.prepare("PRAGMA table_info(runtime_slots)")?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == "auth_kind"))
+}
+
+fn upgrade_uniform_slot_model(connection: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(connection, "runtime_slots")? || uniform_slot_schema_present(connection)? {
+        return Ok(());
+    }
+    connection.execute("BEGIN IMMEDIATE", [])?;
+    if let Err(error) = connection.execute_batch(UNIFORM_SLOT_MODEL_MIGRATION) {
+        let _ = connection.execute("ROLLBACK", []);
+        return Err(error);
+    }
+    match uniform_slot_schema_present(connection) {
+        Ok(true) => {
+            connection.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Ok(false) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::Unknown,
+                    extended_code: 1,
+                },
+                Some("uniform slot model upgrade did not produce auth_kind".into()),
             ))
         }
         Err(error) => {

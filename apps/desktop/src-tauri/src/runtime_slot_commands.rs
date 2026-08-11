@@ -1,16 +1,19 @@
 //! Host-side runtime-slot commands. Returned DTOs are closed and secret-free.
+//!
+//! One slot record shape: auth + role. `kind` / `governance` / `authMode` on the
+//! wire are **derived** labels for existing UI contracts (not independent storage).
 
 use std::path::Path;
 
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
-    GrokSlotAuth, RuntimeSlotGovernance, RuntimeSlotId, RuntimeSlotKind, SqliteSettingsRepository,
+    RuntimeSlotGovernance, RuntimeSlotId, SlotAuth, SlotRole, SqliteSettingsRepository,
     process_env_map,
 };
 use pillow_runtime_slots::{
-    ExternalCliStatus, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
+    CreateSlotAuth, ExternalCliStatus, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
     ModelCatalogUnsupportedReason, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView,
-    SecretBytes,
+    SecretBytes, UpdateSlotAuthInput,
 };
 use serde::Serialize;
 use tauri::State;
@@ -26,8 +29,11 @@ pub struct RuntimeSlotDto {
     pub slot_id: String,
     pub project_id: String,
     pub display_name: String,
+    /// Derived wire label: `governed_grok` | `external_cli`.
     pub kind: String,
+    /// Derived from auth: `full` | `none`.
     pub governance: String,
+    /// Derived: `login` | `api_key` | null.
     pub auth_mode: Option<String>,
     pub base_url: Option<String>,
     pub model_id: Option<String>,
@@ -36,6 +42,10 @@ pub struct RuntimeSlotDto {
     pub executable_path: Option<String>,
     pub launch_args: Option<Vec<String>>,
     pub status_args: Option<Vec<String>>,
+    /// `controller` | `librarian` | `custom`
+    pub role: String,
+    /// Present only when `role == "custom"`.
+    pub role_custom_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -91,6 +101,44 @@ pub fn list_runtime_slots(
     project_id: String,
 ) -> Result<Vec<RuntimeSlotDto>, CommandError> {
     list_runtime_slots_impl(&slots, &app, project_id)
+}
+
+/// Unified create command. Auth kind is selected by `auth_kind`.
+///
+/// `auth_kind`: `api_key` | `grok_login` | `local_cli`
+/// `role`: `controller` | `librarian` | `custom` (default custom / 未分配 when omitted)
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn create_slot(
+    slots: State<'_, RuntimeSlotService>,
+    app: State<'_, AppState>,
+    project_id: String,
+    display_name: String,
+    auth_kind: String,
+    role: Option<String>,
+    role_custom_name: Option<String>,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    api_key: Option<String>,
+    executable_path: Option<String>,
+    launch_args: Option<Vec<String>>,
+    status_args: Option<Vec<String>>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    create_slot_impl(
+        &slots,
+        &app,
+        project_id,
+        display_name,
+        auth_kind,
+        role,
+        role_custom_name,
+        base_url,
+        model_id,
+        api_key,
+        executable_path,
+        launch_args,
+        status_args,
+    )
 }
 
 #[tauri::command]
@@ -197,10 +245,6 @@ pub fn set_runtime_slot_model(
 ///
 /// `api_key` is optional: omit (or null) to keep the stored secret; provide a
 /// non-empty value to rotate. Empty/whitespace is treated as omit (keep), never clear.
-///
-/// Argument count follows the IPC boundary: Tauri commands receive the wire
-/// fields flat, so bundling them would change the renderer contract rather than
-/// simplify anything. Same precedent as `host/process.rs` and `governed_write.rs`.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn update_grok_api_key_slot(
@@ -229,10 +273,49 @@ pub fn update_grok_api_key_slot(
     )
 }
 
+/// Unified update: display name, role, and auth-branch fields.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn update_slot(
+    slots: State<'_, RuntimeSlotService>,
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    runtime: State<'_, RuntimeServiceState>,
+    project_id: String,
+    slot_id: String,
+    display_name: String,
+    role: Option<String>,
+    role_custom_name: Option<String>,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    api_key: Option<String>,
+    executable_path: Option<String>,
+    launch_args: Option<Vec<String>>,
+    status_args: Option<Vec<String>>,
+    keep_auth: Option<bool>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    update_slot_impl(
+        &slots,
+        &settings,
+        &app,
+        &runtime,
+        project_id,
+        slot_id,
+        display_name,
+        role,
+        role_custom_name,
+        base_url,
+        model_id,
+        api_key,
+        executable_path,
+        launch_args,
+        status_args,
+        keep_auth,
+    )
+}
+
 /// Delete a project-scoped runtime slot and destroy any associated secret material.
 /// If this slot is the process-active runtime, the runtime is shut down first.
-///
-/// See `update_grok_api_key_slot`: `lib.rs` registration is controller-owned.
 #[tauri::command]
 pub fn delete_runtime_slot(
     slots: State<'_, RuntimeSlotService>,
@@ -256,17 +339,85 @@ pub(crate) fn list_runtime_slots_impl(
         .map(|views| views.into_iter().map(slot_to_dto).collect())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_slot_impl(
+    slots: &RuntimeSlotService,
+    app: &AppState,
+    project_id: String,
+    display_name: String,
+    auth_kind: String,
+    role: Option<String>,
+    role_custom_name: Option<String>,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    api_key: Option<String>,
+    executable_path: Option<String>,
+    launch_args: Option<Vec<String>>,
+    status_args: Option<Vec<String>>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    let project_id = registered_project_id(app, &project_id)?;
+    let role = parse_role(role, role_custom_name)?;
+    let auth = match auth_kind.as_str() {
+        "grok_login" => CreateSlotAuth::GrokLogin {
+            model_id: model_id.filter(|value| !value.trim().is_empty()),
+        },
+        "api_key" => {
+            let secret = SecretBytes::new(api_key.ok_or_else(|| {
+                command_error("runtime_slot_input_invalid", "API key is required.")
+            })?);
+            CreateSlotAuth::ApiKey {
+                base_url: base_url.ok_or_else(|| {
+                    command_error("runtime_slot_input_invalid", "base_url is required.")
+                })?,
+                model_id: model_id.ok_or_else(|| {
+                    command_error("runtime_slot_input_invalid", "model_id is required.")
+                })?,
+                api_key: secret,
+            }
+        }
+        "local_cli" => CreateSlotAuth::LocalCli {
+            executable_path: executable_path.ok_or_else(|| {
+                command_error("runtime_slot_input_invalid", "executable_path is required.")
+            })?,
+            launch_args: launch_args.unwrap_or_default(),
+            status_args: status_args.ok_or_else(|| {
+                command_error("runtime_slot_input_invalid", "status_args is required.")
+            })?,
+        },
+        _ => {
+            return Err(command_error(
+                "runtime_slot_input_invalid",
+                "Unknown auth_kind.",
+            ));
+        }
+    };
+    slots
+        .create_slot(project_id, display_name, auth, role)
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
+}
+
 pub(crate) fn create_grok_login_slot_impl(
     slots: &RuntimeSlotService,
     app: &AppState,
     project_id: String,
     display_name: String,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    let project_id = registered_project_id(app, &project_id)?;
-    slots
-        .create_grok_login(project_id, display_name)
-        .map(slot_to_dto)
-        .map_err(map_slot_error)
+    create_slot_impl(
+        slots,
+        app,
+        project_id,
+        display_name,
+        "grok_login".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn create_grok_api_key_slot_impl(
@@ -278,14 +429,21 @@ pub(crate) fn create_grok_api_key_slot_impl(
     model_id: String,
     api_key: String,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    let project_id = registered_project_id(app, &project_id)?;
-    // Move the inbound String buffer immediately into a non-formatting,
-    // zero-on-drop host wrapper. It is never part of a serializable DTO.
-    let secret = SecretBytes::new(api_key);
-    slots
-        .create_grok_api_key(project_id, display_name, base_url, model_id, secret)
-        .map(slot_to_dto)
-        .map_err(map_slot_error)
+    create_slot_impl(
+        slots,
+        app,
+        project_id,
+        display_name,
+        "api_key".into(),
+        None,
+        None,
+        Some(base_url),
+        Some(model_id),
+        Some(api_key),
+        None,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn create_external_cli_slot_impl(
@@ -297,17 +455,21 @@ pub(crate) fn create_external_cli_slot_impl(
     launch_args: Vec<String>,
     status_args: Vec<String>,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    let project_id = registered_project_id(app, &project_id)?;
-    slots
-        .create_external_cli(
-            project_id,
-            display_name,
-            executable_path,
-            launch_args,
-            status_args,
-        )
-        .map(slot_to_dto)
-        .map_err(map_slot_error)
+    create_slot_impl(
+        slots,
+        app,
+        project_id,
+        display_name,
+        "local_cli".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(executable_path),
+        Some(launch_args),
+        Some(status_args),
+    )
 }
 
 pub(crate) fn get_external_cli_status_impl(
@@ -354,12 +516,7 @@ pub(crate) fn get_runtime_slot_model_catalog_impl(
         .into_iter()
         .find(|view| view.slot.id == slot_id_value)
         .ok_or_else(|| command_error("runtime_slot_not_found", "Runtime slot was not found."))?;
-    let login_executable = if matches!(
-        view.slot.kind,
-        RuntimeSlotKind::GovernedGrok {
-            auth: GrokSlotAuth::Login { .. }
-        }
-    ) {
+    let login_executable = if matches!(view.slot.auth, SlotAuth::GrokLogin { .. }) {
         let resolved = settings
             .resolve_runtime(Some(&project_id), &process_env_map())
             .map_err(|error| command_error(error.code(), &error.to_string()))?;
@@ -439,6 +596,111 @@ pub(crate) fn update_grok_api_key_slot_impl(
     Ok(slot_to_dto(updated))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_slot_impl(
+    slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    runtime: &RuntimeServiceState,
+    project_id: String,
+    slot_id: String,
+    display_name: String,
+    role: Option<String>,
+    role_custom_name: Option<String>,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    api_key: Option<String>,
+    executable_path: Option<String>,
+    launch_args: Option<Vec<String>>,
+    status_args: Option<Vec<String>>,
+    keep_auth: Option<bool>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    let _lifecycle = runtime
+        .lock_slot_lifecycle()
+        .map_err(|error| command_error(error.code, &error.message))?;
+    let project_id_value = registered_project_id(app, &project_id)?;
+    let slot_id_value = parse_slot_id(&slot_id)?;
+    let was_active = runtime
+        .is_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
+
+    let existing = slots
+        .list(project_id_value)
+        .map_err(map_slot_error)?
+        .into_iter()
+        .find(|view| view.slot.id == slot_id_value)
+        .ok_or_else(|| command_error("runtime_slot_not_found", "Runtime slot was not found."))?;
+
+    let role = match role {
+        Some(value) => parse_role(Some(value), role_custom_name)?,
+        None => existing.slot.role.clone(),
+    };
+
+    let auth_update = if keep_auth.unwrap_or(false) {
+        UpdateSlotAuthInput::Keep
+    } else {
+        match &existing.slot.auth {
+            SlotAuth::ApiKey { .. } => {
+                let secret = match api_key {
+                    None => None,
+                    Some(value) if value.trim().is_empty() => None,
+                    Some(value) => Some(SecretBytes::new(value)),
+                };
+                UpdateSlotAuthInput::ApiKey {
+                    base_url: base_url.ok_or_else(|| {
+                        command_error("runtime_slot_input_invalid", "base_url is required.")
+                    })?,
+                    model_id: model_id.ok_or_else(|| {
+                        command_error("runtime_slot_input_invalid", "model_id is required.")
+                    })?,
+                    api_key: secret,
+                }
+            }
+            SlotAuth::GrokLogin { .. } => UpdateSlotAuthInput::GrokLogin {
+                model_id: model_id.filter(|value| !value.trim().is_empty()),
+            },
+            SlotAuth::LocalCli { .. } => UpdateSlotAuthInput::LocalCli {
+                executable_path: executable_path.ok_or_else(|| {
+                    command_error("runtime_slot_input_invalid", "executable_path is required.")
+                })?,
+                launch_args: launch_args.unwrap_or_default(),
+                status_args: status_args.ok_or_else(|| {
+                    command_error("runtime_slot_input_invalid", "status_args is required.")
+                })?,
+            },
+        }
+    };
+
+    let updated = slots
+        .update_slot(
+            project_id_value,
+            slot_id_value,
+            display_name,
+            role,
+            auth_update,
+        )
+        .map_err(map_slot_error)?;
+
+    if was_active
+        && let Err(error) = start_runtime_slot_impl_locked(
+            slots,
+            settings,
+            app,
+            runtime,
+            project_id.clone(),
+            slot_id.clone(),
+        )
+    {
+        return Err(fail_closed_replacement_error(
+            runtime,
+            &project_id,
+            &slot_id,
+            error,
+        ));
+    }
+    Ok(slot_to_dto(updated))
+}
+
 pub(crate) fn delete_runtime_slot_impl(
     slots: &RuntimeSlotService,
     app: &AppState,
@@ -491,10 +753,10 @@ fn start_runtime_slot_impl_locked(
         .into_iter()
         .find(|view| view.slot.id == slot_id_value)
         .ok_or_else(|| command_error("runtime_slot_not_found", "Runtime slot was not found."))?;
-    if matches!(view.slot.kind, RuntimeSlotKind::ExternalCli { .. }) {
+    if matches!(view.slot.auth, SlotAuth::LocalCli { .. }) {
         return Err(command_error(
             "external_cli_launch_unsupported",
-            "External CLI slots are status-only and cannot be launched by Pillow.",
+            "Local CLI slots are status-only and cannot be launched by Pillow.",
         ));
     }
     let resolved = settings
@@ -598,37 +860,32 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         executable_path,
         launch_args,
         status_args,
-    ) = match slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth: GrokSlotAuth::Login { model_id },
-        } => (
+    ) = match &slot.auth {
+        SlotAuth::GrokLogin { model_id } => (
             "governed_grok".into(),
             Some("login".into()),
             None,
-            model_id,
+            model_id.clone(),
             None,
             None,
             None,
             None,
         ),
-        RuntimeSlotKind::GovernedGrok {
-            auth:
-                GrokSlotAuth::ApiKey {
-                    base_url,
-                    model_id,
-                    secret_ref,
-                },
+        SlotAuth::ApiKey {
+            base_url,
+            model_id,
+            secret_ref,
         } => (
             "governed_grok".into(),
             Some("api_key".into()),
-            Some(base_url),
-            Some(model_id),
-            Some(secret_ref),
+            Some(base_url.clone()),
+            Some(model_id.clone()),
+            Some(secret_ref.clone()),
             None,
             None,
             None,
         ),
-        RuntimeSlotKind::ExternalCli {
+        SlotAuth::LocalCli {
             executable_path,
             launch_args,
             status_args,
@@ -638,17 +895,24 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
             None,
             None,
             None,
-            Some(executable_path),
-            Some(launch_args),
-            Some(status_args),
+            Some(executable_path.clone()),
+            Some(launch_args.clone()),
+            Some(status_args.clone()),
         ),
     };
+    let (role, role_custom_name) = match &slot.role {
+        SlotRole::Controller => ("controller".into(), None),
+        SlotRole::Librarian => ("librarian".into(), None),
+        SlotRole::Custom(name) => ("custom".into(), Some(name.clone())),
+    };
+    // Read the derived governance before moving any owned field out of `slot`.
+    let governance = governance_label(slot.governance()).into();
     RuntimeSlotDto {
         slot_id: slot.id.0.to_string(),
         project_id: slot.project_id.0.to_string(),
         display_name: slot.display_name,
         kind,
-        governance: governance_label(slot.governance).into(),
+        governance,
         auth_mode,
         base_url,
         model_id,
@@ -657,6 +921,8 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         executable_path,
         launch_args,
         status_args,
+        role,
+        role_custom_name,
         created_at: slot.created_at.to_rfc3339(),
         updated_at: slot.updated_at.to_rfc3339(),
     }
@@ -696,6 +962,23 @@ fn governance_label(value: RuntimeSlotGovernance) -> &'static str {
     match value {
         RuntimeSlotGovernance::Full => "full",
         RuntimeSlotGovernance::None => "none",
+    }
+}
+
+fn parse_role(
+    role: Option<String>,
+    role_custom_name: Option<String>,
+) -> Result<SlotRole, CommandError> {
+    match role.as_deref() {
+        None | Some("") | Some("custom") => {
+            let name = role_custom_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| keeper_storage_sqlite::DEFAULT_CUSTOM_ROLE_NAME.to_owned());
+            Ok(SlotRole::Custom(name))
+        }
+        Some("controller") => Ok(SlotRole::Controller),
+        Some("librarian") => Ok(SlotRole::Librarian),
+        Some(_) => Err(command_error("runtime_slot_input_invalid", "Unknown role.")),
     }
 }
 

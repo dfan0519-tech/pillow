@@ -48,6 +48,8 @@ function apiKeySlot(
 ): RuntimeSlotView {
   return {
     slotId: SLOT,
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Grok API",
     kind: "governed_grok",
@@ -71,6 +73,8 @@ function externalSlot(
 ): RuntimeSlotView {
   return {
     slotId: "00000000-0000-4000-8000-0000000000c3",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Codex CLI",
     kind: "external_cli",
@@ -196,7 +200,8 @@ describe("runtime slot DTO parsers", () => {
     });
 
     // Pin allowlist lengths so silently empty validators cannot go green.
-    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(15);
+    // 15 -> 17 when the uniform slot model added `role` + `roleCustomName`.
+    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(17);
     expect(EXTERNAL_CLI_STATUS_DTO_KEYS).toHaveLength(8);
     expect(RUNTIME_SLOT_START_DTO_KEYS).toHaveLength(5);
     expect(RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS).toHaveLength(6);

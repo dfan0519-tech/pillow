@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use keeper_project::CreateProject;
-use keeper_storage_sqlite::{RuntimeSlotGovernance, RuntimeSlotKind, SqliteProjectRepository};
+use keeper_storage_sqlite::{RuntimeSlotGovernance, SlotAuth, SlotRole, SqliteProjectRepository};
 use pillow_runtime_slots::{
-    DpapiFileSecretStore, GROK_API_KEY_ENV, PreparedGrokSlot, RuntimeSlotService, SecretBytes,
-    SecretStore,
+    CreateSlotAuth, DpapiFileSecretStore, GROK_API_KEY_ENV, PreparedGrokSlot, RuntimeSlotService,
+    SecretBytes, SecretStore,
 };
 
 fn seed_project(db: &Path, temp: &tempfile::TempDir, name: &str) -> keeper_project::Project {
@@ -33,11 +33,9 @@ fn login_slot_model_update_is_persisted_and_prepared_for_launch() {
         .update_model(project.id, created.slot.id, "grok-4.5".into())
         .unwrap();
     assert!(matches!(
-        updated.slot.kind,
-        RuntimeSlotKind::GovernedGrok {
-            auth: keeper_storage_sqlite::GrokSlotAuth::Login {
-                model_id: Some(ref model_id)
-            }
+        updated.slot.auth,
+        SlotAuth::GrokLogin {
+            model_id: Some(ref model_id)
         } if model_id == "grok-4.5"
     ));
     assert!(matches!(
@@ -127,7 +125,7 @@ fn configured_api_slot_generates_secret_free_usable_private_config() {
             SecretBytes::new(marker.clone()),
         )
         .unwrap();
-    assert_eq!(created.slot.governance, RuntimeSlotGovernance::Full);
+    assert_eq!(created.slot.governance(), RuntimeSlotGovernance::Full);
     assert!(created.secret_configured);
 
     let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
@@ -205,10 +203,7 @@ fn login_slot_preparation_does_not_redirect_the_default_profile() {
     let created = service
         .create_grok_login(project.id, "Signed-in Grok".into())
         .unwrap();
-    assert!(matches!(
-        created.slot.kind,
-        RuntimeSlotKind::GovernedGrok { .. }
-    ));
+    assert!(matches!(created.slot.auth, SlotAuth::GrokLogin { .. }));
     assert!(matches!(
         service.prepare_grok(project.id, created.slot.id).unwrap(),
         PreparedGrokSlot::Login { model_id: None }
@@ -217,7 +212,7 @@ fn login_slot_preparation_does_not_redirect_the_default_profile() {
 
 #[cfg(windows)]
 #[test]
-fn external_cli_status_returns_bounded_raw_program_output_and_stays_ungoverned() {
+fn external_cli_dto_is_explicitly_ungoverned_and_cannot_start() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("keeper.db");
     let project = seed_project(&db, &temp, "alpha");
@@ -237,7 +232,9 @@ fn external_cli_status_returns_bounded_raw_program_output_and_stays_ungoverned()
             ],
         )
         .unwrap();
-    assert_eq!(created.slot.governance, RuntimeSlotGovernance::None);
+    // LocalCli is still ungoverned — now as a derived property of auth, not a second slot kind.
+    assert_eq!(created.slot.governance(), RuntimeSlotGovernance::None);
+    assert!(matches!(created.slot.auth, SlotAuth::LocalCli { .. }));
 
     let status = service
         .external_status(project.id, created.slot.id)
@@ -251,8 +248,50 @@ fn external_cli_status_returns_bounded_raw_program_output_and_stays_ungoverned()
     let error = service
         .prepare_grok(project.id, created.slot.id)
         .err()
-        .expect("external slot must not prepare as Grok");
+        .expect("local CLI slot must not prepare as Grok");
     assert_eq!(error.code(), "runtime_slot_not_governed_grok");
+}
+
+#[test]
+fn create_slot_rejects_local_cli_as_controller() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, temp.path().join("app-data")).unwrap();
+    let executable = std::env::current_exe().unwrap();
+
+    let err = service
+        .create_slot(
+            project.id,
+            "Bad controller".into(),
+            CreateSlotAuth::LocalCli {
+                executable_path: executable.to_string_lossy().into_owned(),
+                launch_args: vec![],
+                status_args: vec!["--help".into()],
+            },
+            SlotRole::Controller,
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "runtime_slot_controller_requires_governed_auth");
+}
+
+#[test]
+fn create_slot_accepts_governed_auth_as_controller() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, temp.path().join("app-data")).unwrap();
+
+    let created = service
+        .create_slot(
+            project.id,
+            "Controller".into(),
+            CreateSlotAuth::GrokLogin { model_id: None },
+            SlotRole::Controller,
+        )
+        .unwrap();
+    assert_eq!(created.slot.role, SlotRole::Controller);
+    assert_eq!(created.slot.governance(), RuntimeSlotGovernance::Full);
 }
 
 #[test]
@@ -274,10 +313,8 @@ fn list_marks_missing_secret_as_not_configured_without_exposing_a_value() {
                 SecretBytes::new("pillow-test-canary-not-a-real-key".into()),
             )
             .unwrap();
-        let secret_ref = match &created.slot.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
-            } => secret_ref,
+        let secret_ref = match &created.slot.auth {
+            SlotAuth::ApiKey { secret_ref, .. } => secret_ref,
             _ => panic!("expected api-key slot"),
         };
         std::fs::remove_file(app_data.join("secrets").join(format!("{secret_ref}.dpapi"))).unwrap();
@@ -306,10 +343,8 @@ fn update_without_api_key_keeps_the_original_secret_usable() {
             SecretBytes::new(original.clone()),
         )
         .unwrap();
-    let original_ref = match &created.slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
-        } => secret_ref.clone(),
+    let original_ref = match &created.slot.auth {
+        SlotAuth::ApiKey { secret_ref, .. } => secret_ref.clone(),
         _ => panic!("expected api-key slot"),
     };
 
@@ -325,14 +360,11 @@ fn update_without_api_key_keeps_the_original_secret_usable() {
         .unwrap();
     assert_eq!(updated.slot.display_name, "Renamed model");
     assert!(updated.secret_configured);
-    let kept_ref = match &updated.slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth:
-                keeper_storage_sqlite::GrokSlotAuth::ApiKey {
-                    base_url,
-                    model_id,
-                    secret_ref,
-                },
+    let kept_ref = match &updated.slot.auth {
+        SlotAuth::ApiKey {
+            base_url,
+            model_id,
+            secret_ref,
         } => {
             assert_eq!(base_url, "https://example.invalid/v2");
             assert_eq!(model_id, "model-two");
@@ -379,10 +411,8 @@ fn update_with_new_api_key_rotates_and_destroys_prior_ciphertext() {
             SecretBytes::new(original.clone()),
         )
         .unwrap();
-    let original_ref = match &created.slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
-        } => secret_ref.clone(),
+    let original_ref = match &created.slot.auth {
+        SlotAuth::ApiKey { secret_ref, .. } => secret_ref.clone(),
         _ => panic!("expected api-key slot"),
     };
     let original_path = app_data
@@ -400,10 +430,8 @@ fn update_with_new_api_key_rotates_and_destroys_prior_ciphertext() {
             Some(SecretBytes::new(rotated.clone())),
         )
         .unwrap();
-    let new_ref = match &updated.slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
-        } => secret_ref.clone(),
+    let new_ref = match &updated.slot.auth {
+        SlotAuth::ApiKey { secret_ref, .. } => secret_ref.clone(),
         _ => panic!("expected api-key slot"),
     };
     assert_ne!(new_ref, original_ref);
@@ -449,10 +477,8 @@ fn delete_destroys_slot_metadata_and_secret_ciphertext() {
             SecretBytes::new(marker.clone()),
         )
         .unwrap();
-    let secret_ref = match &created.slot.kind {
-        RuntimeSlotKind::GovernedGrok {
-            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
-        } => secret_ref.clone(),
+    let secret_ref = match &created.slot.auth {
+        SlotAuth::ApiKey { secret_ref, .. } => secret_ref.clone(),
         _ => panic!("expected api-key slot"),
     };
     // Materialize private home so delete must clean it too.

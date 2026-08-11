@@ -1,20 +1,24 @@
 /**
- * Project-scoped runtime slots (governed Grok + external CLI registration).
- * Field names match host camelCase DTOs from the slots foundation report.
- * Secret material never appears on response views — only configuration status.
+ * Project-scoped runtime slots — one record shape: auth + role.
+ * Field names match host camelCase DTOs. `kind` / `governance` / `authMode`
+ * are **derived** wire labels (not independent storage). Secret material never
+ * appears on response views — only configuration status.
  */
 
-/** Host `kind` values. */
+/** Derived host `kind` values (from auth). */
 export type RuntimeSlotKind = "governed_grok" | "external_cli";
 
 /**
- * Host `governance` is an explicit field — never infer from kind in product UI.
- * `full` = governed ACP path; `none` = registration/status only, no proposal gate.
+ * Derived governance from auth — host still emits the field so UI never infers.
+ * `full` = ApiKey | GrokLogin; `none` = LocalCli.
  */
 export type RuntimeSlotGovernance = "full" | "none";
 
-/** Present only on `governed_grok` slots. */
+/** Present only on governed auth (`governed_grok` wire kind). */
 export type GrokSlotAuthMode = "login" | "api_key";
+
+/** Slot role within a project. Controller is at most one and must be governed. */
+export type RuntimeSlotRole = "controller" | "librarian" | "custom";
 
 /**
  * Closed renderer view of one runtime slot.
@@ -36,6 +40,8 @@ export type RuntimeSlotView = {
   executablePath: string | null;
   launchArgs: string[] | null;
   statusArgs: string[] | null;
+  role: RuntimeSlotRole;
+  roleCustomName: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -104,6 +110,25 @@ export type RuntimeSlotModelSwitchView = {
   sessionRestore: RuntimeSlotModelSessionRestore;
 };
 
+/** Auth kind for unified create_slot (host `auth_kind`). */
+export type SlotAuthKind = "api_key" | "grok_login" | "local_cli";
+
+/** Unified create input — one command for all auth variants. */
+export type CreateSlotInput = {
+  projectId: string;
+  displayName: string;
+  authKind: SlotAuthKind;
+  role?: RuntimeSlotRole;
+  roleCustomName?: string;
+  baseUrl?: string;
+  modelId?: string;
+  /** One-shot create input only — never returned, never persisted client-side. */
+  apiKey?: string;
+  executablePath?: string;
+  launchArgs?: string[];
+  statusArgs?: string[];
+};
+
 export type CreateGrokLoginSlotInput = {
   projectId: string;
   displayName: string;
@@ -161,7 +186,9 @@ export type RuntimeSlotsGatewayErrorCode =
   | "external_cli_launch_unsupported"
   | "runtime_slot_id_invalid"
   | "runtime_slot_project_mismatch"
-  | "runtime_slot_update_unavailable";
+  | "runtime_slot_update_unavailable"
+  | "runtime_slot_controller_already_exists"
+  | "runtime_slot_controller_requires_governed_auth";
 
 export class RuntimeSlotsGatewayError extends Error {
   readonly code: string;
@@ -175,6 +202,8 @@ export class RuntimeSlotsGatewayError extends Error {
 
 export interface RuntimeSlotsGateway {
   listRuntimeSlots(projectId: string): Promise<RuntimeSlotView[]>;
+  /** Unified create — preferred entry. */
+  createSlot(input: CreateSlotInput): Promise<RuntimeSlotView>;
   createGrokLoginSlot(
     input: CreateGrokLoginSlotInput,
   ): Promise<RuntimeSlotView>;
@@ -235,6 +264,9 @@ export const EXTERNAL_CLI_UNGOVERNED_BANNER =
   `${EXTERNAL_CLI_UNGOVERNED_HEADING}。${EXTERNAL_CLI_UNGOVERNED_BODY}`;
 
 export const GOVERNED_GROK_BADGE = "受 Pillow 完整治理";
+
+/** Default custom role applied to migrated / unspecified slots. */
+export const DEFAULT_CUSTOM_ROLE_NAME = "未分配";
 
 /** Saved API-key slot shows status only — never ciphertext or plaintext. */
 export const SECRET_CONFIGURED_LABEL = "已配置";

@@ -412,6 +412,16 @@ export function RuntimeSlotsSection({
                         : "Grok · API key"
                       : "外部 CLI"}
                   </span>
+                  <span
+                    className="runtime-slots-badge"
+                    data-testid={`runtime-slot-role-${slot.slotId}`}
+                  >
+                    {slot.role === "controller"
+                      ? "总控"
+                      : slot.role === "librarian"
+                      ? "信息管理员"
+                      : slot.roleCustomName ?? "未分配"}
+                  </span>
                   {slot.kind === "governed_grok"
                   && slot.governance === "full" ? (
                     startedSlotId === slot.slotId ? (

@@ -27,6 +27,8 @@ function fixtureApiKeySlot(
 ): RuntimeSlotView {
   return {
     slotId: "slot-api-model-1",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Grok API",
     kind: "governed_grok",
@@ -50,6 +52,8 @@ function fixtureLoginSlot(
 ): RuntimeSlotView {
   return {
     slotId: "slot-login-model-1",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Grok Login",
     kind: "governed_grok",
@@ -73,6 +77,8 @@ function fixtureExternalSlot(
 ): RuntimeSlotView {
   return {
     slotId: "slot-ext-model-1",
+    role: "custom",
+    roleCustomName: "未分配",
     projectId: PROJECT,
     displayName: "Codex",
     kind: "external_cli",

@@ -9,6 +9,8 @@ import {
   type CreateExternalCliSlotInput,
   type CreateGrokApiKeySlotInput,
   type CreateGrokLoginSlotInput,
+  type CreateSlotInput,
+  DEFAULT_CUSTOM_ROLE_NAME,
   type ExternalCliStatusView,
   type GrokSlotAuthMode,
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
@@ -23,6 +25,7 @@ import {
   type RuntimeSlotModelCatalogView,
   type RuntimeSlotModelSessionRestore,
   type RuntimeSlotModelSwitchView,
+  type RuntimeSlotRole,
   type RuntimeSlotStartView,
   type RuntimeSlotView,
   type RuntimeSlotsGateway,
@@ -66,6 +69,8 @@ export const RUNTIME_SLOT_DTO_KEYS = [
   "executablePath",
   "launchArgs",
   "statusArgs",
+  "role",
+  "roleCustomName",
   "createdAt",
   "updatedAt",
 ] as const;
@@ -113,6 +118,7 @@ export const RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS = [
 const KINDS: readonly RuntimeSlotKind[] = ["governed_grok", "external_cli"];
 const GOVERNANCE: readonly RuntimeSlotGovernance[] = ["full", "none"];
 const AUTH_MODES: readonly GrokSlotAuthMode[] = ["login", "api_key"];
+const ROLES: readonly RuntimeSlotRole[] = ["controller", "librarian", "custom"];
 const CATALOG_STATUSES: readonly RuntimeSlotModelCatalogStatus[] = [
   "available",
   "unsupported",
@@ -205,6 +211,10 @@ function isAuthMode(value: unknown): value is GrokSlotAuthMode {
     && (AUTH_MODES as string[]).includes(value);
 }
 
+function isRole(value: unknown): value is RuntimeSlotRole {
+  return typeof value === "string" && (ROLES as string[]).includes(value);
+}
+
 function invalidResponse(): RuntimeSlotsGatewayError {
   return new RuntimeSlotsGatewayError(
     "invalid_runtime_slot_response",
@@ -277,6 +287,12 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
     || !isOptionalBoundedString(value.executablePath, MAX_PATH_CHARS)
     || !isOptionalStringArray(value.launchArgs, MAX_ARGS, MAX_ARG_CHARS)
     || !isOptionalStringArray(value.statusArgs, MAX_ARGS, MAX_ARG_CHARS)
+    || !isRole(value.role)
+    || !(
+      value.roleCustomName === null
+      || value.roleCustomName === undefined
+      || isBoundedString(value.roleCustomName, 64)
+    )
     || !isFiniteTimestamp(value.createdAt)
     || !isFiniteTimestamp(value.updatedAt)
   ) {
@@ -288,6 +304,19 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
     throw invalidResponse();
   }
   if (value.kind === "external_cli" && value.governance !== "none") {
+    throw invalidResponse();
+  }
+  // custom requires a non-blank name; controller/librarian require null name.
+  if (value.role === "custom") {
+    const name = value.roleCustomName;
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw invalidResponse();
+    }
+  } else if (value.roleCustomName != null) {
+    throw invalidResponse();
+  }
+  // Controller cannot be ungoverned LocalCli (half-open trap).
+  if (value.role === "controller" && value.governance !== "full") {
     throw invalidResponse();
   }
 
@@ -305,6 +334,8 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
     executablePath: value.executablePath ?? null,
     launchArgs: value.launchArgs ?? null,
     statusArgs: value.statusArgs ?? null,
+    role: value.role,
+    roleCustomName: value.roleCustomName ?? null,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
@@ -649,6 +680,10 @@ export function mapRuntimeSlotErrorMessage(code: string): string {
       return "槽位不属于当前项目，已拒绝跨项目使用。";
     case "runtime_slot_update_unavailable":
       return FIXED_UPDATE_UNAVAILABLE;
+    case "runtime_slot_controller_already_exists":
+      return "该项目已有总控槽位，请先降级或删除现有总控后再指定。";
+    case "runtime_slot_controller_requires_governed_auth":
+      return "总控角色必须使用受治理认证（API key 或 Grok 登录），不能使用本地 CLI。";
     case "invalid_runtime_slot_response":
       return INVALID_RESPONSE;
     default:
@@ -753,9 +788,29 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
     );
   }
 
+  createSlot(input: CreateSlotInput): Promise<RuntimeSlotView> {
+    const args: Record<string, unknown> = {
+      projectId: input.projectId,
+      displayName: input.displayName,
+      authKind: input.authKind,
+    };
+    if (input.role) args.role = input.role;
+    if (input.roleCustomName) args.roleCustomName = input.roleCustomName;
+    if (input.baseUrl !== undefined) args.baseUrl = input.baseUrl;
+    if (input.modelId !== undefined) args.modelId = input.modelId;
+    if (input.apiKey !== undefined) args.apiKey = input.apiKey;
+    if (input.executablePath !== undefined) {
+      args.executablePath = input.executablePath;
+    }
+    if (input.launchArgs !== undefined) args.launchArgs = input.launchArgs;
+    if (input.statusArgs !== undefined) args.statusArgs = input.statusArgs;
+    return invokeSlotCommand("create_slot", args, parseRuntimeSlotView);
+  }
+
   createGrokLoginSlot(
     input: CreateGrokLoginSlotInput,
   ): Promise<RuntimeSlotView> {
+    // Host lib.rs still registers the legacy name; domain path is create_slot.
     return invokeSlotCommand(
       "create_grok_login_slot",
       {
@@ -769,7 +824,6 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
   createGrokApiKeySlot(
     input: CreateGrokApiKeySlotInput,
   ): Promise<RuntimeSlotView> {
-    // apiKey travels once in the invoke args; response is validated secret-free.
     return invokeSlotCommand(
       "create_grok_api_key_slot",
       buildCreateGrokApiKeySlotArgs(input),
@@ -951,24 +1005,114 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       .map((slot) => ({ ...slot }));
   }
 
-  async createGrokLoginSlot(
-    input: CreateGrokLoginSlotInput,
-  ): Promise<RuntimeSlotView> {
+  async createSlot(input: CreateSlotInput): Promise<RuntimeSlotView> {
+    const role = input.role ?? "custom";
+    const roleCustomName =
+      role === "custom"
+        ? (input.roleCustomName?.trim() || DEFAULT_CUSTOM_ROLE_NAME)
+        : null;
+    if (role === "controller") {
+      if (input.authKind === "local_cli") {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_controller_requires_governed_auth",
+          mapRuntimeSlotErrorMessage(
+            "runtime_slot_controller_requires_governed_auth",
+          ),
+        );
+      }
+      if (
+        this.slots.some(
+          (slot) =>
+            slot.projectId === input.projectId && slot.role === "controller",
+        )
+      ) {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_controller_already_exists",
+          mapRuntimeSlotErrorMessage(
+            "runtime_slot_controller_already_exists",
+          ),
+        );
+      }
+    }
     const now = new Date().toISOString();
+    if (input.authKind === "grok_login") {
+      const slot: RuntimeSlotView = {
+        slotId: cryptoRandomId(),
+        projectId: input.projectId,
+        displayName: input.displayName,
+        kind: "governed_grok",
+        governance: "full",
+        authMode: "login",
+        baseUrl: null,
+        modelId: input.modelId ?? null,
+        secretRef: null,
+        secretConfigured: false,
+        executablePath: null,
+        launchArgs: null,
+        statusArgs: null,
+        role,
+        roleCustomName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.slots.push(slot);
+      return { ...slot };
+    }
+    if (input.authKind === "api_key") {
+      const args = buildCreateGrokApiKeySlotArgs({
+        projectId: input.projectId,
+        displayName: input.displayName,
+        baseUrl: input.baseUrl ?? "",
+        modelId: input.modelId ?? "",
+        apiKey: input.apiKey ?? "",
+      });
+      this.lastCreateApiKeyArgs.push({ ...args });
+      if (!args.apiKey.trim()) {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_input_invalid",
+          mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+        );
+      }
+      const secretRef = cryptoRandomId();
+      this.secrets.set(secretRef, args.apiKey);
+      const slot: RuntimeSlotView = {
+        slotId: cryptoRandomId(),
+        projectId: args.projectId,
+        displayName: args.displayName,
+        kind: "governed_grok",
+        governance: "full",
+        authMode: "api_key",
+        baseUrl: args.baseUrl,
+        modelId: args.modelId,
+        secretRef,
+        secretConfigured: true,
+        executablePath: null,
+        launchArgs: null,
+        statusArgs: null,
+        role,
+        roleCustomName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.slots.push(slot);
+      return { ...slot };
+    }
     const slot: RuntimeSlotView = {
       slotId: cryptoRandomId(),
       projectId: input.projectId,
       displayName: input.displayName,
-      kind: "governed_grok",
-      governance: "full",
-      authMode: "login",
+      kind: "external_cli",
+      governance: "none",
+      authMode: null,
       baseUrl: null,
       modelId: null,
       secretRef: null,
       secretConfigured: false,
-      executablePath: null,
-      launchArgs: null,
-      statusArgs: null,
+      executablePath: input.executablePath ?? null,
+      launchArgs: input.launchArgs ? [...input.launchArgs] : null,
+      statusArgs: input.statusArgs ? [...input.statusArgs] : null,
+      role,
+      roleCustomName,
       createdAt: now,
       updatedAt: now,
     };
@@ -976,40 +1120,27 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
     return { ...slot };
   }
 
+  async createGrokLoginSlot(
+    input: CreateGrokLoginSlotInput,
+  ): Promise<RuntimeSlotView> {
+    return this.createSlot({
+      projectId: input.projectId,
+      displayName: input.displayName,
+      authKind: "grok_login",
+    });
+  }
+
   async createGrokApiKeySlot(
     input: CreateGrokApiKeySlotInput,
   ): Promise<RuntimeSlotView> {
-    const args = buildCreateGrokApiKeySlotArgs(input);
-    this.lastCreateApiKeyArgs.push({ ...args });
-    if (!args.apiKey.trim()) {
-      throw new RuntimeSlotsGatewayError(
-        "runtime_slot_input_invalid",
-        mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
-      );
-    }
-    const secretRef = cryptoRandomId();
-    this.secrets.set(secretRef, args.apiKey);
-    const now = new Date().toISOString();
-    const slot: RuntimeSlotView = {
-      slotId: cryptoRandomId(),
-      projectId: args.projectId,
-      displayName: args.displayName,
-      kind: "governed_grok",
-      governance: "full",
-      authMode: "api_key",
-      baseUrl: args.baseUrl,
-      modelId: args.modelId,
-      secretRef,
-      secretConfigured: true,
-      executablePath: null,
-      launchArgs: null,
-      statusArgs: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.slots.push(slot);
-    // Response view must not carry the key.
-    return { ...slot };
+    return this.createSlot({
+      projectId: input.projectId,
+      displayName: input.displayName,
+      authKind: "api_key",
+      baseUrl: input.baseUrl,
+      modelId: input.modelId,
+      apiKey: input.apiKey,
+    });
   }
 
   async updateGrokApiKeySlot(
@@ -1062,26 +1193,14 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   async createExternalCliSlot(
     input: CreateExternalCliSlotInput,
   ): Promise<RuntimeSlotView> {
-    const now = new Date().toISOString();
-    const slot: RuntimeSlotView = {
-      slotId: cryptoRandomId(),
+    return this.createSlot({
       projectId: input.projectId,
       displayName: input.displayName,
-      kind: "external_cli",
-      governance: "none",
-      authMode: null,
-      baseUrl: null,
-      modelId: null,
-      secretRef: null,
-      secretConfigured: false,
+      authKind: "local_cli",
       executablePath: input.executablePath,
-      launchArgs: [...input.launchArgs],
-      statusArgs: [...input.statusArgs],
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.slots.push(slot);
-    return { ...slot };
+      launchArgs: input.launchArgs,
+      statusArgs: input.statusArgs,
+    });
   }
 
   async getExternalCliStatus(

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
-    GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
-    RuntimeSlotKind, SqliteProjectRepository, SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
-    UpdateRuntimeSlotModel,
+    NewRuntimeSlot, RuntimeSlot, RuntimeSlotId, SlotAuth, SlotRole, SqliteProjectRepository,
+    SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot, UpdateRuntimeSlot, UpdateRuntimeSlotModel,
+    UpdateSlotAuth,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -53,6 +53,10 @@ pub enum RuntimeSlotError {
     ModelCatalogUnavailable,
     #[error("runtime slot model catalog response is invalid")]
     ModelCatalogInvalid,
+    #[error("project already has a controller slot")]
+    ControllerAlreadyExists,
+    #[error("controller role requires governed auth")]
+    ControllerRequiresGovernedAuth,
 }
 
 impl RuntimeSlotError {
@@ -72,7 +76,27 @@ impl RuntimeSlotError {
             Self::ExternalStatusUnavailable => "external_cli_status_unavailable",
             Self::ModelCatalogUnavailable => "runtime_slot_model_catalog_unavailable",
             Self::ModelCatalogInvalid => "runtime_slot_model_catalog_invalid",
+            Self::ControllerAlreadyExists => "runtime_slot_controller_already_exists",
+            Self::ControllerRequiresGovernedAuth => {
+                "runtime_slot_controller_requires_governed_auth"
+            }
         }
+    }
+}
+
+fn map_store_error(error: keeper_storage_sqlite::RuntimeSlotStoreError) -> RuntimeSlotError {
+    match error {
+        keeper_storage_sqlite::RuntimeSlotStoreError::NotFound => RuntimeSlotError::SlotNotFound,
+        keeper_storage_sqlite::RuntimeSlotStoreError::InvalidShape => {
+            RuntimeSlotError::InvalidInput
+        }
+        keeper_storage_sqlite::RuntimeSlotStoreError::ControllerConflict => {
+            RuntimeSlotError::ControllerAlreadyExists
+        }
+        keeper_storage_sqlite::RuntimeSlotStoreError::ControllerRequiresGovernedAuth => {
+            RuntimeSlotError::ControllerRequiresGovernedAuth
+        }
+        _ => RuntimeSlotError::MetadataUnavailable,
     }
 }
 
@@ -80,6 +104,24 @@ impl RuntimeSlotError {
 pub struct RuntimeSlotView {
     pub slot: RuntimeSlot,
     pub secret_configured: bool,
+}
+
+/// Auth payload for create (secrets as host SecretBytes, not yet referenced).
+/// No Debug: may hold SecretBytes.
+pub enum CreateSlotAuth {
+    ApiKey {
+        base_url: String,
+        model_id: String,
+        api_key: SecretBytes,
+    },
+    GrokLogin {
+        model_id: Option<String>,
+    },
+    LocalCli {
+        executable_path: String,
+        launch_args: Vec<String>,
+        status_args: Vec<String>,
+    },
 }
 
 pub enum PreparedGrokSlot {
@@ -126,29 +168,113 @@ impl RuntimeSlotService {
         })
     }
 
+    /// Unified create: one record shape, auth is a field, role is a field.
+    pub fn create_slot(
+        &self,
+        project_id: ProjectId,
+        display_name: String,
+        auth: CreateSlotAuth,
+        role: SlotRole,
+    ) -> Result<RuntimeSlotView, RuntimeSlotError> {
+        self.ensure_project(project_id)?;
+        match auth {
+            CreateSlotAuth::GrokLogin { model_id } => {
+                if let Some(ref model_id) = model_id {
+                    validate_model(model_id)?;
+                }
+                let slot = self
+                    .slots
+                    .create(NewRuntimeSlot {
+                        project_id,
+                        display_name,
+                        auth: SlotAuth::GrokLogin { model_id },
+                        role,
+                    })
+                    .map_err(map_store_error)?;
+                Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: false,
+                })
+            }
+            CreateSlotAuth::ApiKey {
+                base_url,
+                model_id,
+                api_key,
+            } => {
+                validate_endpoint(&base_url)?;
+                validate_model(&model_id)?;
+                if api_key.is_empty() || api_key.as_bytes().contains(&0) {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                let secret_ref = Uuid::new_v4().to_string();
+                self.secrets.put(&secret_ref, &api_key)?;
+                let created = self.slots.create(NewRuntimeSlot {
+                    project_id,
+                    display_name,
+                    auth: SlotAuth::ApiKey {
+                        base_url,
+                        model_id,
+                        secret_ref: secret_ref.clone(),
+                    },
+                    role,
+                });
+                let slot = match created {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        self.secrets.delete(&secret_ref)?;
+                        return Err(map_store_error(error));
+                    }
+                };
+                Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: true,
+                })
+            }
+            CreateSlotAuth::LocalCli {
+                executable_path,
+                launch_args,
+                status_args,
+            } => {
+                let executable = Path::new(&executable_path);
+                if !executable.is_absolute() || !executable.is_file() || status_args.is_empty() {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                let slot = self
+                    .slots
+                    .create(NewRuntimeSlot {
+                        project_id,
+                        display_name,
+                        auth: SlotAuth::LocalCli {
+                            executable_path,
+                            launch_args,
+                            status_args,
+                        },
+                        role,
+                    })
+                    .map_err(map_store_error)?;
+                Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: false,
+                })
+            }
+        }
+    }
+
+    /// Thin wrapper — default role is Custom("未分配").
     pub fn create_grok_login(
         &self,
         project_id: ProjectId,
         display_name: String,
     ) -> Result<RuntimeSlotView, RuntimeSlotError> {
-        self.ensure_project(project_id)?;
-        let slot = self
-            .slots
-            .create(NewRuntimeSlot {
-                project_id,
-                display_name,
-                governance: RuntimeSlotGovernance::Full,
-                kind: RuntimeSlotKind::GovernedGrok {
-                    auth: GrokSlotAuth::Login { model_id: None },
-                },
-            })
-            .map_err(|_| RuntimeSlotError::MetadataUnavailable)?;
-        Ok(RuntimeSlotView {
-            slot,
-            secret_configured: false,
-        })
+        self.create_slot(
+            project_id,
+            display_name,
+            CreateSlotAuth::GrokLogin { model_id: None },
+            SlotRole::default_unassigned(),
+        )
     }
 
+    /// Thin wrapper — default role is Custom("未分配").
     pub fn create_grok_api_key(
         &self,
         project_id: ProjectId,
@@ -157,39 +283,19 @@ impl RuntimeSlotService {
         model_id: String,
         api_key: SecretBytes,
     ) -> Result<RuntimeSlotView, RuntimeSlotError> {
-        self.ensure_project(project_id)?;
-        validate_endpoint(&base_url)?;
-        validate_model(&model_id)?;
-        if api_key.is_empty() || api_key.as_bytes().contains(&0) {
-            return Err(RuntimeSlotError::InvalidInput);
-        }
-        let secret_ref = Uuid::new_v4().to_string();
-        self.secrets.put(&secret_ref, &api_key)?;
-        let created = self.slots.create(NewRuntimeSlot {
+        self.create_slot(
             project_id,
             display_name,
-            governance: RuntimeSlotGovernance::Full,
-            kind: RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::ApiKey {
-                    base_url,
-                    model_id,
-                    secret_ref: secret_ref.clone(),
-                },
+            CreateSlotAuth::ApiKey {
+                base_url,
+                model_id,
+                api_key,
             },
-        });
-        let slot = match created {
-            Ok(slot) => slot,
-            Err(_) => {
-                self.secrets.delete(&secret_ref)?;
-                return Err(RuntimeSlotError::MetadataUnavailable);
-            }
-        };
-        Ok(RuntimeSlotView {
-            slot,
-            secret_configured: true,
-        })
+            SlotRole::default_unassigned(),
+        )
     }
 
+    /// Thin wrapper — default role is Custom("未分配").
     pub fn create_external_cli(
         &self,
         project_id: ProjectId,
@@ -198,28 +304,16 @@ impl RuntimeSlotService {
         launch_args: Vec<String>,
         status_args: Vec<String>,
     ) -> Result<RuntimeSlotView, RuntimeSlotError> {
-        self.ensure_project(project_id)?;
-        let executable = Path::new(&executable_path);
-        if !executable.is_absolute() || !executable.is_file() || status_args.is_empty() {
-            return Err(RuntimeSlotError::InvalidInput);
-        }
-        let slot = self
-            .slots
-            .create(NewRuntimeSlot {
-                project_id,
-                display_name,
-                governance: RuntimeSlotGovernance::None,
-                kind: RuntimeSlotKind::ExternalCli {
-                    executable_path,
-                    launch_args,
-                    status_args,
-                },
-            })
-            .map_err(|_| RuntimeSlotError::MetadataUnavailable)?;
-        Ok(RuntimeSlotView {
-            slot,
-            secret_configured: false,
-        })
+        self.create_slot(
+            project_id,
+            display_name,
+            CreateSlotAuth::LocalCli {
+                executable_path,
+                launch_args,
+                status_args,
+            },
+            SlotRole::default_unassigned(),
+        )
     }
 
     /// Update a governed Grok API-key slot.
@@ -241,11 +335,9 @@ impl RuntimeSlotService {
         validate_endpoint(&base_url)?;
         validate_model(&model_id)?;
         let existing = self.get(project_id, slot_id)?;
-        let previous_secret_ref = match &existing.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
-            } => secret_ref.clone(),
-            // Update command is API-key only; login/external slots must not share this path.
+        let previous_secret_ref = match &existing.auth {
+            SlotAuth::ApiKey { secret_ref, .. } => secret_ref.clone(),
+            // Update command is API-key only; login/local slots must not share this path.
             _ => return Err(RuntimeSlotError::InvalidInput),
         };
 
@@ -277,15 +369,7 @@ impl RuntimeSlotService {
                     // write does not leave an unreachable secret.
                     let _ = self.secrets.delete(&secret_ref);
                 }
-                return Err(match error {
-                    keeper_storage_sqlite::RuntimeSlotStoreError::NotFound => {
-                        RuntimeSlotError::SlotNotFound
-                    }
-                    keeper_storage_sqlite::RuntimeSlotStoreError::InvalidShape => {
-                        RuntimeSlotError::InvalidInput
-                    }
-                    _ => RuntimeSlotError::MetadataUnavailable,
-                });
+                return Err(map_store_error(error));
             }
         };
 
@@ -302,6 +386,133 @@ impl RuntimeSlotService {
         })
     }
 
+    /// Uniform update: display name, role, and auth fields (auth kind cannot change).
+    ///
+    /// For ApiKey, `api_key == None` means keep stored secret; `Some` rotates.
+    pub fn update_slot(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        display_name: String,
+        role: SlotRole,
+        auth_update: UpdateSlotAuthInput,
+    ) -> Result<RuntimeSlotView, RuntimeSlotError> {
+        self.ensure_project(project_id)?;
+        let existing = self.get(project_id, slot_id)?;
+
+        let (store_auth, secret_configured_path) = match (existing.auth, auth_update) {
+            (auth, UpdateSlotAuthInput::Keep) => {
+                let secret_configured = match &auth {
+                    SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
+                    _ => false,
+                };
+                (UpdateSlotAuth::Keep, secret_configured)
+            }
+            (
+                SlotAuth::ApiKey {
+                    secret_ref: previous_secret_ref,
+                    ..
+                },
+                UpdateSlotAuthInput::ApiKey {
+                    base_url,
+                    model_id,
+                    api_key,
+                },
+            ) => {
+                validate_endpoint(&base_url)?;
+                validate_model(&model_id)?;
+                let (secret_ref, rotated_from) = match api_key {
+                    None => (previous_secret_ref, None),
+                    Some(secret) => {
+                        if secret.is_empty() || secret.as_bytes().contains(&0) {
+                            return Err(RuntimeSlotError::InvalidInput);
+                        }
+                        let new_ref = Uuid::new_v4().to_string();
+                        self.secrets.put(&new_ref, &secret)?;
+                        (new_ref, Some(previous_secret_ref))
+                    }
+                };
+                let updated = self.slots.update(UpdateRuntimeSlot {
+                    project_id,
+                    slot_id,
+                    display_name: display_name.clone(),
+                    role: role.clone(),
+                    auth: UpdateSlotAuth::ApiKey {
+                        base_url,
+                        model_id,
+                        secret_ref: secret_ref.clone(),
+                    },
+                });
+                let slot = match updated {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        if rotated_from.is_some() {
+                            let _ = self.secrets.delete(&secret_ref);
+                        }
+                        return Err(map_store_error(error));
+                    }
+                };
+                if let Some(old_ref) = rotated_from {
+                    self.secrets.delete(&old_ref)?;
+                }
+                return Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: self.secrets.exists(&secret_ref)?,
+                });
+            }
+            (SlotAuth::GrokLogin { .. }, UpdateSlotAuthInput::GrokLogin { model_id }) => {
+                if let Some(ref model_id) = model_id {
+                    validate_model(model_id)?;
+                }
+                (UpdateSlotAuth::GrokLogin { model_id }, false)
+            }
+            (
+                SlotAuth::LocalCli { .. },
+                UpdateSlotAuthInput::LocalCli {
+                    executable_path,
+                    launch_args,
+                    status_args,
+                },
+            ) => {
+                let executable = Path::new(&executable_path);
+                if !executable.is_absolute() || !executable.is_file() || status_args.is_empty() {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                (
+                    UpdateSlotAuth::LocalCli {
+                        executable_path,
+                        launch_args,
+                        status_args,
+                    },
+                    false,
+                )
+            }
+            _ => return Err(RuntimeSlotError::InvalidInput),
+        };
+
+        // Keep path or non-ApiKey updates go through store.update once.
+        if matches!(store_auth, UpdateSlotAuth::Keep)
+            || matches!(store_auth, UpdateSlotAuth::GrokLogin { .. })
+            || matches!(store_auth, UpdateSlotAuth::LocalCli { .. })
+        {
+            let slot = self
+                .slots
+                .update(UpdateRuntimeSlot {
+                    project_id,
+                    slot_id,
+                    display_name,
+                    role,
+                    auth: store_auth,
+                })
+                .map_err(map_store_error)?;
+            return Ok(RuntimeSlotView {
+                slot,
+                secret_configured: secret_configured_path,
+            });
+        }
+        Err(RuntimeSlotError::InvalidInput)
+    }
+
     /// Delete a project-scoped slot and destroy any associated DPAPI secret.
     ///
     /// Order prioritizes no orphan ciphertext: secret is removed before the
@@ -314,10 +525,8 @@ impl RuntimeSlotService {
     ) -> Result<(), RuntimeSlotError> {
         self.ensure_project(project_id)?;
         let existing = self.get(project_id, slot_id)?;
-        let secret_ref = match &existing.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
-            } => Some(secret_ref.clone()),
+        let secret_ref = match &existing.auth {
+            SlotAuth::ApiKey { secret_ref, .. } => Some(secret_ref.clone()),
             _ => None,
         };
 
@@ -358,19 +567,9 @@ impl RuntimeSlotService {
                 slot_id,
                 model_id,
             })
-            .map_err(|error| match error {
-                keeper_storage_sqlite::RuntimeSlotStoreError::NotFound => {
-                    RuntimeSlotError::SlotNotFound
-                }
-                keeper_storage_sqlite::RuntimeSlotStoreError::InvalidShape => {
-                    RuntimeSlotError::InvalidInput
-                }
-                _ => RuntimeSlotError::MetadataUnavailable,
-            })?;
-        let secret_configured = match &slot.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
-            } => self.secrets.exists(secret_ref)?,
+            .map_err(map_store_error)?;
+        let secret_configured = match &slot.auth {
+            SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
             _ => false,
         };
         Ok(RuntimeSlotView {
@@ -386,10 +585,8 @@ impl RuntimeSlotService {
             .map_err(|_| RuntimeSlotError::MetadataUnavailable)?
             .into_iter()
             .map(|slot| {
-                let secret_configured = match &slot.kind {
-                    RuntimeSlotKind::GovernedGrok {
-                        auth: GrokSlotAuth::ApiKey { secret_ref, .. },
-                    } => self.secrets.exists(secret_ref)?,
+                let secret_configured = match &slot.auth {
+                    SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
                     _ => false,
                 };
                 Ok(RuntimeSlotView {
@@ -406,17 +603,12 @@ impl RuntimeSlotService {
         slot_id: RuntimeSlotId,
     ) -> Result<PreparedGrokSlot, RuntimeSlotError> {
         let slot = self.get(project_id, slot_id)?;
-        match slot.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login { model_id },
-            } => Ok(PreparedGrokSlot::Login { model_id }),
-            RuntimeSlotKind::GovernedGrok {
-                auth:
-                    GrokSlotAuth::ApiKey {
-                        base_url,
-                        model_id,
-                        secret_ref,
-                    },
+        match slot.auth {
+            SlotAuth::GrokLogin { model_id } => Ok(PreparedGrokSlot::Login { model_id }),
+            SlotAuth::ApiKey {
+                base_url,
+                model_id,
+                secret_ref,
             } => {
                 let api_key = self.secrets.get(&secret_ref)?;
                 let private_home = grok_config::write_private_grok_config(
@@ -433,7 +625,7 @@ impl RuntimeSlotService {
                     api_key,
                 })
             }
-            RuntimeSlotKind::ExternalCli { .. } => Err(RuntimeSlotError::NotGovernedGrok),
+            SlotAuth::LocalCli { .. } => Err(RuntimeSlotError::NotGovernedGrok),
         }
     }
 
@@ -448,8 +640,8 @@ impl RuntimeSlotService {
             .get(project_id)
             .map_err(|_| RuntimeSlotError::ProjectUnavailable)?
             .ok_or(RuntimeSlotError::ProjectUnavailable)?;
-        match slot.kind {
-            RuntimeSlotKind::ExternalCli {
+        match slot.auth {
+            SlotAuth::LocalCli {
                 executable_path,
                 status_args,
                 ..
@@ -458,7 +650,9 @@ impl RuntimeSlotService {
                 &status_args,
                 Path::new(&project.root_path),
             ),
-            RuntimeSlotKind::GovernedGrok { .. } => Err(RuntimeSlotError::InvalidInput),
+            SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } => {
+                Err(RuntimeSlotError::InvalidInput)
+            }
         }
     }
 
@@ -466,7 +660,7 @@ impl RuntimeSlotService {
     ///
     /// API-key material is decrypted only inside this host service and is
     /// consumed directly by the HTTP transport. Login slots use the configured
-    /// Grok executable; external CLI slots return an explicit unsupported
+    /// Grok executable; LocalCli slots return an explicit unsupported
     /// outcome so the renderer can retain manual input.
     pub fn model_catalog(
         &self,
@@ -476,25 +670,20 @@ impl RuntimeSlotService {
         project_root: &Path,
     ) -> Result<ModelCatalog, RuntimeSlotError> {
         let slot = self.get(project_id, slot_id)?;
-        match slot.kind {
-            RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login { .. },
-            } => {
+        match slot.auth {
+            SlotAuth::GrokLogin { .. } => {
                 let executable = login_executable.ok_or(RuntimeSlotError::InvalidInput)?;
                 catalog::fetch_grok_model_catalog(executable, project_root)
             }
-            RuntimeSlotKind::GovernedGrok {
-                auth:
-                    GrokSlotAuth::ApiKey {
-                        base_url,
-                        secret_ref,
-                        ..
-                    },
+            SlotAuth::ApiKey {
+                base_url,
+                secret_ref,
+                ..
             } => {
                 let api_key = self.secrets.get(&secret_ref)?;
                 catalog::fetch_openai_model_catalog(&base_url, &api_key)
             }
-            RuntimeSlotKind::ExternalCli { .. } => Ok(ModelCatalog::unsupported(
+            SlotAuth::LocalCli { .. } => Ok(ModelCatalog::unsupported(
                 ModelCatalogSource::ExternalCli,
                 ModelCatalogUnsupportedReason::ExternalCli,
             )),
@@ -519,6 +708,25 @@ impl RuntimeSlotService {
             .map(|_| ())
             .ok_or(RuntimeSlotError::ProjectUnavailable)
     }
+}
+
+/// Service-level auth update (ApiKey may rotate secret material).
+/// No Debug: may hold SecretBytes.
+pub enum UpdateSlotAuthInput {
+    Keep,
+    ApiKey {
+        base_url: String,
+        model_id: String,
+        api_key: Option<SecretBytes>,
+    },
+    GrokLogin {
+        model_id: Option<String>,
+    },
+    LocalCli {
+        executable_path: String,
+        launch_args: Vec<String>,
+        status_args: Vec<String>,
+    },
 }
 
 fn validate_endpoint(value: &str) -> Result<(), RuntimeSlotError> {

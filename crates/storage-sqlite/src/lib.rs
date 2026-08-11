@@ -33,9 +33,10 @@ pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
 };
 pub use runtime_slot::{
-    GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
-    RuntimeSlotKind, RuntimeSlotStoreError, SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
-    UpdateRuntimeSlotModel,
+    DEFAULT_CUSTOM_ROLE_NAME, GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance,
+    RuntimeSlotId, RuntimeSlotKind, RuntimeSlotStoreError, SlotAuth, SlotRole,
+    SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot, UpdateRuntimeSlot, UpdateRuntimeSlotModel,
+    UpdateSlotAuth, governance_from_auth,
 };
 pub use settings::{
     ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,

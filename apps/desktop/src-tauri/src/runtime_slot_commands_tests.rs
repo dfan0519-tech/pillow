@@ -188,6 +188,10 @@ fn serialized_slot_dto_has_an_exact_allowlist_and_never_contains_the_key() {
             "launchArgs",
             "modelId",
             "projectId",
+            // Added by the uniform slot model: role is a field of every slot,
+            // not a property of one privileged kind.
+            "role",
+            "roleCustomName",
             "secretConfigured",
             "secretRef",
             "slotId",
@@ -295,6 +299,8 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
         .unwrap();
     for command in [
         "list_runtime_slots",
+        "create_slot",
+        "update_slot",
         "create_grok_login_slot",
         "create_grok_api_key_slot",
         "create_external_cli_slot",
@@ -306,6 +312,62 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
         assert!(
             handler.contains(command),
             "missing invoke command {command}"
+        );
+    }
+}
+
+/// Every command the renderer actually invokes must be registered.
+///
+/// The list above is hand-maintained, which is why it could not catch the
+/// defect it was written to prevent: `create_slot` and `update_slot` shipped
+/// with the gateway calling them and `generate_handler!` never naming them.
+/// Rust compiled, TypeScript typechecked, and the call would have failed only
+/// at runtime with "command not found". Deriving the required set from the
+/// gateway source makes adding an invoke without a registration a build
+/// failure instead of a silent dead path.
+#[test]
+fn every_command_the_slots_gateway_invokes_is_registered() {
+    const GATEWAY: &str = include_str!("../../src/features/settings/runtimeSlotsGateway.ts");
+    let handler = include_str!("lib.rs")
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .expect("generate_handler! block");
+
+    let mut invoked: Vec<&str> = Vec::new();
+    for segment in GATEWAY.split("invokeSlotCommand(").skip(1) {
+        // First string literal after the call opens is the command name.
+        let Some(open) = segment.find('"') else {
+            continue;
+        };
+        let rest = &segment[open + 1..];
+        let Some(close) = rest.find('"') else {
+            continue;
+        };
+        let name = &rest[..close];
+        // Command names are snake_case identifiers; anything else is not one.
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            continue;
+        }
+        if !invoked.contains(&name) {
+            invoked.push(name);
+        }
+    }
+
+    // A parser that silently finds nothing would make this test vacuously
+    // green — the same false-green shape this suite exists to prevent.
+    assert!(
+        invoked.len() >= 8,
+        "gateway command extraction found only {invoked:?}; the parser is broken, not the code"
+    );
+
+    for command in invoked {
+        assert!(
+            handler.contains(command),
+            "gateway invokes `{command}` but generate_handler! does not register it"
         );
     }
 }
