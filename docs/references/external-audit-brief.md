@@ -26,12 +26,74 @@ accordingly.**
 
 Rough shape:
 
-- `crates/` — Rust workspace (~12 crates): policy state machines, SQLite
-  storage, runtime host, tool executors, the Grok ACP adapter, a governance port
+- `crates/` — Rust workspace (13 crates): policy state machines, SQLite
+  storage, runtime host, tool executors, the Grok ACP adapter, a governance port,
+  runtime slots (credential storage + per-slot agent config)
 - `apps/desktop/src-tauri/` — Tauri host (Rust): commands, composition root
 - `apps/desktop/src/` — React renderer (TypeScript)
 - `scripts/` — gate entry (`run-worker-gate.mjs`) and acceptance harnesses
 - `docs/` — design records, acceptance evidence, execution reports
+
+---
+
+## 1b. Read this before anything else: the boundary
+
+The governance layer above only means something if the agent **cannot act
+outside it**. That containment is not a sandbox. It is a negotiated contract
+with a third-party CLI (Grok Build) over ACP, and it consists of exactly three
+things:
+
+```jsonc
+// crates/adapter-grok-acp/src/rpc/methods.rs
+tools:              ["ask_user_question", "write", "run_terminal_cmd"]  // allowlist
+disallowedTools:    ["search_tool", "use_tool"]                        // MCP meta-tools only
+clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true }
+```
+
+Native `write` reaches us as ACP `fs/write_text_file`; native `run_terminal_cmd`
+reaches us as `terminal/*`. Both then enter the same proposal chain. Nothing
+else is supposed to be reachable.
+
+**We already got this catastrophically wrong once, and the code looked correct
+the whole time.** Three failures stacked:
+
+1. the profile omitted upstream's required `name` / `description`, so parsing
+   failed, was logged on one line, and **silently fell back to the full default
+   toolset**;
+2. `tools: []` means *inherit everything* upstream, not "none";
+3. several disallowed tool names were simply wrong.
+
+For months the governance chain was exercised only by the fixture agent. A real
+agent could read and write freely without ever raising a proposal. It was found
+by a live probe, not by review — reading configuration code produced three
+confident, wrong conclusions in a row.
+
+So: **treat any claim about containment as unproven until it is observed at
+runtime.** `scripts/probe-mcp-tool-exposure.mjs` (opt-in, never in the gate) is
+how we check it now. Its `acp-fs-localfs-trap` and `shell-no-handler` variants
+are deliberate sentinels: they assert *provider* behaviour, not ours, and are
+expected to keep reproducing.
+
+Three "half-open" shapes are known, all silent, all identical in form — grant a
+hand without opening the line to the host and the agent acts locally with no
+error:
+
+| Trap | Condition |
+| --- | --- |
+| LocalFs | `write` allowlisted while `fs.writeTextFile` is false |
+| LocalTerminal | shell tool allowlisted while `terminal` is false |
+| ambient MCP | the two MCP meta-tools not denied |
+
+Note the asymmetry, which is easy to misread: the filesystem backend is chosen
+by `read && write` (**both**), the terminal backend by a **single** bool.
+
+Two coupling tests pin the first two. **Check that they actually bite**, and
+that nothing else can reintroduce a hand without its line.
+
+Also worth challenging: `mcpServers: []` does **not** mean "no MCP" — sessions
+merge servers from user config, plugins and an account gateway, and denying the
+two meta-tools is the only lever a client has. If you can find a path that
+reaches an MCP tool without those meta-tools, that is a serious finding.
 
 ---
 
@@ -62,6 +124,29 @@ actually enforces them**, not assuming it does.
    considered fail-open.
 9. **Paths from the agent are project-relative and portable.** No absolute paths,
    no traversal, no Windows device names.
+10. **Native tool restriction is an allowlist, never an enumeration.** A denylist
+    lost once already: the agent left through `workflow` / `monitor`, which no
+    list had thought to name. The one denylist that remains covers exactly two
+    MCP meta-tools and is a door, not a room inventory.
+11. **Rule allow is conjunctive.** A shell command is split conservatively and
+    *every* segment must match an allow rule; any deny wins; an unsplittable
+    command asks. `Bash(cargo*)` must never authorise `cargo test; rm -rf x`.
+    The splitter is deliberately incomplete — it only has to be right about *when
+    it does not know*.
+12. **A permission mode turns asking off, not governance off.** Even in bypass,
+    the proposal, execution and durable receipt still happen, deny rules still
+    win, and the receipt records which mode allowed it. A corrupt stored mode
+    falls back to `default`, never to `bypass`. A project directory can never
+    select a mode.
+13. **Approval authority is never delegated to the provider.** Pillow must not
+    send `yolomode` / `automode` / `always-approve` in session params. If the
+    agent decides, our receipts are fiction.
+14. **Slot secrets are user-encrypted at rest and never leave the host.** Keys
+    live in DPAPI-protected files, are redacted from `Debug`, zeroed on drop, and
+    absent from every DTO. Non-Windows fails closed rather than storing plaintext.
+15. **Structured Git operations construct their own argv.** `git` is an execution
+    engine (`-c core.pager=…`, `--upload-pack`, aliases). No caller-supplied flag
+    or config may reach it, or the whole command-approval story is void.
 
 ---
 
@@ -69,24 +154,31 @@ actually enforces them**, not assuming it does.
 
 Ordered by where a defect would hurt most.
 
-1. **`crates/runtime-host/src/`** — the coordinators. `governed_write.rs`,
+1. **`crates/adapter-grok-acp/src/rpc/methods.rs` + `provider_writes.rs` +
+   `provider_terminals.rs`** — the boundary and the two reverse-RPC entries
+   (§1b). A defect here is not a bug, it is the absence of the product.
+2. **`crates/runtime-host/src/`** — the coordinators. `governed_write.rs`,
    `governed_read.rs`, `host/process.rs`, `governed_tool_service.rs`.
    These hold live authority in memory with `Mutex` + `Condvar`, and deliberately
    perform some work *off-lock*. Two real races have already been found and fixed
    here; assume more exist.
-2. **`crates/kernel-policy/`** — the write/exec state machines. Check that no
+3. **`crates/kernel-policy/`** — the write/exec state machines, plus the
+   command segmenter and conjunctive rule evaluation (`permission_rules.rs`). Check that no
    illegal transition is reachable, and that terminal states are truly terminal.
-3. **`crates/storage-sqlite/`** — persistence and migrations (`migrations/*.sql`).
+4. **`crates/storage-sqlite/`** — persistence and migrations (`migrations/*.sql`).
    Check transaction boundaries, whether "commit" really committed, and whether
    any query can be influenced by agent-supplied strings.
-4. **`crates/tool-executor/` and `crates/process-executor/`** — actual file
+5. **`crates/tool-executor/` and `crates/process-executor/`** — actual file
    writes and child processes. Windows job objects are used for process-tree
    cleanup. Check for orphaned children, unbounded output, and whether the
    working directory / environment can be escaped.
-5. **`apps/desktop/src-tauri/src/`** — every `#[tauri::command]` is an entry point
+6. **`apps/desktop/src-tauri/src/`** — every `#[tauri::command]` is an entry point
    the renderer can call. Check argument validation and scope enforcement at that
    boundary specifically.
-6. **`crates/adapter-grok-acp/`** — the wire protocol is **hand-written**, not
+7. **`crates/runtime-slots/`** — credential storage and per-slot agent config.
+   Check that a key cannot reach a DTO, a log, an error, or a config file.
+8. **`crates/git-executor/`** — structured mutation (invariant 15).
+9. **The rest of `crates/adapter-grok-acp/`** — the wire protocol is **hand-written**, not
    generated from a schema, so there is no compile-time signal if it drifts.
    Check parsing robustness against malformed or hostile agent output.
 
@@ -116,16 +208,34 @@ this list as exhaustive — blind spots are by definition not on it.
   anything sensitive can still reach the renderer by a path those tests miss.
 - **Windows-specific behaviour.** Path handling, device names, job objects,
   file locking. This code has only ever run on Windows.
+- **The boundary contract with the provider.** It is upstream behaviour, not our
+  code, and it can change under us without notice. Our evidence is a live probe
+  run at a point in time, nothing stronger.
+- **Everything added on 2026-08-11.** Governed write over ACP, governed shell,
+  permission rules, permission modes, slots and credential storage, and Git
+  mutation all landed inside one day. Each passed its own gate; **the composition
+  was never reviewed as a whole.** The same warning as the decoupling refactor
+  above, with less settling time.
 
 ---
 
 ## 5. Known issues — do not re-report
 
-- An intermittent E2E failure under heavy machine load: a restart degrades with
-  `runtime_profile_invalid` on a directory the harness never deletes. Root cause
-  unproven. Path probing was recently changed to distinguish "definitely absent"
-  from "cannot determine". **If you can find the actual cause, that is very
-  valuable** — but do not report the symptom alone as a new finding.
+- An intermittent E2E failure under heavy machine load. Contributing causes have
+  been found and fixed (a harness that crashed on control characters in its own
+  captured output; a process-wide probe counter shared by tests that did not take
+  the lock). A residue may remain under contention. **A proven root cause is very
+  valuable** — the symptom alone is not a new finding.
+- Known and accepted limits, do not re-report as discoveries: the interpreter
+  confirmation table is finite, so a broad rule over an unrecognised wrapper is
+  the most plausible wrong-allow; a rule like `node*` legitimately authorises
+  `node any-script.js`; the event payload carries one representative rule while
+  the durable receipt holds the full per-segment set; restart-recovered rows
+  cannot reconstruct segments and are therefore not decision-capable.
+- **Not claimed:** this is not an OS sandbox. Containment is over a verified
+  provider tool path (§1b). Anything that bypasses the Grok tool layer entirely
+  is out of scope for the current design — but if you find such a path *through*
+  it, that is exactly what we want to know.
 - Governance decoupling is incomplete by design. Steps 7–11 of the plan (state
   migration, single bind, run lease, removal of the free-function compatibility
   layer) are outstanding and known.
