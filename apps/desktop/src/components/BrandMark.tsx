@@ -30,7 +30,11 @@ let markSeq = 0;
 type MarkDetail = "compact" | "standard" | "hero";
 
 function markDetail(size: number): MarkDetail {
-  if (size < 28) return "compact";
+  // `compact` flattens the ribbon into two plain lobes. That is a different
+  // drawing, not a lighter one, and at the 22px the sidebar uses it read as a
+  // thinner logo than the taskbar icon. Reserve it for genuinely tiny sizes so
+  // every surface a person actually looks at shows the same segmented mark.
+  if (size < 18) return "compact";
   if (size < 80) return "standard";
   return "hero";
 }
@@ -111,10 +115,13 @@ export function BrandSymbol({
   };
 
   // Stroke widths: face-on ≈ 16% of viewBox height (55 → ~8.8), side ~14% → ~5.5
+  // Weights match `src-tauri/icons/pillow-mark.svg`. The icon and this component
+  // must read as one mark; when they drifted the app chrome looked like a
+  // thinner, different logo than the taskbar.
   const w = {
-    face: detail === "compact" ? 9.2 : detail === "hero" ? 8.8 : 8.6,
-    side: detail === "compact" ? 6.4 : detail === "hero" ? 5.8 : 6.0,
-    cross: detail === "compact" ? 6.8 : 6.2,
+    face: 10.0,
+    side: 6.8,
+    cross: 7.2,
     rim: detail === "compact" ? 0 : detail === "hero" ? 0.55 : 0.45,
     shadow: detail === "compact" ? 8.2 : 7.6,
   };
@@ -241,12 +248,33 @@ export function BrandSymbol({
           </filter>
         </defs>
 
-        {/* ── 1. Bloom (lowest) ─────────────────────────────────────────── */}
+        {/* ── 0. Outline (lowest) ───────────────────────────────────────
+            Same pass as the app icon. On dark chrome it merges into the
+            background; on light chrome it holds the silhouette. Both surfaces
+            then adapt the same way, which is what makes them one mark rather
+            than two similar ones. */}
+        <g
+          fill="none"
+          stroke="#2A2733"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity={0.92}
+          className="brand-symbol__outline"
+        >
+          <path d={PATH.underpass} strokeWidth={w.cross + 2.4} />
+          <path d={PATH.leftBottom} strokeWidth={w.side + 2.4} />
+          <path d={PATH.rightTop} strokeWidth={w.side + 2.4} />
+          <path d={PATH.rightBottom} strokeWidth={w.face + 2.4} />
+          <path d={PATH.leftTop} strokeWidth={w.face + 2.4} />
+          <path d={PATH.overpass} strokeWidth={w.cross + 2.4} />
+        </g>
+
+        {/* ── 1. Bloom ──────────────────────────────────────────────────── */}
         <path
           d={PATH.glowSilhouette}
           className="brand-symbol__bloom"
           fill="#DCCBFF"
-          opacity={detail === "compact" ? 0.22 : 0.32}
+          opacity={0.22}
           filter={`url(#${g.bloom})`}
         />
 
