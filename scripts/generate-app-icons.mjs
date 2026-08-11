@@ -10,6 +10,14 @@
  * playwright-core, which is already a devDependency. No new toolchain.
  *
  * Usage: node scripts/generate-app-icons.mjs
+ *
+ * After running this, the next `cargo build` will NOT pick the new icon up on
+ * its own: cargo does not treat the icon files as inputs to tauri-build's build
+ * script, so the previously embedded Windows resource survives and the binary
+ * keeps the old icon while everything reports success. Touch
+ * `apps/desktop/src-tauri/build.rs` (this script does) before rebuilding, and
+ * confirm by extracting the icon from the built exe rather than trusting the
+ * build's exit code.
  */
 
 import { spawn } from "node:child_process";
@@ -67,13 +75,25 @@ function runTauriIcon(sourcePng) {
   });
 }
 
+/**
+ * Touch the Tauri build script so the next build re-embeds the icon resource.
+ * Without this the regenerated icons land on disk and the binary keeps the old
+ * one, with every command still reporting success.
+ */
+async function invalidateBuildScript() {
+  const buildScript = path.join(repositoryRoot, "apps/desktop/src-tauri/build.rs");
+  const source = await readFile(buildScript, "utf8");
+  await writeFile(buildScript, source, "utf8");
+}
+
 async function main() {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "pillow-icon-"));
   const sourcePng = path.join(temporaryRoot, "pillow-icon-source.png");
   try {
     await renderSourcePng(sourcePng);
     await runTauriIcon(sourcePng);
-    console.log(`PILLOW_ICONS: regenerated from ${path.basename(SOURCE_SVG)}`);
+    await invalidateBuildScript();
+    console.log(`PILLOW_ICONS: regenerated from ${path.basename(SOURCE_SVG)}; build script touched`);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true }).catch(() => undefined);
   }
