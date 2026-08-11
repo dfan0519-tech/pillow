@@ -1,7 +1,7 @@
 # Pillow 总控交接手册(2026-08-11)
 
 工作目录:`<repo>`
-分支 / HEAD:`main` / `fd4ad7d`(**本地 = 远程**)
+分支 / HEAD:`main` / `db14fa9`(**本地 = 远程**)
 远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
 
 > 本文件取代 `docs/handoff/2026-08-10-pillow-controller-handoff.md`。
@@ -13,9 +13,10 @@
 
 ## 1. 一句话状态
 
-**代理有两只受管的手:写文件、跑命令。默认每次问你,可以用规则逐段免问。**
+**代理有两只受管的手:写文件、跑命令。默认每次问你;可用规则逐段免问,
+或切权限模式(`default` / `accept_edits` / `bypass`)整体免问。**
 
-自 `9b2abba` 起 18 个提交,HEAD `ee7f175`。门 OK,**E2E 10/10**
+自 `9b2abba` 起 20 个提交。门 OK,**E2E 10/10**
 (含 shell 场景,`7b2e50c` 那次是它们第一次真正执行)。
 
 规则也能用了:`Bash(cargo*)` **不会**放行 `cargo test; rm -rf x` ——
@@ -59,6 +60,28 @@ mcpServers:       []
 
 **allowlist 管原生工具,fail-closed;denylist 只关 MCP 那一扇门。**
 两者职责不同,代码里有测试钉死:denylist 出现第三个名字就红。
+
+### 权限模式(`db14fa9`,照抄基座)
+
+| 档 | 写 | 执行命令 |
+| --- | --- | --- |
+| `default` | 问 | 问 |
+| `accept_edits` | 自动 | 问 |
+| `bypass` | 自动 | 自动 |
+
+写与执行分开,因为**爆炸半径不同** —— 文件改动 git 能救,`rm -rf` 救不回来。
+
+🔴 **`bypass` 不是关掉治理,是关掉"问"。** 提案/执行/durable 收据一条不少,
+且模式放行有**独立的收据类型**,记录是哪一档放的行。
+
+四条已钉死(改这块前重看):
+
+1. **规则先跑,deny 在任何模式下都赢** —— 模式分支是 `else if`,只在无规则命中时到达
+2. **坏枚举值 fail-closed 回 `default`**,不是回 `bypass`
+3. **项目目录不能选模式** —— 否则打开恶意项目 = 它给自己开全开
+4. **模式绝不翻译成 provider flag** —— `methods.rs` 那条禁止
+   `yolomode`/`automode`/`always-approve` 的测试必须一直绿。
+   把批准权交出去,收据就成了虚构。
 
 ---
 
