@@ -7,8 +7,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "../src/App";
 import {
-  FIRSTRUN_GROK_BODY,
   FIRSTRUN_PROJECT_BODY,
+  FIRSTRUN_SLOT_BODY,
   FIRSTRUN_TITLE,
 } from "../src/features/onboarding/onboardingCopy";
 import {
@@ -244,21 +244,32 @@ describe("App first-run onboarding surface", () => {
     ).toBe("alert");
   });
 
-  it("5 — copy never implies Pillow stores Grok login (ADR-0003 claim)", async () => {
+  it("5 — slot step explains login vs API key paths; never lists external CLI as chat", async () => {
     const settings = new MockSettingsGateway();
     render(
       <App gateway={emptyProjectGateway()} settingsGateway={settings} />,
     );
 
-    const grokBody = await screen.findByTestId("firstrun-grok-body");
-    expect(grokBody.textContent).toBe(FIRSTRUN_GROK_BODY);
-    expect(FIRSTRUN_GROK_BODY).toMatch(/Grok 登录由 Grok CLI 管理/);
-    expect(FIRSTRUN_GROK_BODY).toMatch(/不存储/);
-    expect(FIRSTRUN_GROK_BODY).toMatch(/grok login/i);
-    expect(FIRSTRUN_GROK_BODY).not.toMatch(
+    const slotBody = await screen.findByTestId("firstrun-slot-body");
+    expect(slotBody.textContent).toBe(FIRSTRUN_SLOT_BODY);
+    // After open project: configure + start a slot before chat works.
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/运行时槽位/);
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/启动/);
+    // Two governed ways only.
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/登录 profile|已登录的 Grok/);
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/API key/);
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/端点/);
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/模型/);
+    // External CLI must not be offered as a chat path.
+    expect(FIRSTRUN_SLOT_BODY).toMatch(/不能用来对话/);
+    expect(FIRSTRUN_SLOT_BODY).not.toMatch(
+      /用外部 CLI 对话|外部 CLI 启动代理|external_cli 对话/i,
+    );
+    // No credential leakage / auth file claims.
+    expect(FIRSTRUN_SLOT_BODY).not.toMatch(
       /Pillow (保存|存储|代管|管理).{0,8}登录|粘贴.*API|auth\.json/i,
     );
-    expect(guidanceLooksSafe(FIRSTRUN_GROK_BODY)).toBe(true);
+    expect(guidanceLooksSafe(FIRSTRUN_SLOT_BODY)).toBe(true);
     expect(guidanceLooksSafe(FIRSTRUN_PROJECT_BODY)).toBe(true);
   });
 

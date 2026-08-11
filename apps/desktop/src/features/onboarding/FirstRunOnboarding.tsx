@@ -2,17 +2,17 @@
  * First-run onboarding surface for strangers with an empty project list.
  *
  * Neutral status guidance (not an error). Primary next step is open project;
- * Grok readiness is educational copy aligned with ADR-0003 (CLI owns login).
+ * then configure and start a governed runtime slot before chat works.
  * Dismiss is durable via the settings layer — this component only invokes
  * callbacks; it never opens a second store.
  */
 import {
   FIRSTRUN_CLOSE_LABEL,
   FIRSTRUN_DISMISS_LABEL,
-  FIRSTRUN_GROK_BODY,
   FIRSTRUN_OPEN_PROJECT_LABEL,
   FIRSTRUN_OPEN_SETTINGS_LABEL,
   FIRSTRUN_PROJECT_BODY,
+  FIRSTRUN_SLOT_BODY,
   FIRSTRUN_TITLE,
 } from "./onboardingCopy";
 import "../../styles/onboarding.css";
@@ -40,7 +40,7 @@ export function FirstRunOnboarding({
       <div className="firstrun-onboarding__body">
         <strong id="firstrun-onboarding-title">{FIRSTRUN_TITLE}</strong>
         <p data-testid="firstrun-project-body">{FIRSTRUN_PROJECT_BODY}</p>
-        <p data-testid="firstrun-grok-body">{FIRSTRUN_GROK_BODY}</p>
+        <p data-testid="firstrun-slot-body">{FIRSTRUN_SLOT_BODY}</p>
       </div>
       <div className="firstrun-onboarding__actions">
         <button

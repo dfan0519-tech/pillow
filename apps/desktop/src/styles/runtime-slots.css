@@ -123,6 +123,44 @@
   color: var(--text-primary);
 }
 
+.runtime-slots-badge--needs-start {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text-primary);
+}
+
+.runtime-slots-badge--started {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text-secondary);
+}
+
+.runtime-slots-list__actions button.runtime-slots-start {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.runtime-slots-list__actions button.runtime-slots-start--primary {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 78%, #1a1028);
+  color: #f8f5ff;
+}
+
+.runtime-slots-list__actions button.runtime-slots-start--primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.runtime-slots-list__actions button.runtime-slots-start:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .runtime-slots-ungoverned {
   margin: 0;
   padding: 8px 10px;

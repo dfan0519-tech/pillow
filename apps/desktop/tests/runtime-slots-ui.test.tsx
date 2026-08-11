@@ -198,12 +198,21 @@ describe("RuntimeSlotsSection — probe paths", () => {
     const probeBtn = await screen.findByTestId(
       `runtime-slot-probe-${slot.slotId}`,
     );
+    expect(probeBtn).toHaveTextContent("启动");
+    expect(probeBtn.className).toMatch(/runtime-slots-start--primary/);
+    expect(
+      screen.getByTestId(`runtime-slot-needs-start-${slot.slotId}`),
+    ).toHaveTextContent(/未启动/);
     await user.click(probeBtn);
     const result = await screen.findByTestId(
       `runtime-slot-probe-result-${slot.slotId}`,
     );
     expect(result).toHaveTextContent(/探活成功/u);
     expect(result).toHaveTextContent(/active/u);
+    expect(
+      await screen.findByTestId(`runtime-slot-started-${slot.slotId}`),
+    ).toHaveTextContent("已启动");
+    expect(probeBtn).toHaveTextContent("重新启动");
   });
 
   it("shows actionable failure for governed Grok probe without host secret text", async () => {
@@ -218,6 +227,7 @@ describe("RuntimeSlotsSection — probe paths", () => {
     const probeBtn = await screen.findByTestId(
       `runtime-slot-probe-${slot.slotId}`,
     );
+    expect(probeBtn).toHaveTextContent("启动");
     await user.click(probeBtn);
     const result = await screen.findByTestId(
       `runtime-slot-probe-result-${slot.slotId}`,
@@ -225,6 +235,13 @@ describe("RuntimeSlotsSection — probe paths", () => {
     expect(result).toHaveTextContent(/探活失败/u);
     expect(result).toHaveTextContent(/认证|密钥/u);
     expect(result.textContent ?? "").not.toMatch(/sk-|apiKey=/i);
+    // Failed start must not claim the slot is running.
+    expect(
+      screen.queryByTestId(`runtime-slot-started-${slot.slotId}`),
+    ).toBeNull();
+    expect(
+      screen.getByTestId(`runtime-slot-needs-start-${slot.slotId}`),
+    ).toBeVisible();
   });
 
   it("shows external CLI status stdout on success and failure summary on fail", async () => {
@@ -239,6 +256,12 @@ describe("RuntimeSlotsSection — probe paths", () => {
     const probeBtn = await screen.findByTestId(
       `runtime-slot-probe-${slot.slotId}`,
     );
+    // external_cli must never get a Start affordance.
+    expect(probeBtn).toHaveTextContent("查询账号状态");
+    expect(probeBtn).not.toHaveTextContent("启动");
+    expect(
+      screen.queryByTestId(`runtime-slot-needs-start-${slot.slotId}`),
+    ).toBeNull();
     await user.click(probeBtn);
     let result = await screen.findByTestId(
       `runtime-slot-probe-result-${slot.slotId}`,

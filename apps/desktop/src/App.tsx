@@ -27,6 +27,18 @@ import {
   userFacingSendError,
 } from "./features/settings/loginGuidance";
 import {
+  MockRuntimeSlotsGateway,
+  TauriRuntimeSlotsGateway,
+} from "./features/settings/runtimeSlotsGateway";
+import {
+  classifyRuntimeSlotGuidance,
+  looksLikeRuntimeUnavailable,
+  RUNTIME_SLOT_GUIDANCE_OPEN_SETTINGS,
+  RUNTIME_SLOT_GUIDANCE_TITLE,
+  userFacingRuntimeSlotGuidance,
+  type RuntimeSlotGuidanceKind,
+} from "./features/settings/runtimeUnavailableGuidance";
+import {
   MockSettingsGateway,
   TauriSettingsGateway,
 } from "./features/settings/settingsGateway";
@@ -38,6 +50,7 @@ import {
   type RuntimeStartupView,
   type SettingsGateway,
 } from "./features/settings/settingsTypes";
+import type { RuntimeSlotsGateway } from "./features/settings/runtimeSlotsTypes";
 import type { GitChangesPaneModel } from "./features/workbench/ResourcePane";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
@@ -77,6 +90,11 @@ type AppProps = {
   gitGateway?: GitGateway;
   /** S0 settings gateway. Defaults to in-memory mock; desktop main injects Tauri. */
   settingsGateway?: SettingsGateway;
+  /**
+   * Optional runtime-slots gateway (first-run / send-path guidance).
+   * Defaults to Tauri when the IPC bridge is present; otherwise in-memory mock.
+   */
+  runtimeSlotsGateway?: RuntimeSlotsGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
@@ -138,6 +156,7 @@ export function App({
   execGateway,
   gitGateway,
   settingsGateway: settingsGatewayProp,
+  runtimeSlotsGateway: runtimeSlotsGatewayProp,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
@@ -157,6 +176,16 @@ export function App({
     }
     return new MockSettingsGateway();
   }, [settingsGatewayProp]);
+  const runtimeSlotsGateway = useMemo(() => {
+    if (runtimeSlotsGatewayProp) return runtimeSlotsGatewayProp;
+    if (
+      typeof window !== "undefined"
+      && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      return new TauriRuntimeSlotsGateway();
+    }
+    return new MockRuntimeSlotsGateway();
+  }, [runtimeSlotsGatewayProp]);
   const isMockRuntime = conversationGateway instanceof MockConversationGateway;
 
   const [projects, setProjects] = useState<ProjectDto[]>([]);
@@ -175,6 +204,13 @@ export function App({
    * Independent of degraded startup; never reads auth files — only failure phrases.
    */
   const [loginGuidanceVisible, setLoginGuidanceVisible] = useState(false);
+  /**
+   * Send-path guidance when the conversation runtime is unavailable
+   * (`runtime_unavailable`). Distinguishes no governed slots vs slots not started.
+   * Never pretends the turn succeeded.
+   */
+  const [runtimeSlotGuidanceKind, setRuntimeSlotGuidanceKind] =
+    useState<RuntimeSlotGuidanceKind | null>(null);
   /**
    * First-run dismiss flag from settings (`ui.onboarding.dismissed`).
    * null = not yet resolved (do not flash guidance).
@@ -425,10 +461,12 @@ export function App({
         if (isAuthenticationFailedEvent(event.payload)) {
           setSendError(GROK_CLI_LOGIN_GUIDANCE);
           setLoginGuidanceVisible(true);
+          setRuntimeSlotGuidanceKind(null);
         }
       }
       if (event.kind === "turn_completed" && targetsSelectedConversation) {
         setLoginGuidanceVisible(false);
+        setRuntimeSlotGuidanceKind(null);
       }
     });
   }, [conversationGateway]);
@@ -994,6 +1032,7 @@ export function App({
     dispatchConversation({ type: "conversation_selected", conversationId: null });
     setSendError(null);
     setLoginGuidanceVisible(false);
+    setRuntimeSlotGuidanceKind(null);
     setRefreshWarning(null);
   }
 
@@ -1182,6 +1221,7 @@ export function App({
     setSending(true);
     setSendError(null);
     setLoginGuidanceVisible(false);
+    setRuntimeSlotGuidanceKind(null);
     setRefreshWarning(null);
 
     const state = conversationStateRef.current;
@@ -1282,10 +1322,35 @@ export function App({
       }
       const raw =
         cause instanceof Error ? cause.message : "发送失败，请重试。";
+
+      // Runtime not active: classify no-slots vs not-started, never only show a code.
+      if (looksLikeRuntimeUnavailable(raw)) {
+        let kind: RuntimeSlotGuidanceKind = "no_slots";
+        try {
+          const slots = await runtimeSlotsGateway.listRuntimeSlots(projectIdAtStart);
+          if (isScopeCurrent(projectIdAtStart, generationAtStart)) {
+            kind = classifyRuntimeSlotGuidance(slots);
+          }
+        } catch {
+          // List failed: still guide to settings; default "create" path is safer.
+          kind = "no_slots";
+        }
+        if (!isScopeCurrent(projectIdAtStart, generationAtStart)) {
+          return;
+        }
+        const message = userFacingRuntimeSlotGuidance(kind);
+        setSendError(message);
+        setRuntimeSlotGuidanceKind(kind);
+        setLoginGuidanceVisible(false);
+        console.error("Failed to send turn.", cause);
+        throw cause instanceof Error ? cause : new Error(message);
+      }
+
       const message = userFacingSendError(raw);
       setSendError(message);
       if (message === GROK_CLI_LOGIN_GUIDANCE) {
         setLoginGuidanceVisible(true);
+        setRuntimeSlotGuidanceKind(null);
       }
       console.error("Failed to send turn.", cause);
       throw cause instanceof Error ? cause : new Error(message);
@@ -1420,6 +1485,34 @@ export function App({
           </button>
         </div>
       ) : null}
+      {/* No active governed runtime after a real send failure — never fake success. */}
+      {runtimeSlotGuidanceKind
+      && !(
+        runtimeStartup
+        && !runtimeStartup.conversationAvailable
+        && runtimeStartup.degradedCode
+      ) ? (
+        <div
+          className="runtime-slot-guidance-banner"
+          data-runtime-slot-guidance={runtimeSlotGuidanceKind}
+          data-testid="runtime-slot-guidance-banner"
+          role="status"
+        >
+          <div className="runtime-slot-guidance-banner__body">
+            <strong>{RUNTIME_SLOT_GUIDANCE_TITLE}</strong>
+            <p data-testid="runtime-slot-guidance-body">
+              {userFacingRuntimeSlotGuidance(runtimeSlotGuidanceKind)}
+            </p>
+          </div>
+          <button
+            data-testid="runtime-slot-guidance-open-settings"
+            onClick={() => setSettingsOpen(true)}
+            type="button"
+          >
+            {RUNTIME_SLOT_GUIDANCE_OPEN_SETTINGS}
+          </button>
+        </div>
+      ) : null}
       {error ? (
         <p className="app-error" role="alert">
           <span>{error.message}</span>
@@ -1471,6 +1564,7 @@ export function App({
           onThemeChanged={applyDocumentTheme}
           onPermissionModeChanged={setPermissionMode}
           projectId={activeProject?.id ?? null}
+          runtimeSlotsGateway={runtimeSlotsGateway}
         />
       ) : null}
     </div>

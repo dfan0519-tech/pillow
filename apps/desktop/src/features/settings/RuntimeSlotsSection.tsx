@@ -75,6 +75,12 @@ export function RuntimeSlotsSection({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+  /**
+   * Last successfully started governed slot in this panel session.
+   * Host list DTO has no active flag — session-local only so Start stays
+   * obvious for slots that have never been started here.
+   */
+  const [startedSlotId, setStartedSlotId] = useState<string | null>(null);
 
   const [formMode, setFormMode] = useState<FormMode>("closed");
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
@@ -111,6 +117,7 @@ export function RuntimeSlotsSection({
   }, [gateway, projectId]);
 
   useEffect(() => {
+    setStartedSlotId(null);
     void reload();
   }, [reload]);
 
@@ -272,6 +279,7 @@ export function RuntimeSlotsSection({
           projectId,
           slot.slotId,
         );
+        setStartedSlotId(slot.slotId);
         setProbe({
           slotId: slot.slotId,
           ok: true,
@@ -404,6 +412,24 @@ export function RuntimeSlotsSection({
                         : "Grok · API key"
                       : "外部 CLI"}
                   </span>
+                  {slot.kind === "governed_grok"
+                  && slot.governance === "full" ? (
+                    startedSlotId === slot.slotId ? (
+                      <span
+                        className="runtime-slots-badge runtime-slots-badge--started"
+                        data-testid={`runtime-slot-started-${slot.slotId}`}
+                      >
+                        已启动
+                      </span>
+                    ) : (
+                      <span
+                        className="runtime-slots-badge runtime-slots-badge--needs-start"
+                        data-testid={`runtime-slot-needs-start-${slot.slotId}`}
+                      >
+                        未启动 · 需启动后才能对话
+                      </span>
+                    )
+                  ) : null}
                 </div>
                 <div className="runtime-slots-list__actions">
                   {slot.kind === "governed_grok"
@@ -417,14 +443,30 @@ export function RuntimeSlotsSection({
                       编辑
                     </button>
                   ) : null}
-                  <button
-                    data-testid={`runtime-slot-probe-${slot.slotId}`}
-                    disabled={busy}
-                    onClick={() => void handleProbe(slot)}
-                    type="button"
-                  >
-                    {slot.kind === "external_cli" ? "查询账号状态" : "探活 / 启动"}
-                  </button>
+                  {slot.kind === "external_cli" ? (
+                    <button
+                      data-testid={`runtime-slot-probe-${slot.slotId}`}
+                      disabled={busy}
+                      onClick={() => void handleProbe(slot)}
+                      type="button"
+                    >
+                      查询账号状态
+                    </button>
+                  ) : (
+                    <button
+                      className={
+                        startedSlotId === slot.slotId
+                          ? "runtime-slots-start"
+                          : "runtime-slots-start runtime-slots-start--primary"
+                      }
+                      data-testid={`runtime-slot-probe-${slot.slotId}`}
+                      disabled={busy}
+                      onClick={() => void handleProbe(slot)}
+                      type="button"
+                    >
+                      {startedSlotId === slot.slotId ? "重新启动" : "启动"}
+                    </button>
+                  )}
                 </div>
               </div>
 
