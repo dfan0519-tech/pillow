@@ -1,0 +1,77 @@
+<!--
+  Pillow app icon source — Concept 08 «Mirage Loop».
+
+  Geometry is lifted from apps/desktop/src/components/BrandMark.tsx so the icon
+  and the in-app chrome stay the same mark. The ribbon lives in a 100x55 box;
+  here it is centred on a square plate at the app's dark base (#0e0e10) so the
+  light ribbon reads on both light and dark taskbars.
+
+  Regenerate the raster set with scripts/generate-app-icons.mjs after editing.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#17161c"/>
+      <stop offset="55%" stop-color="#0e0e10"/>
+      <stop offset="100%" stop-color="#0b0b0d"/>
+    </linearGradient>
+
+    <!-- Path hue: lilac → near-white → smoke → lilac (matches BrandMark). -->
+    <linearGradient id="pathHue" x1="8%" y1="35%" x2="92%" y2="65%">
+      <stop offset="0%" stop-color="#DCCBFF"/>
+      <stop offset="28%" stop-color="#FAF9F7"/>
+      <stop offset="55%" stop-color="#C7C7CE"/>
+      <stop offset="82%" stop-color="#E4D8F8"/>
+      <stop offset="100%" stop-color="#DCCBFF"/>
+    </linearGradient>
+    <linearGradient id="light" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F5F2FF"/>
+      <stop offset="45%" stop-color="#FAF9F7"/>
+      <stop offset="100%" stop-color="#E8E4F0"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#B8A8D0"/>
+      <stop offset="50%" stop-color="#8E869C"/>
+      <stop offset="100%" stop-color="#6E6878"/>
+    </linearGradient>
+    <linearGradient id="smoke" x1="0%" y1="40%" x2="100%" y2="70%">
+      <stop offset="0%" stop-color="#D4D0DC"/>
+      <stop offset="55%" stop-color="#C7C7CE"/>
+      <stop offset="100%" stop-color="#A8A4B0"/>
+    </linearGradient>
+
+    <filter id="bloom" x="-50%" y="-80%" width="200%" height="260%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3.2" result="blur"/>
+      <feColorMatrix in="blur" type="matrix"
+        values="0.85 0 0 0 0.08
+                0.75 0 0 0 0.05
+                1    0 0 0 0.12
+                0    0 0 0.55 0"/>
+    </filter>
+  </defs>
+
+  <!-- Plate: rounded square, Windows-safe corner radius. -->
+  <rect width="1024" height="1024" rx="220" ry="220" fill="url(#plate)"/>
+
+  <!-- Ribbon: 100x55 mark scaled to ~88% of the plate and centred.
+       Sized for the 32px taskbar case, not the 1024px one: below ~40px the
+       thinner ribbon collapsed into a smudge. -->
+  <g transform="translate(62 264) scale(9.0)">
+    <path d="M18 27.5 C18 15.5 28.5 9.5 40 14.5 C45 17.2 47.5 22.5 50 27.5 C52.5 22.5 55 17.2 60 14.5 C73 8.5 90.5 14 90.5 27.5 C90.5 41 73 46.5 60 40.5 C55 37.8 52.5 32.5 50 27.5 C47.5 32.5 45 37.8 40 40.5 C28.5 45.5 18 39.5 18 27.5 Z"
+          fill="url(#pathHue)" opacity="0.5" filter="url(#bloom)"/>
+
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Underpass first so the overpass reads on top. -->
+      <path d="M55 19.5 C52 23.8 48 31.2 45 35.5" stroke="url(#dark)" stroke-width="7.2"/>
+      <path d="M45 35.5 C41.5 39.5 34 43.5 26 41.5 C20 39.8 17.5 33.5 17 27.5" stroke="url(#dark)" stroke-width="6.8"/>
+      <path d="M90 27.5 C88.5 21.8 84 16.2 76 14.2 C68 12.2 60.5 14.2 55 19.5" stroke="url(#dark)" stroke-width="6.8"/>
+      <path d="M55 35.5 C59.5 39.5 68 42.5 78 40.2 C84.5 38.5 88.5 33.2 90 27.5" stroke="url(#smoke)" stroke-width="10.0"/>
+      <path d="M17 27.5 C17.5 18 24 11.5 33 12.2 C39 12.8 42.5 16.2 45 19.5" stroke="url(#light)" stroke-width="10.0"/>
+      <path d="M45 19.5 C48 23.8 52 31.2 55 35.5" stroke="url(#light)" stroke-width="7.2"/>
+
+      <!-- Specular rim hints where the faces turn. -->
+      <path d="M20 18.5 C24 13.5 30 11.2 36 12.5 C40 13.5 43 16 44.5 18.5" stroke="#FFFFFF" stroke-width="0.7" opacity="0.6"/>
+      <path d="M55.5 18.5 C58 15.5 65 12.5 74 13.5 C82 14.5 87.5 19 89 24" stroke="#FFFFFF" stroke-width="0.7" opacity="0.4"/>
+    </g>
+  </g>
+</svg>
