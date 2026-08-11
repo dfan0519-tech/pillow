@@ -43,6 +43,13 @@
 
   /* Layout metrics — theme-invariant */
   --titlebar-height: 40px;
+  /* Width of the fixed window-control cluster (3 buttons x 44px).
+     Anything that renders at the top of the shell has to inset by this, or the
+     controls sit on top of it — they are position:fixed with z-index 30, so
+     document order does not save you. This was referenced in
+     workbench-conversation.css before it was ever defined, which silently
+     dropped that declaration and left stage-top actions under the controls. */
+  --window-controls-inset: 132px;
   --sidebar-width: 248px;
   --radius-sm: 6px;
   --radius-md: 8px;

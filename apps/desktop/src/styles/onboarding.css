@@ -13,7 +13,10 @@
   justify-content: space-between;
   gap: 12px;
   margin: 0;
-  padding: 12px 14px;
+  /* Right inset clears the fixed window controls: this banner can be the first
+     element in the shell, so its actions would otherwise render underneath
+     them. */
+  padding: 12px calc(var(--window-controls-inset) + 14px) 12px 14px;
   border-bottom: 1px solid
     color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
   background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));

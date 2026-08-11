@@ -244,7 +244,9 @@
   justify-content: space-between;
   gap: 12px;
   margin: 0;
-  padding: 10px 14px;
+  /* Clears the fixed window controls — any of these banners can be the first
+     element in the shell, and the controls are position:fixed above them. */
+  padding: 10px calc(var(--window-controls-inset) + 14px) 10px 14px;
   border-bottom: 1px solid
     color-mix(in srgb, var(--warning) 40%, var(--border-subtle));
   background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated));
@@ -305,7 +307,9 @@
   justify-content: space-between;
   gap: 12px;
   margin: 0;
-  padding: 10px 14px;
+  /* Clears the fixed window controls — any of these banners can be the first
+     element in the shell, and the controls are position:fixed above them. */
+  padding: 10px calc(var(--window-controls-inset) + 14px) 10px 14px;
   border-bottom: 1px solid
     color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-elevated));
@@ -360,7 +364,9 @@
   justify-content: space-between;
   gap: 12px;
   margin: 0;
-  padding: 10px 14px;
+  /* Clears the fixed window controls — any of these banners can be the first
+     element in the shell, and the controls are position:fixed above them. */
+  padding: 10px calc(var(--window-controls-inset) + 14px) 10px 14px;
   border-bottom: 1px solid
     color-mix(in srgb, var(--warning) 40%, var(--border-subtle));
   background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated));
