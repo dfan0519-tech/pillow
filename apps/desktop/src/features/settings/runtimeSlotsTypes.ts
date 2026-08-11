@@ -113,6 +113,65 @@ export type RuntimeSlotModelSwitchView = {
 /** Auth kind for unified create_slot (host `auth_kind`). */
 export type SlotAuthKind = "api_key" | "grok_login" | "local_cli";
 
+/**
+ * Data-driven auth method catalog for the create form.
+ * Adding OAuth later is one more row here — not a new UI branch tree.
+ */
+export type SlotAuthMethodOption = {
+  id: SlotAuthKind;
+  label: string;
+  description: string;
+  /** Controller requires governed auth; false for local CLI. */
+  allowsController: boolean;
+};
+
+/** Parallel, equal auth options — none is "primary". */
+export const SLOT_AUTH_METHODS: readonly SlotAuthMethodOption[] = [
+  {
+    id: "api_key",
+    label: "API key",
+    description: "端点、模型与密钥；受 Pillow 完整治理。",
+    allowsController: true,
+  },
+  {
+    id: "grok_login",
+    label: "已登录的 Grok",
+    description: "使用本机默认 Grok 登录 profile；受 Pillow 完整治理。",
+    allowsController: true,
+  },
+  {
+    id: "local_cli",
+    label: "本机 CLI",
+    description: "可执行文件与参数；不受治理，仅供登记与账号状态查询。",
+    allowsController: false,
+  },
+];
+
+/** Role options for create / reassign (custom needs a free-text name). */
+export type SlotRoleOption = {
+  id: RuntimeSlotRole;
+  label: string;
+  description: string;
+};
+
+export const SLOT_ROLE_OPTIONS: readonly SlotRoleOption[] = [
+  {
+    id: "controller",
+    label: "总控",
+    description: "可在 Pillow 中对话的主控槽位；每个项目最多一个，且必须受治理认证。",
+  },
+  {
+    id: "librarian",
+    label: "信息管理员",
+    description: "建议设置一位，负责知识与资料侧协助（不强制）。",
+  },
+  {
+    id: "custom",
+    label: "自定义",
+    description: "自行命名角色，例如写码、审阅等。",
+  },
+];
+
 /** Unified create input — one command for all auth variants. */
 export type CreateSlotInput = {
   projectId: string;
@@ -127,6 +186,26 @@ export type CreateSlotInput = {
   executablePath?: string;
   launchArgs?: string[];
   statusArgs?: string[];
+};
+
+/**
+ * Unified update input (`update_slot`).
+ * Role reassignment uses keepAuth + current displayName; empty apiKey omits rotate.
+ */
+export type UpdateSlotInput = {
+  projectId: string;
+  slotId: string;
+  displayName: string;
+  role?: RuntimeSlotRole;
+  roleCustomName?: string;
+  baseUrl?: string;
+  modelId?: string;
+  /** Omit or empty to keep stored secret when keepAuth / host omit rules apply. */
+  apiKey?: string;
+  executablePath?: string;
+  launchArgs?: string[];
+  statusArgs?: string[];
+  keepAuth?: boolean;
 };
 
 export type CreateGrokLoginSlotInput = {
@@ -204,9 +283,13 @@ export interface RuntimeSlotsGateway {
   listRuntimeSlots(projectId: string): Promise<RuntimeSlotView[]>;
   /** Unified create — preferred entry. */
   createSlot(input: CreateSlotInput): Promise<RuntimeSlotView>;
+  /** Unified update — role reassignment and auth-branch fields. */
+  updateSlot(input: UpdateSlotInput): Promise<RuntimeSlotView>;
+  /** @deprecated UI must use createSlot; kept for host legacy registration. */
   createGrokLoginSlot(
     input: CreateGrokLoginSlotInput,
   ): Promise<RuntimeSlotView>;
+  /** @deprecated UI must use createSlot; kept for host legacy registration. */
   createGrokApiKeySlot(
     input: CreateGrokApiKeySlotInput,
   ): Promise<RuntimeSlotView>;
@@ -218,6 +301,7 @@ export interface RuntimeSlotsGateway {
   updateGrokApiKeySlot(
     input: UpdateGrokApiKeySlotInput,
   ): Promise<RuntimeSlotView>;
+  /** @deprecated UI must use createSlot; kept for host legacy registration. */
   createExternalCliSlot(
     input: CreateExternalCliSlotInput,
   ): Promise<RuntimeSlotView>;
@@ -267,6 +351,32 @@ export const GOVERNED_GROK_BADGE = "受 Pillow 完整治理";
 
 /** Default custom role applied to migrated / unspecified slots. */
 export const DEFAULT_CUSTOM_ROLE_NAME = "未分配";
+
+/**
+ * Guidance when the project has zero slots.
+ * Next step: create the first slot (preferably as 总控 with governed auth).
+ */
+export const GUIDANCE_NO_SLOTS_HEADING = "还没有槽位";
+
+export const GUIDANCE_NO_SLOTS_BODY =
+  "请先新建一个槽位。没有总控时无法在 Pillow 里对话；建议将第一个受治理槽位（API key 或已登录的 Grok）设为总控。也可稍后指定信息管理员（不强制）。";
+
+/**
+ * Guidance when slots exist but none is controller.
+ * Next step: reassign an existing governed slot’s role, or create one as 总控.
+ */
+export const GUIDANCE_NO_CONTROLLER_HEADING = "尚未指定总控";
+
+export const GUIDANCE_NO_CONTROLLER_BODY =
+  "当前已有槽位，但没有总控。没有总控就无法在 Pillow 里对话。请将某个受治理槽位（API key 或已登录的 Grok）的角色改为总控，或新建一个总控槽位。建议再设一位信息管理员（不强制）。";
+
+/** Soft suggestion when controller exists but no librarian. */
+export const GUIDANCE_LIBRARIAN_SUGGESTION =
+  "建议设置一位信息管理员，便于知识与资料侧协助（不强制）。";
+
+/** Why controller is disabled when local CLI auth is selected. */
+export const CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT =
+  "总控必须使用受治理认证（API key 或已登录的 Grok）。本机 CLI 不受治理，不能担任总控。";
 
 /** Saved API-key slot shows status only — never ciphertext or plaintext. */
 export const SECRET_CONFIGURED_LABEL = "已配置";

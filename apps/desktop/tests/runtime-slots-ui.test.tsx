@@ -107,6 +107,13 @@ describe("RuntimeSlotsSection — create API-key flow", () => {
     await user.click(screen.getByTestId("runtime-slots-add"));
 
     await user.type(screen.getByTestId("runtime-slots-display-name"), "My Grok");
+    await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
+    // Custom role so create does not require controller uniqueness later.
+    await user.click(screen.getByTestId("runtime-slots-role-custom"));
+    await user.type(
+      screen.getByTestId("runtime-slots-role-custom-name"),
+      "写码",
+    );
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
       "https://api.example.test/v1",
@@ -126,6 +133,8 @@ describe("RuntimeSlotsSection — create API-key flow", () => {
     const created = gateway.getSlotsSnapshot()[0]!;
     expect(created.secretConfigured).toBe(true);
     expect(JSON.stringify(created)).not.toContain(TEST_API_KEY);
+    expect(gateway.lastCreateSlotArgs.at(-1)?.apiKey).toBe(TEST_API_KEY);
+    expect(gateway.lastCreateSlotArgs.at(-1)?.authKind).toBe("api_key");
     expect(gateway.lastCreateApiKeyArgs.at(-1)?.apiKey).toBe(TEST_API_KEY);
   });
 });
@@ -177,10 +186,10 @@ describe("RuntimeSlotsSection — external CLI ungoverned copy", () => {
     expect(banner).toHaveTextContent(EXTERNAL_CLI_UNGOVERNED_BODY);
     expect(banner).toHaveTextContent("不经过提案与审批");
 
-    // Create form also shows the same warning before save.
+    // Create form also shows the same warning before save (local_cli auth).
     const user = userEvent.setup();
     await user.click(screen.getByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-kind-external"));
+    await user.click(screen.getByTestId("runtime-slots-auth-local_cli"));
     const createWarn = screen.getByTestId(
       "runtime-slots-create-ungoverned-warning",
     );

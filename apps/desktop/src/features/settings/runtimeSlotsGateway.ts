@@ -31,6 +31,7 @@ import {
   type RuntimeSlotsGateway,
   RuntimeSlotsGatewayError,
   type UpdateGrokApiKeySlotInput,
+  type UpdateSlotInput,
 } from "./runtimeSlotsTypes";
 
 const INVALID_RESPONSE =
@@ -807,6 +808,31 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
     return invokeSlotCommand("create_slot", args, parseRuntimeSlotView);
   }
 
+  updateSlot(input: UpdateSlotInput): Promise<RuntimeSlotView> {
+    const args: Record<string, unknown> = {
+      projectId: input.projectId,
+      slotId: input.slotId,
+      displayName: input.displayName,
+    };
+    if (input.role !== undefined) args.role = input.role;
+    if (input.roleCustomName !== undefined) {
+      args.roleCustomName = input.roleCustomName;
+    }
+    if (input.baseUrl !== undefined) args.baseUrl = input.baseUrl;
+    if (input.modelId !== undefined) args.modelId = input.modelId;
+    // Empty / whitespace key = keep secret (omit from wire).
+    if (input.apiKey !== undefined && input.apiKey.trim().length > 0) {
+      args.apiKey = input.apiKey.trim();
+    }
+    if (input.executablePath !== undefined) {
+      args.executablePath = input.executablePath;
+    }
+    if (input.launchArgs !== undefined) args.launchArgs = input.launchArgs;
+    if (input.statusArgs !== undefined) args.statusArgs = input.statusArgs;
+    if (input.keepAuth !== undefined) args.keepAuth = input.keepAuth;
+    return invokeSlotCommand("update_slot", args, parseRuntimeSlotView);
+  }
+
   createGrokLoginSlot(
     input: CreateGrokLoginSlotInput,
   ): Promise<RuntimeSlotView> {
@@ -931,6 +957,10 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   readonly lastUpdateApiKeyArgs: Array<ReturnType<
     typeof buildUpdateGrokApiKeySlotArgs
   >> = [];
+  /** Last unified create_slot inputs (tests: UI must call createSlot only). */
+  readonly lastCreateSlotArgs: CreateSlotInput[] = [];
+  /** Last unified update_slot inputs. */
+  readonly lastUpdateSlotArgs: UpdateSlotInput[] = [];
   readonly lastSetModelArgs: Array<{
     projectId: string;
     slotId: string;
@@ -1006,6 +1036,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   }
 
   async createSlot(input: CreateSlotInput): Promise<RuntimeSlotView> {
+    this.lastCreateSlotArgs.push({ ...input });
     const role = input.role ?? "custom";
     const roleCustomName =
       role === "custom"
@@ -1118,6 +1149,88 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
     };
     this.slots.push(slot);
     return { ...slot };
+  }
+
+  async updateSlot(input: UpdateSlotInput): Promise<RuntimeSlotView> {
+    this.lastUpdateSlotArgs.push({ ...input });
+    const index = this.slots.findIndex(
+      (slot) =>
+        slot.slotId === input.slotId && slot.projectId === input.projectId,
+    );
+    if (index < 0) {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_not_found",
+        mapRuntimeSlotErrorMessage("runtime_slot_not_found"),
+      );
+    }
+    const current = this.slots[index]!;
+    const nextRole = input.role ?? current.role;
+    if (nextRole === "controller") {
+      if (current.kind === "external_cli" || current.governance !== "full") {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_controller_requires_governed_auth",
+          mapRuntimeSlotErrorMessage(
+            "runtime_slot_controller_requires_governed_auth",
+          ),
+        );
+      }
+      if (
+        this.slots.some(
+          (slot) =>
+            slot.projectId === input.projectId
+            && slot.role === "controller"
+            && slot.slotId !== input.slotId,
+        )
+      ) {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_controller_already_exists",
+          mapRuntimeSlotErrorMessage(
+            "runtime_slot_controller_already_exists",
+          ),
+        );
+      }
+    }
+    const roleCustomName =
+      nextRole === "custom"
+        ? (input.roleCustomName?.trim()
+          || current.roleCustomName
+          || DEFAULT_CUSTOM_ROLE_NAME)
+        : null;
+    current.displayName = input.displayName.trim() || current.displayName;
+    current.role = nextRole;
+    current.roleCustomName = roleCustomName;
+    if (!input.keepAuth) {
+      if (input.baseUrl !== undefined && current.authMode === "api_key") {
+        current.baseUrl = input.baseUrl;
+      }
+      if (input.modelId !== undefined && current.kind === "governed_grok") {
+        current.modelId = input.modelId;
+      }
+      if (
+        input.apiKey !== undefined
+        && input.apiKey.trim().length > 0
+        && current.authMode === "api_key"
+      ) {
+        const ref = current.secretRef ?? cryptoRandomId();
+        this.secrets.set(ref, input.apiKey.trim());
+        current.secretRef = ref;
+        current.secretConfigured = true;
+      }
+      if (current.kind === "external_cli") {
+        if (input.executablePath !== undefined) {
+          current.executablePath = input.executablePath;
+        }
+        if (input.launchArgs !== undefined) {
+          current.launchArgs = [...input.launchArgs];
+        }
+        if (input.statusArgs !== undefined) {
+          current.statusArgs = [...input.statusArgs];
+        }
+      }
+    }
+    current.updatedAt = new Date().toISOString();
+    this.slots[index] = current;
+    return { ...current };
   }
 
   async createGrokLoginSlot(

@@ -1,29 +1,39 @@
 /**
- * Project-scoped runtime slots: create, edit (API-key keep-on-blank), probe.
+ * Project-scoped runtime slots: unified create (name → auth → role),
+ * role reassignment, and API-key edit (keep-on-blank).
  * Secrets never enter localStorage / sessionStorage / URL; drafts clear on save.
  * Host errors are never console-logged (may carry secret-shaped detail).
  */
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { RuntimeSlotModelPicker } from "./RuntimeSlotModelPicker";
 import {
   MockRuntimeSlotsGateway,
   TauriRuntimeSlotsGateway,
   classifyExternalCliStatus,
   mapGrokProbeFailureMessage,
+  mapRuntimeSlotErrorMessage,
 } from "./runtimeSlotsGateway";
 import {
+  CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT,
   EXTERNAL_CLI_UNGOVERNED_BANNER,
   EXTERNAL_CLI_UNGOVERNED_BODY,
   EXTERNAL_CLI_UNGOVERNED_HEADING,
   GOVERNED_GROK_BADGE,
+  GUIDANCE_LIBRARIAN_SUGGESTION,
+  GUIDANCE_NO_CONTROLLER_BODY,
+  GUIDANCE_NO_CONTROLLER_HEADING,
+  GUIDANCE_NO_SLOTS_BODY,
+  GUIDANCE_NO_SLOTS_HEADING,
   SECRET_CONFIGURED_LABEL,
   SECRET_NOT_CONFIGURED_LABEL,
-  type GrokSlotAuthMode,
-  type RuntimeSlotKind,
+  SLOT_AUTH_METHODS,
+  SLOT_ROLE_OPTIONS,
   type RuntimeSlotModelSwitchView,
+  type RuntimeSlotRole,
   type RuntimeSlotView,
   type RuntimeSlotsGateway,
+  type SlotAuthKind,
   RuntimeSlotsGatewayError,
 } from "./runtimeSlotsTypes";
 import "../../styles/runtime-slots.css";
@@ -34,9 +44,6 @@ export type RuntimeSlotsSectionProps = {
 };
 
 type FormMode = "closed" | "create" | "edit";
-
-type CreateKind = RuntimeSlotKind;
-type CreateAuth = GrokSlotAuthMode;
 
 type ProbeResult = {
   slotId: string;
@@ -62,6 +69,31 @@ export function parseArgvField(value: string): string[] {
     .filter((part) => part.length > 0);
 }
 
+function roleLabel(slot: RuntimeSlotView): string {
+  if (slot.role === "controller") return "总控";
+  if (slot.role === "librarian") return "信息管理员";
+  return slot.roleCustomName ?? "未分配";
+}
+
+function authAllowsController(authKind: SlotAuthKind): boolean {
+  const method = SLOT_AUTH_METHODS.find((entry) => entry.id === authKind);
+  return method?.allowsController ?? false;
+}
+
+function slotAllowsController(slot: RuntimeSlotView): boolean {
+  return slot.kind === "governed_grok" && slot.governance === "full";
+}
+
+function mapSaveError(cause: unknown): string {
+  if (cause instanceof RuntimeSlotsGatewayError) {
+    return mapRuntimeSlotErrorMessage(cause.code);
+  }
+  if (cause instanceof Error && cause.message.trim()) {
+    return cause.message;
+  }
+  return "保存槽位失败。";
+}
+
 export function RuntimeSlotsSection({
   projectId,
   gateway: gatewayProp,
@@ -84,8 +116,10 @@ export function RuntimeSlotsSection({
 
   const [formMode, setFormMode] = useState<FormMode>("closed");
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
-  const [createKind, setCreateKind] = useState<CreateKind>("governed_grok");
-  const [createAuth, setCreateAuth] = useState<CreateAuth>("api_key");
+  /** Unified create auth — data-driven from SLOT_AUTH_METHODS. */
+  const [createAuthKind, setCreateAuthKind] = useState<SlotAuthKind>("api_key");
+  const [createRole, setCreateRole] = useState<RuntimeSlotRole>("controller");
+  const [roleCustomName, setRoleCustomName] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [modelId, setModelId] = useState("");
@@ -94,6 +128,21 @@ export function RuntimeSlotsSection({
   const [executablePath, setExecutablePath] = useState("");
   const [launchArgsText, setLaunchArgsText] = useState("");
   const [statusArgsText, setStatusArgsText] = useState("");
+
+  /** Inline role editor for an existing list row. */
+  const [roleEditSlotId, setRoleEditSlotId] = useState<string | null>(null);
+  const [roleEditRole, setRoleEditRole] = useState<RuntimeSlotRole>("custom");
+  const [roleEditCustomName, setRoleEditCustomName] = useState("");
+
+  const hasController = useMemo(
+    () => slots.some((slot) => slot.role === "controller"),
+    [slots],
+  );
+  const hasLibrarian = useMemo(
+    () => slots.some((slot) => slot.role === "librarian"),
+    [slots],
+  );
+  const controllerAllowedForCreate = authAllowsController(createAuthKind);
 
   const reload = useCallback(async () => {
     if (!projectId) {
@@ -130,13 +179,17 @@ export function RuntimeSlotsSection({
     setLaunchArgsText("");
     setStatusArgsText("");
     setEditingSlotId(null);
-    setCreateKind("governed_grok");
-    setCreateAuth("api_key");
+    setCreateAuthKind("api_key");
+    setCreateRole("controller");
+    setRoleCustomName("");
   }
 
   function openCreate(): void {
     resetFormDrafts();
+    // Suggest controller only when the project has none yet.
+    setCreateRole(hasController ? "custom" : "controller");
     setFormMode("create");
+    setRoleEditSlotId(null);
     setNotice(null);
     setError(null);
     setProbe(null);
@@ -148,13 +201,15 @@ export function RuntimeSlotsSection({
     }
     setFormMode("edit");
     setEditingSlotId(slot.slotId);
-    setCreateKind("governed_grok");
-    setCreateAuth("api_key");
+    setCreateAuthKind("api_key");
+    setCreateRole(slot.role);
+    setRoleCustomName(slot.roleCustomName ?? "");
     setDisplayName(slot.displayName);
     setBaseUrl(slot.baseUrl ?? "");
     setModelId(slot.modelId ?? "");
     // Leave secret field blank = keep stored value.
     setApiKeyDraft("");
+    setRoleEditSlotId(null);
     setNotice(null);
     setError(null);
     setProbe(null);
@@ -163,6 +218,29 @@ export function RuntimeSlotsSection({
   function closeForm(): void {
     setFormMode("closed");
     resetFormDrafts();
+  }
+
+  function selectCreateAuth(kind: SlotAuthKind): void {
+    setCreateAuthKind(kind);
+    if (!authAllowsController(kind) && createRole === "controller") {
+      setCreateRole("custom");
+    }
+  }
+
+  function openRoleEdit(slot: RuntimeSlotView): void {
+    setRoleEditSlotId(slot.slotId);
+    setRoleEditRole(slot.role);
+    setRoleEditCustomName(slot.roleCustomName ?? "");
+    setFormMode("closed");
+    resetFormDrafts();
+    setError(null);
+    setNotice(null);
+  }
+
+  function closeRoleEdit(): void {
+    setRoleEditSlotId(null);
+    setRoleEditRole("custom");
+    setRoleEditCustomName("");
   }
 
   async function handleSave(event: FormEvent): Promise<void> {
@@ -180,71 +258,161 @@ export function RuntimeSlotsSection({
     setNotice(null);
     try {
       if (formMode === "edit" && editingSlotId) {
+        const editKey = apiKeyDraft;
+        // Clear draft before host call so failures never leave key material in DOM.
+        setApiKeyDraft("");
         await gateway.updateGrokApiKeySlot({
           projectId,
           slotId: editingSlotId,
           displayName: name,
           baseUrl: baseUrl.trim(),
           modelId: modelId.trim(),
-          apiKey: apiKeyDraft,
+          apiKey: editKey,
         });
-        // Clear draft key from React state immediately after send.
-        setApiKeyDraft("");
+        // Role may have changed in the same form.
+        const editing = slots.find((slot) => slot.slotId === editingSlotId);
+        if (
+          editing
+          && (createRole !== editing.role
+            || (createRole === "custom"
+              && (roleCustomName.trim() || "未分配")
+                !== (editing.roleCustomName ?? "未分配")))
+        ) {
+          if (createRole === "controller" && !slotAllowsController(editing)) {
+            setError(CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT);
+            setBusy(false);
+            return;
+          }
+          if (createRole === "custom" && !roleCustomName.trim()) {
+            setError("自定义角色需要填写名称。");
+            setBusy(false);
+            return;
+          }
+          await gateway.updateSlot({
+            projectId,
+            slotId: editingSlotId,
+            displayName: name,
+            role: createRole,
+            roleCustomName:
+              createRole === "custom" ? roleCustomName.trim() : undefined,
+            keepAuth: true,
+          });
+        }
         setNotice("槽位已更新。");
-      } else if (createKind === "governed_grok" && createAuth === "login") {
-        await gateway.createGrokLoginSlot({
-          projectId,
-          displayName: name,
-        });
-        setNotice("已创建 Grok 登录槽位（使用默认 profile）。");
-      } else if (createKind === "governed_grok" && createAuth === "api_key") {
-        const key = apiKeyDraft.trim();
-        if (!key) {
-          setError("创建 API-key 槽位时必须填写 API key。");
-          setBusy(false);
-          return;
-        }
-        if (!baseUrl.trim() || !modelId.trim()) {
-          setError("请填写端点 base_url 与模型 id。");
-          setBusy(false);
-          return;
-        }
-        await gateway.createGrokApiKeySlot({
-          projectId,
-          displayName: name,
-          baseUrl: baseUrl.trim(),
-          modelId: modelId.trim(),
-          apiKey: key,
-        });
-        setApiKeyDraft("");
-        setNotice("已创建 API-key 槽位。密钥已交由宿主保管，界面仅显示「已配置」。");
       } else {
-        const statusArgs = parseArgvField(statusArgsText);
-        if (!executablePath.trim()) {
-          setError("请填写可执行文件的绝对路径。");
+        // Create: single gateway.createSlot call.
+        if (createRole === "controller" && !controllerAllowedForCreate) {
+          setError(CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT);
           setBusy(false);
           return;
         }
-        if (statusArgs.length === 0) {
-          setError("请填写至少一项账号状态命令参数（例如 login status）。");
+        if (createRole === "custom" && !roleCustomName.trim()) {
+          setError("自定义角色需要填写名称。");
           setBusy(false);
           return;
         }
-        await gateway.createExternalCliSlot({
-          projectId,
-          displayName: name,
-          executablePath: executablePath.trim(),
-          launchArgs: parseArgvField(launchArgsText),
-          statusArgs,
-        });
-        setNotice("已登记外部 CLI 槽位（不受治理）。");
+
+        if (createAuthKind === "api_key") {
+          const key = apiKeyDraft.trim();
+          if (!key) {
+            setError("创建 API-key 槽位时必须填写 API key。");
+            setBusy(false);
+            return;
+          }
+          if (!baseUrl.trim() || !modelId.trim()) {
+            setError("请填写端点 base_url 与模型 id。");
+            setBusy(false);
+            return;
+          }
+          // Clear draft before await so a host failure never leaves key material in DOM.
+          setApiKeyDraft("");
+          await gateway.createSlot({
+            projectId,
+            displayName: name,
+            authKind: "api_key",
+            role: createRole,
+            roleCustomName:
+              createRole === "custom" ? roleCustomName.trim() : undefined,
+            baseUrl: baseUrl.trim(),
+            modelId: modelId.trim(),
+            apiKey: key,
+          });
+          setNotice(
+            "已创建槽位。密钥已交由宿主保管，界面仅显示「已配置」。",
+          );
+        } else if (createAuthKind === "grok_login") {
+          await gateway.createSlot({
+            projectId,
+            displayName: name,
+            authKind: "grok_login",
+            role: createRole,
+            roleCustomName:
+              createRole === "custom" ? roleCustomName.trim() : undefined,
+          });
+          setNotice("已创建槽位（使用本机默认 Grok 登录 profile）。");
+        } else {
+          const statusArgs = parseArgvField(statusArgsText);
+          if (!executablePath.trim()) {
+            setError("请填写可执行文件的绝对路径。");
+            setBusy(false);
+            return;
+          }
+          if (statusArgs.length === 0) {
+            setError("请填写至少一项账号状态命令参数（例如 login status）。");
+            setBusy(false);
+            return;
+          }
+          await gateway.createSlot({
+            projectId,
+            displayName: name,
+            authKind: "local_cli",
+            role: createRole,
+            roleCustomName:
+              createRole === "custom" ? roleCustomName.trim() : undefined,
+            executablePath: executablePath.trim(),
+            launchArgs: parseArgvField(launchArgsText),
+            statusArgs,
+          });
+          setNotice("已创建槽位（本机 CLI，不受治理）。");
+        }
       }
       closeForm();
       await reload();
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "保存槽位失败。";
-      setError(message);
+      setError(mapSaveError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRoleSave(slot: RuntimeSlotView): Promise<void> {
+    if (!projectId || busy) return;
+    if (roleEditRole === "controller" && !slotAllowsController(slot)) {
+      setError(CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT);
+      return;
+    }
+    if (roleEditRole === "custom" && !roleEditCustomName.trim()) {
+      setError("自定义角色需要填写名称。");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await gateway.updateSlot({
+        projectId,
+        slotId: slot.slotId,
+        displayName: slot.displayName,
+        role: roleEditRole,
+        roleCustomName:
+          roleEditRole === "custom" ? roleEditCustomName.trim() : undefined,
+        keepAuth: true,
+      });
+      closeRoleEdit();
+      setNotice("角色已更新。");
+      await reload();
+    } catch (cause) {
+      setError(mapSaveError(cause));
     } finally {
       setBusy(false);
     }
@@ -362,10 +530,41 @@ export function RuntimeSlotsSection({
       <div className="runtime-slots__head">
         <h3>运行时槽位</h3>
         <p>
-          为当前项目配置受治理的 Grok 槽位，或登记不受治理的外部 CLI。
+          所有槽位平等：新建时填写名称、选择认证方式、分配角色。
           API key 仅在提交时发送给宿主，保存后界面只显示「已配置」。
         </p>
       </div>
+
+      {/* T3: distinguish zero slots vs slots-without-controller. */}
+      {!loading && slots.length === 0 ? (
+        <p
+          className="runtime-slots-ungoverned"
+          data-testid="runtime-slots-guidance-no-slots"
+          role="status"
+        >
+          <strong>{GUIDANCE_NO_SLOTS_HEADING}</strong>
+          。{GUIDANCE_NO_SLOTS_BODY}
+        </p>
+      ) : null}
+      {!loading && slots.length > 0 && !hasController ? (
+        <p
+          className="runtime-slots-ungoverned"
+          data-testid="runtime-slots-guidance-no-controller"
+          role="status"
+        >
+          <strong>{GUIDANCE_NO_CONTROLLER_HEADING}</strong>
+          。{GUIDANCE_NO_CONTROLLER_BODY}
+        </p>
+      ) : null}
+      {!loading && hasController && !hasLibrarian ? (
+        <p
+          className="runtime-slots__hint"
+          data-testid="runtime-slots-guidance-librarian"
+          role="note"
+        >
+          {GUIDANCE_LIBRARIAN_SUGGESTION}
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="runtime-slots__status">正在加载槽位…</p>
@@ -374,7 +573,7 @@ export function RuntimeSlotsSection({
           className="runtime-slots__hint"
           data-testid="runtime-slots-empty"
         >
-          尚未配置槽位。点击下方按钮新增。
+          点击下方「新建槽位」开始配置。
         </p>
       ) : (
         <ul className="runtime-slots-list" data-testid="runtime-slots-list">
@@ -410,17 +609,13 @@ export function RuntimeSlotsSection({
                       ? slot.authMode === "login"
                         ? "Grok · 登录"
                         : "Grok · API key"
-                      : "外部 CLI"}
+                      : "本机 CLI"}
                   </span>
                   <span
                     className="runtime-slots-badge"
                     data-testid={`runtime-slot-role-${slot.slotId}`}
                   >
-                    {slot.role === "controller"
-                      ? "总控"
-                      : slot.role === "librarian"
-                      ? "信息管理员"
-                      : slot.roleCustomName ?? "未分配"}
+                    {roleLabel(slot)}
                   </span>
                   {slot.kind === "governed_grok"
                   && slot.governance === "full" ? (
@@ -442,6 +637,14 @@ export function RuntimeSlotsSection({
                   ) : null}
                 </div>
                 <div className="runtime-slots-list__actions">
+                  <button
+                    data-testid={`runtime-slot-role-edit-${slot.slotId}`}
+                    disabled={busy}
+                    onClick={() => openRoleEdit(slot)}
+                    type="button"
+                  >
+                    改角色
+                  </button>
                   {slot.kind === "governed_grok"
                   && slot.authMode === "api_key" ? (
                     <button
@@ -479,6 +682,95 @@ export function RuntimeSlotsSection({
                   )}
                 </div>
               </div>
+
+              {roleEditSlotId === slot.slotId ? (
+                <div
+                  className="runtime-slots-form"
+                  data-testid={`runtime-slot-role-form-${slot.slotId}`}
+                >
+                  <p className="runtime-slots-form__title">更改角色</p>
+                  <div
+                    className="runtime-slots-form__kind"
+                    role="group"
+                    aria-label="槽位角色"
+                  >
+                    {SLOT_ROLE_OPTIONS.map((option) => {
+                      const disabled =
+                        option.id === "controller"
+                        && !slotAllowsController(slot);
+                      return (
+                        <button
+                          aria-pressed={roleEditRole === option.id}
+                          data-testid={
+                            `runtime-slot-role-option-${slot.slotId}-${option.id}`
+                          }
+                          disabled={disabled || busy}
+                          key={option.id}
+                          onClick={() => setRoleEditRole(option.id)}
+                          title={
+                            disabled
+                              ? CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT
+                              : option.description
+                          }
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!slotAllowsController(slot) ? (
+                    <p
+                      className="runtime-slots__hint"
+                      data-testid={
+                        `runtime-slot-controller-cli-hint-${slot.slotId}`
+                      }
+                      role="note"
+                    >
+                      {CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT}
+                    </p>
+                  ) : null}
+                  {roleEditRole === "custom" ? (
+                    <label className="settings-field">
+                      <span className="settings-field__label">自定义角色名</span>
+                      <input
+                        aria-label="自定义角色名"
+                        autoComplete="off"
+                        className="settings-field__control"
+                        data-testid={
+                          `runtime-slot-role-custom-name-${slot.slotId}`
+                        }
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRoleEditCustomName(event.target.value)}
+                        spellCheck={false}
+                        type="text"
+                        value={roleEditCustomName}
+                      />
+                    </label>
+                  ) : null}
+                  <div className="settings-actions modal-actions">
+                    <button
+                      data-testid={
+                        `runtime-slot-role-cancel-${slot.slotId}`
+                      }
+                      disabled={busy}
+                      onClick={closeRoleEdit}
+                      type="button"
+                    >
+                      取消
+                    </button>
+                    <button
+                      data-testid={`runtime-slot-role-save-${slot.slotId}`}
+                      disabled={busy}
+                      onClick={() => void handleRoleSave(slot)}
+                      type="button"
+                    >
+                      {busy ? "保存中…" : "保存角色"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {slot.governance === "none" ? (
                 <p
@@ -556,7 +848,7 @@ export function RuntimeSlotsSection({
           onClick={openCreate}
           type="button"
         >
-          增加新槽位
+          新建槽位
         </button>
       ) : (
         <form
@@ -565,35 +857,58 @@ export function RuntimeSlotsSection({
           onSubmit={(event) => void handleSave(event)}
         >
           <p className="runtime-slots-form__title">
-            {formMode === "edit" ? "编辑 API-key 槽位" : "新增槽位"}
+            {formMode === "edit" ? "编辑 API-key 槽位" : "新建槽位"}
           </p>
 
+          <label className="settings-field">
+            <span className="settings-field__label">1. 名称</span>
+            <input
+              aria-label="槽位显示名称"
+              autoComplete="off"
+              className="settings-field__control"
+              data-testid="runtime-slots-display-name"
+              disabled={busy}
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder="例如：写码 Grok、总控"
+              spellCheck={false}
+              type="text"
+              value={displayName}
+            />
+          </label>
+
           {formMode === "create" ? (
-            <div
-              className="runtime-slots-form__kind"
-              role="group"
-              aria-label="槽位类型"
-            >
-              <button
-                aria-pressed={createKind === "governed_grok"}
-                data-testid="runtime-slots-kind-grok"
-                onClick={() => setCreateKind("governed_grok")}
-                type="button"
+            <>
+              <div
+                className="runtime-slots-form__kind"
+                role="group"
+                aria-label="2. 认证方式"
               >
-                受治理 Grok
-              </button>
-              <button
-                aria-pressed={createKind === "external_cli"}
-                data-testid="runtime-slots-kind-external"
-                onClick={() => setCreateKind("external_cli")}
-                type="button"
+                <span className="settings-field__label">2. 认证方式</span>
+                {SLOT_AUTH_METHODS.map((method) => (
+                  <button
+                    aria-pressed={createAuthKind === method.id}
+                    data-testid={`runtime-slots-auth-${method.id}`}
+                    key={method.id}
+                    onClick={() => selectCreateAuth(method.id)}
+                    title={method.description}
+                    type="button"
+                  >
+                    {method.label}
+                  </button>
+                ))}
+              </div>
+              <p
+                className="runtime-slots__hint"
+                data-testid="runtime-slots-auth-description"
+                role="note"
               >
-                外部 CLI
-              </button>
-            </div>
+                {SLOT_AUTH_METHODS.find((m) => m.id === createAuthKind)
+                  ?.description}
+              </p>
+            </>
           ) : null}
 
-          {formMode === "create" && createKind === "external_cli" ? (
+          {formMode === "create" && createAuthKind === "local_cli" ? (
             <p
               className="runtime-slots-ungoverned"
               data-testid="runtime-slots-create-ungoverned-warning"
@@ -604,50 +919,8 @@ export function RuntimeSlotsSection({
             </p>
           ) : null}
 
-          {formMode === "create" && createKind === "governed_grok" ? (
-            <div
-              className="runtime-slots-form__kind"
-              role="group"
-              aria-label="Grok 认证方式"
-            >
-              <button
-                aria-pressed={createAuth === "api_key"}
-                data-testid="runtime-slots-auth-api-key"
-                onClick={() => setCreateAuth("api_key")}
-                type="button"
-              >
-                API key
-              </button>
-              <button
-                aria-pressed={createAuth === "login"}
-                data-testid="runtime-slots-auth-login"
-                onClick={() => setCreateAuth("login")}
-                type="button"
-              >
-                登录 profile
-              </button>
-            </div>
-          ) : null}
-
-          <label className="settings-field">
-            <span className="settings-field__label">显示名称</span>
-            <input
-              aria-label="槽位显示名称"
-              autoComplete="off"
-              className="settings-field__control"
-              data-testid="runtime-slots-display-name"
-              disabled={busy}
-              onChange={(event) => setDisplayName(event.target.value)}
-              spellCheck={false}
-              type="text"
-              value={displayName}
-            />
-          </label>
-
           {(formMode === "edit"
-            || (formMode === "create"
-              && createKind === "governed_grok"
-              && createAuth === "api_key")) ? (
+            || (formMode === "create" && createAuthKind === "api_key")) ? (
             <>
               <label className="settings-field">
                 <span className="settings-field__label">端点 base_url</span>
@@ -712,12 +985,12 @@ export function RuntimeSlotsSection({
             </>
           ) : null}
 
-          {formMode === "create" && createKind === "external_cli" ? (
+          {formMode === "create" && createAuthKind === "local_cli" ? (
             <>
               <label className="settings-field">
                 <span className="settings-field__label">可执行文件路径</span>
                 <input
-                  aria-label="外部 CLI 可执行文件路径"
+                  aria-label="本机 CLI 可执行文件路径"
                   autoComplete="off"
                   className="settings-field__control"
                   data-testid="runtime-slots-executable"
@@ -734,7 +1007,7 @@ export function RuntimeSlotsSection({
                   调用参数（空格分隔，可空）
                 </span>
                 <input
-                  aria-label="外部 CLI 调用参数"
+                  aria-label="本机 CLI 调用参数"
                   autoComplete="off"
                   className="settings-field__control"
                   data-testid="runtime-slots-launch-args"
@@ -750,7 +1023,7 @@ export function RuntimeSlotsSection({
                   账号状态参数（空格分隔，必填）
                 </span>
                 <input
-                  aria-label="外部 CLI 账号状态参数"
+                  aria-label="本机 CLI 账号状态参数"
                   autoComplete="off"
                   className="settings-field__control"
                   data-testid="runtime-slots-status-args"
@@ -765,13 +1038,71 @@ export function RuntimeSlotsSection({
             </>
           ) : null}
 
-          {formMode === "create"
-          && createKind === "governed_grok"
-          && createAuth === "login" ? (
-            <p className="runtime-slots__hint" role="note">
+          {formMode === "create" && createAuthKind === "grok_login" ? (
+            <p
+              className="runtime-slots__hint"
+              data-testid="runtime-slots-login-hint"
+              role="note"
+            >
               使用本机默认 Grok 登录 profile。登录由 Grok CLI 管理，Pillow
               不存储该登录。
             </p>
+          ) : null}
+
+          <div
+            className="runtime-slots-form__kind"
+            role="group"
+            aria-label="3. 角色"
+          >
+            <span className="settings-field__label">3. 角色</span>
+            {SLOT_ROLE_OPTIONS.map((option) => {
+              const disabled =
+                option.id === "controller" && !controllerAllowedForCreate
+                && formMode === "create";
+              return (
+                <button
+                  aria-pressed={createRole === option.id}
+                  data-testid={`runtime-slots-role-${option.id}`}
+                  disabled={disabled || busy}
+                  key={option.id}
+                  onClick={() => setCreateRole(option.id)}
+                  title={
+                    disabled
+                      ? CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT
+                      : option.description
+                  }
+                  type="button"
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          {formMode === "create" && !controllerAllowedForCreate ? (
+            <p
+              className="runtime-slots__hint"
+              data-testid="runtime-slots-controller-cli-disabled"
+              role="note"
+            >
+              {CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT}
+            </p>
+          ) : null}
+          {createRole === "custom" ? (
+            <label className="settings-field">
+              <span className="settings-field__label">自定义角色名</span>
+              <input
+                aria-label="自定义角色名"
+                autoComplete="off"
+                className="settings-field__control"
+                data-testid="runtime-slots-role-custom-name"
+                disabled={busy}
+                onChange={(event) => setRoleCustomName(event.target.value)}
+                placeholder="例如：写码、审阅"
+                spellCheck={false}
+                type="text"
+                value={roleCustomName}
+              />
+            </label>
           ) : null}
 
           {/* Hidden marker for tests asserting ungoverned copy constant. */}
