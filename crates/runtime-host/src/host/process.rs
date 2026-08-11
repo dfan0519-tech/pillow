@@ -42,9 +42,9 @@ use keeper_process_executor::{
     OutputObserver,
 };
 use keeper_storage_sqlite::{
-    ExecDecisionOutcome, PermissionRuleAction, PermissionRulePrefix,
-    PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository, StoredExecProposal,
-    StoredPermissionRuleReceipt,
+    ExecDecisionOutcome, PermissionMode, PermissionRuleAction, PermissionRulePrefix,
+    PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository, SqliteSettingsRepository,
+    StoredExecProposal, StoredPermissionRuleReceipt,
 };
 use keeper_tool_executor::{
     ClaimedObserver, GovernedProcessError, GovernedProcessExecution, GovernedProcessOutcome,
@@ -58,8 +58,9 @@ use uuid::Uuid;
 
 use crate::governed_write::{generate_approval_grant, grant_digest};
 use crate::permission_rules::{
-    HostPermissionRuleConjunctionEvaluation, PermissionRuleAttributionView,
-    attribution_from_receipt, evaluate_host_permission_rule_conjunction,
+    HostPermissionRuleConjunctionEvaluation, PermissionGovernanceRepositories,
+    PermissionRuleAttributionView, attribution_from_receipt,
+    evaluate_host_permission_rule_conjunction,
 };
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -224,6 +225,7 @@ struct BoundProcessRun {
     capability: ProjectCapability,
     gateway: Arc<GovernedProcessToolGateway>,
     permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    permission_settings: Option<Arc<SqliteSettingsRepository>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -264,7 +266,7 @@ struct LiveProcessEntry {
     observer_delivery_in_progress: bool,
     observer_failure_cleanup_in_progress: bool,
     observer_quarantine_deferred: bool,
-    auto_rule_pending: bool,
+    auto_decision_pending: bool,
     /// Structured commands expose one canonical subject. Shell audit subjects
     /// live in ordered durable segment receipts, so this compatibility string
     /// stays empty rather than flattening away segment boundaries.
@@ -462,7 +464,7 @@ pub(crate) fn open_process_gateway(
 pub(crate) fn bind_process_run(
     owner: Uuid,
     gateway: Arc<GovernedProcessToolGateway>,
-    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    permissions: PermissionGovernanceRepositories,
     run_id: RunId,
     project_id: impl Into<String>,
     conversation_id: impl Into<String>,
@@ -487,7 +489,8 @@ pub(crate) fn bind_process_run(
             context,
             capability,
             gateway,
-            permission_rules,
+            permission_rules: permissions.rules,
+            permission_settings: permissions.settings,
         }),
     );
     let (conversation, capability) = {
@@ -1006,10 +1009,27 @@ fn execute_governed_sealed(
     } else {
         HostPermissionRuleConjunctionEvaluation::RequireConfirmation
     };
-    let auto_rule_pending = !matches!(
+    let permission_mode = if matches!(
         &rule_evaluation,
         HostPermissionRuleConjunctionEvaluation::RequireConfirmation
-    );
+    ) {
+        match bound.permission_settings.as_deref() {
+            Some(settings) => match settings.resolve_permission_mode() {
+                Ok(resolved) => resolved.value,
+                Err(_) => {
+                    fail_closed_after_reserve(&proposal_id, &bound);
+                    return Err(GovernedProcessBridgeError::Gateway);
+                }
+            },
+            None => PermissionMode::Default,
+        }
+    } else {
+        PermissionMode::Default
+    };
+    let auto_decision_pending = !matches!(
+        &rule_evaluation,
+        HostPermissionRuleConjunctionEvaluation::RequireConfirmation
+    ) || permission_mode.automatically_approves_processes();
 
     let requested = ProcessProposalRequestedView {
         proposal_id: proposal_id.clone(),
@@ -1074,7 +1094,7 @@ fn execute_governed_sealed(
                 observer_delivery_in_progress: false,
                 observer_failure_cleanup_in_progress: false,
                 observer_quarantine_deferred: false,
-                auto_rule_pending,
+                auto_decision_pending,
                 rule_subject,
                 rule_segments,
                 auto_approved_by_rule: None,
@@ -1094,12 +1114,22 @@ fn execute_governed_sealed(
         HostPermissionRuleConjunctionEvaluation::Deny(matched) => Some(vec![matched]),
         HostPermissionRuleConjunctionEvaluation::RequireConfirmation => None,
     };
-    if let Some(matched) = rule_matches
-        && let Err(error) = decide_process_proposal_by_rules(
+    if let Some(matched) = rule_matches {
+        if let Err(error) = decide_process_proposal_by_rules(
             bound.owner,
             bound.context.conversation_id(),
             &proposal_id,
             &matched,
+        ) {
+            fail_closed_after_reserve(&proposal_id, &bound);
+            return Err(error);
+        }
+    } else if permission_mode.automatically_approves_processes()
+        && let Err(error) = decide_process_proposal_by_permission_mode(
+            bound.owner,
+            bound.context.conversation_id(),
+            &proposal_id,
+            permission_mode,
         )
     {
         fail_closed_after_reserve(&proposal_id, &bound);
@@ -1696,7 +1726,7 @@ pub fn list_process_proposals(
                 && entry.metadata.state == ExecProposalState::PendingApproval
                 && now < entry.expires_at
                 && !entry.raw_grant.is_empty()
-                && !entry.auto_rule_pending;
+                && !entry.auto_decision_pending;
             seen.insert(entry.proposal_id.clone());
             views.push(live_view_from_entry(entry, decision_available));
         }
@@ -1835,7 +1865,7 @@ pub fn decide_process_proposal(
     proposal_id: &str,
     decision: ExecDecision,
 ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
-    decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, None)
+    decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, None, None)
 }
 
 fn decide_process_proposal_by_rules(
@@ -1851,7 +1881,33 @@ fn decide_process_proposal_by_rules(
         PermissionRuleAction::Allow => ExecDecision::ApproveOnce,
         PermissionRuleAction::Deny => ExecDecision::Reject,
     };
-    decide_process_proposal_inner(owner, conversation_id, proposal_id, decision, Some(matched))
+    decide_process_proposal_inner(
+        owner,
+        conversation_id,
+        proposal_id,
+        decision,
+        Some(matched),
+        None,
+    )
+}
+
+fn decide_process_proposal_by_permission_mode(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    permission_mode: PermissionMode,
+) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
+    if !permission_mode.automatically_approves_processes() {
+        return Err(GovernedProcessBridgeError::DecisionDenied);
+    }
+    decide_process_proposal_inner(
+        owner,
+        conversation_id,
+        proposal_id,
+        ExecDecision::ApproveOnce,
+        None,
+        Some(permission_mode),
+    )
 }
 
 fn decide_process_proposal_inner(
@@ -1860,6 +1916,7 @@ fn decide_process_proposal_inner(
     proposal_id: &str,
     decision: ExecDecision,
     matched: Option<&[PermissionRuleSegmentMatchSnapshot]>,
+    permission_mode: Option<PermissionMode>,
 ) -> Result<LiveProcessProposalView, GovernedProcessBridgeError> {
     reconcile_expired_for_owner(owner, Some(conversation_id))?;
 
@@ -1881,10 +1938,10 @@ fn decide_process_proposal_inner(
         if Utc::now() >= entry.expires_at {
             return Err(GovernedProcessBridgeError::Expired);
         }
-        if matched.is_none() && entry.raw_grant.is_empty() {
+        if matched.is_none() && permission_mode.is_none() && entry.raw_grant.is_empty() {
             return Err(GovernedProcessBridgeError::DecisionDenied);
         }
-        if matched.is_some() && !entry.auto_rule_pending {
+        if (matched.is_some() || permission_mode.is_some()) && !entry.auto_decision_pending {
             return Err(GovernedProcessBridgeError::DecisionDenied);
         }
         // Single-use: clear raw grant material at decision time.
@@ -1915,43 +1972,59 @@ fn decide_process_proposal_inner(
         )
     };
 
-    let outcome = if let Some(matched) = matched {
-        bound
-            .permission_rules
-            .as_deref()
-            .ok_or(GovernedProcessBridgeError::Gateway)?
-            .decide_exec_by_rule_segments(
-                proposal_id,
-                conversation_id,
-                matched,
-                &grant_digest_value,
-                &fingerprint,
-                Utc::now(),
-            )
-            .map_err(|error| match error {
-                keeper_storage_sqlite::ExecProposalStoreError::OwnershipMismatch => {
-                    GovernedProcessBridgeError::NotLive
-                }
-                _ => GovernedProcessBridgeError::Gateway,
-            })?
-    } else {
-        bound
-            .gateway
-            .decide_for_owner(
-                &bound.capability,
-                conversation_id,
-                proposal_id,
-                decision,
-                &grant_digest_value,
-                &fingerprint,
-            )
-            .map_err(|error| match error {
-                GovernedProcessError::CapabilityMismatch | GovernedProcessError::NotApplicable => {
-                    GovernedProcessBridgeError::NotLive
-                }
-                _ => GovernedProcessBridgeError::Gateway,
-            })?
-    };
+    let outcome =
+        if let Some(matched) = matched {
+            bound
+                .permission_rules
+                .as_deref()
+                .ok_or(GovernedProcessBridgeError::Gateway)?
+                .decide_exec_by_rule_segments(
+                    proposal_id,
+                    conversation_id,
+                    matched,
+                    &grant_digest_value,
+                    &fingerprint,
+                    Utc::now(),
+                )
+                .map_err(|error| match error {
+                    keeper_storage_sqlite::ExecProposalStoreError::OwnershipMismatch => {
+                        GovernedProcessBridgeError::NotLive
+                    }
+                    _ => GovernedProcessBridgeError::Gateway,
+                })?
+        } else if let Some(permission_mode) = permission_mode {
+            bound
+                .gateway
+                .decide_by_permission_mode_for_owner(
+                    &bound.capability,
+                    conversation_id,
+                    proposal_id,
+                    permission_mode,
+                    &grant_digest_value,
+                    &fingerprint,
+                )
+                .map_err(|error| match error {
+                    GovernedProcessError::CapabilityMismatch
+                    | GovernedProcessError::NotApplicable => GovernedProcessBridgeError::NotLive,
+                    _ => GovernedProcessBridgeError::Gateway,
+                })?
+        } else {
+            bound
+                .gateway
+                .decide_for_owner(
+                    &bound.capability,
+                    conversation_id,
+                    proposal_id,
+                    decision,
+                    &grant_digest_value,
+                    &fingerprint,
+                )
+                .map_err(|error| match error {
+                    GovernedProcessError::CapabilityMismatch
+                    | GovernedProcessError::NotApplicable => GovernedProcessBridgeError::NotLive,
+                    _ => GovernedProcessBridgeError::Gateway,
+                })?
+        };
 
     let rule_receipt = if matched.is_some() {
         bound
@@ -1963,11 +2036,11 @@ fn decide_process_proposal_inner(
     } else {
         None
     };
-    if matched.is_some()
+    if (matched.is_some() || permission_mode.is_some())
         && let Ok(mut guard) = coordinator().state.lock()
         && let Some(entry) = guard.live.get_mut(proposal_id)
     {
-        entry.auto_rule_pending = false;
+        entry.auto_decision_pending = false;
         entry.auto_approved_by_rule = rule_receipt.as_ref().map(attribution_from_receipt);
     }
 

@@ -13,6 +13,8 @@ import {
   isEnvOverride,
   parseUiThemeLabel,
   sourceLabel,
+  type PermissionModeLabel,
+  type PermissionModeSettingsView,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type SettingsGateway,
@@ -29,6 +31,8 @@ export type SettingsPanelProps = {
   onClose: () => void;
   /** Called after a successful theme write so the shell can re-apply. */
   onThemeChanged?: (theme: UiThemeLabel) => void;
+  /** Keeps the workbench's persistent mode indicator synchronized. */
+  onPermissionModeChanged?: (mode: PermissionModeLabel) => void;
   /**
    * Optional permission-rules gateway. Defaults to Tauri when the IPC bridge
    * is present; otherwise an in-memory mock (unit tests / non-desktop).
@@ -60,6 +64,12 @@ const THEME_OPTIONS: { value: UiThemeLabel; label: string }[] = [
   { value: "light", label: "浅色" },
 ];
 
+const PERMISSION_MODE_OPTIONS: { value: PermissionModeLabel; label: string }[] = [
+  { value: "default", label: "默认：写入与命令都询问" },
+  { value: "accept_edits", label: "接受改动：写入自动，命令询问" },
+  { value: "bypass", label: "全开：写入与命令都自动" },
+];
+
 /**
  * S0 settings surface: runtime adapter + Grok paths + global UI theme.
  * Env overrides are visible and read-only (ADR-0003).
@@ -80,6 +90,7 @@ export function SettingsPanel({
   projectId,
   onClose,
   onThemeChanged,
+  onPermissionModeChanged,
   permissionRulesGateway: permissionRulesGatewayProp,
 }: SettingsPanelProps) {
   const [scope, setScope] = useState<SettingsScope>("global");
@@ -87,8 +98,12 @@ export function SettingsPanel({
   const [themeSettings, setThemeSettings] = useState<ThemeSettingsView | null>(
     null,
   );
+  const [permissionModeSettings, setPermissionModeSettings] =
+    useState<PermissionModeSettingsView | null>(null);
   const [adapterDraft, setAdapterDraft] = useState<RuntimeAdapterLabel>("grok-acp");
   const [themeDraft, setThemeDraft] = useState<UiThemeLabel>("dark");
+  const [permissionModeDraft, setPermissionModeDraft] =
+    useState<PermissionModeLabel>("default");
   const [executableDraft, setExecutableDraft] = useState("");
   const [profileDraft, setProfileDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -114,18 +129,25 @@ export function SettingsPanel({
     setThemeDraft(parseUiThemeLabel(view.theme.value));
   }, []);
 
+  const applyPermissionModeView = useCallback((view: PermissionModeSettingsView) => {
+    setPermissionModeSettings(view);
+    setPermissionModeDraft(view.mode);
+  }, []);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [view, themeView] = await Promise.all([
+      const [view, themeView, permissionModeView] = await Promise.all([
         gateway.getRuntimeSettings(effectiveProjectId),
         // Theme is global-only in the product UI; resolve without project so
         // project-scoped rows (if any) do not affect the editor value.
         gateway.getThemeSettings(null),
+        gateway.getPermissionMode(),
       ]);
       applyView(view);
       applyThemeView(themeView);
+      applyPermissionModeView(permissionModeView);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "加载设置失败。";
@@ -133,7 +155,13 @@ export function SettingsPanel({
     } finally {
       setLoading(false);
     }
-  }, [applyThemeView, applyView, effectiveProjectId, gateway]);
+  }, [
+    applyPermissionModeView,
+    applyThemeView,
+    applyView,
+    effectiveProjectId,
+    gateway,
+  ]);
 
   useEffect(() => {
     void reload();
@@ -189,8 +217,13 @@ export function SettingsPanel({
         applyDocumentTheme(applied);
         onThemeChanged?.(applied);
       }
+      if (scope === "global" && permissionModeSettings) {
+        const permissionModeView = await gateway.setPermissionMode(permissionModeDraft);
+        applyPermissionModeView(permissionModeView);
+        onPermissionModeChanged?.(permissionModeView.mode);
+      }
       applyView(view);
-      setNotice("已保存。主题立即生效；运行时适配器与 Grok 路径在重启 Pillow 后生效。");
+      setNotice("已保存。主题与权限模式立即生效；运行时适配器与 Grok 路径在重启 Pillow 后生效。");
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "保存设置失败。";
@@ -285,6 +318,49 @@ export function SettingsPanel({
           <p className="settings-status">正在加载设置…</p>
         ) : (
           <form className="settings-form" onSubmit={(e) => void handleSave(e)}>
+            <label className="settings-field">
+              <span className="settings-field__label">
+                权限模式
+                {permissionModeSettings ? (
+                  <SourceBadge source={permissionModeSettings.source} />
+                ) : null}
+              </span>
+              <select
+                aria-label="权限模式"
+                className="settings-field__control"
+                data-testid="settings-permission-mode"
+                disabled={saving || scope === "project"}
+                onChange={(event) =>
+                  setPermissionModeDraft(event.target.value as PermissionModeLabel)
+                }
+                title={scope === "project" ? "权限模式仅支持全局设置" : undefined}
+                value={permissionModeDraft}
+              >
+                {PERMISSION_MODE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {scope === "project" ? (
+                <p
+                  className="settings-env-note"
+                  data-testid="settings-permission-mode-global-only"
+                  role="status"
+                >
+                  权限模式只能由全局设置修改；项目不能为自己开启自动批准。
+                </p>
+              ) : permissionModeDraft === "default" ? (
+                <p className="settings-env-note" role="note">
+                  写入与命令均需逐次确认。
+                </p>
+              ) : (
+                <p className="settings-permission-warning" role="note">
+                  deny 规则始终优先；自动批准仍会生成提案、执行记录与持久收据。
+                </p>
+              )}
+            </label>
+
             <label className="settings-field">
               <span className="settings-field__label">
                 外观主题

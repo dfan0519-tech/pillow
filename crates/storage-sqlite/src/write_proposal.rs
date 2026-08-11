@@ -31,6 +31,10 @@ use crate::permission_rules::{
     permission_rule_receipt_from_row, receipt_matches_snapshot, rule_snapshot_exists,
     validate_rule_match_snapshot,
 };
+use crate::settings::{
+    PermissionMode, PermissionModeReceiptActor, PermissionModeReceiptDecision,
+    StoredPermissionModeReceipt, permission_mode_receipt_from_row,
+};
 
 /// Maximum apply-lease duration the repository will accept (milliseconds).
 pub const MAX_APPLY_LEASE_MS: u64 = 300_000;
@@ -159,6 +163,7 @@ pub enum WriteDecisionOutcome {
 enum WriteDecisionSource<'a> {
     Human(WriteDecision),
     Rule(&'a PermissionRuleMatchSnapshot),
+    PermissionMode(PermissionMode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +189,8 @@ pub enum WriteProposalStoreError {
     ReservationConflict,
     #[error("write proposal rule receipt is invalid")]
     InvalidRuleReceipt,
+    #[error("write proposal permission-mode receipt is invalid")]
+    InvalidPermissionModeReceipt,
     #[error("SQLite write proposal store error")]
     Sqlite,
     #[error("write proposal store lock was poisoned")]
@@ -646,12 +653,42 @@ impl SqliteWriteProposalRepository {
         )
     }
 
+    pub fn decide_by_permission_mode(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        permission_mode: PermissionMode,
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WriteDecisionOutcome, WriteProposalStoreError> {
+        if !permission_mode.automatically_approves_writes() {
+            return Err(WriteProposalStoreError::InvalidPermissionModeReceipt);
+        }
+        self.decide_internal(
+            proposal_id,
+            conversation_id,
+            WriteDecisionSource::PermissionMode(permission_mode),
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
     pub fn get_rule_receipt(
         &self,
         proposal_id: &str,
     ) -> Result<Option<StoredPermissionRuleReceipt>, WriteProposalStoreError> {
         let connection = self.connection()?;
         load_rule_receipt(&connection, proposal_id)
+    }
+
+    pub fn get_permission_mode_receipt(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<StoredPermissionModeReceipt>, WriteProposalStoreError> {
+        let connection = self.connection()?;
+        load_permission_mode_receipt(&connection, proposal_id)
     }
 
     fn decide_internal(
@@ -663,14 +700,17 @@ impl SqliteWriteProposalRepository {
         proposal_fingerprint: &str,
         now: DateTime<Utc>,
     ) -> Result<WriteDecisionOutcome, WriteProposalStoreError> {
-        let (decision, matched) = match source {
-            WriteDecisionSource::Human(decision) => (decision, None),
+        let (decision, matched, permission_mode) = match source {
+            WriteDecisionSource::Human(decision) => (decision, None, None),
             WriteDecisionSource::Rule(matched) => {
                 let decision = match matched.rule.action {
                     PermissionRuleAction::Allow => WriteDecision::ApproveOnce,
                     PermissionRuleAction::Deny => WriteDecision::Reject,
                 };
-                (decision, Some(matched))
+                (decision, Some(matched), None)
+            }
+            WriteDecisionSource::PermissionMode(permission_mode) => {
+                (WriteDecision::ApproveOnce, None, Some(permission_mode))
             }
         };
         self.begin_mutation()?;
@@ -701,13 +741,22 @@ impl SqliteWriteProposalRepository {
 
         if let Some(existing_decision) = load_decision(&transaction, proposal_id)? {
             let existing_rule_receipt = load_rule_receipt(&transaction, proposal_id)?;
-            let same_source = match (matched, existing_rule_receipt.as_ref()) {
-                (None, None) => true,
-                (Some(matched), Some(receipt)) => {
+            let existing_mode_receipt = load_permission_mode_receipt(&transaction, proposal_id)?;
+            let same_source = match (
+                matched,
+                permission_mode,
+                existing_rule_receipt.as_ref(),
+                existing_mode_receipt.as_ref(),
+            ) {
+                (None, None, None, None) => true,
+                (Some(matched), None, Some(receipt), None) => {
                     receipt_matches_snapshot(receipt, matched)
                         && receipt.decision == rule_receipt_decision(matched.rule.action)
                 }
-                (None, Some(_)) | (Some(_), None) => false,
+                (None, Some(permission_mode), None, Some(receipt)) => {
+                    receipt.permission_mode == permission_mode
+                }
+                _ => false,
             };
             if !same_source {
                 transaction.commit().map_err(map_sqlite)?;
@@ -800,6 +849,9 @@ impl SqliteWriteProposalRepository {
 
         if let Some(matched) = matched {
             insert_rule_receipt(&transaction, proposal_id, matched, now)?;
+        }
+        if let Some(permission_mode) = permission_mode {
+            insert_permission_mode_receipt(&transaction, proposal_id, permission_mode, now)?;
         }
 
         let updated = force_transition(&transaction, &current, next, None, now)?;
@@ -1649,6 +1701,21 @@ fn load_rule_receipt(
         .map_err(map_sqlite)
 }
 
+fn load_permission_mode_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+) -> Result<Option<StoredPermissionModeReceipt>, WriteProposalStoreError> {
+    connection
+        .query_row(
+            "SELECT proposal_id, decision, actor, permission_mode, decided_at
+             FROM write_permission_mode_receipts WHERE proposal_id = ?1",
+            [proposal_id],
+            permission_mode_receipt_from_row,
+        )
+        .optional()
+        .map_err(map_sqlite)
+}
+
 fn insert_rule_receipt(
     connection: &Connection,
     proposal_id: &str,
@@ -1674,6 +1741,32 @@ fn insert_rule_receipt(
                 matched.rule.action.as_str(),
                 matched.rule.content_digest,
                 matched.match_subject,
+                now.to_rfc3339(),
+            ],
+        )
+        .map_err(map_sqlite)?;
+    Ok(())
+}
+
+fn insert_permission_mode_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+    permission_mode: PermissionMode,
+    now: DateTime<Utc>,
+) -> Result<(), WriteProposalStoreError> {
+    if !permission_mode.automatically_approves_writes() {
+        return Err(WriteProposalStoreError::InvalidPermissionModeReceipt);
+    }
+    connection
+        .execute(
+            "INSERT INTO write_permission_mode_receipts (
+                proposal_id, decision, actor, permission_mode, decided_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                proposal_id,
+                PermissionModeReceiptDecision::ApproveByMode.as_str(),
+                PermissionModeReceiptActor::PillowPermissionMode.as_str(),
+                permission_mode.as_str(),
                 now.to_rfc3339(),
             ],
         )

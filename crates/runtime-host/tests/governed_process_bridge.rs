@@ -35,9 +35,10 @@ use keeper_runtime_host::{
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    AddPermissionRule, ExecRunClaimOutcome, ExecTerminalReceipt, PermissionRuleAction,
-    PermissionRulePrefix, PermissionRuleScope, SqliteConversationRepository,
-    SqliteExecProposalRepository, SqlitePermissionRuleRepository, SqliteProjectRepository,
+    AddPermissionRule, ExecRunClaimOutcome, ExecTerminalReceipt, PermissionMode,
+    PermissionRuleAction, PermissionRulePrefix, PermissionRuleScope, SettingsUpdatedBy,
+    SqliteConversationRepository, SqliteExecProposalRepository, SqlitePermissionRuleRepository,
+    SqliteProjectRepository, SqliteSettingsRepository,
 };
 use serde_json::json;
 
@@ -221,6 +222,164 @@ fn add_process_rule_scoped(
             action,
         })
         .unwrap()
+}
+
+fn set_permission_mode(fx: &Fixture, mode: PermissionMode) {
+    SqliteSettingsRepository::open(&fx.db)
+        .unwrap()
+        .upsert_permission_mode(mode, SettingsUpdatedBy::User)
+        .unwrap();
+}
+
+#[test]
+fn bypass_auto_executes_process_with_full_lifecycle_and_durable_mode_receipt() {
+    let fx = fixture();
+    set_permission_mode(&fx, PermissionMode::Bypass);
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let mut lifecycle = Vec::new();
+
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_version("bypass-node-version"),
+        &cancel,
+        |event| {
+            lifecycle.push(match event {
+                GovernedProcessLifecycle::Requested(requested) => {
+                    let live = host
+                        .list_process_proposals(&fx.conversation_id)
+                        .unwrap()
+                        .into_iter()
+                        .find(|proposal| proposal.proposal_id == requested.proposal_id)
+                        .expect(
+                            "automatic process remains observable while its decision is pending",
+                        );
+                    assert!(
+                        !live.decision_available,
+                        "mode-owned decision must never expose a clickable approval action"
+                    );
+                    "requested"
+                }
+                GovernedProcessLifecycle::Decided(_) => "decided",
+                GovernedProcessLifecycle::Started(_) => "started",
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(receipt.state, ExecProposalState::Succeeded);
+    assert!(
+        receipt.started.is_some(),
+        "bypass must really reach execution"
+    );
+    assert_eq!(lifecycle, vec!["requested", "decided", "started"]);
+    let store = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    let mode_receipt = store
+        .get_permission_mode_receipt(&receipt.proposal_id)
+        .unwrap()
+        .expect("bypass approval must have a durable receipt");
+    assert_eq!(mode_receipt.permission_mode, PermissionMode::Bypass);
+    assert!(
+        store
+            .get_rule_receipt(&receipt.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn default_and_accept_edits_keep_process_confirmation_and_never_spawn_before_reject() {
+    for mode in [PermissionMode::Default, PermissionMode::AcceptEdits] {
+        let fx = fixture();
+        set_permission_mode(&fx, mode);
+        let host = Arc::new(host_for(&fx));
+        register(&host, &fx);
+        let deciding_host = Arc::clone(&host);
+        let conversation_id = fx.conversation_id.clone();
+        let decision = thread::spawn(move || {
+            let proposal_id = wait_live_pending(&deciding_host, &conversation_id);
+            deciding_host
+                .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+                .unwrap();
+        });
+        let cancel = AtomicBool::new(false);
+        let mut lifecycle = Vec::new();
+
+        let receipt = execute_governed_process(
+            fx.run_id,
+            provider_node_version("confirm-node-version"),
+            &cancel,
+            |event| {
+                lifecycle.push(match event {
+                    GovernedProcessLifecycle::Requested(_) => "requested",
+                    GovernedProcessLifecycle::Decided(_) => "decided",
+                    GovernedProcessLifecycle::Started(_) => "started",
+                });
+                Ok(())
+            },
+        )
+        .unwrap();
+        decision.join().unwrap();
+
+        assert_eq!(receipt.state, ExecProposalState::Rejected);
+        assert!(receipt.started.is_none());
+        assert_eq!(lifecycle, vec!["requested", "decided"]);
+        assert!(
+            SqliteExecProposalRepository::open(&fx.db)
+                .unwrap()
+                .get_permission_mode_receipt(&receipt.proposal_id)
+                .unwrap()
+                .is_none()
+        );
+        host.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn bypass_process_still_obeys_deny_and_never_reaches_started() {
+    let fx = fixture();
+    set_permission_mode(&fx, PermissionMode::Bypass);
+    let deny = add_process_rule(&fx, "node --version", PermissionRuleAction::Deny);
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+    let mut lifecycle = Vec::new();
+
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_version("bypass-denied-process"),
+        &cancel,
+        |event| {
+            lifecycle.push(match event {
+                GovernedProcessLifecycle::Requested(_) => "requested",
+                GovernedProcessLifecycle::Decided(_) => "decided",
+                GovernedProcessLifecycle::Started(_) => "started",
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(receipt.state, ExecProposalState::Rejected);
+    assert!(receipt.started.is_none());
+    assert_eq!(lifecycle, vec!["requested", "decided"]);
+    let store = SqliteExecProposalRepository::open(&fx.db).unwrap();
+    assert!(
+        store
+            .get_permission_mode_receipt(&receipt.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    let rule_receipt = store
+        .get_rule_receipt(&receipt.proposal_id)
+        .unwrap()
+        .expect("deny must retain rule attribution");
+    assert_eq!(rule_receipt.rule_id, deny.rule_id);
+    assert_eq!(rule_receipt.rule_action, PermissionRuleAction::Deny);
+    host.shutdown().unwrap();
 }
 
 #[test]

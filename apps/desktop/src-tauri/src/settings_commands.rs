@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use keeper_storage_sqlite::{
-    KEY_GROK_EXECUTABLE, KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME,
+    KEY_GROK_EXECUTABLE, KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, PermissionMode,
     ResolvedRuntimeSettings, ResolvedSetting, RuntimeAdapterSetting, SettingScope, SettingSource,
     SettingsError, SettingsUpdatedBy, SqliteSettingsRepository, UiThemeSetting, process_env_map,
 };
@@ -136,6 +136,17 @@ impl RuntimeStartupState {
 #[serde(rename_all = "camelCase")]
 pub struct ThemeSettingsDto {
     pub theme: ResolvedSettingDto,
+}
+
+/// Installation-wide Pillow permission mode. There is deliberately no project
+/// id or scope key on this DTO or its write command.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionModeSettingsDto {
+    /// `default` | `accept_edits` | `bypass`.
+    pub mode: String,
+    /// `global` when stored, otherwise `default` (including corrupt rows).
+    pub source: String,
 }
 
 /// First-run onboarding dismiss flag (`ui.onboarding.dismissed`).
@@ -292,6 +303,35 @@ pub fn set_ui_theme(
     Ok(theme_to_dto(resolved))
 }
 
+/// Resolve the installation-wide permission mode. Invalid stored values are
+/// already mapped to `default` by the storage repository.
+#[tauri::command]
+pub fn get_permission_mode(
+    settings: State<'_, SqliteSettingsRepository>,
+) -> Result<PermissionModeSettingsDto, CommandError> {
+    settings
+        .resolve_permission_mode()
+        .map(permission_mode_to_dto)
+        .map_err(map_settings_error)
+}
+
+/// Set the installation-wide permission mode. No project-shaped command
+/// exists, so an opened project cannot grant authority to itself.
+#[tauri::command]
+pub fn set_permission_mode(
+    settings: State<'_, SqliteSettingsRepository>,
+    mode: String,
+) -> Result<PermissionModeSettingsDto, CommandError> {
+    let parsed = PermissionMode::parse(&mode).map_err(map_settings_error)?;
+    settings
+        .upsert_permission_mode(parsed, SettingsUpdatedBy::User)
+        .map_err(map_settings_error)?;
+    settings
+        .resolve_permission_mode()
+        .map(permission_mode_to_dto)
+        .map_err(map_settings_error)
+}
+
 /// Resolve first-run onboarding dismiss flag (global install fact).
 ///
 /// Default when absent: **not dismissed** so strangers see guidance once.
@@ -445,6 +485,15 @@ pub(crate) fn theme_to_dto(resolved: ResolvedSetting<UiThemeSetting>) -> ThemeSe
             source: source_str(resolved.source).to_owned(),
             env_var: env_var_for(resolved.source, "PILLOW_THEME"),
         },
+    }
+}
+
+pub(crate) fn permission_mode_to_dto(
+    resolved: ResolvedSetting<PermissionMode>,
+) -> PermissionModeSettingsDto {
+    PermissionModeSettingsDto {
+        mode: resolved.value.as_str().to_owned(),
+        source: source_str(resolved.source).to_owned(),
     }
 }
 

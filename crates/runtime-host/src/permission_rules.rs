@@ -1,5 +1,7 @@
 //! Host-side permission-rule loading, pure-policy evaluation and view mapping.
 
+use std::sync::Arc;
+
 use keeper_policy::{
     MatchedPermissionRuleSegment, PermissionRuleAction as PolicyAction,
     PermissionRuleConjunctionEvaluation as PolicyConjunctionEvaluation,
@@ -10,8 +12,23 @@ use keeper_policy::{
 use keeper_storage_sqlite::{
     PermissionRule, PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
     PermissionRuleScope, PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository,
-    StoredPermissionRuleReceipt,
+    SqliteSettingsRepository, StoredPermissionRuleReceipt,
 };
+
+#[derive(Clone)]
+pub(crate) struct PermissionGovernanceRepositories {
+    pub(crate) rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    pub(crate) settings: Option<Arc<SqliteSettingsRepository>>,
+}
+
+impl PermissionGovernanceRepositories {
+    pub(crate) fn new(
+        rules: Option<Arc<SqlitePermissionRuleRepository>>,
+        settings: Option<Arc<SqliteSettingsRepository>>,
+    ) -> Self {
+        Self { rules, settings }
+    }
+}
 
 /// Rule attribution for host-side views.
 ///

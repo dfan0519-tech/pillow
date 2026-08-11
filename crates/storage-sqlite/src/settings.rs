@@ -28,6 +28,8 @@ pub const KEY_GROK_EXECUTABLE: &str = "runtime.grok.executable";
 pub const KEY_GROK_PROFILE: &str = "runtime.grok.profile";
 /// UI theme preference (`PILLOW_THEME`). Values: `dark` | `light` only.
 pub const KEY_UI_THEME: &str = "ui.theme";
+/// Installation-wide permission mode. Never project- or environment-scoped.
+pub const KEY_PERMISSION_MODE: &str = "permissions.mode";
 
 /// Whether the user has dismissed first-run onboarding.
 ///
@@ -161,6 +163,78 @@ impl UiThemeSetting {
     }
 }
 
+/// Host-owned approval posture for operations not decided by a permission rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    Default,
+    AcceptEdits,
+    Bypass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionModeReceiptDecision {
+    ApproveByMode,
+}
+
+impl PermissionModeReceiptDecision {
+    pub fn as_str(self) -> &'static str {
+        "approve_by_mode"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionModeReceiptActor {
+    PillowPermissionMode,
+}
+
+impl PermissionModeReceiptActor {
+    pub fn as_str(self) -> &'static str {
+        "pillow_permission_mode"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPermissionModeReceipt {
+    pub proposal_id: String,
+    pub decision: PermissionModeReceiptDecision,
+    pub actor: PermissionModeReceiptActor,
+    pub permission_mode: PermissionMode,
+    pub decided_at: DateTime<Utc>,
+}
+
+impl PermissionMode {
+    pub fn parse(raw: &str) -> Result<Self, SettingsError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "accept_edits" => Ok(Self::AcceptEdits),
+            "bypass" => Ok(Self::Bypass),
+            other => Err(SettingsError::InvalidPermissionModeSelection {
+                value: other.to_owned(),
+            }),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "accept_edits",
+            Self::Bypass => "bypass",
+        }
+    }
+
+    pub fn default_value() -> Self {
+        Self::Default
+    }
+
+    pub fn automatically_approves_writes(self) -> bool {
+        matches!(self, Self::AcceptEdits | Self::Bypass)
+    }
+
+    pub fn automatically_approves_processes(self) -> bool {
+        self == Self::Bypass
+    }
+}
+
 /// Durable settings row (non-secret only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSetting {
@@ -234,6 +308,10 @@ pub enum SettingsError {
     InvalidRuntimeSelection { value: String },
     #[error("invalid theme selection `{value}` (fail-closed; never falls back to dark)")]
     InvalidThemeSelection { value: String },
+    #[error("invalid permission mode `{value}`")]
+    InvalidPermissionModeSelection { value: String },
+    #[error("permission mode is installation-wide and cannot be project-scoped")]
+    PermissionModeGlobalOnly,
     #[error("invalid path setting value for key {key}")]
     InvalidPathValue { key: String },
     #[error("invalid settings value kind `{kind}` for key {key}")]
@@ -256,6 +334,8 @@ impl SettingsError {
             Self::UnknownKey { .. } => "settings_unknown_key",
             Self::InvalidRuntimeSelection { .. } => "invalid_runtime_selection",
             Self::InvalidThemeSelection { .. } => "invalid_theme_selection",
+            Self::InvalidPermissionModeSelection { .. } => "invalid_permission_mode",
+            Self::PermissionModeGlobalOnly => "permission_mode_global_only",
             Self::InvalidPathValue { .. } => "settings_invalid_path",
             Self::InvalidValueKind { .. } => "settings_invalid_value_kind",
             Self::InvalidValueJson { .. } => "settings_invalid_value_json",
@@ -495,6 +575,23 @@ impl SqliteSettingsRepository {
         })
     }
 
+    /// Set the installation-wide permission mode. No project-shaped overload
+    /// exists, and generic upsert validation enforces the same boundary.
+    pub fn upsert_permission_mode(
+        &self,
+        mode: PermissionMode,
+        updated_by: SettingsUpdatedBy,
+    ) -> Result<StoredSetting, SettingsError> {
+        self.upsert(UpsertSetting {
+            scope: SettingScope::Global,
+            project_id: None,
+            key: KEY_PERMISSION_MODE.to_owned(),
+            value_kind: VALUE_KIND_ENUM.to_owned(),
+            value_json: json_string(mode.as_str()),
+            updated_by,
+        })
+    }
+
     /// Convenience: record whether first-run onboarding has been dismissed.
     ///
     /// Global scope only in practice — "this person has seen the guidance" is a
@@ -668,6 +765,30 @@ impl SqliteSettingsRepository {
         })
     }
 
+    /// Resolve the installation-wide permission mode.
+    ///
+    /// A malformed stored row is treated as `default`, including malformed
+    /// JSON or value kind. This is an intentional fail-closed exception to the
+    /// ordinary enum-setting behavior: corrupt configuration must never widen
+    /// write or process authority.
+    pub fn resolve_permission_mode(
+        &self,
+    ) -> Result<ResolvedSetting<PermissionMode>, SettingsError> {
+        if let Some(row) = self.get(SettingScope::Global, None, KEY_PERMISSION_MODE)?
+            && let Some(value) = parse_stored_permission_mode(&row)
+        {
+            return Ok(ResolvedSetting {
+                value,
+                source: SettingSource::Global,
+            });
+        }
+
+        Ok(ResolvedSetting {
+            value: PermissionMode::default_value(),
+            source: SettingSource::Default,
+        })
+    }
+
     fn resolve_adapter(
         &self,
         project_id: Option<&str>,
@@ -790,6 +911,24 @@ fn validate_scope_shape(
 
 fn validate_known_key_write(input: &UpsertSetting) -> Result<(), SettingsError> {
     match input.key.as_str() {
+        KEY_PERMISSION_MODE => {
+            if input.scope != SettingScope::Global || input.project_id.is_some() {
+                return Err(SettingsError::PermissionModeGlobalOnly);
+            }
+            if input.value_kind != VALUE_KIND_ENUM {
+                return Err(SettingsError::InvalidValueKind {
+                    key: input.key.clone(),
+                    kind: input.value_kind.clone(),
+                });
+            }
+            let label = parse_json_string(&input.value_json).map_err(|_| {
+                SettingsError::InvalidValueJson {
+                    key: input.key.clone(),
+                }
+            })?;
+            let _ = PermissionMode::parse(&label)?;
+            Ok(())
+        }
         KEY_RUNTIME_ADAPTER => {
             if input.value_kind != VALUE_KIND_ENUM {
                 return Err(SettingsError::InvalidValueKind {
@@ -886,6 +1025,54 @@ fn parse_stored_theme(row: &StoredSetting) -> Result<UiThemeSetting, SettingsErr
         })?;
     // Hard requirement: illegal stored enum fails closed; never silent dark.
     UiThemeSetting::parse(&label)
+}
+
+fn parse_stored_permission_mode(row: &StoredSetting) -> Option<PermissionMode> {
+    if row.value_kind != VALUE_KIND_ENUM {
+        return None;
+    }
+    let label = parse_json_string(&row.value_json).ok()?;
+    PermissionMode::parse(&label).ok()
+}
+
+pub(crate) fn permission_mode_receipt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredPermissionModeReceipt> {
+    let decision: String = row.get(1)?;
+    let actor: String = row.get(2)?;
+    let mode: String = row.get(3)?;
+    let decided_at: String = row.get(4)?;
+    if decision != PermissionModeReceiptDecision::ApproveByMode.as_str()
+        || actor != PermissionModeReceiptActor::PillowPermissionMode.as_str()
+    {
+        return Err(permission_mode_conversion_error(1));
+    }
+    let permission_mode =
+        PermissionMode::parse(&mode).map_err(|_| permission_mode_conversion_error(3))?;
+    if permission_mode == PermissionMode::Default {
+        return Err(permission_mode_conversion_error(3));
+    }
+    let decided_at = DateTime::parse_from_rfc3339(&decided_at)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| permission_mode_conversion_error(4))?;
+    Ok(StoredPermissionModeReceipt {
+        proposal_id: row.get(0)?,
+        decision: PermissionModeReceiptDecision::ApproveByMode,
+        actor: PermissionModeReceiptActor::PillowPermissionMode,
+        permission_mode,
+        decided_at,
+    })
+}
+
+fn permission_mode_conversion_error(index: usize) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid permission mode receipt",
+        )),
+    )
 }
 
 fn parse_stored_path(row: &StoredSetting) -> Result<String, SettingsError> {

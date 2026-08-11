@@ -5,7 +5,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "../src/App";
-import { MockSettingsGateway } from "../src/features/settings/settingsGateway";
+import {
+  MockSettingsGateway,
+  parsePermissionModeSettings,
+} from "../src/features/settings/settingsGateway";
 import {
   adapterOptionsForBuild,
   SettingsPanel,
@@ -34,6 +37,93 @@ function fixtureGateway(): ProjectGateway {
 }
 
 describe("SettingsPanel", () => {
+  it("accepts the exact permission-mode DTO and rejects unknown or missing keys", () => {
+    expect(
+      parsePermissionModeSettings({ mode: "bypass", source: "global" }),
+    ).toEqual({ mode: "bypass", source: "global" });
+    expect(() =>
+      parsePermissionModeSettings({
+        mode: "bypass",
+        source: "global",
+        nativePath: "C:\\smuggled",
+      })
+    ).toThrow(/invalid settings response/i);
+    expect(() =>
+      parsePermissionModeSettings({ mode: "bypass" })
+    ).toThrow(/invalid settings response/i);
+    expect(() =>
+      parsePermissionModeSettings({ mode: "always-approve", source: "global" })
+    ).toThrow(/invalid settings response/i);
+  });
+
+  it("offers exactly three global permission modes and saves the selection", async () => {
+    const user = userEvent.setup();
+    const gateway = new MockSettingsGateway();
+    const applied: string[] = [];
+    render(
+      <SettingsPanel
+        gateway={gateway}
+        onClose={() => undefined}
+        onPermissionModeChanged={(mode) => applied.push(mode)}
+        projectId={null}
+      />,
+    );
+
+    const select = await screen.findByTestId("settings-permission-mode");
+    expect([...select.querySelectorAll("option")].map((option) => option.value)).toEqual([
+      "default",
+      "accept_edits",
+      "bypass",
+    ]);
+    await user.selectOptions(select, "accept_edits");
+    await user.click(screen.getByTestId("settings-save"));
+    await waitFor(() => {
+      expect(gateway.getPermissionModeSnapshot().mode).toBe("accept_edits");
+    });
+    expect(applied).toContain("accept_edits");
+  });
+
+  it("keeps permission mode global-only when project scope is selected", async () => {
+    const user = userEvent.setup();
+    const gateway = new MockSettingsGateway();
+    render(
+      <SettingsPanel
+        gateway={gateway}
+        onClose={() => undefined}
+        projectId="project-1"
+      />,
+    );
+
+    await screen.findByTestId("settings-permission-mode");
+    await user.click(screen.getByRole("button", { name: "当前项目" }));
+    expect(screen.getByTestId("settings-permission-mode")).toBeDisabled();
+    expect(screen.getByTestId("settings-permission-mode-global-only")).toBeVisible();
+  });
+
+  it.each([
+    ["accept_edits", /接受改动/],
+    ["bypass", /全开/],
+  ] as const)("keeps %s visible in the workbench and resets it in one click", async (mode, label) => {
+    const user = userEvent.setup();
+    const settings = new MockSettingsGateway(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { mode, source: "global" },
+    );
+    render(<App gateway={fixtureGateway()} settingsGateway={settings} />);
+
+    const indicator = await screen.findByTestId("permission-mode-indicator");
+    expect(indicator).toBeVisible();
+    expect(indicator.textContent).toMatch(label);
+    await user.click(screen.getByTestId("permission-mode-reset"));
+    await waitFor(() => {
+      expect(settings.getPermissionModeSnapshot().mode).toBe("default");
+      expect(screen.queryByTestId("permission-mode-indicator")).toBeNull();
+    });
+  });
+
   it("shows env override state and keeps the field read-only", async () => {
     const gateway = new MockSettingsGateway();
     gateway.setEnvOverride("adapter", "fake", "PILLOW_RUNTIME");

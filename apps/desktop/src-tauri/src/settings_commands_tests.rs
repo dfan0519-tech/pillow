@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 use keeper_storage_sqlite::{
     ENV_GROK_EXECUTABLE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE, KEY_UI_THEME,
-    RuntimeAdapterSetting, SettingScope, SettingSource, SettingsUpdatedBy,
+    PermissionMode, RuntimeAdapterSetting, SettingScope, SettingSource, SettingsUpdatedBy,
     SqliteSettingsRepository, UiThemeSetting,
 };
 use serde_json::Value;
@@ -16,8 +16,8 @@ use serde_json::Value;
 use crate::app_state::AppState;
 use crate::runtime_composition::{fake_adapter_selectable, tests::env_lock};
 use crate::settings_commands::{
-    RuntimeSettingsDto, RuntimeStartupState, ThemeSettingsDto, runtime_settings_dto_field_names,
-    theme_to_dto, to_dto,
+    PermissionModeSettingsDto, RuntimeSettingsDto, RuntimeStartupState, ThemeSettingsDto,
+    permission_mode_to_dto, runtime_settings_dto_field_names, theme_to_dto, to_dto,
 };
 
 /// Owns the fixture tree; removing it is the guard's own `Drop`, never ours.
@@ -88,6 +88,14 @@ impl Harness {
             .resolve_theme(None, env)
             .expect("resolve theme");
         theme_to_dto(resolved)
+    }
+
+    fn resolve_permission_mode_dto(&self) -> PermissionModeSettingsDto {
+        permission_mode_to_dto(
+            self.settings
+                .resolve_permission_mode()
+                .expect("resolve permission mode"),
+        )
     }
 }
 
@@ -569,4 +577,38 @@ fn theme_key_is_known_for_clear_path() {
     let dto = h.resolve_theme_dto(&empty_env());
     assert_eq!(dto.theme.value.as_deref(), Some("dark"));
     assert_eq!(dto.theme.source, "default");
+}
+
+#[test]
+fn permission_mode_dto_accepts_exact_keys_and_global_values_round_trip() {
+    let h = Harness::new("permission-mode-dto");
+    let default = h.resolve_permission_mode_dto();
+    assert_eq!(default.mode, "default");
+    assert_eq!(default.source, "default");
+
+    h.settings
+        .upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    let stored = h.resolve_permission_mode_dto();
+    assert_eq!(stored.mode, "bypass");
+    assert_eq!(stored.source, "global");
+
+    let json = serde_json::to_value(stored).expect("serialize permission mode dto");
+    let keys = json
+        .as_object()
+        .expect("permission mode dto object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["mode", "source"]);
+}
+
+#[test]
+fn permission_mode_command_parser_rejects_unknown_value_without_selecting_bypass() {
+    let error = PermissionMode::parse("always-approve").unwrap_err();
+    assert_eq!(error.code(), "invalid_permission_mode");
+    assert!(!matches!(
+        PermissionMode::parse("always-approve"),
+        Ok(PermissionMode::Bypass)
+    ));
 }

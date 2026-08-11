@@ -42,6 +42,7 @@ import type {
 import { CommandApprovalBar } from "../execution/CommandApprovalBar";
 import { isPortableRelativePath } from "../resources/resourcePaneState";
 import { IconPanelRight } from "../../components/icons";
+import type { PermissionModeLabel } from "../settings/settingsTypes";
 import { Composer } from "./Composer";
 import {
   ResourcePane,
@@ -100,6 +101,10 @@ type WorkbenchProps = {
    * Changes mode (null when inactive). Discovery runs only for that project.
    */
   onGitChangesActive?: (projectId: string | null) => void;
+  /** Installation-wide Pillow approval mode, shown whenever it is non-default. */
+  permissionMode?: PermissionModeLabel;
+  /** One-click safety escape hatch back to default confirmation behavior. */
+  onResetPermissionMode?: () => void;
 };
 
 function toCommandProposal(proposal: ExecProposalView): CommandProposalView {
@@ -152,6 +157,8 @@ export function Workbench({
   gitChanges = null,
   gitChangesCapable = false,
   onGitChangesActive,
+  permissionMode = "default",
+  onResetPermissionMode,
 }: WorkbenchProps) {
   const projectId = project?.id ?? null;
   const permissionRulesGateway = useMemo(() => {
@@ -717,6 +724,25 @@ export function Workbench({
             )}
           </div>
           <div className="stage-top__actions">
+            {permissionMode !== "default" ? (
+              <div
+                className={`permission-mode-indicator permission-mode-indicator--${permissionMode}`}
+                data-testid="permission-mode-indicator"
+                role="status"
+                title="deny 规则仍然优先；自动批准仍会记录提案、执行与收据。"
+              >
+                <span>
+                  权限：{permissionMode === "bypass" ? "全开" : "接受改动"}
+                </span>
+                <button
+                  data-testid="permission-mode-reset"
+                  onClick={onResetPermissionMode}
+                  type="button"
+                >
+                  恢复默认
+                </button>
+              </div>
+            ) : null}
             <button
               aria-label={resourcesOpen ? "关闭资源面板" : "打开资源面板"}
               aria-pressed={resourcesOpen}

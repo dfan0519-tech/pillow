@@ -28,8 +28,9 @@ use keeper_runtime_host::{
 };
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    AddPermissionRule, PermissionRuleAction, PermissionRulePrefix, PermissionRuleScope,
-    SqliteConversationRepository, SqlitePermissionRuleRepository, SqliteProjectRepository,
+    AddPermissionRule, PermissionMode, PermissionRuleAction, PermissionRulePrefix,
+    PermissionRuleScope, SettingsUpdatedBy, SqliteConversationRepository,
+    SqlitePermissionRuleRepository, SqliteProjectRepository, SqliteSettingsRepository,
     SqliteWriteProposalRepository, WriteApplyReconcileObservation,
 };
 use keeper_tool_executor::{GovernedWriteToolGateway, ProjectCapability, content_sha256_digest};
@@ -190,6 +191,117 @@ fn add_rule(
             action,
         })
         .unwrap()
+}
+
+fn set_permission_mode(fx: &Fixture, mode: PermissionMode) {
+    SqliteSettingsRepository::open(&fx.db)
+        .unwrap()
+        .upsert_permission_mode(mode, SettingsUpdatedBy::User)
+        .unwrap();
+}
+
+#[test]
+fn accept_edits_and_bypass_auto_apply_writes_with_durable_mode_receipts() {
+    for (index, mode) in [PermissionMode::AcceptEdits, PermissionMode::Bypass]
+        .into_iter()
+        .enumerate()
+    {
+        let fx = fixture();
+        fs::create_dir_all(fx.root.join("src")).unwrap();
+        set_permission_mode(&fx, mode);
+        let host = host_for(&fx);
+        register(&host, &fx);
+        let cancel = AtomicBool::new(false);
+        let mut requested_count = 0;
+
+        let receipt = execute_governed_write(
+            fx.run_id,
+            provider_create(
+                &format!("mode-write-{index}"),
+                "src/mode.rs",
+                "pub const MODE: bool = true;\n",
+            ),
+            &cancel,
+            |requested| {
+                requested_count += 1;
+                let live = host
+                    .list_write_proposals(&fx.conversation_id)
+                    .unwrap()
+                    .into_iter()
+                    .find(|proposal| proposal.proposal_id == requested.proposal_id)
+                    .expect("automatic write remains observable while its decision is pending");
+                assert!(
+                    live.approval_grant.is_none(),
+                    "mode-owned decision must never expose a clickable human grant"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(receipt.resolved.state, WriteProposalState::Succeeded);
+        assert_eq!(requested_count, 1, "proposal lifecycle must not be skipped");
+        assert_eq!(
+            fs::read_to_string(fx.root.join("src/mode.rs")).unwrap(),
+            "pub const MODE: bool = true;\n"
+        );
+        let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+        let mode_receipt = store
+            .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .expect("mode approval must have a durable receipt");
+        assert_eq!(mode_receipt.permission_mode, mode);
+        assert!(
+            store
+                .get_rule_receipt(&receipt.resolved.proposal_id)
+                .unwrap()
+                .is_none(),
+            "mode approval must not masquerade as a rule approval"
+        );
+        host.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn bypass_write_still_obeys_project_deny_and_never_creates_mode_receipt() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join("blocked")).unwrap();
+    set_permission_mode(&fx, PermissionMode::Bypass);
+    let deny = add_rule(
+        &fx,
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Write,
+        "blocked/**",
+        PermissionRuleAction::Deny,
+    );
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+
+    let receipt = execute_governed_write(
+        fx.run_id,
+        provider_create("bypass-denied-write", "blocked/no.txt", "must not exist"),
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(receipt.resolved.state, WriteProposalState::Rejected);
+    assert!(!fx.root.join("blocked/no.txt").exists());
+    let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+    assert!(
+        store
+            .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    let rule_receipt = store
+        .get_rule_receipt(&receipt.resolved.proposal_id)
+        .unwrap()
+        .expect("deny must retain rule attribution");
+    assert_eq!(rule_receipt.rule_id, deny.rule_id);
+    assert_eq!(rule_receipt.rule_action, PermissionRuleAction::Deny);
+    host.shutdown().unwrap();
 }
 
 #[test]

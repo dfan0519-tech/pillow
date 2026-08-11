@@ -22,6 +22,30 @@ fn reopen_with_foreign_keys(db: &Path) -> Connection {
     connection
 }
 
+#[test]
+fn permission_mode_migration_is_idempotent_and_installs_global_scope_guards() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+
+    apply_via_repository_open(&db);
+    apply_via_repository_open(&db);
+
+    let connection = reopen_with_foreign_keys(&db);
+    let guard_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name IN (
+                   'trg_settings_permission_mode_global_insert',
+                   'trg_settings_permission_mode_global_update'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(guard_count, 2);
+}
+
 /// Pre-C3-F `run_events` table: CHECK list intentionally omits
 /// `write_proposal_requested` / `write_proposal_resolved` so tests can build
 /// a legacy 0001–0005 database even after 0002 is updated for fresh installs.

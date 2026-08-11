@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   SettingsGatewayError,
   type OnboardingSettingsView,
+  type PermissionModeLabel,
+  type PermissionModeSettingsView,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type RuntimeStartupView,
@@ -29,6 +31,31 @@ function isSettingSource(value: unknown): value is SettingSource {
     || value === "global"
     || value === "default"
   );
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const allowed = [...expected].sort();
+  return actual.length === allowed.length
+    && actual.every((key, index) => key === allowed[index]);
+}
+
+/** Closed-key validator paired with the Rust `PermissionModeSettingsDto`. */
+export function parsePermissionModeSettings(value: unknown): PermissionModeSettingsView {
+  assertNoSecretFields(value);
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, ["mode", "source"])
+    || !(
+      value.mode === "default"
+      || value.mode === "accept_edits"
+      || value.mode === "bypass"
+    )
+    || !(value.source === "global" || value.source === "default")
+  ) {
+    throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
+  }
+  return { mode: value.mode, source: value.source };
 }
 
 function parseResolvedSetting(
@@ -216,8 +243,30 @@ async function invokeThemeSettings(
   }
 }
 
+async function invokePermissionModeSettings(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<PermissionModeSettingsView> {
+  try {
+    const payload = args
+      ? await invoke<unknown>(command, args)
+      : await invoke<unknown>(command);
+    return parsePermissionModeSettings(payload);
+  } catch (error) {
+    throw normalizeSettingsError(error);
+  }
+}
+
 /** Tauri settings gateway — host owns storage; renderer never touches the DB. */
 export class TauriSettingsGateway implements SettingsGateway {
+  getPermissionMode(): Promise<PermissionModeSettingsView> {
+    return invokePermissionModeSettings("get_permission_mode");
+  }
+
+  setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView> {
+    return invokePermissionModeSettings("set_permission_mode", { mode });
+  }
+
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView> {
     return invokeSettings("get_runtime_settings", {
       projectId: projectId ?? null,
@@ -324,12 +373,14 @@ export class MockSettingsGateway implements SettingsGateway {
   private themeState: ThemeSettingsView;
   private startup: RuntimeStartupView;
   private onboarding: OnboardingSettingsView;
+  private permissionMode: PermissionModeSettingsView;
 
   constructor(
     initial?: Partial<RuntimeSettingsView>,
     themeInitial?: Partial<ThemeSettingsView>,
     startupInitial?: Partial<RuntimeStartupView>,
     onboardingInitial?: Partial<OnboardingSettingsView>,
+    permissionModeInitial?: Partial<PermissionModeSettingsView>,
   ) {
     this.state = {
       adapter: {
@@ -362,6 +413,24 @@ export class MockSettingsGateway implements SettingsGateway {
       source: "default",
       ...onboardingInitial,
     };
+    this.permissionMode = {
+      mode: "default",
+      source: "default",
+      ...permissionModeInitial,
+    };
+  }
+
+  getPermissionModeSnapshot(): PermissionModeSettingsView {
+    return structuredClone(this.permissionMode);
+  }
+
+  async getPermissionMode(): Promise<PermissionModeSettingsView> {
+    return this.getPermissionModeSnapshot();
+  }
+
+  async setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView> {
+    this.permissionMode = { mode, source: "global" };
+    return this.getPermissionModeSnapshot();
   }
 
   /** Test seam: force degraded conversation runtime (not Fake). */

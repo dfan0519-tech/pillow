@@ -28,8 +28,8 @@ use keeper_process_executor::{
 };
 use keeper_storage_sqlite::{
     ExecDecisionOutcome, ExecProposalReserveInput, ExecProposalStoreError, ExecReservationOutcome,
-    ExecRunClaimOutcome, ExecTerminalReceipt, MAX_RUN_LEASE_MS, SqliteExecProposalRepository,
-    StoredExecProposal,
+    ExecRunClaimOutcome, ExecTerminalReceipt, MAX_RUN_LEASE_MS, PermissionMode,
+    SqliteExecProposalRepository, StoredExecProposal,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -905,6 +905,37 @@ impl GovernedProcessToolGateway {
             approval_grant_digest,
             proposal_fingerprint,
         )
+    }
+
+    /// Capability-bound automatic approval owned by Pillow's permission-mode
+    /// gate. The provider never selects this path; storage records the mode in
+    /// the same transaction as the ordinary approval decision.
+    pub fn decide_by_permission_mode_for_owner(
+        &self,
+        capability: &ProjectCapability,
+        conversation_id: &str,
+        proposal_id: &str,
+        permission_mode: PermissionMode,
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+    ) -> Result<ExecDecisionOutcome, GovernedProcessError> {
+        let Some(current) = self.store.get(proposal_id)? else {
+            return Err(GovernedProcessError::NotApplicable);
+        };
+        if current.project_id != capability.project_id() {
+            return Err(GovernedProcessError::CapabilityMismatch);
+        }
+        if current.conversation_id != conversation_id {
+            return Err(GovernedProcessError::NotApplicable);
+        }
+        Ok(self.store.decide_by_permission_mode(
+            proposal_id,
+            conversation_id,
+            permission_mode,
+            approval_grant_digest,
+            proposal_fingerprint,
+            Utc::now(),
+        )?)
     }
 
     /// Claim once, re-resolve for drift, execute through the supervised runner,

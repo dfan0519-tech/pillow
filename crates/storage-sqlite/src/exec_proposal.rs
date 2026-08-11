@@ -31,6 +31,10 @@ use crate::permission_rules::{
     permission_rule_receipt_from_row, permission_rule_segment_receipt_from_row,
     receipt_matches_snapshot, rule_snapshot_exists, validate_rule_match_snapshot,
 };
+use crate::settings::{
+    PermissionMode, PermissionModeReceiptActor, PermissionModeReceiptDecision,
+    StoredPermissionModeReceipt, permission_mode_receipt_from_row,
+};
 
 /// Maximum run-lease duration the repository will accept (milliseconds).
 pub const MAX_RUN_LEASE_MS: u64 = 300_000;
@@ -121,6 +125,7 @@ pub enum ExecDecisionOutcome {
 enum ExecDecisionSource<'a> {
     Human(ExecDecision),
     Rule(&'a [PermissionRuleSegmentMatchSnapshot]),
+    PermissionMode(PermissionMode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +151,8 @@ pub enum ExecProposalStoreError {
     ReservationConflict,
     #[error("exec proposal rule receipt is invalid")]
     InvalidRuleReceipt,
+    #[error("exec proposal permission-mode receipt is invalid")]
+    InvalidPermissionModeReceipt,
     #[error("SQLite exec proposal store error")]
     Sqlite,
     #[error("exec proposal store lock was poisoned")]
@@ -428,12 +435,42 @@ impl SqliteExecProposalRepository {
         )
     }
 
+    pub fn decide_by_permission_mode(
+        &self,
+        proposal_id: &str,
+        conversation_id: &str,
+        permission_mode: PermissionMode,
+        approval_grant_digest: &str,
+        proposal_fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
+        if !permission_mode.automatically_approves_processes() {
+            return Err(ExecProposalStoreError::InvalidPermissionModeReceipt);
+        }
+        self.decide_internal(
+            proposal_id,
+            conversation_id,
+            ExecDecisionSource::PermissionMode(permission_mode),
+            approval_grant_digest,
+            proposal_fingerprint,
+            now,
+        )
+    }
+
     pub fn get_rule_receipt(
         &self,
         proposal_id: &str,
     ) -> Result<Option<StoredPermissionRuleReceipt>, ExecProposalStoreError> {
         let connection = self.connection()?;
         load_rule_receipt(&connection, proposal_id)
+    }
+
+    pub fn get_permission_mode_receipt(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<StoredPermissionModeReceipt>, ExecProposalStoreError> {
+        let connection = self.connection()?;
+        load_permission_mode_receipt(&connection, proposal_id)
     }
 
     pub fn get_rule_receipts(
@@ -453,9 +490,14 @@ impl SqliteExecProposalRepository {
         proposal_fingerprint: &str,
         now: DateTime<Utc>,
     ) -> Result<ExecDecisionOutcome, ExecProposalStoreError> {
-        let (decision, matched) = match source {
-            ExecDecisionSource::Human(decision) => (decision, None),
-            ExecDecisionSource::Rule(matched) => (validate_rule_decision(matched)?, Some(matched)),
+        let (decision, matched, permission_mode) = match source {
+            ExecDecisionSource::Human(decision) => (decision, None, None),
+            ExecDecisionSource::Rule(matched) => {
+                (validate_rule_decision(matched)?, Some(matched), None)
+            }
+            ExecDecisionSource::PermissionMode(permission_mode) => {
+                (ExecDecision::ApproveOnce, None, Some(permission_mode))
+            }
         };
         self.begin_mutation()?;
         validate_canonical_digest(approval_grant_digest)?;
@@ -491,9 +533,15 @@ impl SqliteExecProposalRepository {
         if let Some(existing_decision) = load_decision(&transaction, proposal_id)? {
             let existing_rule_receipt = load_rule_receipt(&transaction, proposal_id)?;
             let existing_rule_receipts = load_rule_receipts(&transaction, proposal_id)?;
-            let same_source = match (matched, existing_rule_receipt.as_ref()) {
-                (None, None) => existing_rule_receipts.is_empty(),
-                (Some(matched), Some(receipt)) => {
+            let existing_mode_receipt = load_permission_mode_receipt(&transaction, proposal_id)?;
+            let same_source = match (
+                matched,
+                permission_mode,
+                existing_rule_receipt.as_ref(),
+                existing_mode_receipt.as_ref(),
+            ) {
+                (None, None, None, None) => existing_rule_receipts.is_empty(),
+                (Some(matched), None, Some(receipt), None) => {
                     let first = &matched[0].matched;
                     receipt_matches_snapshot(receipt, first)
                         && receipt.decision == rule_receipt_decision(first.rule.action)
@@ -503,7 +551,10 @@ impl SqliteExecProposalRepository {
                             rule_receipts_match_snapshots(&existing_rule_receipts, matched)
                         }
                 }
-                (None, Some(_)) | (Some(_), None) => false,
+                (None, Some(permission_mode), None, Some(receipt)) => {
+                    existing_rule_receipts.is_empty() && receipt.permission_mode == permission_mode
+                }
+                _ => false,
             };
             if !same_source {
                 transaction.commit().map_err(map_sqlite)?;
@@ -598,6 +649,9 @@ impl SqliteExecProposalRepository {
         if let Some(matched) = matched {
             insert_rule_receipt(&transaction, proposal_id, &matched[0].matched, now)?;
             insert_rule_segment_receipts(&transaction, proposal_id, matched, now)?;
+        }
+        if let Some(permission_mode) = permission_mode {
+            insert_permission_mode_receipt(&transaction, proposal_id, permission_mode, now)?;
         }
 
         let updated = force_transition(&transaction, &current, next, None, now)?;
@@ -1313,6 +1367,21 @@ fn load_rule_receipt(
         .map_err(map_sqlite)
 }
 
+fn load_permission_mode_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+) -> Result<Option<StoredPermissionModeReceipt>, ExecProposalStoreError> {
+    connection
+        .query_row(
+            "SELECT proposal_id, decision, actor, permission_mode, decided_at
+             FROM exec_permission_mode_receipts WHERE proposal_id = ?1",
+            [proposal_id],
+            permission_mode_receipt_from_row,
+        )
+        .optional()
+        .map_err(map_sqlite)
+}
+
 fn load_rule_receipts(
     connection: &Connection,
     proposal_id: &str,
@@ -1398,6 +1467,32 @@ fn insert_rule_segment_receipts(
             )
             .map_err(map_sqlite)?;
     }
+    Ok(())
+}
+
+fn insert_permission_mode_receipt(
+    connection: &Connection,
+    proposal_id: &str,
+    permission_mode: PermissionMode,
+    now: DateTime<Utc>,
+) -> Result<(), ExecProposalStoreError> {
+    if !permission_mode.automatically_approves_processes() {
+        return Err(ExecProposalStoreError::InvalidPermissionModeReceipt);
+    }
+    connection
+        .execute(
+            "INSERT INTO exec_permission_mode_receipts (
+                proposal_id, decision, actor, permission_mode, decided_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                proposal_id,
+                PermissionModeReceiptDecision::ApproveByMode.as_str(),
+                PermissionModeReceiptActor::PillowPermissionMode.as_str(),
+                permission_mode.as_str(),
+                now.to_rfc3339(),
+            ],
+        )
+        .map_err(map_sqlite)?;
     Ok(())
 }
 

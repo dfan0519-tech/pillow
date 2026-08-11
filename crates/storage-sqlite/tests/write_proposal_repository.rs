@@ -11,12 +11,12 @@ use keeper_agent_protocol::{RunId as ProtocolRunId, WRITE_CONTENT_BYTE_CAP, Writ
 use keeper_policy::{WRITE_PROPOSAL_TTL_SECS, WriteDecision, WriteProposalState};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
-    AddPermissionRule, MAX_APPLY_LEASE_MS, PermissionRuleAction, PermissionRuleMatchSnapshot,
-    PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
-    PermissionRuleScope, SqlitePermissionRuleRepository, SqliteWriteProposalRepository,
-    StoredWriteProposal, WriteApplyClaimOutcome, WriteApplyErrorCode, WriteApplyReceipt,
-    WriteApplyReconcileObservation, WriteDecisionOutcome, WriteProposalReserveInput,
-    WriteProposalStoreError, WriteReservationOutcome,
+    AddPermissionRule, MAX_APPLY_LEASE_MS, PermissionMode, PermissionRuleAction,
+    PermissionRuleMatchSnapshot, PermissionRulePrefix, PermissionRuleReceiptActor,
+    PermissionRuleReceiptDecision, PermissionRuleScope, SqlitePermissionRuleRepository,
+    SqliteWriteProposalRepository, StoredWriteProposal, WriteApplyClaimOutcome,
+    WriteApplyErrorCode, WriteApplyReceipt, WriteApplyReconcileObservation, WriteDecisionOutcome,
+    WriteProposalReserveInput, WriteProposalStoreError, WriteReservationOutcome,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -32,6 +32,91 @@ struct Fixture {
     conversation_id: String,
     run_id: ProtocolRunId,
     db_path: std::path::PathBuf,
+}
+
+#[test]
+fn accept_edits_and_bypass_decisions_persist_mode_receipts_and_approve_writes() {
+    for (label, seed, permission_mode) in [
+        ("accept-edits", 0xC1, PermissionMode::AcceptEdits),
+        ("bypass", 0xC3, PermissionMode::Bypass),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let fx = fixture(&temp);
+        let input = reserve_input(&fx, &format!("mode-{label}"), seed);
+        fx.store.reserve(&input).unwrap();
+        let decided_at = Utc::now();
+
+        let outcome = fx
+            .store
+            .decide_by_permission_mode(
+                &input.proposal_id,
+                &fx.conversation_id,
+                permission_mode,
+                &grant_digest(seed),
+                &input.proposal_fingerprint,
+                decided_at,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            WriteDecisionOutcome::Accepted(ref row) if row.state == WriteProposalState::Approved
+        ));
+
+        let receipt = fx
+            .store
+            .get_permission_mode_receipt(&input.proposal_id)
+            .unwrap()
+            .expect("durable permission-mode receipt");
+        assert_eq!(receipt.proposal_id, input.proposal_id);
+        assert_eq!(receipt.permission_mode, permission_mode);
+        assert_eq!(receipt.decided_at, decided_at);
+        assert!(
+            fx.store
+                .get_rule_receipt(&receipt.proposal_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn default_mode_cannot_create_a_write_approval_or_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let input = reserve_input(&fx, "mode-default", 0xC2);
+    fx.store.reserve(&input).unwrap();
+
+    let error = fx
+        .store
+        .decide_by_permission_mode(
+            &input.proposal_id,
+            &fx.conversation_id,
+            PermissionMode::Default,
+            &grant_digest(0xC2),
+            &input.proposal_fingerprint,
+            Utc::now(),
+        )
+        .expect_err("default must never be an automatic approval source");
+    assert_eq!(error, WriteProposalStoreError::InvalidPermissionModeReceipt);
+    assert_eq!(
+        fx.store.get(&input.proposal_id).unwrap().unwrap().state,
+        WriteProposalState::PendingApproval
+    );
+    assert!(
+        fx.store
+            .get_permission_mode_receipt(&input.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    let connection = Connection::open(&fx.db_path).unwrap();
+    let decisions: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM write_approval_decisions WHERE proposal_id = ?1",
+            [&input.proposal_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(decisions, 0);
 }
 
 #[test]

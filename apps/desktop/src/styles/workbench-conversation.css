@@ -59,6 +59,46 @@
   margin-right: var(--window-controls-inset);
 }
 
+.permission-mode-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 2px 3px 2px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border-subtle));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 16%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.permission-mode-indicator--bypass {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger) 15%, var(--bg-elevated));
+}
+
+.permission-mode-indicator button {
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.permission-mode-indicator button:hover {
+  background: var(--bg-hover);
+}
+
+.permission-mode-indicator button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
 .stage-body {
   display: flex;
   align-items: center;

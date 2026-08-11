@@ -175,6 +175,18 @@
   color: var(--text-primary);
 }
 
+.settings-permission-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
 .settings-status,
 .settings-notice {
   margin: 0;

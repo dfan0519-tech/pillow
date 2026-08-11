@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
     ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,
-    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, RuntimeAdapterSetting, SettingScope,
-    SettingSource, SettingsError, SettingsUpdatedBy, SqliteProjectRepository,
-    SqliteSettingsRepository, UiThemeSetting,
+    KEY_GROK_PROFILE, KEY_PERMISSION_MODE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, PermissionMode,
+    RuntimeAdapterSetting, SettingScope, SettingSource, SettingsError, SettingsUpdatedBy,
+    SqliteProjectRepository, SqliteSettingsRepository, UiThemeSetting, UpsertSetting,
 };
 use rusqlite::Connection;
 
@@ -964,4 +964,115 @@ fn theme_uses_same_settings_entries_table_not_parallel_store() {
         )
         .unwrap();
     assert_eq!(theme_tables, 0);
+}
+
+// ---------------------------------------------------------------------------
+// permissions.mode — global-only, no env/project authority
+// ---------------------------------------------------------------------------
+
+#[test]
+fn permission_mode_defaults_and_global_values_roundtrip() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+
+    {
+        let repo = SqliteSettingsRepository::open(&db).unwrap();
+        let absent = repo.resolve_permission_mode().unwrap();
+        assert_eq!(absent.value, PermissionMode::Default);
+        assert_eq!(absent.source, SettingSource::Default);
+
+        repo.upsert_permission_mode(PermissionMode::AcceptEdits, SettingsUpdatedBy::User)
+            .unwrap();
+        let edits = repo.resolve_permission_mode().unwrap();
+        assert_eq!(edits.value, PermissionMode::AcceptEdits);
+        assert_eq!(edits.source, SettingSource::Global);
+
+        repo.upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+            .unwrap();
+    }
+
+    let reopened = SqliteSettingsRepository::open(&db).unwrap();
+    let bypass = reopened.resolve_permission_mode().unwrap();
+    assert_eq!(bypass.value, PermissionMode::Bypass);
+    assert_eq!(bypass.source, SettingSource::Global);
+}
+
+#[test]
+fn permission_mode_project_write_is_rejected_by_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "permission-mode-project");
+    let repo = open_settings(&temp);
+
+    let error = repo
+        .upsert(UpsertSetting {
+            scope: SettingScope::Project,
+            project_id: Some(project_id),
+            key: KEY_PERMISSION_MODE.to_owned(),
+            value_kind: "enum".to_owned(),
+            value_json: "\"bypass\"".to_owned(),
+            updated_by: SettingsUpdatedBy::User,
+        })
+        .expect_err("project scope must never set permission mode");
+
+    assert!(matches!(error, SettingsError::PermissionModeGlobalOnly));
+    assert_eq!(error.code(), "permission_mode_global_only");
+    assert_eq!(
+        repo.resolve_permission_mode().unwrap().value,
+        PermissionMode::Default
+    );
+}
+
+#[test]
+fn permission_mode_project_row_is_rejected_by_sqlite_guard() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "permission-mode-trigger");
+    let repo = open_settings(&temp);
+    drop(repo);
+
+    let connection = Connection::open(temp.path().join("keeper.db")).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    let result = connection.execute(
+        "INSERT INTO settings_entries (
+            setting_id, scope, project_id, key, value_kind, value_json, updated_at, updated_by
+         ) VALUES (
+            'bad-project-mode', 'project', ?1, ?2, 'enum', '\"bypass\"',
+            '2026-08-11T00:00:00Z', 'user'
+         )",
+        rusqlite::params![project_id, KEY_PERMISSION_MODE],
+    );
+
+    assert!(
+        result.is_err(),
+        "SQLite must reject project-scoped permission mode"
+    );
+}
+
+#[test]
+fn invalid_stored_permission_mode_fails_closed_to_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    drop(repo);
+
+    let connection = Connection::open(temp.path().join("keeper.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO settings_entries (
+                setting_id, scope, project_id, key, value_kind, value_json, updated_at, updated_by
+             ) VALUES (
+                'bad-permission-mode', 'global', NULL, ?1, 'enum', '\"never-ask\"',
+                '2026-08-11T00:00:00Z', 'user'
+             )",
+            [KEY_PERMISSION_MODE],
+        )
+        .unwrap();
+    drop(connection);
+
+    let repo = open_settings(&temp);
+    let resolved = repo.resolve_permission_mode().unwrap();
+    assert_eq!(resolved.value, PermissionMode::Default);
+    assert_eq!(resolved.source, SettingSource::Default);
+    assert_ne!(resolved.value, PermissionMode::AcceptEdits);
+    assert_ne!(resolved.value, PermissionMode::Bypass);
 }

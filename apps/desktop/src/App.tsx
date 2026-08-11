@@ -34,6 +34,7 @@ import { SettingsPanel } from "./features/settings/SettingsPanel";
 import {
   applyDocumentTheme,
   parseUiThemeLabel,
+  type PermissionModeLabel,
   type RuntimeStartupView,
   type SettingsGateway,
 } from "./features/settings/settingsTypes";
@@ -160,6 +161,8 @@ export function App({
   const [loading, setLoading] = useState(true);
   const [shellReady, setShellReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [permissionMode, setPermissionMode] =
+    useState<PermissionModeLabel>("default");
   /** Runtime config degrade (bad Grok path etc.) — shell up, conversation off. */
   const [runtimeStartup, setRuntimeStartup] = useState<RuntimeStartupView | null>(
     null,
@@ -275,6 +278,23 @@ export function App({
         if (cancelled) return;
         // Fail closed to product default so the shell still becomes visible.
         applyDocumentTheme("dark");
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsGateway]);
+
+  // Global permission mode is a persistent safety status, so resolve it even
+  // while Settings is closed. Read failures fail closed in the renderer too.
+  useEffect(() => {
+    let cancelled = false;
+    void settingsGateway.getPermissionMode().then(
+      (view) => {
+        if (!cancelled) setPermissionMode(view.mode);
+      },
+      () => {
+        if (!cancelled) setPermissionMode("default");
       },
     );
     return () => {
@@ -869,6 +889,15 @@ export function App({
     }
   }
 
+  async function resetPermissionMode() {
+    try {
+      const view = await settingsGateway.setPermissionMode("default");
+      setPermissionMode(view.mode);
+    } catch (cause) {
+      console.error("Failed to restore the default permission mode.", cause);
+    }
+  }
+
   async function createConversation() {
     if (!activeProject) return;
     const projectId = activeProject.id;
@@ -1224,6 +1253,8 @@ export function App({
           gitChanges={gitChanges}
           gitChangesCapable={Boolean(gitGateway)}
           onGitChangesActive={setGitChangesRequestProjectId}
+          permissionMode={permissionMode}
+          onResetPermissionMode={() => void resetPermissionMode()}
         />
       </div>
       {settingsOpen ? (
@@ -1231,6 +1262,7 @@ export function App({
           gateway={settingsGateway}
           onClose={() => setSettingsOpen(false)}
           onThemeChanged={applyDocumentTheme}
+          onPermissionModeChanged={setPermissionMode}
           projectId={activeProject?.id ?? null}
         />
       ) : null}

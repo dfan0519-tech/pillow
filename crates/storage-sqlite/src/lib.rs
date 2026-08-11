@@ -33,9 +33,11 @@ pub use resource_recent::{
 };
 pub use settings::{
     ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,
-    KEY_GROK_PROFILE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, ResolvedRuntimeSettings, ResolvedSetting,
-    RuntimeAdapterSetting, SettingScope, SettingSource, SettingsError, SettingsUpdatedBy,
-    SqliteSettingsRepository, StoredSetting, UiThemeSetting, UpsertSetting, process_env_map,
+    KEY_GROK_PROFILE, KEY_PERMISSION_MODE, KEY_RUNTIME_ADAPTER, KEY_UI_THEME, PermissionMode,
+    PermissionModeReceiptActor, PermissionModeReceiptDecision, ResolvedRuntimeSettings,
+    ResolvedSetting, RuntimeAdapterSetting, SettingScope, SettingSource, SettingsError,
+    SettingsUpdatedBy, SqliteSettingsRepository, StoredPermissionModeReceipt, StoredSetting,
+    UiThemeSetting, UpsertSetting, process_env_map,
 };
 pub use tool_call::{
     SqliteToolCallRepository, StoredToolCall, ToolCallReservationOutcome, ToolCallStoreError,

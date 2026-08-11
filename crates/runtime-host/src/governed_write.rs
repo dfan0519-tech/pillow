@@ -26,9 +26,9 @@ use keeper_agent_protocol::{
 use keeper_governance_port::CancellationProbe;
 use keeper_policy::WriteDecision;
 use keeper_storage_sqlite::{
-    PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
-    SqlitePermissionRuleRepository, StoredPermissionRuleReceipt, StoredWriteProposal,
-    WriteDecisionOutcome, WriteProposalReserveInput, WriteReservationOutcome,
+    PermissionMode, PermissionRuleAction, PermissionRuleMatchSnapshot, PermissionRulePrefix,
+    SqlitePermissionRuleRepository, SqliteSettingsRepository, StoredPermissionRuleReceipt,
+    StoredWriteProposal, WriteDecisionOutcome, WriteProposalReserveInput, WriteReservationOutcome,
 };
 use keeper_tool_executor::{
     BaseSnapshot, BoundedDiff, CancellationSignal, GovernedWriteApplyOutcome, GovernedWriteError,
@@ -40,8 +40,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::permission_rules::{
-    HostPermissionRuleEvaluation, PermissionRuleAttributionView, attribution_from_receipt,
-    evaluate_host_permission_rules,
+    HostPermissionRuleEvaluation, PermissionGovernanceRepositories, PermissionRuleAttributionView,
+    attribution_from_receipt, evaluate_host_permission_rules,
 };
 
 /// Canonical raw approval grant: 32 CSPRNG bytes → base64url (no pad) = 43 chars.
@@ -137,6 +137,7 @@ struct BoundWriteRun {
     capability: ProjectCapability,
     gateway: Arc<GovernedWriteToolGateway>,
     permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    permission_settings: Option<Arc<SqliteSettingsRepository>>,
 }
 
 struct LiveWriteEntry {
@@ -162,7 +163,7 @@ struct LiveWriteEntry {
     terminal_transition_in_progress: bool,
     #[allow(dead_code)]
     waiter_notified: bool,
-    auto_rule_pending: bool,
+    auto_decision_pending: bool,
     auto_approved_by_rule: Option<PermissionRuleAttributionView>,
 }
 
@@ -222,7 +223,7 @@ pub(crate) fn open_write_gateway(
 pub(crate) fn bind_write_run(
     owner: Uuid,
     gateway: Arc<GovernedWriteToolGateway>,
-    permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    permissions: PermissionGovernanceRepositories,
     run_id: RunId,
     project_id: impl Into<String>,
     conversation_id: impl Into<String>,
@@ -247,7 +248,8 @@ pub(crate) fn bind_write_run(
             context,
             capability,
             gateway,
-            permission_rules,
+            permission_rules: permissions.rules,
+            permission_settings: permissions.settings,
         }),
     );
     Ok(())
@@ -690,10 +692,27 @@ pub fn execute_governed_write(
                     return Err(GovernedWriteBridgeError::Gateway);
                 }
             };
-            let auto_rule_pending = !matches!(
+            let permission_mode = if matches!(
                 &rule_evaluation,
                 HostPermissionRuleEvaluation::RequireConfirmation
-            );
+            ) {
+                match bound.permission_settings.as_deref() {
+                    Some(settings) => match settings.resolve_permission_mode() {
+                        Ok(resolved) => resolved.value,
+                        Err(_) => {
+                            fail_closed_after_reserve(&proposal_id, &bound.gateway);
+                            return Err(GovernedWriteBridgeError::Gateway);
+                        }
+                    },
+                    None => PermissionMode::Default,
+                }
+            } else {
+                PermissionMode::Default
+            };
+            let auto_decision_pending = !matches!(
+                &rule_evaluation,
+                HostPermissionRuleEvaluation::RequireConfirmation
+            ) || permission_mode.automatically_approves_writes();
 
             {
                 let mut guard = coordinator()
@@ -739,7 +758,7 @@ pub fn execute_governed_write(
                         interrupted: false,
                         terminal_transition_in_progress: false,
                         waiter_notified: false,
-                        auto_rule_pending,
+                        auto_decision_pending,
                         auto_approved_by_rule: None,
                     },
                 );
@@ -759,6 +778,19 @@ pub fn execute_governed_write(
                         bound.context.conversation_id(),
                         &proposal_id,
                         &matched,
+                    ) {
+                        fail_closed_after_reserve(&proposal_id, &bound.gateway);
+                        return Err(error);
+                    }
+                }
+                HostPermissionRuleEvaluation::RequireConfirmation
+                    if permission_mode.automatically_approves_writes() =>
+                {
+                    if let Err(error) = decide_write_proposal_by_permission_mode(
+                        bound.owner,
+                        bound.context.conversation_id(),
+                        &proposal_id,
+                        permission_mode,
                     ) {
                         fail_closed_after_reserve(&proposal_id, &bound.gateway);
                         return Err(error);
@@ -1203,7 +1235,7 @@ pub fn list_write_proposals(
             let include_grant = entry.terminal.is_none()
                 && entry.metadata.state == WriteProposalState::PendingApproval
                 && now < entry.expires_at
-                && !entry.auto_rule_pending;
+                && !entry.auto_decision_pending;
             seen.insert(entry.proposal_id.clone());
             views.push(live_view_from_entry(entry, include_grant));
         }
@@ -1294,6 +1326,7 @@ pub fn decide_write_proposal(
         Some(approval_grant),
         decision,
         None,
+        None,
     )
 }
 
@@ -1314,6 +1347,27 @@ fn decide_write_proposal_by_rule(
         None,
         decision,
         Some(matched),
+        None,
+    )
+}
+
+fn decide_write_proposal_by_permission_mode(
+    owner: Uuid,
+    conversation_id: &str,
+    proposal_id: &str,
+    permission_mode: PermissionMode,
+) -> Result<LiveWriteProposalView, GovernedWriteBridgeError> {
+    if !permission_mode.automatically_approves_writes() {
+        return Err(GovernedWriteBridgeError::DecisionDenied);
+    }
+    decide_write_proposal_inner(
+        owner,
+        conversation_id,
+        proposal_id,
+        None,
+        WriteDecision::ApproveOnce,
+        None,
+        Some(permission_mode),
     )
 }
 
@@ -1324,6 +1378,7 @@ fn decide_write_proposal_inner(
     approval_grant: Option<&str>,
     decision: WriteDecision,
     matched: Option<&PermissionRuleMatchSnapshot>,
+    permission_mode: Option<PermissionMode>,
 ) -> Result<LiveWriteProposalView, GovernedWriteBridgeError> {
     // Expire first if past due so listing/decision never act on a stale grant.
     reconcile_expired_for_owner(
@@ -1356,7 +1411,10 @@ fn decide_write_proposal_inner(
         {
             return Err(GovernedWriteBridgeError::InvalidGrant);
         }
-        if approval_grant.is_none() && matched.is_none() {
+        if approval_grant.is_none() && matched.is_none() && permission_mode.is_none() {
+            return Err(GovernedWriteBridgeError::DecisionDenied);
+        }
+        if (matched.is_some() || permission_mode.is_some()) && !entry.auto_decision_pending {
             return Err(GovernedWriteBridgeError::DecisionDenied);
         }
         let bound = guard
@@ -1379,6 +1437,15 @@ fn decide_write_proposal_inner(
             proposal_id,
             conversation_id,
             matched,
+            &grant_digest,
+            &fingerprint,
+            now,
+        )
+    } else if let Some(permission_mode) = permission_mode {
+        bound.gateway.store().decide_by_permission_mode(
+            proposal_id,
+            conversation_id,
+            permission_mode,
             &grant_digest,
             &fingerprint,
             now,
@@ -1410,11 +1477,11 @@ fn decide_write_proposal_inner(
     } else {
         None
     };
-    if matched.is_some()
+    if (matched.is_some() || permission_mode.is_some())
         && let Ok(mut guard) = coordinator().state.lock()
         && let Some(entry) = guard.live.get_mut(proposal_id)
     {
-        entry.auto_rule_pending = false;
+        entry.auto_decision_pending = false;
         entry.auto_approved_by_rule = rule_receipt.as_ref().map(attribution_from_receipt);
     }
 
@@ -1801,7 +1868,7 @@ mod grant_tests {
             interrupted: false,
             terminal_transition_in_progress: false,
             waiter_notified: false,
-            auto_rule_pending: false,
+            auto_decision_pending: false,
             auto_approved_by_rule: None,
         };
         let debug = format!("{entry:?}");
@@ -1857,7 +1924,7 @@ mod grant_tests {
             interrupted: false,
             terminal_transition_in_progress: false,
             waiter_notified: false,
-            auto_rule_pending: false,
+            auto_decision_pending: false,
             auto_approved_by_rule: None,
         };
         // Past-due listing must never include the grant.

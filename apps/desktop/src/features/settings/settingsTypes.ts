@@ -7,6 +7,15 @@ export type RuntimeAdapterLabel = "grok-acp" | "fake";
 /** Constrained UI theme labels (matches UiThemeSetting). No `system`. */
 export type UiThemeLabel = "dark" | "light";
 
+/** Pillow-owned approval gate; never forwarded to a provider runtime. */
+export type PermissionModeLabel = "default" | "accept_edits" | "bypass";
+
+/** Installation-wide only. A project source is intentionally unrepresentable. */
+export type PermissionModeSettingsView = {
+  mode: PermissionModeLabel;
+  source: "global" | "default";
+};
+
 export type SettingsScope = "global" | "project";
 
 export type ResolvedSettingView = {
@@ -67,6 +76,8 @@ export type OnboardingSettingsView = {
 export type SettingsGatewayErrorCode =
   | "invalid_runtime_selection"
   | "invalid_theme_selection"
+  | "invalid_permission_mode"
+  | "permission_mode_global_only"
   | "settings_invalid_scope"
   | "settings_scope_shape"
   | "settings_unknown_key"
@@ -96,6 +107,8 @@ export class SettingsGatewayError extends Error {
 }
 
 export interface SettingsGateway {
+  getPermissionMode(): Promise<PermissionModeSettingsView>;
+  setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView>;
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView>;
   /** Optional: process startup ready/degraded status (Tauri host). */
   getRuntimeStartup?(): Promise<RuntimeStartupView>;

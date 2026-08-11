@@ -14,10 +14,10 @@ use keeper_policy::{EXEC_PROPOSAL_TTL_SECS, ExecDecision, ExecProposalState};
 use keeper_session::{ConversationRepository, NewConversation, NewRun};
 use keeper_storage_sqlite::{
     AddPermissionRule, ExecDecisionOutcome, ExecProposalReserveInput, ExecReservationOutcome,
-    ExecRunClaimOutcome, ExecTerminalReceipt, PermissionRuleAction, PermissionRuleMatchSnapshot,
-    PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
-    PermissionRuleScope, PermissionRuleSegmentMatchSnapshot, SqliteExecProposalRepository,
-    SqlitePermissionRuleRepository, StoredExecProposal,
+    ExecRunClaimOutcome, ExecTerminalReceipt, PermissionMode, PermissionRuleAction,
+    PermissionRuleMatchSnapshot, PermissionRulePrefix, PermissionRuleReceiptActor,
+    PermissionRuleReceiptDecision, PermissionRuleScope, PermissionRuleSegmentMatchSnapshot,
+    SqliteExecProposalRepository, SqlitePermissionRuleRepository, StoredExecProposal,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -37,6 +37,91 @@ struct Fixture {
     conversation_id: String,
     run_id: ProtocolRunId,
     db_path: std::path::PathBuf,
+}
+
+#[test]
+fn bypass_decision_persists_mode_receipt_and_approves_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let fx = fixture(&temp);
+    let input = reserve_input(&fx, "mode-bypass", 0xC3);
+    fx.store.reserve(&input).unwrap();
+    let decided_at = Utc::now();
+
+    let outcome = fx
+        .store
+        .decide_by_permission_mode(
+            &input.proposal_id,
+            &fx.conversation_id,
+            PermissionMode::Bypass,
+            &grant_digest(0xC3),
+            &input.proposal_fingerprint,
+            decided_at,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ExecDecisionOutcome::Accepted(ref row) if row.state == ExecProposalState::Approved
+    ));
+
+    let receipt = fx
+        .store
+        .get_permission_mode_receipt(&input.proposal_id)
+        .unwrap()
+        .expect("durable process mode receipt");
+    assert_eq!(receipt.proposal_id, input.proposal_id);
+    assert_eq!(receipt.permission_mode, PermissionMode::Bypass);
+    assert_eq!(receipt.decided_at, decided_at);
+    assert!(
+        fx.store
+            .get_rule_receipt(&receipt.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn default_and_accept_edits_cannot_create_process_approval_receipts() {
+    for permission_mode in [PermissionMode::Default, PermissionMode::AcceptEdits] {
+        let temp = tempfile::tempdir().unwrap();
+        let fx = fixture(&temp);
+        let input = reserve_input(&fx, permission_mode.as_str(), 0xC4);
+        fx.store.reserve(&input).unwrap();
+
+        let error = fx
+            .store
+            .decide_by_permission_mode(
+                &input.proposal_id,
+                &fx.conversation_id,
+                permission_mode,
+                &grant_digest(0xC4),
+                &input.proposal_fingerprint,
+                Utc::now(),
+            )
+            .expect_err("only bypass may auto-approve a process");
+        assert_eq!(
+            error,
+            keeper_storage_sqlite::ExecProposalStoreError::InvalidPermissionModeReceipt
+        );
+        assert_eq!(
+            fx.store.get(&input.proposal_id).unwrap().unwrap().state,
+            ExecProposalState::PendingApproval
+        );
+        assert!(
+            fx.store
+                .get_permission_mode_receipt(&input.proposal_id)
+                .unwrap()
+                .is_none()
+        );
+        let connection = Connection::open(&fx.db_path).unwrap();
+        let decisions: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM exec_approval_decisions WHERE proposal_id = ?1",
+                [&input.proposal_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(decisions, 0);
+    }
 }
 
 fn fixture(temp: &tempfile::TempDir) -> Fixture {

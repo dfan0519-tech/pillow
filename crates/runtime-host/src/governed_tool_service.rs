@@ -13,7 +13,8 @@ use chrono::{DateTime, Utc};
 use keeper_agent_protocol::RunId;
 use keeper_policy::{ExecDecision, WriteDecision};
 use keeper_storage_sqlite::{
-    SqlitePermissionRuleRepository, StoredExecProposal, StoredWriteProposal,
+    SqlitePermissionRuleRepository, SqliteSettingsRepository, StoredExecProposal,
+    StoredWriteProposal,
 };
 use keeper_tool_executor::{
     GovernedProcessToolGateway, GovernedReadToolGateway, GovernedWriteToolGateway,
@@ -32,6 +33,7 @@ use crate::host::{
     GovernedProcessBridgeError, LiveProcessProposalView, ProcessOutputView, bind_process_run,
     open_process_gateway, process_run_is_owned_by, release_process_owner, release_process_run,
 };
+use crate::permission_rules::PermissionGovernanceRepositories;
 
 /// Host-owned governance allocation shared with an adapter through an erased
 /// [`keeper_governance_port::GovernedExecutionPort`] `Arc`.
@@ -46,6 +48,7 @@ pub struct GovernedToolService {
     write_gateway: Option<Arc<GovernedWriteToolGateway>>,
     process_gateway: Option<Arc<GovernedProcessToolGateway>>,
     permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+    permission_settings: Option<Arc<SqliteSettingsRepository>>,
     /// Retained construction identity; recovery uses gateway handles only.
     #[allow(dead_code)]
     database_path: Option<PathBuf>,
@@ -62,6 +65,10 @@ impl std::fmt::Debug for GovernedToolService {
             .field("has_write_gateway", &self.write_gateway.is_some())
             .field("has_process_gateway", &self.process_gateway.is_some())
             .field("has_permission_rules", &self.permission_rules.is_some())
+            .field(
+                "has_permission_settings",
+                &self.permission_settings.is_some(),
+            )
             .field("shut_down", &self.is_shut_down())
             .finish()
     }
@@ -77,17 +84,21 @@ impl GovernedToolService {
         let permission_rules = SqlitePermissionRuleRepository::open(path)
             .map(Arc::new)
             .map_err(|_| GovernedReadBridgeError::Gateway)?;
+        let permission_settings = SqliteSettingsRepository::open(path)
+            .map(Arc::new)
+            .map_err(|_| GovernedReadBridgeError::Gateway)?;
         Ok(Self::build(
             Some(read),
             Some(write),
             Some(process),
             Some(permission_rules),
+            Some(permission_settings),
             Some(path.to_path_buf()),
         ))
     }
 
     pub(crate) fn without_gateways() -> Self {
-        Self::build(None, None, None, None, None)
+        Self::build(None, None, None, None, None, None)
     }
 
     fn build(
@@ -95,6 +106,7 @@ impl GovernedToolService {
         write_gateway: Option<Arc<GovernedWriteToolGateway>>,
         process_gateway: Option<Arc<GovernedProcessToolGateway>>,
         permission_rules: Option<Arc<SqlitePermissionRuleRepository>>,
+        permission_settings: Option<Arc<SqliteSettingsRepository>>,
         database_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -103,6 +115,7 @@ impl GovernedToolService {
             write_gateway,
             process_gateway,
             permission_rules,
+            permission_settings,
             database_path,
             shut_down: AtomicBool::new(false),
             lifecycle: Mutex::new(()),
@@ -155,7 +168,10 @@ impl GovernedToolService {
             bind_write_run(
                 self.owner_id,
                 write_gateway,
-                self.permission_rules.clone(),
+                PermissionGovernanceRepositories::new(
+                    self.permission_rules.clone(),
+                    self.permission_settings.clone(),
+                ),
                 run_id,
                 project_id,
                 conversation_id,
@@ -183,7 +199,10 @@ impl GovernedToolService {
         bind_write_run(
             self.owner_id,
             gateway,
-            self.permission_rules.clone(),
+            PermissionGovernanceRepositories::new(
+                self.permission_rules.clone(),
+                self.permission_settings.clone(),
+            ),
             run_id,
             project_id,
             conversation_id,
@@ -208,7 +227,10 @@ impl GovernedToolService {
         bind_process_run(
             self.owner_id,
             gateway,
-            self.permission_rules.clone(),
+            PermissionGovernanceRepositories::new(
+                self.permission_rules.clone(),
+                self.permission_settings.clone(),
+            ),
             run_id,
             project_id,
             conversation_id,
