@@ -539,9 +539,14 @@ function gitChangesModel(
     loading: false,
     error: null,
     stale: false,
+    mutating: false,
     onSelectRepository: vi.fn(),
     onSelectPath: vi.fn(),
     onRefresh: vi.fn(),
+    onStagePath: vi.fn(),
+    onUnstagePath: vi.fn(),
+    onCommit: vi.fn(),
+    onPush: vi.fn(),
     ...overrides,
   };
 }
@@ -852,7 +857,7 @@ describe("Workbench ResourcePane — Git Changes mode (C4 D3B4)", () => {
     await user.click(screen.getByTestId("git-changes-refresh"));
     expect(onRefresh).toHaveBeenCalledTimes(1);
 
-    await user.click(screen.getByTestId("git-changes-entry-0"));
+    await user.click(screen.getByTestId("git-changes-entry-select-0"));
     expect(onSelectPath).toHaveBeenCalledWith("src/app.ts");
 
     await user.click(screen.getByTestId("git-changes-repo-nested/pkg"));

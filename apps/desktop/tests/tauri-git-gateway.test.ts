@@ -134,6 +134,155 @@ describe("TauriGitGateway invoke contract", () => {
     }
   });
 
+  it("invokes stage/unstage/commit/push with closed payloads and normalizes receipts", async () => {
+    const stageReceipt = {
+      repositoryId: ".",
+      generation: 7,
+      operation: "stage",
+    };
+    const unstageReceipt = {
+      repositoryId: ".",
+      generation: 7,
+      operation: "unstage",
+    };
+    const commitReceipt = {
+      repositoryId: ".",
+      generation: 7,
+      operation: "commit",
+    };
+    const pushReceipt = {
+      repositoryId: ".",
+      generation: 7,
+      operation: "push",
+      remoteName: "origin",
+      branchName: "main",
+    };
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(stageReceipt)
+      .mockResolvedValueOnce(unstageReceipt)
+      .mockResolvedValueOnce(commitReceipt)
+      .mockResolvedValueOnce(pushReceipt);
+
+    const gateway = new TauriGitGateway();
+    await expect(
+      gateway.stageGitPaths({
+        projectId,
+        expected,
+        paths: ["src/a.ts"],
+      }),
+    ).resolves.toEqual(stageReceipt);
+    await expect(
+      gateway.unstageGitPaths({
+        projectId,
+        expected,
+        paths: ["src/a.ts"],
+      }),
+    ).resolves.toEqual(unstageReceipt);
+    await expect(
+      gateway.commitGitChanges({
+        projectId,
+        expected,
+        message: "fix wiring",
+      }),
+    ).resolves.toEqual(commitReceipt);
+    await expect(
+      gateway.pushGitBranch({
+        projectId,
+        expected,
+        confirmation: {
+          confirmed: true,
+          remoteName: "origin",
+          branchName: "main",
+        },
+      }),
+    ).resolves.toEqual(pushReceipt);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "stage_git_paths", {
+      projectId,
+      repositoryId: ".",
+      generation: 7,
+      paths: ["src/a.ts"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "unstage_git_paths", {
+      projectId,
+      repositoryId: ".",
+      generation: 7,
+      paths: ["src/a.ts"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "commit_git_changes", {
+      projectId,
+      repositoryId: ".",
+      generation: 7,
+      message: "fix wiring",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "push_git_branch", {
+      projectId,
+      repositoryId: ".",
+      generation: 7,
+      confirmation: {
+        confirmed: true,
+        remoteName: "origin",
+        branchName: "main",
+      },
+    });
+
+    for (const call of vi.mocked(invoke).mock.calls) {
+      const args = call[1] as Record<string, unknown> | undefined;
+      if (!args) continue;
+      expect(args).not.toHaveProperty("root");
+      expect(args).not.toHaveProperty("argv");
+      expect(args).not.toHaveProperty("executable");
+      expect(args).not.toHaveProperty("nativePath");
+    }
+  });
+
+  it("refuses push when confirmed is false before any host invoke", async () => {
+    const gateway = new TauriGitGateway();
+    await expect(
+      gateway.pushGitBranch({
+        projectId,
+        expected,
+        confirmation: {
+          confirmed: false,
+          remoteName: "origin",
+          branchName: "main",
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "git_push_confirmation_required",
+      message: GIT_ERROR_MESSAGES.git_push_confirmation_required,
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("maps mutation host codes to fixed path-free messages", async () => {
+    const gateway = new TauriGitGateway();
+    const secret = "failed https://user:tok@host/repo.git F:\\secret";
+    for (const code of [
+      "git_message_rejected",
+      "git_branch_rejected",
+      "git_remote_rejected",
+      "git_push_confirmation_required",
+      "git_mutation_failed",
+    ] as const) {
+      vi.mocked(invoke).mockRejectedValueOnce({ code, message: secret });
+      try {
+        await gateway.commitGitChanges({
+          projectId,
+          expected,
+          message: "ok message",
+        });
+        expect.fail("expected rejection");
+      } catch (error) {
+        expect(error).toBeInstanceOf(GitGatewayError);
+        expect((error as GitGatewayError).code).toBe(code);
+        expect((error as GitGatewayError).message).toBe(GIT_ERROR_MESSAGES[code]);
+        expect((error as GitGatewayError).message).not.toContain("user:tok");
+        expect((error as GitGatewayError).message).not.toContain("F:");
+      }
+    }
+  });
+
   it("accepts valid discovery, status, and text/binary/unsupported diffs", async () => {
     const unsupported: GitDiffView = {
       repositoryId: ".",
@@ -484,7 +633,7 @@ describe("normalizeGitDiff hostile responses", () => {
 });
 
 describe("public error normalization", () => {
-  it("exposes exactly the six accepted public error codes", () => {
+  it("exposes the closed public error codes including mutation failures", () => {
     expect([...GIT_PUBLIC_ERRORS]).toEqual([
       "git_project_not_found",
       "git_path_rejected",
@@ -492,6 +641,11 @@ describe("public error normalization", () => {
       "git_unavailable",
       "git_generation_stale",
       "git_generation_mismatch",
+      "git_message_rejected",
+      "git_branch_rejected",
+      "git_remote_rejected",
+      "git_push_confirmation_required",
+      "git_mutation_failed",
     ]);
     for (const code of GIT_PUBLIC_ERRORS) {
       expect(isGitPublicError(code)).toBe(true);

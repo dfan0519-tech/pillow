@@ -218,6 +218,34 @@ type MockGitGateway = GitGateway & {
     generation: number;
     path: string;
   }>;
+  stageCalls: Array<{
+    projectId: string;
+    repositoryId: string;
+    generation: number;
+    paths: string[];
+  }>;
+  unstageCalls: Array<{
+    projectId: string;
+    repositoryId: string;
+    generation: number;
+    paths: string[];
+  }>;
+  commitCalls: Array<{
+    projectId: string;
+    repositoryId: string;
+    generation: number;
+    message: string;
+  }>;
+  pushCalls: Array<{
+    projectId: string;
+    repositoryId: string;
+    generation: number;
+    confirmation: {
+      confirmed: boolean;
+      remoteName: string;
+      branchName: string;
+    };
+  }>;
   setDiscoverImpl: (
     impl: (projectId: string) => Promise<GitDiscoveryView>,
   ) => void;
@@ -233,6 +261,38 @@ type MockGitGateway = GitGateway & {
       expected: { repositoryId: string; generation: number };
       path: string;
     }) => Promise<GitDiffView>,
+  ) => void;
+  setStageImpl: (
+    impl: (input: {
+      projectId: string;
+      expected: { repositoryId: string; generation: number };
+      paths: string[];
+    }) => Promise<import("../src/lib/gitGateway").GitMutationView>,
+  ) => void;
+  setUnstageImpl: (
+    impl: (input: {
+      projectId: string;
+      expected: { repositoryId: string; generation: number };
+      paths: string[];
+    }) => Promise<import("../src/lib/gitGateway").GitMutationView>,
+  ) => void;
+  setCommitImpl: (
+    impl: (input: {
+      projectId: string;
+      expected: { repositoryId: string; generation: number };
+      message: string;
+    }) => Promise<import("../src/lib/gitGateway").GitMutationView>,
+  ) => void;
+  setPushImpl: (
+    impl: (input: {
+      projectId: string;
+      expected: { repositoryId: string; generation: number };
+      confirmation: {
+        confirmed: boolean;
+        remoteName: string;
+        branchName: string;
+      };
+    }) => Promise<import("../src/lib/gitGateway").GitMutationView>,
   ) => void;
 };
 
@@ -253,6 +313,10 @@ function createMockGitGateway(
   const discoverCalls: string[] = [];
   const statusCalls: MockGitGateway["statusCalls"] = [];
   const diffCalls: MockGitGateway["diffCalls"] = [];
+  const stageCalls: MockGitGateway["stageCalls"] = [];
+  const unstageCalls: MockGitGateway["unstageCalls"] = [];
+  const commitCalls: MockGitGateway["commitCalls"] = [];
+  const pushCalls: MockGitGateway["pushCalls"] = [];
   let discoverImpl =
     overrides.discoverImpl
     ?? (async () =>
@@ -272,11 +336,41 @@ function createMockGitGateway(
         generation: input.expected.generation,
         path: input.path,
       }));
+  let stageImpl: Parameters<MockGitGateway["setStageImpl"]>[0] = async (input) => ({
+    repositoryId: input.expected.repositoryId,
+    generation: input.expected.generation,
+    operation: "stage",
+  });
+  let unstageImpl: Parameters<MockGitGateway["setUnstageImpl"]>[0] = async (
+    input,
+  ) => ({
+    repositoryId: input.expected.repositoryId,
+    generation: input.expected.generation,
+    operation: "unstage",
+  });
+  let commitImpl: Parameters<MockGitGateway["setCommitImpl"]>[0] = async (
+    input,
+  ) => ({
+    repositoryId: input.expected.repositoryId,
+    generation: input.expected.generation,
+    operation: "commit",
+  });
+  let pushImpl: Parameters<MockGitGateway["setPushImpl"]>[0] = async (input) => ({
+    repositoryId: input.expected.repositoryId,
+    generation: input.expected.generation,
+    operation: "push",
+    remoteName: input.confirmation.remoteName,
+    branchName: input.confirmation.branchName,
+  });
 
   return {
     discoverCalls,
     statusCalls,
     diffCalls,
+    stageCalls,
+    unstageCalls,
+    commitCalls,
+    pushCalls,
     setDiscoverImpl: (impl) => {
       discoverImpl = impl;
     },
@@ -285,6 +379,18 @@ function createMockGitGateway(
     },
     setDiffImpl: (impl) => {
       diffImpl = impl;
+    },
+    setStageImpl: (impl) => {
+      stageImpl = impl;
+    },
+    setUnstageImpl: (impl) => {
+      unstageImpl = impl;
+    },
+    setCommitImpl: (impl) => {
+      commitImpl = impl;
+    },
+    setPushImpl: (impl) => {
+      pushImpl = impl;
     },
     discoverGitRepositories: async (projectId) => {
       discoverCalls.push(projectId);
@@ -306,6 +412,42 @@ function createMockGitGateway(
         path: input.path,
       });
       return diffImpl(input);
+    },
+    stageGitPaths: async (input) => {
+      stageCalls.push({
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        paths: input.paths,
+      });
+      return stageImpl(input);
+    },
+    unstageGitPaths: async (input) => {
+      unstageCalls.push({
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        paths: input.paths,
+      });
+      return unstageImpl(input);
+    },
+    commitGitChanges: async (input) => {
+      commitCalls.push({
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        message: input.message,
+      });
+      return commitImpl(input);
+    },
+    pushGitBranch: async (input) => {
+      pushCalls.push({
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        confirmation: input.confirmation,
+      });
+      return pushImpl(input);
     },
   };
 }
@@ -750,7 +892,7 @@ describe("C4 D3B4 Git workbench composition", () => {
     });
 
     const user = userEvent.setup();
-    await user.click(screen.getByTestId("git-changes-entry-0"));
+    await user.click(screen.getByTestId("git-changes-entry-select-0"));
     await waitFor(() => {
       expect(gitGateway.diffCalls).toHaveLength(1);
       expect(gitGateway.diffCalls[0]).toEqual({
@@ -784,7 +926,7 @@ describe("C4 D3B4 Git workbench composition", () => {
     expect(screen.queryByText("stale-diff")).toBeNull();
     expect(screen.queryByTestId("git-changes-diff")).toBeNull();
 
-    await user.click(screen.getByTestId("git-changes-entry-0"));
+    await user.click(screen.getByTestId("git-changes-entry-select-0"));
     await waitFor(() => {
       expect(gitGateway.diffCalls.at(-1)).toEqual({
         projectId: projectAId,
@@ -893,7 +1035,7 @@ describe("C4 D3B4 Git workbench composition", () => {
     });
 
     const user = userEvent.setup();
-    await user.click(screen.getByTestId("git-changes-entry-1"));
+    await user.click(screen.getByTestId("git-changes-entry-select-1"));
     await waitFor(() => {
       expect(gitGateway.diffCalls).toEqual([
         {
@@ -1117,9 +1259,14 @@ describe("C4 D3B4 Git workbench composition", () => {
         loading: false,
         error: null,
         stale: false,
+        mutating: false,
         onSelectRepository: vi.fn(),
         onSelectPath: vi.fn(),
         onRefresh: vi.fn(),
+        onStagePath: vi.fn(),
+        onUnstagePath: vi.fn(),
+        onCommit: vi.fn(),
+        onPush: vi.fn(),
       };
 
       const project = fixtureProject();
@@ -1228,5 +1375,276 @@ describe("C4 D3B4 Git workbench composition", () => {
     expect(text).not.toMatch(/F:\\|git\.exe|session=|argv|--git-dir/i);
     expect(text).not.toContain("secret");
     expect(within(pane).queryByText(/xyz/)).toBeNull();
+  });
+
+  it("stages and unstages through the gateway with exact paths, then refreshes status", async () => {
+    const gitGateway = createMockGitGateway({
+      statusImpl: async (input) =>
+        statusView({
+          repositoryId: input.expected.repositoryId,
+          generation: input.expected.generation,
+          dirtyCount: 1,
+          files: [{ path: "src/app.ts", kind: "modified" }],
+        }),
+    });
+
+    render(
+      <App
+        gateway={fixtureProjectGateway()}
+        conversationGateway={emptyConversationGateway()}
+        gitGateway={gitGateway}
+      />,
+    );
+    await selectProjectByName("Project A");
+    await openGitChangesMode();
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-stage-0")).toBeInTheDocument();
+    });
+
+    const statusBefore = gitGateway.statusCalls.length;
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("git-changes-stage-0"));
+
+    await waitFor(() => {
+      expect(gitGateway.stageCalls).toEqual([
+        {
+          projectId: projectAId,
+          repositoryId: ".",
+          generation: 1,
+          paths: ["src/app.ts"],
+        },
+      ]);
+    });
+    await waitFor(() => {
+      expect(gitGateway.statusCalls.length).toBeGreaterThan(statusBefore);
+    });
+
+    await user.click(screen.getByTestId("git-changes-unstage-0"));
+    await waitFor(() => {
+      expect(gitGateway.unstageCalls).toEqual([
+        {
+          projectId: projectAId,
+          repositoryId: ".",
+          generation: 1,
+          paths: ["src/app.ts"],
+        },
+      ]);
+    });
+  });
+
+  it("rejects empty commit messages client-side and commits then refreshes the list", async () => {
+    let dirty = true;
+    const gitGateway = createMockGitGateway();
+    gitGateway.setStatusImpl(async (input) =>
+      statusView({
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        dirtyCount: dirty ? 1 : 0,
+        files: dirty ? [{ path: "src/app.ts", kind: "modified" }] : [],
+        branch: "main",
+      }),
+    );
+
+    render(
+      <App
+        gateway={fixtureProjectGateway()}
+        conversationGateway={emptyConversationGateway()}
+        gitGateway={gitGateway}
+      />,
+    );
+    await selectProjectByName("Project A");
+    await openGitChangesMode();
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-commit-submit")).toBeInTheDocument();
+    });
+
+    const user = userEvent.setup();
+    const submit = screen.getByTestId("git-changes-commit-submit");
+    expect(submit).toBeDisabled();
+    await user.click(submit);
+    expect(gitGateway.commitCalls).toEqual([]);
+
+    await user.type(
+      screen.getByTestId("git-changes-commit-message"),
+      "wire stage and push",
+    );
+    dirty = false;
+    await user.click(screen.getByTestId("git-changes-commit-submit"));
+
+    await waitFor(() => {
+      expect(gitGateway.commitCalls).toEqual([
+        {
+          projectId: projectAId,
+          repositoryId: ".",
+          generation: 1,
+          message: "wire stage and push",
+        },
+      ]);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-clean")).toBeInTheDocument();
+    });
+  });
+
+  it("does not call push gateway until the confirm step; open alone is inert", async () => {
+    const gitGateway = createMockGitGateway({
+      statusImpl: async (input) =>
+        statusView({
+          repositoryId: input.expected.repositoryId,
+          generation: input.expected.generation,
+          branch: "feature",
+          detached: false,
+        }),
+    });
+
+    render(
+      <App
+        gateway={fixtureProjectGateway()}
+        conversationGateway={emptyConversationGateway()}
+        gitGateway={gitGateway}
+      />,
+    );
+    await selectProjectByName("Project A");
+    await openGitChangesMode();
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-push-open")).toBeEnabled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("git-changes-push-open"));
+    expect(gitGateway.pushCalls).toEqual([]);
+    expect(screen.getByTestId("git-changes-push-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-push-branch")).toHaveTextContent(
+      "feature",
+    );
+
+    await user.click(screen.getByTestId("git-changes-push-confirm-submit"));
+    await waitFor(() => {
+      expect(gitGateway.pushCalls).toEqual([
+        {
+          projectId: projectAId,
+          repositoryId: ".",
+          generation: 1,
+          confirmation: {
+            confirmed: true,
+            remoteName: "origin",
+            branchName: "feature",
+          },
+        },
+      ]);
+    });
+  });
+
+  it("maps mutation failures to fixed copy and never puts host error text in the DOM", async () => {
+    const hostLeak =
+      "remote: denied https://user:sekrit@github.com/org/repo.git non-fast-forward";
+    const gitGateway = createMockGitGateway({
+      statusImpl: async (input) =>
+        statusView({
+          repositoryId: input.expected.repositoryId,
+          generation: input.expected.generation,
+          branch: "main",
+          files: [{ path: "src/app.ts", kind: "modified" }],
+          dirtyCount: 1,
+        }),
+    });
+    gitGateway.setStageImpl(async () => {
+      throw new Error(hostLeak);
+    });
+
+    render(
+      <App
+        gateway={fixtureProjectGateway()}
+        conversationGateway={emptyConversationGateway()}
+        gitGateway={gitGateway}
+      />,
+    );
+    await selectProjectByName("Project A");
+    await openGitChangesMode();
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-stage-0")).toBeInTheDocument();
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("git-changes-stage-0"));
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-error")).toHaveTextContent(
+        GIT_ERROR_MESSAGES.git_unavailable,
+      );
+    });
+
+    const pane = screen.getByTestId("resource-pane");
+    const text = pane.textContent ?? "";
+    expect(text).not.toContain(hostLeak);
+    expect(text).not.toContain("sekrit");
+    expect(text).not.toContain("user:");
+    expect(text).not.toContain("github.com");
+    expect(text).not.toContain("non-fast-forward");
+  });
+
+  it("keeps Changes mode optional so the C2 resource browser remains reachable", async () => {
+    const listProjectResources = vi.fn(async () => [
+      { path: "README.md", kind: "file" as const, sizeBytes: 12 },
+    ]);
+    const resourceGateway = {
+      listProjectResources,
+      listRecentProjectResources: vi.fn(async () => []),
+      searchProjectResources: vi.fn(async () => []),
+      readProjectResource: vi.fn(async () => {
+        throw new Error("read out of scope");
+      }),
+      previewProjectResource: vi.fn(async () => {
+        throw new Error("preview out of scope");
+      }),
+    };
+
+    const gitGateway = createMockGitGateway();
+
+    render(
+      <App
+        gateway={fixtureProjectGateway()}
+        conversationGateway={emptyConversationGateway()}
+        resourceGateway={resourceGateway as never}
+        gitGateway={gitGateway}
+      />,
+    );
+    await selectProjectByName("Project A");
+    await openResourcePane();
+
+    // Default body is resources — browser mounts, Git does not discover yet.
+    await waitFor(() => {
+      expect(listProjectResources).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    expect(gitGateway.discoverCalls).toEqual([]);
+    expect(screen.getByTestId("context-body-mode-resources")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // Resource browser body is present (not displaced by Changes).
+    expect(screen.getByTestId("ctx-resource-pane")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("context-body-mode-changes"));
+    await waitFor(() => {
+      expect(screen.getByTestId("git-changes-pane")).toBeInTheDocument();
+    });
+    expect(gitGateway.discoverCalls).toEqual([projectAId]);
+
+    // Switch back — resource browser returns; Changes body unmounts.
+    await user.click(screen.getByTestId("context-body-mode-resources"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("git-changes-pane")).toBeNull();
+    });
+    expect(screen.getByTestId("context-body-mode-resources")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // Switcher still coexists with both modes.
+    expect(screen.getByTestId("context-body-mode-changes")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("ctx-resource-pane")).toBeInTheDocument();
+    });
+    expect(listProjectResources.mock.calls.length).toBeGreaterThan(0);
   });
 });

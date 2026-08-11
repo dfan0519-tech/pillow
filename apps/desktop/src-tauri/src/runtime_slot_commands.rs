@@ -1,12 +1,16 @@
 //! Host-side runtime-slot commands. Returned DTOs are closed and secret-free.
 
+use std::path::Path;
+
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
     GrokSlotAuth, RuntimeSlotGovernance, RuntimeSlotId, RuntimeSlotKind, SqliteSettingsRepository,
     process_env_map,
 };
 use pillow_runtime_slots::{
-    ExternalCliStatus, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView, SecretBytes,
+    ExternalCliStatus, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
+    ModelCatalogUnsupportedReason, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView,
+    SecretBytes,
 };
 use serde::Serialize;
 use tauri::State;
@@ -57,6 +61,27 @@ pub struct RuntimeSlotStartDto {
     pub kind: String,
     pub governance: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSlotModelCatalogDto {
+    pub slot_id: String,
+    pub project_id: String,
+    pub status: String,
+    pub source: String,
+    pub models: Vec<String>,
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSlotModelSwitchDto {
+    pub slot_id: String,
+    pub project_id: String,
+    pub model_id: String,
+    pub runtime_restarted: bool,
+    pub session_restore: String,
 }
 
 #[tauri::command]
@@ -131,6 +156,17 @@ pub fn get_external_cli_status(
 }
 
 #[tauri::command]
+pub fn get_runtime_slot_model_catalog(
+    slots: State<'_, RuntimeSlotService>,
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    project_id: String,
+    slot_id: String,
+) -> Result<RuntimeSlotModelCatalogDto, CommandError> {
+    get_runtime_slot_model_catalog_impl(&slots, &settings, &app, project_id, slot_id)
+}
+
+#[tauri::command]
 pub fn start_runtime_slot(
     slots: State<'_, RuntimeSlotService>,
     settings: State<'_, SqliteSettingsRepository>,
@@ -140,6 +176,21 @@ pub fn start_runtime_slot(
     slot_id: String,
 ) -> Result<RuntimeSlotStartDto, CommandError> {
     start_runtime_slot_impl(&slots, &settings, &app, &runtime, project_id, slot_id)
+}
+
+#[tauri::command]
+pub fn set_runtime_slot_model(
+    slots: State<'_, RuntimeSlotService>,
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    runtime: State<'_, RuntimeServiceState>,
+    project_id: String,
+    slot_id: String,
+    model_id: String,
+) -> Result<RuntimeSlotModelSwitchDto, CommandError> {
+    set_runtime_slot_model_impl(
+        &slots, &settings, &app, &runtime, project_id, slot_id, model_id,
+    )
 }
 
 /// Update a governed Grok API-key slot.
@@ -154,7 +205,9 @@ pub fn start_runtime_slot(
 #[tauri::command]
 pub fn update_grok_api_key_slot(
     slots: State<'_, RuntimeSlotService>,
+    settings: State<'_, SqliteSettingsRepository>,
     app: State<'_, AppState>,
+    runtime: State<'_, RuntimeServiceState>,
     project_id: String,
     slot_id: String,
     display_name: String,
@@ -164,7 +217,9 @@ pub fn update_grok_api_key_slot(
 ) -> Result<RuntimeSlotDto, CommandError> {
     update_grok_api_key_slot_impl(
         &slots,
+        &settings,
         &app,
+        &runtime,
         project_id,
         slot_id,
         display_name,
@@ -284,10 +339,54 @@ pub(crate) fn get_external_cli_status_impl(
     })
 }
 
+pub(crate) fn get_runtime_slot_model_catalog_impl(
+    slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    project_id: String,
+    slot_id: String,
+) -> Result<RuntimeSlotModelCatalogDto, CommandError> {
+    let project = app.get_registered_project(&project_id)?;
+    let slot_id_value = parse_slot_id(&slot_id)?;
+    let view = slots
+        .list(project.id)
+        .map_err(map_slot_error)?
+        .into_iter()
+        .find(|view| view.slot.id == slot_id_value)
+        .ok_or_else(|| command_error("runtime_slot_not_found", "Runtime slot was not found."))?;
+    let login_executable = if matches!(
+        view.slot.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::Login { .. }
+        }
+    ) {
+        let resolved = settings
+            .resolve_runtime(Some(&project_id), &process_env_map())
+            .map_err(|error| command_error(error.code(), &error.to_string()))?;
+        Some(
+            discover_grok_executable_with_override(resolved.grok_executable.value.as_deref())
+                .map_err(|error| command_error(error.code, &error.message))?,
+        )
+    } else {
+        None
+    };
+    let catalog = slots
+        .model_catalog(
+            project.id,
+            slot_id_value,
+            login_executable.as_deref(),
+            Path::new(&project.root_path),
+        )
+        .map_err(map_slot_error)?;
+    Ok(model_catalog_to_dto(catalog, slot_id, project_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_grok_api_key_slot_impl(
     slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
     app: &AppState,
+    runtime: &RuntimeServiceState,
     project_id: String,
     slot_id: String,
     display_name: String,
@@ -295,8 +394,14 @@ pub(crate) fn update_grok_api_key_slot_impl(
     model_id: String,
     api_key: Option<String>,
 ) -> Result<RuntimeSlotDto, CommandError> {
+    let _lifecycle = runtime
+        .lock_slot_lifecycle()
+        .map_err(|error| command_error(error.code, &error.message))?;
     let project_id_value = registered_project_id(app, &project_id)?;
     let slot_id_value = parse_slot_id(&slot_id)?;
+    let was_active = runtime
+        .is_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
     // None / empty / whitespace ⇒ keep stored secret. Non-empty is moved into
     // SecretBytes immediately so it never sits in a serializable DTO path.
     let secret = match api_key {
@@ -304,7 +409,7 @@ pub(crate) fn update_grok_api_key_slot_impl(
         Some(value) if value.trim().is_empty() => None,
         Some(value) => Some(SecretBytes::new(value)),
     };
-    slots
+    let updated = slots
         .update_grok_api_key(
             project_id_value,
             slot_id_value,
@@ -313,8 +418,25 @@ pub(crate) fn update_grok_api_key_slot_impl(
             model_id,
             secret,
         )
-        .map(slot_to_dto)
-        .map_err(map_slot_error)
+        .map_err(map_slot_error)?;
+    if was_active
+        && let Err(error) = start_runtime_slot_impl_locked(
+            slots,
+            settings,
+            app,
+            runtime,
+            project_id.clone(),
+            slot_id.clone(),
+        )
+    {
+        return Err(fail_closed_replacement_error(
+            runtime,
+            &project_id,
+            &slot_id,
+            error,
+        ));
+    }
+    Ok(slot_to_dto(updated))
 }
 
 pub(crate) fn delete_runtime_slot_impl(
@@ -324,6 +446,9 @@ pub(crate) fn delete_runtime_slot_impl(
     project_id: String,
     slot_id: String,
 ) -> Result<(), CommandError> {
+    let _lifecycle = runtime
+        .lock_slot_lifecycle()
+        .map_err(|error| command_error(error.code, &error.message))?;
     let project_id_value = registered_project_id(app, &project_id)?;
     let slot_id_value = parse_slot_id(&slot_id)?;
     // If this slot is currently the active conversation runtime, stop it first
@@ -337,6 +462,20 @@ pub(crate) fn delete_runtime_slot_impl(
 }
 
 pub(crate) fn start_runtime_slot_impl(
+    slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    runtime: &RuntimeServiceState,
+    project_id: String,
+    slot_id: String,
+) -> Result<RuntimeSlotStartDto, CommandError> {
+    let _lifecycle = runtime
+        .lock_slot_lifecycle()
+        .map_err(|error| command_error(error.code, &error.message))?;
+    start_runtime_slot_impl_locked(slots, settings, app, runtime, project_id, slot_id)
+}
+
+fn start_runtime_slot_impl_locked(
     slots: &RuntimeSlotService,
     settings: &SqliteSettingsRepository,
     app: &AppState,
@@ -381,6 +520,73 @@ pub(crate) fn start_runtime_slot_impl(
     })
 }
 
+pub(crate) fn set_runtime_slot_model_impl(
+    slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    runtime: &RuntimeServiceState,
+    project_id: String,
+    slot_id: String,
+    model_id: String,
+) -> Result<RuntimeSlotModelSwitchDto, CommandError> {
+    let _lifecycle = runtime
+        .lock_slot_lifecycle()
+        .map_err(|error| command_error(error.code, &error.message))?;
+    let project_id_value = registered_project_id(app, &project_id)?;
+    let slot_id_value = parse_slot_id(&slot_id)?;
+    let was_active = runtime
+        .is_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
+    slots
+        .update_model(project_id_value, slot_id_value, model_id.clone())
+        .map_err(map_slot_error)?;
+
+    if was_active
+        && let Err(error) = start_runtime_slot_impl_locked(
+            slots,
+            settings,
+            app,
+            runtime,
+            project_id.clone(),
+            slot_id.clone(),
+        )
+    {
+        // Metadata now names the requested model. If replacement cannot be
+        // activated, remove the prior active runtime so the command cannot
+        // leave an old model running behind new metadata.
+        return Err(fail_closed_replacement_error(
+            runtime,
+            &project_id,
+            &slot_id,
+            error,
+        ));
+    }
+
+    Ok(RuntimeSlotModelSwitchDto {
+        slot_id,
+        project_id,
+        model_id,
+        runtime_restarted: was_active,
+        session_restore: if was_active {
+            "unavailable".into()
+        } else {
+            "not_applicable".into()
+        },
+    })
+}
+
+fn fail_closed_replacement_error(
+    runtime: &RuntimeServiceState,
+    project_id: &str,
+    slot_id: &str,
+    replacement_error: CommandError,
+) -> CommandError {
+    match runtime.shutdown_if_active_slot(project_id, slot_id) {
+        Ok(_) => replacement_error,
+        Err(error) => command_error(error.code, &error.message),
+    }
+}
+
 fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
     let slot = view.slot;
     let (
@@ -394,12 +600,12 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         status_args,
     ) = match slot.kind {
         RuntimeSlotKind::GovernedGrok {
-            auth: GrokSlotAuth::Login,
+            auth: GrokSlotAuth::Login { model_id },
         } => (
             "governed_grok".into(),
             Some("login".into()),
             None,
-            None,
+            model_id,
             None,
             None,
             None,
@@ -453,6 +659,36 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         status_args,
         created_at: slot.created_at.to_rfc3339(),
         updated_at: slot.updated_at.to_rfc3339(),
+    }
+}
+
+fn model_catalog_to_dto(
+    catalog: ModelCatalog,
+    slot_id: String,
+    project_id: String,
+) -> RuntimeSlotModelCatalogDto {
+    let source = match catalog.source {
+        ModelCatalogSource::OpenAiModels => "openai_models",
+        ModelCatalogSource::GrokCli => "grok_cli",
+        ModelCatalogSource::ExternalCli => "external_cli",
+    };
+    let (status, reason_code) = match catalog.availability {
+        ModelCatalogAvailability::Available => ("available", None),
+        ModelCatalogAvailability::Unsupported { reason } => {
+            let reason = match reason {
+                ModelCatalogUnsupportedReason::Endpoint => "endpoint_not_supported",
+                ModelCatalogUnsupportedReason::ExternalCli => "external_cli_not_supported",
+            };
+            ("unsupported", Some(reason.to_owned()))
+        }
+    };
+    RuntimeSlotModelCatalogDto {
+        slot_id,
+        project_id,
+        status: status.into(),
+        source: source.into(),
+        models: catalog.model_ids,
+        reason_code,
     }
 }
 

@@ -90,6 +90,43 @@ fn production_argv_is_fixed() {
 }
 
 #[test]
+fn opt_in_fake_child_argv_sink_records_the_process_launch_arguments() {
+    let temp = tempfile::tempdir().unwrap();
+    let copied = temp.path().join(if cfg!(windows) {
+        "fake-acp-agent.exe"
+    } else {
+        "fake-acp-agent"
+    });
+    std::fs::copy(fake_bin(), &copied).unwrap();
+    let sink = temp.path().join("argv.jsonl");
+    std::fs::write(
+        temp.path().join("keeper_fake_acp_argv_sink.txt"),
+        sink.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(&copied)
+        .args(["-m", "model-probe", "agent", "--no-leader", "stdio"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let lines = std::fs::read_to_string(sink).unwrap();
+    let argv: Vec<String> = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    assert_eq!(argv, ["-m", "model-probe", "agent", "--no-leader", "stdio"]);
+}
+
+#[test]
+fn fake_child_models_subcommand_emits_a_bounded_plain_model_list() {
+    let output = std::process::Command::new(fake_bin())
+        .arg("models")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "grok-4.5\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn probe_not_healthy_from_executable_presence_alone() {
     let adapter = adapter_with_script("text-only");
     let probe = adapter.probe().unwrap();

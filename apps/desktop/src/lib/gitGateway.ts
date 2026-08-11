@@ -1,4 +1,4 @@
-/** C4 read-only Git DTOs. Every response is bound to a portable repository id + generation. */
+/** C4 Git DTOs. Every response is bound to a portable repository id + generation. */
 
 export type GitStatusKind =
   | "modified"
@@ -15,6 +15,8 @@ export type GitStatusKind =
 
 export type GitDiffKind = "text" | "binary" | "unsupported";
 
+export type GitMutationOperation = "stage" | "unstage" | "commit" | "push";
+
 export const GIT_PUBLIC_ERRORS = [
   "git_project_not_found",
   "git_path_rejected",
@@ -22,6 +24,11 @@ export const GIT_PUBLIC_ERRORS = [
   "git_unavailable",
   "git_generation_stale",
   "git_generation_mismatch",
+  "git_message_rejected",
+  "git_branch_rejected",
+  "git_remote_rejected",
+  "git_push_confirmation_required",
+  "git_mutation_failed",
 ] as const;
 
 export type GitPublicError = (typeof GIT_PUBLIC_ERRORS)[number];
@@ -71,10 +78,26 @@ export type GitGeneration = {
   generation: number;
 };
 
+/** Closed push confirmation: target and marker travel together. */
+export type GitPushConfirmation = {
+  confirmed: boolean;
+  remoteName: string;
+  branchName: string;
+};
+
+export type GitMutationView = {
+  repositoryId: string;
+  generation: number;
+  operation: GitMutationOperation;
+  remoteName?: string;
+  branchName?: string;
+};
+
 /**
- * Renderer wire contract for the read-only Git slice.
- * Invokes use only projectId / repositoryId / generation / path — never roots,
- * executables, argv, or native paths.
+ * Renderer wire contract for the Git slice (read + structured mutations).
+ * Invokes use only projectId / repositoryId / generation / portable paths /
+ * validated message / closed push confirmation — never roots, executables,
+ * argv, or native paths.
  */
 export interface GitGateway {
   discoverGitRepositories(projectId: string): Promise<GitDiscoveryView>;
@@ -87,6 +110,26 @@ export interface GitGateway {
     expected: GitGeneration;
     path: string;
   }): Promise<GitDiffView>;
+  stageGitPaths(input: {
+    projectId: string;
+    expected: GitGeneration;
+    paths: string[];
+  }): Promise<GitMutationView>;
+  unstageGitPaths(input: {
+    projectId: string;
+    expected: GitGeneration;
+    paths: string[];
+  }): Promise<GitMutationView>;
+  commitGitChanges(input: {
+    projectId: string;
+    expected: GitGeneration;
+    message: string;
+  }): Promise<GitMutationView>;
+  pushGitBranch(input: {
+    projectId: string;
+    expected: GitGeneration;
+    confirmation: GitPushConfirmation;
+  }): Promise<GitMutationView>;
 }
 
 export class GitGatewayError extends Error {
@@ -99,7 +142,7 @@ export class GitGatewayError extends Error {
   }
 }
 
-/** Fixed path-free copy for the six public codes. Host messages are never echoed. */
+/** Fixed path-free copy for public codes. Host messages are never echoed. */
 export const GIT_ERROR_MESSAGES: Record<GitPublicError, string> = {
   git_project_not_found: "Git project was not found.",
   git_path_rejected: "Git path was rejected.",
@@ -107,6 +150,16 @@ export const GIT_ERROR_MESSAGES: Record<GitPublicError, string> = {
   git_unavailable: "Git read capability is unavailable.",
   git_generation_stale: "Git result is stale; refresh changes.",
   git_generation_mismatch: "Git repository identity changed; refresh changes.",
+  git_message_rejected:
+    "Commit message was rejected. Use a non-empty message without leading dashes or control characters.",
+  git_branch_rejected:
+    "Branch name was rejected. Choose a valid branch and try again.",
+  git_remote_rejected:
+    "Remote was rejected. Check the remote name and that the target is an allowed HTTPS or local bare repository.",
+  git_push_confirmation_required:
+    "Push requires explicit confirmation of the remote and branch.",
+  git_mutation_failed:
+    "Git operation failed. For push: check credentials, remote access, and that the update is a fast-forward; then refresh and retry.",
 };
 
 export function isGitPublicError(value: unknown): value is GitPublicError {
@@ -118,8 +171,8 @@ export function isGitPublicError(value: unknown): value is GitPublicError {
 
 /**
  * Normalize any rejection into a path-free public error.
- * Known codes (including generation stale/mismatch) are preserved; everything
- * else becomes `git_unavailable`.
+ * Known codes (including generation stale/mismatch and mutation codes) are
+ * preserved; everything else becomes `git_unavailable`.
  */
 export function normalizeGitError(error: unknown): GitGatewayError {
   const code =

@@ -1,5 +1,5 @@
 /**
- * Tauri Git gateway — exact read-only invokes and strict DTO validation.
+ * Tauri Git gateway — exact read + mutation invokes and strict DTO validation.
  * Wire types live only in gitGateway.ts; this module never mounts UI state.
  */
 
@@ -13,6 +13,9 @@ import {
   type GitDiscoveryView,
   type GitGateway,
   type GitGeneration,
+  type GitMutationOperation,
+  type GitMutationView,
+  type GitPushConfirmation,
   type GitStatusEntryView,
   type GitStatusKind,
   type GitStatusView,
@@ -71,6 +74,25 @@ const DIFF_KEYS = [
   "byteCount",
   "originalPath",
 ] as const;
+const MUTATION_KEYS = [
+  "repositoryId",
+  "generation",
+  "operation",
+  "remoteName",
+  "branchName",
+] as const;
+
+const MUTATION_OPERATIONS: readonly GitMutationOperation[] = [
+  "stage",
+  "unstage",
+  "commit",
+  "push",
+];
+
+const MAX_MESSAGE_BYTES = 4_096;
+const MAX_REMOTE_NAME = 64;
+const MAX_BRANCH_NAME = 255;
+const MAX_PATHS = 5_000;
 
 function invalid(): GitGatewayError {
   return new GitGatewayError(
@@ -429,6 +451,135 @@ export function normalizeGitDiff(
   };
 }
 
+/**
+ * Normalize a closed mutation receipt. Echoed repository/generation must match
+ * the request; optional remote/branch are admitted only when present and bounded.
+ */
+export function normalizeGitMutation(
+  value: unknown,
+  current: GitGeneration,
+  expectedOperation?: GitMutationOperation,
+): GitMutationView {
+  if (
+    !record(value)
+    || !only(value, MUTATION_KEYS)
+    || !portable(value.repositoryId)
+    || !integer(value.generation)
+    || !enumValue(value.operation, MUTATION_OPERATIONS)
+  ) {
+    throw invalid();
+  }
+
+  if (
+    value.remoteName !== undefined
+    && (typeof value.remoteName !== "string"
+      || value.remoteName.length === 0
+      || value.remoteName.length > MAX_REMOTE_NAME)
+  ) {
+    throw invalid();
+  }
+  if (
+    value.branchName !== undefined
+    && (typeof value.branchName !== "string"
+      || value.branchName.length === 0
+      || value.branchName.length > MAX_BRANCH_NAME)
+  ) {
+    throw invalid();
+  }
+
+  assertExpected(current, {
+    repositoryId: value.repositoryId,
+    generation: value.generation,
+  });
+
+  if (expectedOperation !== undefined && value.operation !== expectedOperation) {
+    throw invalid();
+  }
+
+  return {
+    repositoryId: value.repositoryId,
+    generation: value.generation,
+    operation: value.operation,
+    ...(value.remoteName === undefined ? {} : { remoteName: value.remoteName }),
+    ...(value.branchName === undefined ? {} : { branchName: value.branchName }),
+  };
+}
+
+function assertPortablePaths(paths: string[]): void {
+  if (
+    !Array.isArray(paths)
+    || paths.length === 0
+    || paths.length > MAX_PATHS
+    || paths.some((path) => !portableEntryPath(path))
+  ) {
+    throw new GitGatewayError(
+      "git_path_rejected",
+      GIT_ERROR_MESSAGES.git_path_rejected,
+    );
+  }
+}
+
+function assertCommitMessage(message: string): void {
+  if (
+    typeof message !== "string"
+    || message.length === 0
+    || utf8Bytes(message) > MAX_MESSAGE_BYTES
+    || message.startsWith("-")
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(message)
+  ) {
+    throw new GitGatewayError(
+      "git_message_rejected",
+      GIT_ERROR_MESSAGES.git_message_rejected,
+    );
+  }
+}
+
+function assertPushConfirmation(
+  confirmation: GitPushConfirmation,
+): GitPushConfirmation {
+  if (typeof confirmation !== "object" || confirmation === null) {
+    throw new GitGatewayError(
+      "git_push_confirmation_required",
+      GIT_ERROR_MESSAGES.git_push_confirmation_required,
+    );
+  }
+  if (typeof confirmation.confirmed !== "boolean") {
+    throw new GitGatewayError(
+      "git_push_confirmation_required",
+      GIT_ERROR_MESSAGES.git_push_confirmation_required,
+    );
+  }
+  if (
+    typeof confirmation.remoteName !== "string"
+    || confirmation.remoteName.length === 0
+    || confirmation.remoteName.length > MAX_REMOTE_NAME
+    || confirmation.remoteName.startsWith("-")
+    || /[\u0000-\u001f]/.test(confirmation.remoteName)
+  ) {
+    throw new GitGatewayError(
+      "git_remote_rejected",
+      GIT_ERROR_MESSAGES.git_remote_rejected,
+    );
+  }
+  if (
+    typeof confirmation.branchName !== "string"
+    || confirmation.branchName.length === 0
+    || confirmation.branchName.length > MAX_BRANCH_NAME
+    || confirmation.branchName.startsWith("-")
+    || /[\u0000-\u001f]/.test(confirmation.branchName)
+  ) {
+    throw new GitGatewayError(
+      "git_branch_rejected",
+      GIT_ERROR_MESSAGES.git_branch_rejected,
+    );
+  }
+  return {
+    confirmed: confirmation.confirmed,
+    remoteName: confirmation.remoteName,
+    branchName: confirmation.branchName,
+  };
+}
+
 export class TauriGitGateway implements GitGateway {
   async discoverGitRepositories(projectId: string): Promise<GitDiscoveryView> {
     try {
@@ -470,6 +621,92 @@ export class TauriGitGateway implements GitGateway {
         path: input.path,
       });
       return normalizeGitDiff(payload, input.expected);
+    } catch (error) {
+      throw normalizeGitError(error);
+    }
+  }
+
+  async stageGitPaths(input: {
+    projectId: string;
+    expected: GitGeneration;
+    paths: string[];
+  }): Promise<GitMutationView> {
+    assertPortablePaths(input.paths);
+    try {
+      const payload = await invoke<unknown>("stage_git_paths", {
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        paths: input.paths,
+      });
+      return normalizeGitMutation(payload, input.expected, "stage");
+    } catch (error) {
+      throw normalizeGitError(error);
+    }
+  }
+
+  async unstageGitPaths(input: {
+    projectId: string;
+    expected: GitGeneration;
+    paths: string[];
+  }): Promise<GitMutationView> {
+    assertPortablePaths(input.paths);
+    try {
+      const payload = await invoke<unknown>("unstage_git_paths", {
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        paths: input.paths,
+      });
+      return normalizeGitMutation(payload, input.expected, "unstage");
+    } catch (error) {
+      throw normalizeGitError(error);
+    }
+  }
+
+  async commitGitChanges(input: {
+    projectId: string;
+    expected: GitGeneration;
+    message: string;
+  }): Promise<GitMutationView> {
+    assertCommitMessage(input.message);
+    try {
+      const payload = await invoke<unknown>("commit_git_changes", {
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        message: input.message,
+      });
+      return normalizeGitMutation(payload, input.expected, "commit");
+    } catch (error) {
+      throw normalizeGitError(error);
+    }
+  }
+
+  async pushGitBranch(input: {
+    projectId: string;
+    expected: GitGeneration;
+    confirmation: GitPushConfirmation;
+  }): Promise<GitMutationView> {
+    const confirmation = assertPushConfirmation(input.confirmation);
+    if (!confirmation.confirmed) {
+      throw new GitGatewayError(
+        "git_push_confirmation_required",
+        GIT_ERROR_MESSAGES.git_push_confirmation_required,
+      );
+    }
+    try {
+      const payload = await invoke<unknown>("push_git_branch", {
+        projectId: input.projectId,
+        repositoryId: input.expected.repositoryId,
+        generation: input.expected.generation,
+        confirmation: {
+          confirmed: true,
+          remoteName: confirmation.remoteName,
+          branchName: confirmation.branchName,
+        },
+      });
+      return normalizeGitMutation(payload, input.expected, "push");
     } catch (error) {
       throw normalizeGitError(error);
     }

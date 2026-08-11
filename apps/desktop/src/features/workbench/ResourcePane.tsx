@@ -46,9 +46,9 @@ export type TerminalOutputTarget = {
 };
 
 /**
- * View-only Git Changes body model for Round 2B (Grok4).
- * Wire DTOs from gitGateway only; loading/error/stale are UI presentation.
- * Field names are a frozen contract — do not rename.
+ * Git Changes body model (read + structured mutations).
+ * Wire DTOs from gitGateway only; loading/error/stale/mutating are UI presentation.
+ * Field names are a frozen contract — do not rename existing keys.
  */
 export type GitChangesPaneModel = {
   repositories: GitRepositoryView[];
@@ -58,9 +58,15 @@ export type GitChangesPaneModel = {
   loading: boolean;
   error: string | null;
   stale: boolean;
+  /** True while stage/unstage/commit/push is in flight. */
+  mutating: boolean;
   onSelectRepository: (repositoryId: string) => void;
   onSelectPath: (portablePath: string) => void;
   onRefresh: () => void;
+  onStagePath: (portablePath: string) => void;
+  onUnstagePath: (portablePath: string) => void;
+  onCommit: (message: string) => void;
+  onPush: (payload: { remoteName: string; branchName: string }) => void;
 };
 
 /**
@@ -682,9 +688,14 @@ export function ResourcePane({
               loading={gitChanges.loading}
               error={gitChanges.error}
               stale={gitChanges.stale}
+              mutating={gitChanges.mutating}
               onSelectRepository={gitChanges.onSelectRepository}
               onSelectPath={gitChanges.onSelectPath}
               onRefresh={gitChanges.onRefresh}
+              onStagePath={gitChanges.onStagePath}
+              onUnstagePath={gitChanges.onUnstagePath}
+              onCommit={gitChanges.onCommit}
+              onPush={gitChanges.onPush}
             />
           </section>
         ) : showGitChanges ? (

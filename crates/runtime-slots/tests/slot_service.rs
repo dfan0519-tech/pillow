@@ -19,6 +19,67 @@ fn seed_project(db: &Path, temp: &tempfile::TempDir, name: &str) -> keeper_proje
         .unwrap()
 }
 
+#[test]
+fn login_slot_model_update_is_persisted_and_prepared_for_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, temp.path().join("app-data")).unwrap();
+    let created = service
+        .create_grok_login(project.id, "Signed-in Grok".into())
+        .unwrap();
+
+    let updated = service
+        .update_model(project.id, created.slot.id, "grok-4.5".into())
+        .unwrap();
+    assert!(matches!(
+        updated.slot.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: keeper_storage_sqlite::GrokSlotAuth::Login {
+                model_id: Some(ref model_id)
+            }
+        } if model_id == "grok-4.5"
+    ));
+    assert!(matches!(
+        service.prepare_grok(project.id, created.slot.id).unwrap(),
+        PreparedGrokSlot::Login {
+            model_id: Some(ref model_id)
+        } if model_id == "grok-4.5"
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn api_key_model_update_keeps_the_secret_and_prepares_the_new_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, temp.path().join("app-data")).unwrap();
+    let marker = "pillow-test-model-switch-key";
+    let created = service
+        .create_grok_api_key(
+            project.id,
+            "Private".into(),
+            "https://example.invalid/v1".into(),
+            "model-old".into(),
+            SecretBytes::new(marker.into()),
+        )
+        .unwrap();
+
+    service
+        .update_model(project.id, created.slot.id, "model-new".into())
+        .unwrap();
+    match service.prepare_grok(project.id, created.slot.id).unwrap() {
+        PreparedGrokSlot::ApiKey {
+            model_id, api_key, ..
+        } => {
+            assert_eq!(model_id, "model-new");
+            assert_eq!(api_key.as_bytes(), marker.as_bytes());
+        }
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn dpapi_file_round_trip_is_user_scoped_ciphertext_not_plaintext() {
@@ -76,7 +137,7 @@ fn configured_api_slot_generates_secret_free_usable_private_config() {
             model_id,
             api_key,
         } => (private_home, model_id, api_key),
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     };
     assert_eq!(model_id, "model-one");
     assert_eq!(api_key.as_bytes(), marker.as_bytes());
@@ -123,7 +184,7 @@ fn api_slot_fails_closed_if_its_private_home_contains_login_auth() {
     let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
     let private_home = match prepared {
         PreparedGrokSlot::ApiKey { private_home, .. } => private_home,
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     };
     std::fs::write(private_home.join(".grok").join("auth.json"), b"forbidden").unwrap();
 
@@ -150,7 +211,7 @@ fn login_slot_preparation_does_not_redirect_the_default_profile() {
     ));
     assert!(matches!(
         service.prepare_grok(project.id, created.slot.id).unwrap(),
-        PreparedGrokSlot::Login
+        PreparedGrokSlot::Login { model_id: None }
     ));
 }
 
@@ -295,7 +356,7 @@ fn update_without_api_key_keeps_the_original_secret_usable() {
             assert_eq!(model_id, "model-two");
             assert_eq!(api_key.as_bytes(), original.as_bytes());
         }
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     }
 }
 
@@ -366,7 +427,7 @@ fn update_with_new_api_key_rotates_and_destroys_prior_ciphertext() {
         PreparedGrokSlot::ApiKey { api_key, .. } => {
             assert_eq!(api_key.as_bytes(), rotated.as_bytes());
         }
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     }
 }
 

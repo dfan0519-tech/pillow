@@ -18,6 +18,8 @@ const EXEC_PERMISSION_RULE_SEGMENTS_MIGRATION: &str =
     include_str!("../migrations/0013_exec_permission_rule_segments.sql");
 const PERMISSION_MODES_MIGRATION: &str = include_str!("../migrations/0014_permission_modes.sql");
 const RUNTIME_SLOTS_MIGRATION: &str = include_str!("../migrations/0015_runtime_slots.sql");
+const RUNTIME_SLOT_LOGIN_MODELS_MIGRATION: &str =
+    include_str!("../migrations/0016_runtime_slot_login_models.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -32,6 +34,7 @@ const RUNTIME_SLOTS_MIGRATION: &str = include_str!("../migrations/0015_runtime_s
 /// Migration 0013 adds ordered per-segment process-rule receipt snapshots.
 /// Migration 0014 adds the global-only permission-mode guard.
 /// Migration 0015 adds project-scoped runtime slots with non-secret metadata.
+/// Migration 0016 lets login-auth Grok slots persist an optional selected model.
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -48,7 +51,75 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(EXEC_PERMISSION_RULE_SEGMENTS_MIGRATION)?;
     connection.execute_batch(PERMISSION_MODES_MIGRATION)?;
     connection.execute_batch(RUNTIME_SLOTS_MIGRATION)?;
+    upgrade_runtime_slot_login_models(connection)?;
     Ok(())
+}
+
+fn login_model_accepted_by_runtime_slots_check(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.execute("SAVEPOINT runtime_slot_login_model_probe", [])?;
+    let insert = connection.execute(
+        "INSERT INTO runtime_slots (
+            slot_id, project_id, display_name, kind, governance, auth_mode,
+            base_url, model_id, secret_ref, executable_path,
+            launch_args_json, status_args_json, created_at, updated_at
+         ) VALUES (
+            '__pillow_runtime_slot_login_model_probe__',
+            '__pillow_runtime_slot_missing_project__',
+            'probe', 'governed_grok', 'full', 'login',
+            NULL, 'probe-model', NULL, NULL, NULL, NULL,
+            '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z'
+         )",
+        [],
+    );
+    connection.execute("ROLLBACK TO runtime_slot_login_model_probe", [])?;
+    connection.execute("RELEASE runtime_slot_login_model_probe", [])?;
+    match insert {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(error, message)) => {
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK {
+                Ok(false)
+            } else if error.code == rusqlite::ErrorCode::ConstraintViolation {
+                // Foreign-key rejection means the row passed the table CHECK.
+                Ok(true)
+            } else {
+                Err(rusqlite::Error::SqliteFailure(error, message))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn upgrade_runtime_slot_login_models(connection: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(connection, "runtime_slots")?
+        || login_model_accepted_by_runtime_slots_check(connection)?
+    {
+        return Ok(());
+    }
+    connection.execute("BEGIN IMMEDIATE", [])?;
+    if let Err(error) = connection.execute_batch(RUNTIME_SLOT_LOGIN_MODELS_MIGRATION) {
+        let _ = connection.execute("ROLLBACK", []);
+        return Err(error);
+    }
+    match login_model_accepted_by_runtime_slots_check(connection) {
+        Ok(true) => {
+            connection.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Ok(false) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::Unknown,
+                    extended_code: 1,
+                },
+                Some("runtime slot login-model upgrade did not accept a model".into()),
+            ))
+        }
+        Err(error) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(error)
+        }
+    }
 }
 
 fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {

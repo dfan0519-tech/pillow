@@ -400,7 +400,13 @@ pub fn build_slot_grok_config(
     prepared: PreparedGrokSlot,
 ) -> Result<GrokAcpConfig, ConversationCommandError> {
     let config = match prepared {
-        PreparedGrokSlot::Login => GrokAcpConfig::new(executable),
+        PreparedGrokSlot::Login { model_id } => {
+            let config = GrokAcpConfig::new(executable);
+            match model_id {
+                Some(model_id) => config.with_model(model_id),
+                None => config,
+            }
+        }
         PreparedGrokSlot::ApiKey {
             private_home,
             model_id,

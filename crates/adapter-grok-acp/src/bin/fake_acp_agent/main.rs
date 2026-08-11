@@ -21,6 +21,7 @@
 
 mod scripts;
 
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -62,6 +63,14 @@ fn resolve_script_name() -> String {
 }
 
 fn main() {
+    record_launch_argv_for_acceptance();
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "models")
+    {
+        println!("grok-4.5");
+        return;
+    }
     let script = resolve_script_name();
     let delay_ms: u64 = std::env::var("KEEPER_FAKE_ACP_DELAY_MS")
         .ok()
@@ -302,6 +311,36 @@ fn main() {
 
     // Keep descendant handle alive until we exit so the OS job tree can kill it.
     drop(descendant);
+}
+
+/// Test/acceptance-only launch evidence. A copied fake binary records argv only
+/// when an opt-in sibling pointer names a sink; the production Grok executable
+/// never uses this code path and no environment/secret values are recorded.
+fn record_launch_argv_for_acceptance() {
+    let Some(directory) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(PathBuf::from))
+    else {
+        return;
+    };
+    let pointer = directory.join("keeper_fake_acp_argv_sink.txt");
+    let Ok(raw_sink) = std::fs::read_to_string(pointer) else {
+        return;
+    };
+    let sink = raw_sink.trim();
+    if sink.is_empty() {
+        return;
+    }
+    let argv = std::env::args_os()
+        .skip(1)
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let Ok(encoded) = serde_json::to_string(&argv) else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(sink) {
+        let _ = writeln!(file, "{encoded}");
+    }
 }
 
 /// Concatenate text blocks from ACP `session/prompt` params.

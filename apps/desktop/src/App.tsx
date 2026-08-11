@@ -93,6 +93,8 @@ type GitPresentationState = {
   loading: boolean;
   error: string | null;
   stale: boolean;
+  /** True while a structured mutation is in flight (blocks repeat submit). */
+  mutating: boolean;
 };
 
 const EMPTY_GIT_STATE: GitPresentationState = {
@@ -104,6 +106,7 @@ const EMPTY_GIT_STATE: GitPresentationState = {
   loading: false,
   error: null,
   stale: false,
+  mutating: false,
 };
 
 /** Prefer project-root `.` when available; otherwise the first available id. */
@@ -534,6 +537,7 @@ export function App({
             loading: false,
             error: GIT_ERROR_MESSAGES.git_repository_not_found,
             stale: false,
+            mutating: false,
           });
           return;
         }
@@ -547,6 +551,7 @@ export function App({
           loading: true,
           error: null,
           stale: false,
+          mutating: false,
         });
 
         await loadGitStatus(
@@ -567,6 +572,7 @@ export function App({
           loading: false,
           error: normalized.message,
           stale: isStaleGitCode(normalized.code),
+          mutating: false,
         });
       }
     },
@@ -708,6 +714,7 @@ export function App({
   const handleGitRefresh = useCallback(() => {
     const projectId = activeProjectIdRef.current;
     if (!projectId || !gitGateway) return;
+    if (gitStateRef.current.mutating) return;
 
     gitScopeRef.current = {
       projectId,
@@ -724,9 +731,199 @@ export function App({
       loading: true,
       error: null,
       stale: false,
+      mutating: false,
     });
     void runGitDiscovery(projectId, generation);
   }, [gitGateway, runGitDiscovery]);
+
+  const runGitMutation = useCallback(
+    async (
+      projectId: string,
+      scopeGeneration: number,
+      repositoryId: string,
+      discoveryGeneration: number,
+      operation: () => Promise<unknown>,
+    ) => {
+      if (!gitGateway) return;
+      if (gitStateRef.current.mutating) return;
+
+      setGitState((prev) => ({
+        ...prev,
+        mutating: true,
+        error: null,
+        stale: false,
+      }));
+
+      try {
+        await operation();
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        await loadGitStatus(
+          projectId,
+          scopeGeneration,
+          repositoryId,
+          discoveryGeneration,
+        );
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        setGitState((prev) => ({
+          ...prev,
+          mutating: false,
+        }));
+      } catch (cause) {
+        if (!isGitScopeCurrent(projectId, scopeGeneration)) return;
+        const normalized = normalizeGitError(cause);
+        setGitState((prev) => ({
+          ...prev,
+          mutating: false,
+          error: normalized.message,
+          stale: isStaleGitCode(normalized.code),
+        }));
+      }
+    },
+    [gitGateway, isGitScopeCurrent, loadGitStatus],
+  );
+
+  const handleGitStagePath = useCallback(
+    (portablePath: string) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (!current.selectedRepositoryId || current.discoveryGeneration === null) {
+        return;
+      }
+      if (current.mutating) return;
+      if (!current.status?.files.some((file) => file.path === portablePath)) {
+        return;
+      }
+
+      const repositoryId = current.selectedRepositoryId;
+      const discoveryGeneration = current.discoveryGeneration;
+      const scopeGeneration = gitScopeRef.current.generation;
+
+      void runGitMutation(
+        projectId,
+        scopeGeneration,
+        repositoryId,
+        discoveryGeneration,
+        () =>
+          gitGateway.stageGitPaths({
+            projectId,
+            expected: {
+              repositoryId,
+              generation: discoveryGeneration,
+            },
+            paths: [portablePath],
+          }),
+      );
+    },
+    [gitGateway, runGitMutation],
+  );
+
+  const handleGitUnstagePath = useCallback(
+    (portablePath: string) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (!current.selectedRepositoryId || current.discoveryGeneration === null) {
+        return;
+      }
+      if (current.mutating) return;
+      if (!current.status?.files.some((file) => file.path === portablePath)) {
+        return;
+      }
+
+      const repositoryId = current.selectedRepositoryId;
+      const discoveryGeneration = current.discoveryGeneration;
+      const scopeGeneration = gitScopeRef.current.generation;
+
+      void runGitMutation(
+        projectId,
+        scopeGeneration,
+        repositoryId,
+        discoveryGeneration,
+        () =>
+          gitGateway.unstageGitPaths({
+            projectId,
+            expected: {
+              repositoryId,
+              generation: discoveryGeneration,
+            },
+            paths: [portablePath],
+          }),
+      );
+    },
+    [gitGateway, runGitMutation],
+  );
+
+  const handleGitCommit = useCallback(
+    (message: string) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (!current.selectedRepositoryId || current.discoveryGeneration === null) {
+        return;
+      }
+      if (current.mutating) return;
+      if (message.trim().length === 0) return;
+
+      const repositoryId = current.selectedRepositoryId;
+      const discoveryGeneration = current.discoveryGeneration;
+      const scopeGeneration = gitScopeRef.current.generation;
+
+      void runGitMutation(
+        projectId,
+        scopeGeneration,
+        repositoryId,
+        discoveryGeneration,
+        () =>
+          gitGateway.commitGitChanges({
+            projectId,
+            expected: {
+              repositoryId,
+              generation: discoveryGeneration,
+            },
+            message,
+          }),
+      );
+    },
+    [gitGateway, runGitMutation],
+  );
+
+  const handleGitPush = useCallback(
+    (payload: { remoteName: string; branchName: string }) => {
+      const projectId = activeProjectIdRef.current;
+      const current = gitStateRef.current;
+      if (!projectId || !gitGateway) return;
+      if (!current.selectedRepositoryId || current.discoveryGeneration === null) {
+        return;
+      }
+      if (current.mutating) return;
+
+      const repositoryId = current.selectedRepositoryId;
+      const discoveryGeneration = current.discoveryGeneration;
+      const scopeGeneration = gitScopeRef.current.generation;
+
+      void runGitMutation(
+        projectId,
+        scopeGeneration,
+        repositoryId,
+        discoveryGeneration,
+        () =>
+          gitGateway.pushGitBranch({
+            projectId,
+            expected: {
+              repositoryId,
+              generation: discoveryGeneration,
+            },
+            confirmation: {
+              confirmed: true,
+              remoteName: payload.remoteName,
+              branchName: payload.branchName,
+            },
+          }),
+      );
+    },
+    [gitGateway, runGitMutation],
+  );
 
   /**
    * Render-time ownership guard: the project-change effect updates
@@ -749,9 +946,14 @@ export function App({
       loading: gitState.loading,
       error: gitState.error,
       stale: gitState.stale,
+      mutating: gitState.mutating,
       onSelectRepository: handleGitSelectRepository,
       onSelectPath: handleGitSelectPath,
       onRefresh: handleGitRefresh,
+      onStagePath: handleGitStagePath,
+      onUnstagePath: handleGitUnstagePath,
+      onCommit: handleGitCommit,
+      onPush: handleGitPush,
     };
   }, [
     activeProject,
@@ -764,9 +966,14 @@ export function App({
     gitState.loading,
     gitState.error,
     gitState.stale,
+    gitState.mutating,
     handleGitSelectRepository,
     handleGitSelectPath,
     handleGitRefresh,
+    handleGitStagePath,
+    handleGitUnstagePath,
+    handleGitCommit,
+    handleGitPush,
   ]);
 
   function upsertProject(project: ProjectDto) {

@@ -35,7 +35,9 @@ impl RuntimeSlotGovernance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrokSlotAuth {
-    Login,
+    Login {
+        model_id: Option<String>,
+    },
     ApiKey {
         base_url: String,
         model_id: String,
@@ -87,6 +89,15 @@ pub struct UpdateGrokApiKeySlot {
     pub base_url: String,
     pub model_id: String,
     pub secret_ref: String,
+}
+
+/// Model-only update for a governed Grok slot. Login and API-key slots share
+/// this path so switching never rotates or exposes secret material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRuntimeSlotModel {
+    pub project_id: ProjectId,
+    pub slot_id: RuntimeSlotId,
+    pub model_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -283,6 +294,73 @@ impl SqliteRuntimeSlotRepository {
         Ok(updated)
     }
 
+    /// Update only the selected model for a governed Grok slot.
+    pub fn update_model(
+        &self,
+        input: UpdateRuntimeSlotModel,
+    ) -> Result<RuntimeSlot, RuntimeSlotStoreError> {
+        validate_text(&input.model_id, CONFIG_VALUE_MAX_CHARS)?;
+        let connection = self.connection()?;
+        let existing = connection
+            .query_row(
+                &format!("{} WHERE project_id = ?1 AND slot_id = ?2", SELECT_SLOT),
+                params![input.project_id.0.to_string(), input.slot_id.0.to_string()],
+                runtime_slot_from_row,
+            )
+            .optional()?
+            .ok_or(RuntimeSlotStoreError::NotFound)?;
+        let kind = match existing.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::Login { .. },
+            } => RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::Login {
+                    model_id: Some(input.model_id),
+                },
+            },
+            RuntimeSlotKind::GovernedGrok {
+                auth:
+                    GrokSlotAuth::ApiKey {
+                        base_url,
+                        secret_ref,
+                        ..
+                    },
+            } => RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url,
+                    model_id: input.model_id,
+                    secret_ref,
+                },
+            },
+            RuntimeSlotKind::ExternalCli { .. } => {
+                return Err(RuntimeSlotStoreError::InvalidShape);
+            }
+        };
+        let updated = RuntimeSlot {
+            id: existing.id,
+            project_id: existing.project_id,
+            display_name: existing.display_name,
+            governance: RuntimeSlotGovernance::Full,
+            kind,
+            created_at: existing.created_at,
+            updated_at: Utc::now(),
+        };
+        let encoded = EncodedSlot::from_slot(&updated)?;
+        let changed = connection.execute(
+            "UPDATE runtime_slots SET model_id = ?1, updated_at = ?2
+             WHERE project_id = ?3 AND slot_id = ?4",
+            params![
+                encoded.model_id,
+                updated.updated_at.to_rfc3339(),
+                updated.project_id.0.to_string(),
+                updated.id.0.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RuntimeSlotStoreError::NotFound);
+        }
+        Ok(updated)
+    }
+
     /// Delete a project-scoped slot row. Returns the removed slot so callers can
     /// destroy any associated secret material. Missing rows yield `Ok(None)`.
     pub fn delete(
@@ -338,12 +416,12 @@ impl EncodedSlot {
     fn from_slot(slot: &RuntimeSlot) -> Result<Self, RuntimeSlotStoreError> {
         match &slot.kind {
             RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id },
             } => Ok(Self {
                 kind: "governed_grok",
                 auth_mode: Some("login"),
                 base_url: None,
-                model_id: None,
+                model_id: model_id.clone(),
                 secret_ref: None,
                 executable_path: None,
                 launch_args_json: None,
@@ -396,9 +474,14 @@ fn validate_new_slot(input: &NewRuntimeSlot) -> Result<(), RuntimeSlotStoreError
         (
             RuntimeSlotGovernance::Full,
             RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id },
             },
-        ) => Ok(()),
+        ) => {
+            if let Some(model_id) = model_id {
+                validate_text(model_id, CONFIG_VALUE_MAX_CHARS)?;
+            }
+            Ok(())
+        }
         (
             RuntimeSlotGovernance::Full,
             RuntimeSlotKind::GovernedGrok {
@@ -480,14 +563,13 @@ fn runtime_slot_from_row(row: &Row<'_>) -> rusqlite::Result<RuntimeSlot> {
     let slot_kind = match (kind.as_str(), governance, auth_mode.as_deref()) {
         ("governed_grok", RuntimeSlotGovernance::Full, Some("login"))
             if base_url.is_none()
-                && model_id.is_none()
                 && secret_ref.is_none()
                 && executable_path.is_none()
                 && launch_args_json.is_none()
                 && status_args_json.is_none() =>
         {
             RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id },
             }
         }
         ("governed_grok", RuntimeSlotGovernance::Full, Some("api_key"))

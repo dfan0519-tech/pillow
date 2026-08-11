@@ -15,8 +15,8 @@ use crate::runtime_composition::build_slot_grok_config;
 use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 use crate::runtime_slot_commands::{
     create_external_cli_slot_impl, create_grok_api_key_slot_impl, create_grok_login_slot_impl,
-    delete_runtime_slot_impl, list_runtime_slots_impl, start_runtime_slot_impl,
-    update_grok_api_key_slot_impl,
+    delete_runtime_slot_impl, get_runtime_slot_model_catalog_impl, list_runtime_slots_impl,
+    set_runtime_slot_model_impl, start_runtime_slot_impl, update_grok_api_key_slot_impl,
 };
 
 struct Harness {
@@ -53,9 +53,25 @@ impl Harness {
     }
 }
 
+/// Serialize with `runtime_composition`'s tests.
+///
+/// Composing a runtime walks the path probe, which counts into a process-wide
+/// static. Those tests assert an *exact* probe count while holding this lock,
+/// so a runtime started here without it leaks an increment into their
+/// assertion — seen as an intermittent `left: 4, right: 3`, plus six follow-on
+/// poison failures that hid which test was actually wrong.
+///
+/// Poison-tolerant on purpose: one real failure should not become seven.
+fn runtime_probe_guard() -> std::sync::MutexGuard<'static, ()> {
+    crate::runtime_composition::tests::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(windows)]
 #[test]
 fn external_cli_dto_is_explicitly_ungoverned_and_cannot_start() {
+    let _probe_guard = runtime_probe_guard();
     let harness = Harness::new();
     let dto = create_external_cli_slot_impl(
         &harness.slots,
@@ -90,6 +106,7 @@ fn external_cli_dto_is_explicitly_ungoverned_and_cannot_start() {
 #[cfg(windows)]
 #[test]
 fn governed_api_slot_command_activates_a_project_scoped_runtime() {
+    let _probe_guard = runtime_probe_guard();
     let harness = Harness::new();
     let dto = create_grok_api_key_slot_impl(
         &harness.slots,
@@ -210,7 +227,10 @@ fn prepared_login_slot_keeps_home_unredirected() {
                 .unwrap(),
         )
         .unwrap();
-    assert!(matches!(prepared, PreparedGrokSlot::Login));
+    assert!(matches!(
+        prepared,
+        PreparedGrokSlot::Login { model_id: None }
+    ));
 
     let config =
         build_slot_grok_config(PathBuf::from(std::env::current_exe().unwrap()), prepared).unwrap();
@@ -279,6 +299,8 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
         "create_grok_api_key_slot",
         "create_external_cli_slot",
         "get_external_cli_status",
+        "get_runtime_slot_model_catalog",
+        "set_runtime_slot_model",
         "start_runtime_slot",
     ] {
         assert!(
@@ -286,6 +308,472 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
             "missing invoke command {command}"
         );
     }
+}
+
+#[test]
+fn inactive_login_model_switch_persists_launch_model_without_claiming_restart() {
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let created = create_grok_login_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Signed-in Grok".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+
+    let switched = set_runtime_slot_model_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+        "grok-4.5".into(),
+    )
+    .unwrap();
+    assert_eq!(switched.slot_id, created.slot_id);
+    assert_eq!(switched.project_id, harness.project_id);
+    assert_eq!(switched.model_id, "grok-4.5");
+    assert!(!switched.runtime_restarted);
+    assert_eq!(switched.session_restore, "not_applicable");
+
+    let prepared = harness
+        .slots
+        .prepare_grok(
+            uuid::Uuid::parse_str(&harness.project_id)
+                .map(keeper_project::ProjectId)
+                .unwrap(),
+            uuid::Uuid::parse_str(&created.slot_id)
+                .map(keeper_storage_sqlite::RuntimeSlotId)
+                .unwrap(),
+        )
+        .unwrap();
+    let config = build_slot_grok_config(std::env::current_exe().unwrap(), prepared).unwrap();
+    assert_eq!(
+        config.launch_argv(),
+        ["-m", "grok-4.5", "agent", "--no-leader", "stdio"]
+    );
+
+    let value = serde_json::to_value(switched).unwrap();
+    let mut keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "modelId",
+            "projectId",
+            "runtimeRestarted",
+            "sessionRestore",
+            "slotId",
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn active_api_model_switch_replaces_runtime_and_keeps_it_active() {
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private".into(),
+        "https://example.invalid/v1".into(),
+        "model-old".into(),
+        "pillow-test-switch-key".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &std::env::current_exe().unwrap().to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+
+    let switched = set_runtime_slot_model_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+        "model-new".into(),
+    )
+    .unwrap();
+    assert!(switched.runtime_restarted);
+    assert_eq!(switched.session_restore, "unavailable");
+    runtime
+        .with_service(|_service, active_project_id| {
+            assert_eq!(active_project_id, Some(harness.project_id.as_str()));
+            Ok(())
+        })
+        .unwrap();
+
+    let prepared = harness
+        .slots
+        .prepare_grok(
+            uuid::Uuid::parse_str(&harness.project_id)
+                .map(keeper_project::ProjectId)
+                .unwrap(),
+            uuid::Uuid::parse_str(&created.slot_id)
+                .map(keeper_storage_sqlite::RuntimeSlotId)
+                .unwrap(),
+        )
+        .unwrap();
+    let config = build_slot_grok_config(std::env::current_exe().unwrap(), prepared).unwrap();
+    assert_eq!(
+        config.launch_argv(),
+        ["-m", "model-new", "agent", "--no-leader", "stdio"]
+    );
+    assert!(runtime.shutdown_if_active().unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn failed_active_model_replacement_does_not_leave_the_old_runtime_active() {
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private".into(),
+        "https://example.invalid/v1".into(),
+        "model-old".into(),
+        "pillow-test-failed-switch-key".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &std::env::current_exe().unwrap().to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+
+    let disappearing = harness._temp.path().join("disappearing-grok.exe");
+    std::fs::write(&disappearing, b"placeholder").unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &disappearing.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    std::fs::remove_file(disappearing).unwrap();
+
+    let error = set_runtime_slot_model_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+        "model-new".into(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "runtime_executable_missing");
+    assert!(!runtime.shutdown_if_active().unwrap());
+
+    let listed = list_runtime_slots_impl(&harness.slots, &harness.app, harness.project_id).unwrap();
+    assert_eq!(listed[0].model_id.as_deref(), Some("model-new"));
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "run explicitly with PILLOW_TEST_FAKE_ACP_BIN after building fake_acp_agent"]
+fn active_model_switch_launches_the_next_acp_child_with_the_new_model_argument() {
+    let _probe_guard = runtime_probe_guard();
+    let fake_source = std::env::var_os("PILLOW_TEST_FAKE_ACP_BIN")
+        .map(PathBuf::from)
+        .expect("PILLOW_TEST_FAKE_ACP_BIN is required");
+    assert!(fake_source.is_file());
+    let harness = Harness::new();
+    let fake = harness._temp.path().join("fake-grok.exe");
+    std::fs::copy(fake_source, &fake).unwrap();
+    let argv_sink = harness._temp.path().join("fake-grok-argv.jsonl");
+    std::fs::write(
+        harness._temp.path().join("keeper_fake_acp_argv_sink.txt"),
+        argv_sink.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private".into(),
+        "https://example.invalid/v1".into(),
+        "model-old".into(),
+        "pillow-test-launch-evidence-key".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &fake.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+
+    let conversation_id = runtime
+        .with_service(|service, _| {
+            let conversation =
+                service.create_conversation(harness.project_id.clone(), Some("argv".into()))?;
+            service.send_turn(conversation.id.clone(), "first".into())?;
+            Ok(conversation.id)
+        })
+        .unwrap();
+
+    let switched = set_runtime_slot_model_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id,
+        "model-new".into(),
+    )
+    .unwrap();
+    assert!(switched.runtime_restarted);
+    runtime
+        .with_service(|service, _| {
+            service.send_turn(conversation_id, "second".into())?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(runtime.shutdown_if_active().unwrap());
+
+    let lines = std::fs::read_to_string(argv_sink).unwrap();
+    let launches = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(
+        launches[0],
+        ["-m", "model-old", "agent", "--no-leader", "stdio"]
+    );
+    assert_eq!(
+        launches[1],
+        ["-m", "model-new", "agent", "--no-leader", "stdio"]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "run explicitly with PILLOW_TEST_FAKE_ACP_BIN after building fake_acp_agent"]
+fn login_model_catalog_command_runs_the_grok_models_subcommand() {
+    let fake = std::env::var_os("PILLOW_TEST_FAKE_ACP_BIN")
+        .map(PathBuf::from)
+        .expect("PILLOW_TEST_FAKE_ACP_BIN is required");
+    assert!(fake.is_file());
+    let harness = Harness::new();
+    let created = create_grok_login_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Signed-in Grok".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &fake.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+
+    let catalog = get_runtime_slot_model_catalog_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        harness.project_id,
+        created.slot_id,
+    )
+    .unwrap();
+    assert_eq!(catalog.status, "available");
+    assert_eq!(catalog.source, "grok_cli");
+    assert_eq!(catalog.models, ["grok-4.5"]);
+    assert_eq!(catalog.reason_code, None);
+}
+
+#[test]
+fn external_cli_model_catalog_is_an_explicit_renderer_fallback() {
+    let harness = Harness::new();
+    let created = create_external_cli_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Status-only CLI".into(),
+        std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        vec!["unused".into()],
+        vec!["--help".into()],
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+
+    let catalog = get_runtime_slot_model_catalog_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(catalog.slot_id, created.slot_id);
+    assert_eq!(catalog.project_id, harness.project_id);
+    assert_eq!(catalog.status, "unsupported");
+    assert_eq!(catalog.source, "external_cli");
+    assert!(catalog.models.is_empty());
+    assert_eq!(
+        catalog.reason_code.as_deref(),
+        Some("external_cli_not_supported")
+    );
+
+    let value = serde_json::to_value(catalog).unwrap();
+    let mut keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "models",
+            "projectId",
+            "reasonCode",
+            "slotId",
+            "source",
+            "status",
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn api_key_catalog_command_uses_the_stored_secret_but_returns_only_safe_models() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 || request.len() > 16 * 1024 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let body = br#"{"data":[{"id":"command-model"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    let harness = Harness::new();
+    let marker = "pillow-test-command-catalog-key";
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private model".into(),
+        format!("http://{address}/v1"),
+        "model-one".into(),
+        marker.into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+
+    let catalog = get_runtime_slot_model_catalog_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        harness.project_id.clone(),
+        created.slot_id,
+    )
+    .unwrap();
+    assert_eq!(catalog.status, "available");
+    assert_eq!(catalog.source, "openai_models");
+    assert_eq!(catalog.models, ["command-model"]);
+    assert_eq!(catalog.reason_code, None);
+    assert!(!serde_json::to_string(&catalog).unwrap().contains(marker));
+
+    let request = server.join().unwrap();
+    // Derived from `marker` for the same reason as the catalog unit test: no
+    // literal auth header in source, and the assertion tracks the real key.
+    assert!(request.contains(&format!("Authorization: Bearer {marker}\r\n")));
 }
 
 #[test]
@@ -299,6 +787,7 @@ fn an_active_slot_is_not_reused_across_project_boundaries() {
 #[cfg(windows)]
 #[test]
 fn update_omitting_api_key_keeps_secret_usable_for_prepare_and_start() {
+    let _probe_guard = runtime_probe_guard();
     let harness = Harness::new();
     let original = "pillow-test-canary-keep-via-command";
     let created = create_grok_api_key_slot_impl(
@@ -312,10 +801,14 @@ fn update_omitting_api_key_keeps_secret_usable_for_prepare_and_start() {
     )
     .unwrap();
     let original_ref = created.secret_ref.clone().expect("secret ref");
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
 
     let updated = update_grok_api_key_slot_impl(
         &harness.slots,
+        &settings,
         &harness.app,
+        &runtime,
         harness.project_id.clone(),
         created.slot_id.clone(),
         "Renamed".into(),
@@ -358,10 +851,9 @@ fn update_omitting_api_key_keeps_secret_usable_for_prepare_and_start() {
             assert_eq!(model_id, "model-two");
             assert_eq!(api_key.as_bytes(), original.as_bytes());
         }
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     }
 
-    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
     let executable = std::env::current_exe().unwrap();
     settings
         .upsert_path(
@@ -372,7 +864,6 @@ fn update_omitting_api_key_keeps_secret_usable_for_prepare_and_start() {
             SettingsUpdatedBy::User,
         )
         .unwrap();
-    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
     let started = start_runtime_slot_impl(
         &harness.slots,
         &settings,
@@ -406,10 +897,14 @@ fn update_with_new_api_key_rotates_secret_and_old_ref_is_unrecoverable() {
     let secrets_dir = harness._temp.path().join("app-data").join("secrets");
     let original_path = secrets_dir.join(format!("{original_ref}.dpapi"));
     assert!(original_path.is_file());
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
 
     let updated = update_grok_api_key_slot_impl(
         &harness.slots,
+        &settings,
         &harness.app,
+        &runtime,
         harness.project_id.clone(),
         created.slot_id.clone(),
         "Private model".into(),
@@ -448,13 +943,72 @@ fn update_with_new_api_key_rotates_secret_and_old_ref_is_unrecoverable() {
         PreparedGrokSlot::ApiKey { api_key, .. } => {
             assert_eq!(api_key.as_bytes(), rotated.as_bytes());
         }
-        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key preparation"),
     }
 }
 
 #[cfg(windows)]
 #[test]
+fn active_api_slot_edit_cannot_change_model_without_restarting_runtime() {
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private".into(),
+        "https://example.invalid/v1".into(),
+        "model-old".into(),
+        "pillow-test-edit-restart-key".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &std::env::current_exe().unwrap().to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+
+    let updated = update_grok_api_key_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id,
+        "Private".into(),
+        "https://example.invalid/v1".into(),
+        "model-new".into(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(updated.model_id.as_deref(), Some("model-new"));
+    assert!(
+        runtime
+            .is_active_slot(&harness.project_id, &updated.slot_id)
+            .unwrap()
+    );
+    assert!(runtime.shutdown_if_active().unwrap());
+}
+
+#[cfg(windows)]
+#[test]
 fn delete_command_removes_slot_and_destroys_secret() {
+    let _probe_guard = runtime_probe_guard();
     let harness = Harness::new();
     let marker = "pillow-test-canary-command-delete";
     let created = create_grok_api_key_slot_impl(
@@ -525,4 +1079,6 @@ fn update_and_delete_command_symbols_exist_for_host_registration() {
     let source = include_str!("runtime_slot_commands.rs");
     assert!(source.contains("pub fn update_grok_api_key_slot"));
     assert!(source.contains("pub fn delete_runtime_slot"));
+    assert!(source.contains("pub fn get_runtime_slot_model_catalog"));
+    assert!(source.contains("pub fn set_runtime_slot_model"));
 }

@@ -1,7 +1,7 @@
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
     GrokSlotAuth, NewRuntimeSlot, RuntimeSlotGovernance, RuntimeSlotKind, SqliteProjectRepository,
-    SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
+    SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot, UpdateRuntimeSlotModel,
 };
 use rusqlite::{Connection, params};
 
@@ -22,6 +22,198 @@ fn seed_project(
 }
 
 #[test]
+fn update_model_persists_for_login_and_api_key_slots_but_rejects_external_cli() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let login = repo
+        .create(NewRuntimeSlot {
+            project_id: project.id,
+            display_name: "Login".into(),
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::Login { model_id: None },
+            },
+        })
+        .unwrap();
+    let api_secret_ref = uuid::Uuid::new_v4().to_string();
+    let api = repo
+        .create(NewRuntimeSlot {
+            project_id: project.id,
+            display_name: "API".into(),
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url: "https://example.invalid/v1".into(),
+                    model_id: "api-old".into(),
+                    secret_ref: api_secret_ref.clone(),
+                },
+            },
+        })
+        .unwrap();
+    let external = repo
+        .create(NewRuntimeSlot {
+            project_id: project.id,
+            display_name: "External".into(),
+            governance: RuntimeSlotGovernance::None,
+            kind: RuntimeSlotKind::ExternalCli {
+                executable_path: "C:\\tools\\external.exe".into(),
+                launch_args: vec!["run".into()],
+                status_args: vec!["status".into()],
+            },
+        })
+        .unwrap();
+
+    let login = repo
+        .update_model(UpdateRuntimeSlotModel {
+            project_id: project.id,
+            slot_id: login.id,
+            model_id: "login-new".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        login.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::Login {
+                model_id: Some(ref model_id)
+            }
+        } if model_id == "login-new"
+    ));
+
+    let api = repo
+        .update_model(UpdateRuntimeSlotModel {
+            project_id: project.id,
+            slot_id: api.id,
+            model_id: "api-new".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        api.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::ApiKey {
+                ref model_id,
+                ref secret_ref,
+                ..
+            }
+        } if model_id == "api-new" && secret_ref == &api_secret_ref
+    ));
+
+    let error = repo
+        .update_model(UpdateRuntimeSlotModel {
+            project_id: project.id,
+            slot_id: external.id,
+            model_id: "not-applicable".into(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "runtime_slot_shape_invalid");
+}
+
+#[test]
+fn legacy_runtime_slot_rows_survive_login_model_schema_upgrade_and_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("legacy.db");
+    let project_id = keeper_project::ProjectId(uuid::Uuid::new_v4());
+    let login_id = uuid::Uuid::new_v4();
+    let api_id = uuid::Uuid::new_v4();
+    let secret_ref = uuid::Uuid::new_v4().to_string();
+    let root = temp.path().join("legacy-project");
+    std::fs::create_dir_all(&root).unwrap();
+    {
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_projects.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0015_runtime_slots.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects (
+                    id, name, root_path, canonical_root_path, trust_state, created_at, updated_at
+                 ) VALUES (?1, 'legacy', ?2, ?2, 'untrusted', ?3, ?3)",
+                params![
+                    project_id.0.to_string(),
+                    root.to_string_lossy().into_owned(),
+                    "2026-08-10T00:00:00Z",
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runtime_slots (
+                    slot_id, project_id, display_name, kind, governance, auth_mode,
+                    base_url, model_id, secret_ref, executable_path,
+                    launch_args_json, status_args_json, created_at, updated_at
+                 ) VALUES (?1, ?2, 'Login', 'governed_grok', 'full', 'login',
+                           NULL, NULL, NULL, NULL, NULL, NULL, ?3, ?3)",
+                params![
+                    login_id.to_string(),
+                    project_id.0.to_string(),
+                    "2026-08-10T00:00:00Z",
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runtime_slots (
+                    slot_id, project_id, display_name, kind, governance, auth_mode,
+                    base_url, model_id, secret_ref, executable_path,
+                    launch_args_json, status_args_json, created_at, updated_at
+                 ) VALUES (?1, ?2, 'API', 'governed_grok', 'full', 'api_key',
+                           'https://example.invalid/v1', 'api-old', ?3,
+                           NULL, NULL, NULL, ?4, ?4)",
+                params![
+                    api_id.to_string(),
+                    project_id.0.to_string(),
+                    secret_ref,
+                    "2026-08-10T00:00:00Z",
+                ],
+            )
+            .unwrap();
+    }
+
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let before = repo.list(project_id).unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(matches!(
+        before[0].kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::Login { model_id: None }
+        }
+    ));
+    repo.update_model(UpdateRuntimeSlotModel {
+        project_id,
+        slot_id: keeper_storage_sqlite::RuntimeSlotId(login_id),
+        model_id: "login-new".into(),
+    })
+    .unwrap();
+    drop(repo);
+
+    let reopened = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let after = reopened.list(project_id).unwrap();
+    assert_eq!(after.len(), 2);
+    assert!(matches!(
+        after[0].kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::Login {
+                model_id: Some(ref model_id)
+            }
+        } if model_id == "login-new"
+    ));
+    assert!(matches!(
+        after[1].kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::ApiKey {
+                ref model_id,
+                secret_ref: ref persisted_ref,
+                ..
+            }
+        } if model_id == "api-old" && persisted_ref == &secret_ref
+    ));
+}
+
+#[test]
 fn persists_both_slot_kinds_with_explicit_governance() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("keeper.db");
@@ -34,7 +226,7 @@ fn persists_both_slot_kinds_with_explicit_governance() {
             display_name: "Default Grok".into(),
             governance: RuntimeSlotGovernance::Full,
             kind: RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id: None },
             },
         })
         .unwrap();
@@ -55,7 +247,7 @@ fn persists_both_slot_kinds_with_explicit_governance() {
     assert!(matches!(
         login.kind,
         RuntimeSlotKind::GovernedGrok {
-            auth: GrokSlotAuth::Login
+            auth: GrokSlotAuth::Login { model_id: None }
         }
     ));
     assert_eq!(external.governance, RuntimeSlotGovernance::None);
@@ -130,7 +322,7 @@ fn list_and_get_are_project_scoped() {
             display_name: "Alpha".into(),
             governance: RuntimeSlotGovernance::Full,
             kind: RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id: None },
             },
         })
         .unwrap();
@@ -201,7 +393,7 @@ fn deleting_a_project_cascades_its_slots() {
         display_name: "Default Grok".into(),
         governance: RuntimeSlotGovernance::Full,
         kind: RuntimeSlotKind::GovernedGrok {
-            auth: GrokSlotAuth::Login,
+            auth: GrokSlotAuth::Login { model_id: None },
         },
     })
     .unwrap();
@@ -289,7 +481,7 @@ fn update_grok_api_key_rejects_missing_and_non_api_slots() {
             display_name: "Login".into(),
             governance: RuntimeSlotGovernance::Full,
             kind: RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
+                auth: GrokSlotAuth::Login { model_id: None },
             },
         })
         .unwrap();

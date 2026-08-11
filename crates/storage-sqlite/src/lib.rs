@@ -35,6 +35,7 @@ pub use resource_recent::{
 pub use runtime_slot::{
     GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
     RuntimeSlotKind, RuntimeSlotStoreError, SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
+    UpdateRuntimeSlotModel,
 };
 pub use settings::{
     ENV_GROK_EXECUTABLE, ENV_GROK_PROFILE, ENV_RUNTIME_ADAPTER, ENV_UI_THEME, KEY_GROK_EXECUTABLE,

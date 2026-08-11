@@ -1,7 +1,7 @@
 //! Replaceable conversation runtime owned below the renderer command layer.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use keeper_adapter_grok_acp::GrokAcpConfig;
 
@@ -18,6 +18,7 @@ struct RuntimeServiceInner {
 pub struct RuntimeServiceState {
     database_path: PathBuf,
     emitter: Arc<dyn RuntimeEventEmitter>,
+    slot_lifecycle: Mutex<()>,
     inner: Mutex<RuntimeServiceInner>,
 }
 
@@ -30,6 +31,7 @@ impl RuntimeServiceState {
         Self {
             database_path: database_path.into(),
             emitter,
+            slot_lifecycle: Mutex::new(()),
             inner: Mutex::new(RuntimeServiceInner {
                 service: service.map(Arc::new),
                 active_project_id: None,
@@ -81,6 +83,23 @@ impl RuntimeServiceState {
         inner.active_project_id = Some(project_id);
         inner.active_slot_id = Some(slot_id);
         Ok(())
+    }
+
+    /// Serialize slot start/update/delete command lifecycles. The guard keeps a
+    /// model metadata update and its required runtime replacement atomic with
+    /// respect to another slot command.
+    pub fn lock_slot_lifecycle(&self) -> Result<MutexGuard<'_, ()>, ConversationCommandError> {
+        self.slot_lifecycle.lock().map_err(|_| state_unavailable())
+    }
+
+    pub fn is_active_slot(
+        &self,
+        project_id: &str,
+        slot_id: &str,
+    ) -> Result<bool, ConversationCommandError> {
+        let inner = self.inner.lock().map_err(|_| state_unavailable())?;
+        Ok(inner.active_project_id.as_deref() == Some(project_id)
+            && inner.active_slot_id.as_deref() == Some(slot_id))
     }
 
     pub fn shutdown_if_active(&self) -> Result<bool, ConversationCommandError> {

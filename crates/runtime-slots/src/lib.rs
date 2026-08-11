@@ -1,5 +1,6 @@
 //! Host-side runtime-slot foundation.
 
+mod catalog;
 mod grok_config;
 mod secret;
 mod status;
@@ -10,10 +11,14 @@ use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
     GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
     RuntimeSlotKind, SqliteProjectRepository, SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
+    UpdateRuntimeSlotModel,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
+pub use catalog::{
+    ModelCatalog, ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason,
+};
 pub use secret::{DpapiFileSecretStore, SecretBytes, SecretStore};
 
 pub const GROK_API_KEY_ENV: &str = "PILLOW_GROK_SLOT_API_KEY";
@@ -44,6 +49,10 @@ pub enum RuntimeSlotError {
     ConfigUnavailable,
     #[error("external CLI account status is unavailable")]
     ExternalStatusUnavailable,
+    #[error("runtime slot model catalog is unavailable")]
+    ModelCatalogUnavailable,
+    #[error("runtime slot model catalog response is invalid")]
+    ModelCatalogInvalid,
 }
 
 impl RuntimeSlotError {
@@ -61,6 +70,8 @@ impl RuntimeSlotError {
             Self::PrivateHomeContaminated => "runtime_slot_private_home_contaminated",
             Self::ConfigUnavailable => "runtime_slot_config_unavailable",
             Self::ExternalStatusUnavailable => "external_cli_status_unavailable",
+            Self::ModelCatalogUnavailable => "runtime_slot_model_catalog_unavailable",
+            Self::ModelCatalogInvalid => "runtime_slot_model_catalog_invalid",
         }
     }
 }
@@ -73,7 +84,7 @@ pub struct RuntimeSlotView {
 
 pub enum PreparedGrokSlot {
     /// Uses the current user's default Grok profile. No HOME redirect is supplied.
-    Login,
+    Login { model_id: Option<String> },
     /// Uses a slot-private home and a secret injected only into the child environment.
     ApiKey {
         private_home: PathBuf,
@@ -128,7 +139,7 @@ impl RuntimeSlotService {
                 display_name,
                 governance: RuntimeSlotGovernance::Full,
                 kind: RuntimeSlotKind::GovernedGrok {
-                    auth: GrokSlotAuth::Login,
+                    auth: GrokSlotAuth::Login { model_id: None },
                 },
             })
             .map_err(|_| RuntimeSlotError::MetadataUnavailable)?;
@@ -332,6 +343,42 @@ impl RuntimeSlotService {
         Ok(())
     }
 
+    pub fn update_model(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        model_id: String,
+    ) -> Result<RuntimeSlotView, RuntimeSlotError> {
+        self.ensure_project(project_id)?;
+        validate_model(&model_id)?;
+        let slot = self
+            .slots
+            .update_model(UpdateRuntimeSlotModel {
+                project_id,
+                slot_id,
+                model_id,
+            })
+            .map_err(|error| match error {
+                keeper_storage_sqlite::RuntimeSlotStoreError::NotFound => {
+                    RuntimeSlotError::SlotNotFound
+                }
+                keeper_storage_sqlite::RuntimeSlotStoreError::InvalidShape => {
+                    RuntimeSlotError::InvalidInput
+                }
+                _ => RuntimeSlotError::MetadataUnavailable,
+            })?;
+        let secret_configured = match &slot.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
+            } => self.secrets.exists(secret_ref)?,
+            _ => false,
+        };
+        Ok(RuntimeSlotView {
+            slot,
+            secret_configured,
+        })
+    }
+
     pub fn list(&self, project_id: ProjectId) -> Result<Vec<RuntimeSlotView>, RuntimeSlotError> {
         self.ensure_project(project_id)?;
         self.slots
@@ -361,8 +408,8 @@ impl RuntimeSlotService {
         let slot = self.get(project_id, slot_id)?;
         match slot.kind {
             RuntimeSlotKind::GovernedGrok {
-                auth: GrokSlotAuth::Login,
-            } => Ok(PreparedGrokSlot::Login),
+                auth: GrokSlotAuth::Login { model_id },
+            } => Ok(PreparedGrokSlot::Login { model_id }),
             RuntimeSlotKind::GovernedGrok {
                 auth:
                     GrokSlotAuth::ApiKey {
@@ -412,6 +459,45 @@ impl RuntimeSlotService {
                 Path::new(&project.root_path),
             ),
             RuntimeSlotKind::GovernedGrok { .. } => Err(RuntimeSlotError::InvalidInput),
+        }
+    }
+
+    /// Fetch a bounded, secret-free model catalog for a project-scoped slot.
+    ///
+    /// API-key material is decrypted only inside this host service and is
+    /// consumed directly by the HTTP transport. Login slots use the configured
+    /// Grok executable; external CLI slots return an explicit unsupported
+    /// outcome so the renderer can retain manual input.
+    pub fn model_catalog(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        login_executable: Option<&Path>,
+        project_root: &Path,
+    ) -> Result<ModelCatalog, RuntimeSlotError> {
+        let slot = self.get(project_id, slot_id)?;
+        match slot.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::Login { .. },
+            } => {
+                let executable = login_executable.ok_or(RuntimeSlotError::InvalidInput)?;
+                catalog::fetch_grok_model_catalog(executable, project_root)
+            }
+            RuntimeSlotKind::GovernedGrok {
+                auth:
+                    GrokSlotAuth::ApiKey {
+                        base_url,
+                        secret_ref,
+                        ..
+                    },
+            } => {
+                let api_key = self.secrets.get(&secret_ref)?;
+                catalog::fetch_openai_model_catalog(&base_url, &api_key)
+            }
+            RuntimeSlotKind::ExternalCli { .. } => Ok(ModelCatalog::unsupported(
+                ModelCatalogSource::ExternalCli,
+                ModelCatalogUnsupportedReason::ExternalCli,
+            )),
         }
     }
 

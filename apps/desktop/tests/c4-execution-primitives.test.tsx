@@ -10,7 +10,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommandActivityRow } from "../src/features/execution/CommandActivityRow";
 import { CommandApprovalBar } from "../src/features/execution/CommandApprovalBar";
-import { GitChangesView } from "../src/features/execution/GitChangesView";
+import {
+  GIT_PUSH_CONFIRM_BODY,
+  GIT_PUSH_CONFIRM_SUBMIT,
+  GIT_PUSH_CONFIRM_TITLE,
+  GIT_PUSH_OPEN_LABEL,
+  GitChangesView,
+} from "../src/features/execution/GitChangesView";
 import { TerminalOutputView } from "../src/features/execution/TerminalOutputView";
 import {
   COMMAND_DISPLAY_EXPAND_THRESHOLD,
@@ -661,7 +667,7 @@ describe("GitChangesView", () => {
     );
     await user.click(screen.getByTestId("git-changes-refresh"));
     expect(onRefresh).toHaveBeenCalledTimes(1);
-    await user.click(screen.getByTestId("git-changes-entry-0"));
+    await user.click(screen.getByTestId("git-changes-entry-select-0"));
     expect(onSelectPath).toHaveBeenCalledWith(
       "src/features/execution/CommandActivityRow.tsx",
     );
@@ -745,6 +751,157 @@ describe("GitChangesView", () => {
     expect(viewSource).not.toMatch(/isBinary/);
     expect(viewSource).not.toMatch(/unavailableReason/);
     expect(viewSource).not.toMatch(/status\.stale|diff\.stale/);
+  });
+
+  it("stages and unstages via callbacks with the portable path argument", async () => {
+    const user = userEvent.setup();
+    const onStagePath = vi.fn();
+    const onUnstagePath = vi.fn();
+    render(
+      <GitChangesView
+        status={gitStatusFixture({
+          dirtyCount: 2,
+          files: [
+            { path: "src/a.ts", kind: "modified" },
+            { path: "src/new.ts", kind: "untracked" },
+          ],
+        })}
+        onStagePath={onStagePath}
+        onUnstagePath={onUnstagePath}
+      />,
+    );
+
+    await user.click(screen.getByTestId("git-changes-stage-0"));
+    expect(onStagePath).toHaveBeenCalledTimes(1);
+    expect(onStagePath).toHaveBeenCalledWith("src/a.ts");
+    expect(onUnstagePath).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("git-changes-unstage-0"));
+    expect(onUnstagePath).toHaveBeenCalledTimes(1);
+    expect(onUnstagePath).toHaveBeenCalledWith("src/a.ts");
+
+    // Untracked: stage only — never invent an unstage control.
+    expect(screen.getByTestId("git-changes-stage-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("git-changes-unstage-1")).toBeNull();
+    await user.click(screen.getByTestId("git-changes-stage-1"));
+    expect(onStagePath).toHaveBeenLastCalledWith("src/new.ts");
+  });
+
+  it("blocks empty commit messages and submits trimmed non-empty messages", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(
+      <GitChangesView status={gitStatusFixture()} onCommit={onCommit} />,
+    );
+
+    const submit = screen.getByTestId("git-changes-commit-submit");
+    expect(submit).toBeDisabled();
+    await user.click(submit);
+    expect(onCommit).not.toHaveBeenCalled();
+
+    await user.type(
+      screen.getByTestId("git-changes-commit-message"),
+      "   ",
+    );
+    expect(submit).toBeDisabled();
+    await user.clear(screen.getByTestId("git-changes-commit-message"));
+    await user.type(
+      screen.getByTestId("git-changes-commit-message"),
+      "  fix panel wiring  ",
+    );
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith("fix panel wiring");
+  });
+
+  it("requires push confirmation before calling onPush; open alone does not push", async () => {
+    const user = userEvent.setup();
+    const onPush = vi.fn();
+    render(
+      <GitChangesView
+        status={gitStatusFixture({ branch: "main", detached: false })}
+        onPush={onPush}
+      />,
+    );
+
+    expect(screen.getByTestId("git-changes-push-open")).toHaveTextContent(
+      GIT_PUSH_OPEN_LABEL,
+    );
+    await user.click(screen.getByTestId("git-changes-push-open"));
+    expect(onPush).not.toHaveBeenCalled();
+
+    expect(screen.getByTestId("git-changes-push-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-push-title")).toHaveTextContent(
+      GIT_PUSH_CONFIRM_TITLE,
+    );
+    expect(screen.getByTestId("git-changes-push-body")).toHaveTextContent(
+      GIT_PUSH_CONFIRM_BODY,
+    );
+    expect(screen.getByTestId("git-changes-push-branch")).toHaveTextContent(
+      "main",
+    );
+    expect(screen.getByTestId("git-changes-push-remote")).toHaveValue("origin");
+    expect(
+      screen.getByTestId("git-changes-push-confirm-submit"),
+    ).toHaveTextContent(GIT_PUSH_CONFIRM_SUBMIT);
+
+    await user.clear(screen.getByTestId("git-changes-push-remote"));
+    await user.type(screen.getByTestId("git-changes-push-remote"), "upstream");
+    await user.click(screen.getByTestId("git-changes-push-confirm-submit"));
+    expect(onPush).toHaveBeenCalledTimes(1);
+    expect(onPush).toHaveBeenCalledWith({
+      remoteName: "upstream",
+      branchName: "main",
+    });
+  });
+
+  it("disables mutation controls while mutating and never shows discard/reset", async () => {
+    const user = userEvent.setup();
+    const onStagePath = vi.fn();
+    const onCommit = vi.fn();
+    const onPush = vi.fn();
+    const { container } = render(
+      <GitChangesView
+        status={gitStatusFixture()}
+        mutating
+        onStagePath={onStagePath}
+        onUnstagePath={vi.fn()}
+        onCommit={onCommit}
+        onPush={onPush}
+      />,
+    );
+
+    expect(screen.getByTestId("git-changes-view")).toHaveAttribute(
+      "data-mutating",
+      "true",
+    );
+    expect(screen.getByTestId("git-changes-mutating")).toBeInTheDocument();
+    expect(screen.getByTestId("git-changes-stage-0")).toBeDisabled();
+    expect(screen.getByTestId("git-changes-commit-submit")).toBeDisabled();
+    expect(screen.getByTestId("git-changes-push-open")).toBeDisabled();
+    await user.click(screen.getByTestId("git-changes-stage-0"));
+    expect(onStagePath).not.toHaveBeenCalled();
+
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/discard|reset --hard|硬重置|丢弃/i);
+  });
+
+  it("surfaces fixed path-free mutation errors without echoing host text", () => {
+    const hostLeak =
+      "auth failed at https://user:token@github.com/org/repo.git non-ff";
+    const { container } = render(
+      <GitChangesView
+        status={gitStatusFixture()}
+        error="Git operation failed. For push: check credentials, remote access, and that the update is a fast-forward; then refresh and retry."
+      />,
+    );
+    expect(screen.getByTestId("git-changes-error")).toHaveTextContent(
+      "check credentials",
+    );
+    expect(container.textContent).not.toContain(hostLeak);
+    expect(container.textContent).not.toContain("user:token");
+    expect(container.textContent).not.toContain("github.com");
   });
 });
 
