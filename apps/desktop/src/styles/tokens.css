@@ -49,7 +49,10 @@
      document order does not save you. This was referenced in
      workbench-conversation.css before it was ever defined, which silently
      dropped that declaration and left stage-top actions under the controls. */
-  --window-controls-inset: 132px;
+  /* Also covers the floating settings button, which is fixed at right:148px
+     and ~80px wide. Counting only the window controls left that button
+     resting on the first banner's actions. */
+  --window-controls-inset: 244px;
   --sidebar-width: 248px;
   --radius-sm: 6px;
   --radius-md: 8px;
