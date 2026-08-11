@@ -1697,9 +1697,9 @@ fn read_ops_do_not_mutate_worktree() {
 
 #[test]
 fn no_public_arbitrary_git_argv_surface() {
-    // API-surface guard: GitReadExecutor only exposes discover/status/diff
-    // (plus `new`). There is no free-form argv / raw command runner.
-    // Method pointers document the closed semantic surface.
+    // API-surface guard: every callable Git operation has a semantic signature.
+    // There is no free-form argv, flag/config collection, cwd, environment, or
+    // raw command runner in any method pointer below.
     type DiscoverFn =
         fn(&GitReadExecutor, &Path) -> Result<keeper_git_executor::GitDiscovery, GitReadError>;
     type StatusFn = fn(
@@ -1715,11 +1715,34 @@ fn no_public_arbitrary_git_argv_surface() {
         &str,
         u64,
     ) -> Result<GitDiffSnapshot, GitReadError>;
+    type PathsFn = fn(
+        &GitReadExecutor,
+        &Path,
+        &GitRepositoryId,
+        &[String],
+    ) -> Result<keeper_git_executor::GitMutationReceipt, GitReadError>;
+    type CommitFn = fn(
+        &GitReadExecutor,
+        &Path,
+        &GitRepositoryId,
+        &str,
+    ) -> Result<keeper_git_executor::GitMutationReceipt, GitReadError>;
+    type PushFn = fn(
+        &GitReadExecutor,
+        &Path,
+        &GitRepositoryId,
+        &str,
+        &str,
+    ) -> Result<keeper_git_executor::GitMutationReceipt, GitReadError>;
 
     let discover: DiscoverFn = GitReadExecutor::discover;
     let status: StatusFn = GitReadExecutor::status;
     let diff: DiffFn = GitReadExecutor::diff;
-    let _ = (discover, status, diff);
+    let stage: PathsFn = GitReadExecutor::stage;
+    let unstage: PathsFn = GitReadExecutor::unstage;
+    let commit: CommitFn = GitReadExecutor::commit;
+    let push: PushFn = GitReadExecutor::push;
+    let _ = (discover, status, diff, stage, unstage, commit, push);
 
     let git = host_git();
     let ex = GitReadExecutor::new(git, Duration::from_secs(5)).expect("executor");

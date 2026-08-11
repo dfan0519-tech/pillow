@@ -10,7 +10,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use crate::app_state::AppState;
-use crate::git_commands::{GitCommandState, is_git_public_error};
+use crate::git_commands::{GitCommandState, GitPushConfirmationInput, is_git_public_error};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -518,6 +518,11 @@ fn public_errors_serialize_without_paths_or_private_codes() {
         "git_unavailable",
         "git_generation_stale",
         "git_generation_mismatch",
+        "git_message_rejected",
+        "git_branch_rejected",
+        "git_remote_rejected",
+        "git_push_confirmation_required",
+        "git_mutation_failed",
     ];
     for code in codes {
         assert!(is_git_public_error(code));
@@ -531,6 +536,207 @@ fn public_errors_serialize_without_paths_or_private_codes() {
     assert!(json.contains("git_project_not_found"));
     assert!(!json.contains(&h.project_root.to_string_lossy().to_string()));
     assert!(!json.contains("\\\\"));
+}
+
+// ---------------------------------------------------------------------------
+// Structured mutation commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stage_unstage_and_commit_mutate_only_the_registered_temporary_repository() {
+    let h = Harness::new("mutation-positive");
+    let repo = h.init_repo(".");
+    h.write(&repo, "seed.txt", b"seed\n");
+    h.commit_all(&repo, "seed");
+    h.write(&repo, "change.txt", b"change\n");
+    let discovery = h.git.discover(&h.app, &h.project_id).expect("discover");
+    let paths = vec!["change.txt".to_owned()];
+
+    let staged = h
+        .git
+        .stage(&h.app, &h.project_id, ".", discovery.generation, &paths)
+        .expect("stage");
+    assert_eq!(staged.operation, "stage");
+    assert_eq!(staged.repository_id, ".");
+    assert_eq!(staged.generation, discovery.generation);
+    let staged_json = serde_json::to_value(&staged).expect("stage dto");
+    let mut staged_keys: Vec<&str> = staged_json
+        .as_object()
+        .expect("stage object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    staged_keys.sort_unstable();
+    assert_eq!(staged_keys, ["generation", "operation", "repositoryId"]);
+    assert!(staged_json.get("argv").is_none());
+    assert!(staged_json.get("nativePath").is_none());
+    let cached = Command::new(&h.host_git)
+        .args(["diff", "--cached", "--name-only", "--", "change.txt"])
+        .current_dir(&repo)
+        .output()
+        .expect("cached diff");
+    assert_eq!(String::from_utf8_lossy(&cached.stdout).trim(), "change.txt");
+
+    let unstaged = h
+        .git
+        .unstage(&h.app, &h.project_id, ".", discovery.generation, &paths)
+        .expect("unstage");
+    assert_eq!(unstaged.operation, "unstage");
+    assert!(
+        repo.join("change.txt").is_file(),
+        "worktree must be preserved"
+    );
+
+    h.git
+        .stage(&h.app, &h.project_id, ".", discovery.generation, &paths)
+        .expect("restage");
+    let committed = h
+        .git
+        .commit(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            "command layer commit",
+        )
+        .expect("commit");
+    assert_eq!(committed.operation, "commit");
+    let subject = Command::new(&h.host_git)
+        .args(["log", "-1", "--pretty=%s"])
+        .current_dir(&repo)
+        .output()
+        .expect("log subject");
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout).trim(),
+        "command layer commit"
+    );
+}
+
+#[test]
+fn command_layer_maps_adversarial_mutation_inputs_to_opaque_errors() {
+    let h = Harness::new("mutation-rejections");
+    let repo = h.init_repo(".");
+    h.write(&repo, "seed.txt", b"seed\n");
+    h.commit_all(&repo, "seed");
+    let discovery = h.git.discover(&h.app, &h.project_id).expect("discover");
+
+    let path = h
+        .git
+        .stage(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            &["../escape".to_owned()],
+        )
+        .expect_err("traversal");
+    assert_eq!(path.code, "git_path_rejected");
+    assert_path_free(&path);
+
+    let message = h
+        .git
+        .commit(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            "-pretend-flag",
+        )
+        .expect_err("message flag");
+    assert_eq!(message.code, "git_message_rejected");
+    assert_path_free(&message);
+
+    let branch = h
+        .git
+        .push(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            &GitPushConfirmationInput {
+                confirmed: true,
+                remote_name: "origin".to_owned(),
+                branch_name: "--upload-pack=malicious".to_owned(),
+            },
+        )
+        .expect_err("branch flag");
+    assert_eq!(branch.code, "git_branch_rejected");
+    assert_path_free(&branch);
+}
+
+#[test]
+fn push_requires_a_backend_checked_target_bound_confirmation() {
+    let h = Harness::new("push-confirmation");
+    let repo = h.init_repo(".");
+    h.write(&repo, "push.txt", b"push\n");
+    h.commit_all(&repo, "push seed");
+    let remote = h.project_root.join("contained-remote.git");
+    fs::create_dir_all(&remote).expect("remote directory");
+    h.git_run(&remote, &["init", "--bare"]);
+    let remote_text = remote.to_string_lossy().into_owned();
+    h.git_run(&repo, &["remote", "add", "origin", &remote_text]);
+    let discovery = h.git.discover(&h.app, &h.project_id).expect("discover");
+
+    let denied = h
+        .git
+        .push(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            &GitPushConfirmationInput {
+                confirmed: false,
+                remote_name: "origin".to_owned(),
+                branch_name: "main".to_owned(),
+            },
+        )
+        .expect_err("confirmation is mandatory");
+    assert_eq!(denied.code, "git_push_confirmation_required");
+    assert_path_free(&denied);
+
+    let pushed = h
+        .git
+        .push(
+            &h.app,
+            &h.project_id,
+            ".",
+            discovery.generation,
+            &GitPushConfirmationInput {
+                confirmed: true,
+                remote_name: "origin".to_owned(),
+                branch_name: "main".to_owned(),
+            },
+        )
+        .expect("confirmed push");
+    assert_eq!(pushed.operation, "push");
+    assert_eq!(pushed.remote_name.as_deref(), Some("origin"));
+    assert_eq!(pushed.branch_name.as_deref(), Some("main"));
+    let pushed_json = serde_json::to_value(&pushed).expect("push dto");
+    let mut pushed_keys: Vec<&str> = pushed_json
+        .as_object()
+        .expect("push object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    pushed_keys.sort_unstable();
+    assert_eq!(
+        pushed_keys,
+        [
+            "branchName",
+            "generation",
+            "operation",
+            "remoteName",
+            "repositoryId",
+        ]
+    );
+
+    let unknown = serde_json::from_value::<GitPushConfirmationInput>(serde_json::json!({
+        "confirmed": true,
+        "remoteName": "origin",
+        "branchName": "main",
+        "argv": ["push"]
+    }));
+    assert!(unknown.is_err(), "push confirmation input must be closed");
 }
 
 // ---------------------------------------------------------------------------
@@ -548,14 +754,23 @@ fn desktop_invoke_handler_registers_exact_git_contract_commands() {
         "discover_git_repositories",
         "get_git_status",
         "open_git_diff",
+        "stage_git_paths",
+        "unstage_git_paths",
+        "commit_git_changes",
+        "push_git_branch",
     ] {
         assert!(
             handler.contains(command),
             "missing invoke command {command}"
         );
     }
-    // No mutation surface in this slice.
-    for forbidden in ["git_stage", "git_commit", "git_checkout", "run_git"] {
+    // Destructive and arbitrary mutation surfaces remain absent.
+    for forbidden in [
+        "discard_git_changes",
+        "reset_git_hard",
+        "git_checkout",
+        "run_git",
+    ] {
         assert!(
             !handler.contains(forbidden),
             "mutation command must not be registered: {forbidden}"

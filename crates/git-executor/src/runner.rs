@@ -1,12 +1,15 @@
-//! Hardened read-only Git runner: fixed templates over `SupervisedProcessRunner`.
+//! Hardened Git runner: fixed semantic templates over `SupervisedProcessRunner`.
 //!
 //! Callers never supply Git argv. The host resolves one trusted `git.exe`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use keeper_process_executor::{
     BoundedOutput, CancellationSignal, ProcessError, ProcessSpec, SupervisedProcessRunner,
@@ -20,6 +23,7 @@ use crate::discovery::{
     read_metadata_under_base, resolve_repo_workdir, resolve_under_base_no_follow,
     strip_verbatim_prefix, walk_git_markers,
 };
+use crate::mutation::{GitInputKind, GitMutationReceipt, PreparedGitMutation};
 use crate::status::{
     GitRepositoryId, GitStatusSnapshot, ParseError, STATUS_TRANSPORT_CAP, parse_porcelain_v2_z,
     validate_portable_path,
@@ -40,6 +44,8 @@ pub enum UnsafeConfigKind {
     ExecutableConfig,
     /// Local `include.path` / `includeIf.*.path` pulls external config.
     Include,
+    /// Configured program or helper that a network operation could execute.
+    RemoteCommand,
 }
 
 /// Typed Git read failures (public surface; no native roots / raw stderr).
@@ -58,6 +64,9 @@ pub enum GitReadError {
     /// Capture truncated, lossy UTF-8, or otherwise not trustworthy to parse/publish.
     OutputUnreliable,
     PathRejected,
+    InputRejected {
+        kind: GitInputKind,
+    },
     Parse(ParseError),
     Process(ProcessError),
     CommandFailed {
@@ -83,6 +92,7 @@ impl std::fmt::Display for GitReadError {
             Self::MalformedConfiguration => write!(f, "malformed git configuration"),
             Self::OutputUnreliable => write!(f, "git output unreliable"),
             Self::PathRejected => write!(f, "path rejected"),
+            Self::InputRejected { kind } => write!(f, "git input rejected: {kind:?}"),
             Self::Parse(e) => write!(f, "git parse error: {e}"),
             Self::Process(e) => write!(f, "process error: {e}"),
             Self::CommandFailed { exit_code } => {
@@ -220,7 +230,7 @@ struct ContainedGitDirs {
     common_dir: PathBuf,
 }
 
-/// Hardened read-only Git executor.
+/// Hardened structured Git executor with a closed semantic operation surface.
 #[derive(Debug, Clone)]
 pub struct GitReadExecutor {
     git_executable: PathBuf,
@@ -414,6 +424,84 @@ impl GitReadExecutor {
         })
     }
 
+    /// Stage a bounded set of portable paths. Callers cannot supply flags or argv.
+    pub fn stage(
+        &self,
+        project_root: &Path,
+        repository: &GitRepositoryId,
+        paths: &[String],
+    ) -> Result<GitMutationReceipt, GitReadError> {
+        let prepared = PreparedGitMutation::stage(&repository.project_relative, paths)?;
+        self.execute_mutation(project_root, repository, &prepared)
+    }
+
+    /// Remove a bounded set of portable paths from the index without touching the worktree.
+    pub fn unstage(
+        &self,
+        project_root: &Path,
+        repository: &GitRepositoryId,
+        paths: &[String],
+    ) -> Result<GitMutationReceipt, GitReadError> {
+        let prepared = PreparedGitMutation::unstage(&repository.project_relative, paths)?;
+        self.execute_mutation(project_root, repository, &prepared)
+    }
+
+    /// Commit the current index with a validated single-line message sent on stdin.
+    pub fn commit(
+        &self,
+        project_root: &Path,
+        repository: &GitRepositoryId,
+        message: &str,
+    ) -> Result<GitMutationReceipt, GitReadError> {
+        let prepared = PreparedGitMutation::commit(message)?;
+        self.execute_mutation(project_root, repository, &prepared)
+    }
+
+    /// Push one validated local branch to the same branch on one validated remote.
+    pub fn push(
+        &self,
+        project_root: &Path,
+        repository: &GitRepositoryId,
+        remote_name: &str,
+        branch_name: &str,
+    ) -> Result<GitMutationReceipt, GitReadError> {
+        let prepared = PreparedGitMutation::push(remote_name, branch_name)?;
+        self.execute_mutation(project_root, repository, &prepared)
+    }
+
+    fn execute_mutation(
+        &self,
+        project_root: &Path,
+        repository: &GitRepositoryId,
+        prepared: &PreparedGitMutation,
+    ) -> Result<GitMutationReceipt, GitReadError> {
+        let workdir = self.prepare_repo(project_root, repository)?;
+        self.deny_unsafe_configuration(project_root, &workdir)?;
+
+        let mut inspected_entries = 0usize;
+        for pathspec in prepared.pathspecs() {
+            ensure_mutation_path_contained(
+                project_root,
+                &workdir,
+                pathspec,
+                &mut inspected_entries,
+            )?;
+        }
+        if prepared.push_url_probe_argv().is_some() {
+            self.validate_push_targets(project_root, &workdir, prepared)?;
+        }
+
+        let exit_code = if let Some(stdin) = prepared.stdin_bytes() {
+            self.run_mutation_with_stdin(&workdir, prepared, stdin)?
+        } else {
+            self.run_mutation(&workdir, prepared)?
+        };
+        if exit_code != Some(0) {
+            return Err(GitReadError::CommandFailed { exit_code });
+        }
+        Ok(prepared.receipt())
+    }
+
     fn classify_worktree(
         &self,
         project_root: &Path,
@@ -598,6 +686,410 @@ impl GitReadExecutor {
         }
         Ok(receipt)
     }
+
+    fn run_mutation(
+        &self,
+        cwd: &Path,
+        prepared: &PreparedGitMutation,
+    ) -> Result<Option<i32>, GitReadError> {
+        let spec = ProcessSpec {
+            executable: self.git_executable.clone(),
+            argv: prepared.argv(),
+            cwd: cwd.to_path_buf(),
+            env: clean_git_env(&self.git_executable)?,
+            timeout: self.timeout,
+            output_byte_cap: 64 * 1024,
+        };
+        let receipt = self
+            .runner
+            .run(spec, CancellationSignal::new())
+            .map_err(GitReadError::from)?;
+        if receipt.timed_out {
+            return Err(GitReadError::TimedOut);
+        }
+        if receipt.cancelled {
+            return Err(GitReadError::Cancelled);
+        }
+        Ok(receipt.exit_code)
+    }
+
+    /// Use the shared executor's owned supervised child for `commit -F -`.
+    /// The same Job Object / stable child handle, timeout cadence, and
+    /// kill-tree proof as ordinary reads remain authoritative.
+    fn run_mutation_with_stdin(
+        &self,
+        cwd: &Path,
+        prepared: &PreparedGitMutation,
+        stdin_bytes: &[u8],
+    ) -> Result<Option<i32>, GitReadError> {
+        let spec = ProcessSpec {
+            executable: self.git_executable.clone(),
+            argv: prepared.argv(),
+            cwd: cwd.to_path_buf(),
+            env: clean_git_env(&self.git_executable)?,
+            timeout: self.timeout,
+            output_byte_cap: 64 * 1024,
+        };
+        let mut child = self.runner.spawn_piped(spec).map_err(GitReadError::from)?;
+        let stdout = match child.take_stdout() {
+            Some(stdout) => stdout,
+            None => {
+                child
+                    .kill_tree(Duration::from_secs(2))
+                    .map_err(GitReadError::from)?;
+                return Err(GitReadError::Process(ProcessError::Setup));
+            }
+        };
+        let drain = thread::spawn(move || -> std::io::Result<()> {
+            let mut stdout = stdout;
+            let mut buffer = [0_u8; 8_192];
+            loop {
+                if stdout.read(&mut buffer)? == 0 {
+                    return Ok(());
+                }
+            }
+        });
+
+        let mut stdin = match child.take_stdin() {
+            Some(stdin) => stdin,
+            None => {
+                child
+                    .kill_tree(Duration::from_secs(2))
+                    .map_err(GitReadError::from)?;
+                join_discarded_stdout(drain)?;
+                return Err(GitReadError::Process(ProcessError::Setup));
+            }
+        };
+        if stdin.write_all(stdin_bytes).is_err() {
+            drop(stdin);
+            child
+                .kill_tree(Duration::from_secs(2))
+                .map_err(GitReadError::from)?;
+            join_discarded_stdout(drain)?;
+            return Err(GitReadError::Process(ProcessError::Output));
+        }
+        drop(stdin);
+
+        let started = Instant::now();
+        let exit_code = loop {
+            if started.elapsed() >= self.timeout {
+                child
+                    .kill_tree(Duration::from_secs(2))
+                    .map_err(GitReadError::from)?;
+                join_discarded_stdout(drain)?;
+                return Err(GitReadError::TimedOut);
+            }
+            if let Some(exit_code) = child.try_wait().map_err(GitReadError::from)? {
+                break Some(exit_code);
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        child
+            .kill_tree(Duration::from_secs(2))
+            .map_err(GitReadError::from)?;
+        join_discarded_stdout(drain)?;
+        Ok(exit_code)
+    }
+
+    fn validate_push_targets(
+        &self,
+        project_root: &Path,
+        workdir: &Path,
+        prepared: &PreparedGitMutation,
+    ) -> Result<(), GitReadError> {
+        let argv = prepared
+            .push_url_probe_argv()
+            .ok_or(GitReadError::InputRejected {
+                kind: GitInputKind::RemoteTarget,
+            })?;
+        let spec = ProcessSpec {
+            executable: self.git_executable.clone(),
+            argv,
+            cwd: workdir.to_path_buf(),
+            env: clean_git_env(&self.git_executable)?,
+            timeout: self.timeout,
+            output_byte_cap: 64 * 1024,
+        };
+        let receipt = self
+            .runner
+            .run(spec, CancellationSignal::new())
+            .map_err(GitReadError::from)?;
+        if receipt.timed_out {
+            return Err(GitReadError::TimedOut);
+        }
+        if receipt.cancelled {
+            return Err(GitReadError::Cancelled);
+        }
+        if receipt.exit_code != Some(0) {
+            return Err(GitReadError::CommandFailed {
+                exit_code: receipt.exit_code,
+            });
+        }
+        require_reliable_publishable(&receipt.stdout)?;
+        let target = parse_single_push_target(&receipt.stdout.text)?;
+        validate_push_target(project_root, target)?;
+        Ok(())
+    }
+}
+
+fn join_discarded_stdout(
+    drain: thread::JoinHandle<std::io::Result<()>>,
+) -> Result<(), GitReadError> {
+    drain
+        .join()
+        .map_err(|_| GitReadError::Process(ProcessError::Output))?
+        .map_err(|_| GitReadError::Process(ProcessError::Output))
+}
+
+/// Prove each existing path component is a real in-project entry. A missing
+/// leaf is allowed so deletion pathspecs can still be staged/unstaged; the
+/// remaining lexical components have already passed the portable grammar.
+fn ensure_mutation_path_contained(
+    project_root: &Path,
+    workdir: &Path,
+    pathspec: &str,
+    inspected_entries: &mut usize,
+) -> Result<(), GitReadError> {
+    let directory_requested = pathspec.ends_with('/');
+    let pathspec = pathspec.strip_suffix('/').unwrap_or(pathspec);
+    let canonical_workdir = fs::canonicalize(workdir).map_err(|_| GitReadError::PathRejected)?;
+    ensure_resolved_under_project(project_root, &canonical_workdir)?;
+    if pathspec == "." {
+        return scan_mutation_directory(
+            project_root,
+            &canonical_workdir,
+            &canonical_workdir,
+            inspected_entries,
+        );
+    }
+
+    let components: Vec<&str> = pathspec.split('/').collect();
+    let mut current = canonical_workdir.clone();
+    let mut final_is_directory = false;
+    for (index, component) in components.iter().enumerate() {
+        current.push(component);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(GitReadError::PathRejected),
+        };
+        if meta_is_symlink_or_reparse(&metadata) {
+            return Err(GitReadError::PathRejected);
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(GitReadError::PathRejected);
+        }
+        final_is_directory = metadata.is_dir();
+        let canonical = fs::canonicalize(&current).map_err(|_| GitReadError::PathRejected)?;
+        if canonical != canonical_workdir && !canonical.starts_with(&canonical_workdir) {
+            return Err(GitReadError::PathRejected);
+        }
+        ensure_resolved_under_project(project_root, &canonical)?;
+        if metadata.is_dir() {
+            ensure_not_descendant_repository(&canonical_workdir, &canonical)?;
+        }
+        current = canonical;
+    }
+    if directory_requested && !final_is_directory {
+        return Err(GitReadError::PathRejected);
+    }
+    if final_is_directory {
+        scan_mutation_directory(
+            project_root,
+            &canonical_workdir,
+            &current,
+            inspected_entries,
+        )?;
+    }
+    Ok(())
+}
+
+/// `git add <directory>` recursively walks descendants. Mirror that authority
+/// boundary without following any symlink/reparse entry before Git sees it.
+fn scan_mutation_directory(
+    project_root: &Path,
+    canonical_workdir: &Path,
+    directory: &Path,
+    inspected_entries: &mut usize,
+) -> Result<(), GitReadError> {
+    const MUTATION_TREE_ENTRY_MAX: usize = 100_000;
+    const MUTATION_TREE_DEPTH_MAX: usize = 128;
+
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    while let Some((current, depth)) = pending.pop() {
+        if depth > MUTATION_TREE_DEPTH_MAX {
+            return Err(GitReadError::PathRejected);
+        }
+        ensure_not_descendant_repository(canonical_workdir, &current)?;
+        let entries = fs::read_dir(&current).map_err(|_| GitReadError::PathRejected)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| GitReadError::PathRejected)?;
+            *inspected_entries = inspected_entries
+                .checked_add(1)
+                .ok_or(GitReadError::PathRejected)?;
+            if *inspected_entries > MUTATION_TREE_ENTRY_MAX {
+                return Err(GitReadError::PathRejected);
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| GitReadError::PathRejected)?;
+            if meta_is_symlink_or_reparse(&metadata) {
+                return Err(GitReadError::PathRejected);
+            }
+
+            // Git treats repository metadata specially and never stages it.
+            // Inspect the entry itself above, then omit its descendants.
+            if entry.file_name() == ".git" {
+                continue;
+            }
+
+            let canonical = fs::canonicalize(&path).map_err(|_| GitReadError::PathRejected)?;
+            if canonical != canonical_workdir && !canonical.starts_with(canonical_workdir) {
+                return Err(GitReadError::PathRejected);
+            }
+            ensure_resolved_under_project(project_root, &canonical)?;
+            if metadata.is_dir() {
+                pending.push((canonical, depth.saturating_add(1)));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_not_descendant_repository(
+    canonical_workdir: &Path,
+    directory: &Path,
+) -> Result<(), GitReadError> {
+    if directory == canonical_workdir {
+        return Ok(());
+    }
+    match fs::symlink_metadata(directory.join(".git")) {
+        Ok(_) => Err(GitReadError::PathRejected),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(GitReadError::PathRejected),
+    }
+}
+
+fn parse_single_push_target(output: &str) -> Result<&str, GitReadError> {
+    let record = output
+        .strip_suffix("\r\n")
+        .or_else(|| output.strip_suffix('\n'))
+        .unwrap_or(output);
+    if record.is_empty() || record.chars().any(char::is_control) {
+        return Err(remote_target_rejected());
+    }
+    Ok(record)
+}
+
+fn validate_push_target(project_root: &Path, target: &str) -> Result<(), GitReadError> {
+    const REMOTE_TARGET_MAX_LEN: usize = 2_048;
+    if target.is_empty()
+        || target.len() > REMOTE_TARGET_MAX_LEN
+        || target.starts_with('-')
+        || target.chars().any(char::is_control)
+    {
+        return Err(remote_target_rejected());
+    }
+
+    if target.starts_with("https://") {
+        return if safe_https_target(target) {
+            Ok(())
+        } else {
+            Err(remote_target_rejected())
+        };
+    }
+
+    // All other URI/helper/scp forms are denied. A local filesystem remote is
+    // accepted only as an absolute, resolved, in-project bare repository. The
+    // absolute-path requirement keeps scp-like `host:path` syntax out of this
+    // branch on every platform.
+    if target.contains("://") || target.contains("::") {
+        return Err(remote_target_rejected());
+    }
+    let raw = PathBuf::from(target);
+    if !raw.is_absolute() {
+        return Err(remote_target_rejected());
+    }
+    let candidate = raw;
+    let remote_root =
+        open_contained_entry(project_root, &candidate, true)?.ok_or_else(remote_target_rejected)?;
+    // A non-bare repository keeps receive hooks/config below `.git`; treating
+    // its worktree root as a bare gitdir would scan the wrong authority. Reject
+    // every `.git` marker (directory, gitfile, symlink, or reparse point) rather
+    // than risk launching an uninspected receive hook.
+    match fs::symlink_metadata(remote_root.join(".git")) {
+        Ok(_) => return Err(remote_target_rejected()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(remote_target_rejected()),
+    }
+    let remote_dirs = ContainedGitDirs {
+        gitdir: remote_root.clone(),
+        common_dir: remote_root.clone(),
+    };
+    deny_filesystem_metadata(project_root, &remote_root, &remote_dirs)?;
+    let config = read_metadata_under_base(project_root, &remote_root, "config")?
+        .ok_or_else(remote_target_rejected)?;
+    if !config_declares_bare_repository(&config)? {
+        return Err(remote_target_rejected());
+    }
+    Ok(())
+}
+
+fn config_declares_bare_repository(text: &str) -> Result<bool, GitReadError> {
+    let mut section = String::new();
+    let mut declared_bare = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            if !line.ends_with(']') || line.len() < 2 {
+                return Err(GitReadError::MalformedConfiguration);
+            }
+            section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        let (key, value) = parse_config_assignment_line(line)?;
+        let is_core_bare =
+            (section == "core" && key == "bare") || (section.is_empty() && key == "core.bare");
+        if !is_core_bare {
+            continue;
+        }
+        if !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "yes" | "on" | "1"
+        ) {
+            return Ok(false);
+        }
+        declared_bare = true;
+    }
+    Ok(declared_bare)
+}
+
+fn safe_https_target(target: &str) -> bool {
+    let Some(rest) = target.strip_prefix("https://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !authority.starts_with('-')
+        && !authority.ends_with('.')
+        && authority.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | ':' | '[' | ']')
+        })
+        && !rest.contains('\\')
+        && !rest
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
+fn remote_target_rejected() -> GitReadError {
+    GitReadError::InputRejected {
+        kind: GitInputKind::RemoteTarget,
+    }
 }
 
 fn clean_git_env(git_executable: &Path) -> Result<BTreeMap<OsString, OsString>, GitReadError> {
@@ -638,6 +1130,7 @@ fn clean_git_env(git_executable: &Path) -> Result<BTreeMap<OsString, OsString>, 
     env.insert(OsString::from("GIT_PAGER"), OsString::from("cat"));
     env.insert(OsString::from("PAGER"), OsString::from("cat"));
     env.insert(OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1"));
+    env.insert(OsString::from("GIT_NO_LAZY_FETCH"), OsString::from("1"));
     env.insert(OsString::from("LC_ALL"), OsString::from("C"));
     env.insert(OsString::from("LANG"), OsString::from("C"));
 
@@ -936,16 +1429,12 @@ fn classify_config_key_value(key: &str, value: &str) -> Option<UnsafeConfigKind>
     if value.is_empty() {
         return None;
     }
-    if value.eq_ignore_ascii_case("false") {
-        return None;
-    }
-
     if key == "core.hookspath" {
         return Some(UnsafeConfigKind::Hook);
     }
     if key == "core.fsmonitor" {
-        // Built-in or custom fsmonitor can execute local programs — deny.
-        return Some(UnsafeConfigKind::Fsmonitor);
+        // This key is boolean-or-command: only boolean false disables it.
+        return (!value.eq_ignore_ascii_case("false")).then_some(UnsafeConfigKind::Fsmonitor);
     }
     if key == "core.sshcommand" {
         return Some(UnsafeConfigKind::SshCommand);
@@ -953,7 +1442,18 @@ fn classify_config_key_value(key: &str, value: &str) -> Option<UnsafeConfigKind>
     if key == "diff.external" || key == "interactive.difffilter" {
         return Some(UnsafeConfigKind::ExtDiff);
     }
-    if key == "gpg.program" {
+    if key == "gpg.program"
+        || key == "gpg.ssh.program"
+        || key == "core.askpass"
+        || key == "core.gitproxy"
+        || key == "core.alternaterefscommand"
+        || key == "gc.recentobjectshook"
+        || key == "core.attributesfile"
+        || key == "core.excludesfile"
+        || key == "core.worktree"
+        || key == "credential.helper"
+        || (key.starts_with("credential.") && key.ends_with(".helper"))
+    {
         return Some(UnsafeConfigKind::ExecutableConfig);
     }
     // include.path / includeIf.<cond>.path pull external configuration.
@@ -977,6 +1477,23 @@ fn classify_config_key_value(key: &str, value: &str) -> Option<UnsafeConfigKind>
     // merge.<driver>.driver can execute programs during merges; deny for read.
     if key.starts_with("merge.") && key.ends_with(".driver") {
         return Some(UnsafeConfigKind::ExecutableConfig);
+    }
+    // A named remote is still unsafe if config can select a program/helper.
+    if key.starts_with("remote.")
+        && (key.ends_with(".receivepack") || key.ends_with(".uploadpack") || key.ends_with(".vcs"))
+    {
+        return Some(UnsafeConfigKind::RemoteCommand);
+    }
+    if key.starts_with("remote.") && key.ends_with(".mirror") {
+        return (!value.eq_ignore_ascii_case("false")).then_some(UnsafeConfigKind::RemoteCommand);
+    }
+    if key == "protocol.allow" || (key.starts_with("protocol.") && key.ends_with(".allow")) {
+        // Repository config must not reopen a transport disabled by the fixed
+        // command-line protocol policy.
+        return Some(UnsafeConfigKind::RemoteCommand);
+    }
+    if key == "push.pushoption" {
+        return Some(UnsafeConfigKind::RemoteCommand);
     }
     None
 }
@@ -1224,6 +1741,81 @@ mod tests {
         assert_eq!(
             parse_config_null_list(wire3).unwrap(),
             Some(UnsafeConfigKind::Fsmonitor)
+        );
+    }
+
+    #[test]
+    fn config_null_wire_denies_remote_program_and_push_expansion_settings() {
+        for wire in [
+            "remote.origin.receivepack\nevil\0",
+            "remote.origin.vcs\nevil\0",
+            "remote.origin.mirror\ntrue\0",
+            "push.pushoption\nserver-side-option\0",
+            "protocol.ext.allow\nalways\0",
+        ] {
+            assert_eq!(
+                parse_config_null_list(wire),
+                Ok(Some(UnsafeConfigKind::RemoteCommand)),
+                "wire={wire:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_target_probe_requires_exactly_one_control_free_record() {
+        assert_eq!(
+            parse_single_push_target("https://example.test/repo.git\n"),
+            Ok("https://example.test/repo.git")
+        );
+        assert_eq!(
+            parse_single_push_target("https://example.test/repo.git\r\n"),
+            Ok("https://example.test/repo.git")
+        );
+        for output in [
+            "",
+            "https://one.test/repo\nhttps://two.test/repo\n",
+            "https://example.test/repo\n\n",
+            "https://example.test/repo\u{0007}\n",
+        ] {
+            assert!(
+                parse_single_push_target(output).is_err(),
+                "output={output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_null_wire_denies_indirect_programs_and_external_metadata() {
+        for wire in [
+            "credential.https://example.test.helper\n!evil\0",
+            "core.alternaterefscommand\nevil\0",
+            "gc.recentobjectshook\nevil\0",
+            "core.attributesfile\n../outside-attributes\0",
+            "core.excludesfile\n../outside-ignore\0",
+            "core.worktree\n../outside-worktree\0",
+        ] {
+            assert_eq!(
+                parse_config_null_list(wire),
+                Ok(Some(UnsafeConfigKind::ExecutableConfig)),
+                "wire={wire:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_valued_false_is_not_treated_as_boolean_disable() {
+        assert_eq!(
+            parse_config_null_list("core.hookspath\nfalse\0"),
+            Ok(Some(UnsafeConfigKind::Hook))
+        );
+        assert_eq!(
+            parse_config_null_list("filter.evil.clean\nfalse\0"),
+            Ok(Some(UnsafeConfigKind::Filter))
+        );
+        assert_eq!(parse_config_null_list("core.fsmonitor\nfalse\0"), Ok(None));
+        assert_eq!(
+            parse_config_null_list("remote.origin.mirror\nfalse\0"),
+            Ok(None)
         );
     }
 

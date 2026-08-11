@@ -1,6 +1,6 @@
-//! C4 read-only Git Tauri commands.
+//! C4 structured Git Tauri commands.
 //!
-//! Composes `keeper_git_executor::GitReadExecutor` only. The renderer never
+//! Composes the closed `keeper_git_executor::GitReadExecutor` surface. The renderer never
 //! supplies a native root, Git executable, argv, cwd, or environment. Project
 //! roots resolve exclusively through `AppState::get_registered_project`.
 
@@ -9,11 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use keeper_git_executor::{
-    GIT_READ_TIMEOUT, GitDiffSnapshot, GitDiffView as ExecutorDiffView, GitHead, GitReadError,
-    GitReadExecutor, GitRepositoryId, GitStatusEntry, GitStatusKind, GitStatusSnapshot,
-    is_portable_path,
+    GIT_READ_TIMEOUT, GitDiffSnapshot, GitDiffView as ExecutorDiffView, GitHead, GitInputKind,
+    GitMutationKind, GitMutationReceipt, GitReadError, GitReadExecutor, GitRepositoryId,
+    GitStatusEntry, GitStatusKind, GitStatusSnapshot, is_portable_entry_path, is_portable_path,
 };
-use serde::Serialize;
+use keeper_tool_executor::ProjectCapability;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_state::{AppState, CommandError};
@@ -79,6 +80,28 @@ pub struct GitDiffDto {
     pub original_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMutationDto {
+    pub repository_id: String,
+    pub generation: u64,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+}
+
+/// Push target and explicit confirmation travel in one closed input object, so
+/// the backend cannot confirm one target and execute another.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitPushConfirmationInput {
+    pub confirmed: bool,
+    pub remote_name: String,
+    pub branch_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Per-project discovery authority
 // ---------------------------------------------------------------------------
@@ -95,6 +118,7 @@ pub struct GitCommandState {
     /// Host-resolved executor. `None` means Git is unavailable (fail-closed).
     executor: Option<GitReadExecutor>,
     authority: Mutex<HashMap<String, ProjectGitAuthority>>,
+    mutation_gate: Mutex<()>,
 }
 
 impl GitCommandState {
@@ -103,6 +127,7 @@ impl GitCommandState {
         Self {
             executor: resolve_host_git_executor(),
             authority: Mutex::new(HashMap::new()),
+            mutation_gate: Mutex::new(()),
         }
     }
 
@@ -116,6 +141,7 @@ impl GitCommandState {
         Self {
             executor,
             authority: Mutex::new(HashMap::new()),
+            mutation_gate: Mutex::new(()),
         }
     }
 
@@ -137,11 +163,13 @@ impl GitCommandState {
         app: &AppState,
         project_id: &str,
     ) -> Result<GitDiscoveryDto, CommandError> {
-        let project = resolve_project(app, project_id)?;
+        let _guard = self.mutation_gate.lock().map_err(|_| mutation_failed())?;
+        let capability = resolve_project_capability(app, project_id)?;
         let executor = self.require_executor()?;
-        let root = PathBuf::from(&project.root_path);
 
-        let discovery = executor.discover(&root).map_err(map_read_error)?;
+        let discovery = executor
+            .discover(capability.canonical_root())
+            .map_err(map_read_error)?;
 
         let repositories: Vec<GitRepositoryDto> = discovery
             .repositories
@@ -187,16 +215,15 @@ impl GitCommandState {
         repository_id: &str,
         generation: u64,
     ) -> Result<GitStatusDto, CommandError> {
-        let project = resolve_project(app, project_id)?;
+        let capability = resolve_project_capability(app, project_id)?;
         let executor = self.require_executor()?;
         self.authorize_repo(project_id, repository_id, generation)?;
 
-        let root = PathBuf::from(&project.root_path);
         let repo = GitRepositoryId {
             project_relative: repository_id.to_owned(),
         };
         let snap = executor
-            .status(&root, &repo, generation)
+            .status(capability.canonical_root(), &repo, generation)
             .map_err(map_read_error)?;
         Ok(map_status_dto(snap))
     }
@@ -210,7 +237,7 @@ impl GitCommandState {
         generation: u64,
         path: &str,
     ) -> Result<GitDiffDto, CommandError> {
-        let project = resolve_project(app, project_id)?;
+        let capability = resolve_project_capability(app, project_id)?;
         let executor = self.require_executor()?;
         self.authorize_repo(project_id, repository_id, generation)?;
 
@@ -219,14 +246,110 @@ impl GitCommandState {
             return Err(git_error("git_path_rejected", "Git path was rejected."));
         }
 
-        let root = PathBuf::from(&project.root_path);
         let repo = GitRepositoryId {
             project_relative: repository_id.to_owned(),
         };
         let snap = executor
-            .diff(&root, &repo, path, generation)
+            .diff(capability.canonical_root(), &repo, path, generation)
             .map_err(map_read_error)?;
         Ok(map_diff_dto(snap))
+    }
+
+    pub fn stage(
+        &self,
+        app: &AppState,
+        project_id: &str,
+        repository_id: &str,
+        generation: u64,
+        paths: &[String],
+    ) -> Result<GitMutationDto, CommandError> {
+        validate_command_paths(paths)?;
+        let _guard = self.mutation_gate.lock().map_err(|_| mutation_failed())?;
+        let capability = resolve_project_capability(app, project_id)?;
+        let executor = self.require_executor()?;
+        self.authorize_repo(project_id, repository_id, generation)?;
+        let repo = GitRepositoryId {
+            project_relative: repository_id.to_owned(),
+        };
+        let receipt = executor
+            .stage(capability.canonical_root(), &repo, paths)
+            .map_err(map_mutation_error)?;
+        Ok(map_mutation_dto(receipt, repository_id, generation))
+    }
+
+    pub fn unstage(
+        &self,
+        app: &AppState,
+        project_id: &str,
+        repository_id: &str,
+        generation: u64,
+        paths: &[String],
+    ) -> Result<GitMutationDto, CommandError> {
+        validate_command_paths(paths)?;
+        let _guard = self.mutation_gate.lock().map_err(|_| mutation_failed())?;
+        let capability = resolve_project_capability(app, project_id)?;
+        let executor = self.require_executor()?;
+        self.authorize_repo(project_id, repository_id, generation)?;
+        let repo = GitRepositoryId {
+            project_relative: repository_id.to_owned(),
+        };
+        let receipt = executor
+            .unstage(capability.canonical_root(), &repo, paths)
+            .map_err(map_mutation_error)?;
+        Ok(map_mutation_dto(receipt, repository_id, generation))
+    }
+
+    pub fn commit(
+        &self,
+        app: &AppState,
+        project_id: &str,
+        repository_id: &str,
+        generation: u64,
+        message: &str,
+    ) -> Result<GitMutationDto, CommandError> {
+        let _guard = self.mutation_gate.lock().map_err(|_| mutation_failed())?;
+        let capability = resolve_project_capability(app, project_id)?;
+        let executor = self.require_executor()?;
+        self.authorize_repo(project_id, repository_id, generation)?;
+        let repo = GitRepositoryId {
+            project_relative: repository_id.to_owned(),
+        };
+        let receipt = executor
+            .commit(capability.canonical_root(), &repo, message)
+            .map_err(map_mutation_error)?;
+        Ok(map_mutation_dto(receipt, repository_id, generation))
+    }
+
+    pub fn push(
+        &self,
+        app: &AppState,
+        project_id: &str,
+        repository_id: &str,
+        generation: u64,
+        confirmation: &GitPushConfirmationInput,
+    ) -> Result<GitMutationDto, CommandError> {
+        if !confirmation.confirmed {
+            return Err(git_error(
+                "git_push_confirmation_required",
+                "Git push requires explicit confirmation.",
+            ));
+        }
+        let _guard = self.mutation_gate.lock().map_err(|_| mutation_failed())?;
+        let capability = resolve_project_capability(app, project_id)?;
+        let executor = self.require_executor()?;
+        self.authorize_repo(project_id, repository_id, generation)?;
+        let repo = GitRepositoryId {
+            project_relative: repository_id.to_owned(),
+        };
+        let receipt = executor
+            .push(
+                capability.canonical_root(),
+                &repo,
+                &confirmation.remote_name,
+                &confirmation.branch_name,
+            )
+            .map_err(map_mutation_error)?;
+        Ok(map_mutation_dto(receipt, repository_id, generation))
     }
 
     /// Exact project + repository + generation membership against latest discovery.
@@ -326,6 +449,54 @@ pub fn open_git_diff(
     git.diff(&app, &project_id, &repository_id, generation, &path)
 }
 
+#[tauri::command]
+pub fn stage_git_paths(
+    app: State<'_, AppState>,
+    git: State<'_, GitCommandState>,
+    project_id: String,
+    repository_id: String,
+    generation: u64,
+    paths: Vec<String>,
+) -> Result<GitMutationDto, CommandError> {
+    git.stage(&app, &project_id, &repository_id, generation, &paths)
+}
+
+#[tauri::command]
+pub fn unstage_git_paths(
+    app: State<'_, AppState>,
+    git: State<'_, GitCommandState>,
+    project_id: String,
+    repository_id: String,
+    generation: u64,
+    paths: Vec<String>,
+) -> Result<GitMutationDto, CommandError> {
+    git.unstage(&app, &project_id, &repository_id, generation, &paths)
+}
+
+#[tauri::command]
+pub fn commit_git_changes(
+    app: State<'_, AppState>,
+    git: State<'_, GitCommandState>,
+    project_id: String,
+    repository_id: String,
+    generation: u64,
+    message: String,
+) -> Result<GitMutationDto, CommandError> {
+    git.commit(&app, &project_id, &repository_id, generation, &message)
+}
+
+#[tauri::command]
+pub fn push_git_branch(
+    app: State<'_, AppState>,
+    git: State<'_, GitCommandState>,
+    project_id: String,
+    repository_id: String,
+    generation: u64,
+    confirmation: GitPushConfirmationInput,
+) -> Result<GitMutationDto, CommandError> {
+    git.push(&app, &project_id, &repository_id, generation, &confirmation)
+}
+
 // ---------------------------------------------------------------------------
 // Host Git resolution (never renderer-controlled)
 // ---------------------------------------------------------------------------
@@ -403,6 +574,22 @@ fn resolve_project(
     }
 }
 
+fn resolve_project_capability(
+    app: &AppState,
+    project_id: &str,
+) -> Result<ProjectCapability, CommandError> {
+    let project = resolve_project(app, project_id)?;
+    let registered_id = project.id.0.to_string();
+    if registered_id != project_id {
+        return Err(git_error(
+            "git_project_not_found",
+            "Git project was not found.",
+        ));
+    }
+    ProjectCapability::new(registered_id, &project.root_path)
+        .map_err(|_| git_error("git_project_not_found", "Git project was not found."))
+}
+
 fn git_error(code: &'static str, message: &'static str) -> CommandError {
     CommandError {
         code,
@@ -430,6 +617,45 @@ fn map_read_error(error: GitReadError) -> CommandError {
     }
 }
 
+fn validate_command_paths(paths: &[String]) -> Result<(), CommandError> {
+    if paths.is_empty() || paths.iter().any(|path| !is_portable_entry_path(path)) {
+        return Err(git_error("git_path_rejected", "Git path was rejected."));
+    }
+    Ok(())
+}
+
+fn map_mutation_error(error: GitReadError) -> CommandError {
+    match error {
+        GitReadError::PathRejected
+        | GitReadError::Parse(keeper_git_executor::ParseError::PathRejected { .. }) => {
+            git_error("git_path_rejected", "Git path was rejected.")
+        }
+        GitReadError::InputRejected {
+            kind: GitInputKind::CommitMessage,
+        } => git_error("git_message_rejected", "Git commit message was rejected."),
+        GitReadError::InputRejected {
+            kind: GitInputKind::BranchName,
+        } => git_error("git_branch_rejected", "Git branch name was rejected."),
+        GitReadError::InputRejected {
+            kind: GitInputKind::RemoteName | GitInputKind::RemoteTarget,
+        } => git_error("git_remote_rejected", "Git remote was rejected."),
+        GitReadError::NotARepository
+        | GitReadError::RepoNotFound
+        | GitReadError::RepoOutsideProject
+        | GitReadError::LinkedWorktreeOutsideProject => {
+            git_error("git_repository_not_found", "Git repository was not found.")
+        }
+        GitReadError::ExecutableUnavailable => {
+            git_error("git_unavailable", "Git capability is unavailable.")
+        }
+        _ => mutation_failed(),
+    }
+}
+
+fn mutation_failed() -> CommandError {
+    git_error("git_mutation_failed", "Git operation failed.")
+}
+
 fn next_generation(previous: u64) -> u64 {
     if previous >= MAX_JS_SAFE_INTEGER {
         1
@@ -441,6 +667,26 @@ fn next_generation(previous: u64) -> u64 {
 // ---------------------------------------------------------------------------
 // DTO projection
 // ---------------------------------------------------------------------------
+
+fn map_mutation_dto(
+    receipt: GitMutationReceipt,
+    repository_id: &str,
+    generation: u64,
+) -> GitMutationDto {
+    let operation = match receipt.operation {
+        GitMutationKind::Stage => "stage",
+        GitMutationKind::Unstage => "unstage",
+        GitMutationKind::Commit => "commit",
+        GitMutationKind::Push => "push",
+    };
+    GitMutationDto {
+        repository_id: repository_id.to_owned(),
+        generation,
+        operation: operation.to_owned(),
+        remote_name: receipt.remote_name,
+        branch_name: receipt.branch_name,
+    }
+}
 
 fn map_status_dto(snap: GitStatusSnapshot) -> GitStatusDto {
     let (branch, detached, head_short) = match &snap.head {
@@ -577,5 +823,10 @@ pub(crate) fn is_git_public_error(code: &str) -> bool {
             | "git_unavailable"
             | "git_generation_stale"
             | "git_generation_mismatch"
+            | "git_message_rejected"
+            | "git_branch_rejected"
+            | "git_remote_rejected"
+            | "git_push_confirmation_required"
+            | "git_mutation_failed"
     )
 }

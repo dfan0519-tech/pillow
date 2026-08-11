@@ -4,7 +4,9 @@ use std::sync::Arc;
 use keeper_storage_sqlite::{
     KEY_GROK_EXECUTABLE, SettingScope, SettingsUpdatedBy, SqliteSettingsRepository,
 };
-use pillow_runtime_slots::{PreparedGrokSlot, RuntimeSlotService};
+use pillow_runtime_slots::{
+    DpapiFileSecretStore, PreparedGrokSlot, RuntimeSlotService, SecretStore,
+};
 use serde_json::Value;
 
 use crate::app_state::AppState;
@@ -13,7 +15,8 @@ use crate::runtime_composition::build_slot_grok_config;
 use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 use crate::runtime_slot_commands::{
     create_external_cli_slot_impl, create_grok_api_key_slot_impl, create_grok_login_slot_impl,
-    start_runtime_slot_impl,
+    delete_runtime_slot_impl, list_runtime_slots_impl, start_runtime_slot_impl,
+    update_grok_api_key_slot_impl,
 };
 
 struct Harness {
@@ -291,4 +294,235 @@ fn an_active_slot_is_not_reused_across_project_boundaries() {
     assert!(require_project_scope(Some("project-a"), "project-a").is_ok());
     let error = require_project_scope(Some("project-a"), "project-b").unwrap_err();
     assert_eq!(error.code, "runtime_slot_project_mismatch");
+}
+
+#[cfg(windows)]
+#[test]
+fn update_omitting_api_key_keeps_secret_usable_for_prepare_and_start() {
+    let harness = Harness::new();
+    let original = "pillow-test-canary-keep-via-command";
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private model".into(),
+        "https://example.invalid/v1".into(),
+        "model-one".into(),
+        original.into(),
+    )
+    .unwrap();
+    let original_ref = created.secret_ref.clone().expect("secret ref");
+
+    let updated = update_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+        "Renamed".into(),
+        "https://example.invalid/v2".into(),
+        "model-two".into(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(updated.display_name, "Renamed");
+    assert_eq!(
+        updated.base_url.as_deref(),
+        Some("https://example.invalid/v2")
+    );
+    assert_eq!(updated.model_id.as_deref(), Some("model-two"));
+    assert_eq!(updated.secret_ref.as_deref(), Some(original_ref.as_str()));
+    assert!(updated.secret_configured);
+    let serialized = serde_json::to_string(&updated).unwrap();
+    assert!(!serialized.contains(original));
+
+    // Prove retained key still decrypts and prepares — not just Ok(()).
+    let store = DpapiFileSecretStore::new(harness._temp.path().join("app-data").join("secrets"));
+    let recovered = store.get(&original_ref).unwrap();
+    assert_eq!(recovered.as_bytes(), original.as_bytes());
+
+    let prepared = harness
+        .slots
+        .prepare_grok(
+            uuid::Uuid::parse_str(&harness.project_id)
+                .map(keeper_project::ProjectId)
+                .unwrap(),
+            uuid::Uuid::parse_str(&created.slot_id)
+                .map(keeper_storage_sqlite::RuntimeSlotId)
+                .unwrap(),
+        )
+        .unwrap();
+    match prepared {
+        PreparedGrokSlot::ApiKey {
+            model_id, api_key, ..
+        } => {
+            assert_eq!(model_id, "model-two");
+            assert_eq!(api_key.as_bytes(), original.as_bytes());
+        }
+        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+    }
+
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &executable.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    let started = start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(started.status, "active");
+    assert!(runtime.shutdown_if_active().unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn update_with_new_api_key_rotates_secret_and_old_ref_is_unrecoverable() {
+    let harness = Harness::new();
+    let original = "pillow-test-canary-command-original";
+    let rotated = "pillow-test-canary-command-rotated";
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private model".into(),
+        "https://example.invalid/v1".into(),
+        "model-one".into(),
+        original.into(),
+    )
+    .unwrap();
+    let original_ref = created.secret_ref.clone().expect("secret ref");
+    let secrets_dir = harness._temp.path().join("app-data").join("secrets");
+    let original_path = secrets_dir.join(format!("{original_ref}.dpapi"));
+    assert!(original_path.is_file());
+
+    let updated = update_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+        "Private model".into(),
+        "https://example.invalid/v1".into(),
+        "model-one".into(),
+        Some(rotated.into()),
+    )
+    .unwrap();
+    let new_ref = updated.secret_ref.clone().expect("new secret ref");
+    assert_ne!(new_ref, original_ref);
+    assert!(!original_path.exists());
+    let serialized = serde_json::to_string(&updated).unwrap();
+    assert!(!serialized.contains(original));
+    assert!(!serialized.contains(rotated));
+
+    let store = DpapiFileSecretStore::new(secrets_dir);
+    assert!(matches!(
+        store.get(&original_ref),
+        Err(pillow_runtime_slots::RuntimeSlotError::SecretMissing)
+    ));
+    let new_value = store.get(&new_ref).unwrap();
+    assert_eq!(new_value.as_bytes(), rotated.as_bytes());
+
+    let prepared = harness
+        .slots
+        .prepare_grok(
+            uuid::Uuid::parse_str(&harness.project_id)
+                .map(keeper_project::ProjectId)
+                .unwrap(),
+            uuid::Uuid::parse_str(&created.slot_id)
+                .map(keeper_storage_sqlite::RuntimeSlotId)
+                .unwrap(),
+        )
+        .unwrap();
+    match prepared {
+        PreparedGrokSlot::ApiKey { api_key, .. } => {
+            assert_eq!(api_key.as_bytes(), rotated.as_bytes());
+        }
+        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn delete_command_removes_slot_and_destroys_secret() {
+    let harness = Harness::new();
+    let marker = "pillow-test-canary-command-delete";
+    let created = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Private model".into(),
+        "https://example.invalid/v1".into(),
+        "model-one".into(),
+        marker.into(),
+    )
+    .unwrap();
+    let secret_ref = created.secret_ref.clone().expect("secret ref");
+    let secrets_dir = harness._temp.path().join("app-data").join("secrets");
+    let secret_path = secrets_dir.join(format!("{secret_ref}.dpapi"));
+    assert!(secret_path.is_file());
+
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &executable.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    let started = start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(started.status, "active");
+
+    delete_runtime_slot_impl(
+        &harness.slots,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot_id.clone(),
+    )
+    .unwrap();
+
+    // Active runtime bound to the deleted slot must have been stopped.
+    assert!(!runtime.shutdown_if_active().unwrap());
+
+    let listed =
+        list_runtime_slots_impl(&harness.slots, &harness.app, harness.project_id.clone()).unwrap();
+    assert!(listed.is_empty());
+    assert!(!secret_path.exists());
+    let store = DpapiFileSecretStore::new(secrets_dir);
+    assert!(matches!(
+        store.get(&secret_ref),
+        Err(pillow_runtime_slots::RuntimeSlotError::SecretMissing)
+    ));
+}
+
+#[test]
+fn update_and_delete_command_symbols_exist_for_host_registration() {
+    // lib.rs registration is owned by the controller merge; assert the command
+    // surface is present in this module so the merge can wire generate_handler.
+    let source = include_str!("runtime_slot_commands.rs");
+    assert!(source.contains("pub fn update_grok_api_key_slot"));
+    assert!(source.contains("pub fn delete_runtime_slot"));
 }

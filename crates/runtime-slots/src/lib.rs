@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
     GrokSlotAuth, NewRuntimeSlot, RuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
-    RuntimeSlotKind, SqliteProjectRepository, SqliteRuntimeSlotRepository,
+    RuntimeSlotKind, SqliteProjectRepository, SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -209,6 +209,127 @@ impl RuntimeSlotService {
             slot,
             secret_configured: false,
         })
+    }
+
+    /// Update a governed Grok API-key slot.
+    ///
+    /// `api_key == None` keeps the existing DPAPI ciphertext and opaque ref
+    /// (omit-means-keep). `Some` rotates: a new opaque ref is written first,
+    /// metadata is updated to point at it, then the prior ciphertext is deleted
+    /// so the old material cannot be recovered through this store.
+    pub fn update_grok_api_key(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        display_name: String,
+        base_url: String,
+        model_id: String,
+        api_key: Option<SecretBytes>,
+    ) -> Result<RuntimeSlotView, RuntimeSlotError> {
+        self.ensure_project(project_id)?;
+        validate_endpoint(&base_url)?;
+        validate_model(&model_id)?;
+        let existing = self.get(project_id, slot_id)?;
+        let previous_secret_ref = match &existing.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
+            } => secret_ref.clone(),
+            // Update command is API-key only; login/external slots must not share this path.
+            _ => return Err(RuntimeSlotError::InvalidInput),
+        };
+
+        let (secret_ref, rotated_from) = match api_key {
+            None => (previous_secret_ref, None),
+            Some(secret) => {
+                if secret.is_empty() || secret.as_bytes().contains(&0) {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                let new_ref = Uuid::new_v4().to_string();
+                self.secrets.put(&new_ref, &secret)?;
+                (new_ref, Some(previous_secret_ref))
+            }
+        };
+
+        let updated = self.slots.update_grok_api_key(UpdateGrokApiKeySlot {
+            project_id,
+            slot_id,
+            display_name,
+            base_url,
+            model_id,
+            secret_ref: secret_ref.clone(),
+        });
+        let slot = match updated {
+            Ok(slot) => slot,
+            Err(error) => {
+                if rotated_from.is_some() {
+                    // Roll back the newly written ciphertext so a failed metadata
+                    // write does not leave an unreachable secret.
+                    let _ = self.secrets.delete(&secret_ref);
+                }
+                return Err(match error {
+                    keeper_storage_sqlite::RuntimeSlotStoreError::NotFound => {
+                        RuntimeSlotError::SlotNotFound
+                    }
+                    keeper_storage_sqlite::RuntimeSlotStoreError::InvalidShape => {
+                        RuntimeSlotError::InvalidInput
+                    }
+                    _ => RuntimeSlotError::MetadataUnavailable,
+                });
+            }
+        };
+
+        if let Some(old_ref) = rotated_from {
+            // Destroy prior ciphertext after the new ref is durable in metadata.
+            // Failure is surfaced so operators can retry cleanup; the slot already
+            // points at the new ref and prepare uses only that ref.
+            self.secrets.delete(&old_ref)?;
+        }
+
+        Ok(RuntimeSlotView {
+            slot,
+            secret_configured: self.secrets.exists(&secret_ref)?,
+        })
+    }
+
+    /// Delete a project-scoped slot and destroy any associated DPAPI secret.
+    ///
+    /// Order prioritizes no orphan ciphertext: secret is removed before the
+    /// metadata row when present. Private per-slot home directories are removed
+    /// best-effort after the row is gone.
+    pub fn delete(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+    ) -> Result<(), RuntimeSlotError> {
+        self.ensure_project(project_id)?;
+        let existing = self.get(project_id, slot_id)?;
+        let secret_ref = match &existing.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey { secret_ref, .. },
+            } => Some(secret_ref.clone()),
+            _ => None,
+        };
+
+        if let Some(secret_ref) = &secret_ref {
+            self.secrets.delete(secret_ref)?;
+        }
+
+        let removed = self
+            .slots
+            .delete(project_id, slot_id)
+            .map_err(|_| RuntimeSlotError::MetadataUnavailable)?;
+        if removed.is_none() {
+            return Err(RuntimeSlotError::SlotNotFound);
+        }
+
+        let private_home = self
+            .private_homes
+            .join(project_id.0.to_string())
+            .join(slot_id.0.to_string());
+        if private_home.exists() {
+            let _ = std::fs::remove_dir_all(&private_home);
+        }
+        Ok(())
     }
 
     pub fn list(&self, project_id: ProjectId) -> Result<Vec<RuntimeSlotView>, RuntimeSlotError> {

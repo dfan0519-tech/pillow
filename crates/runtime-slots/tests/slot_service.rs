@@ -226,3 +226,209 @@ fn list_marks_missing_secret_as_not_configured_without_exposing_a_value() {
         assert!(!listed[0].secret_configured);
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn update_without_api_key_keeps_the_original_secret_usable() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+    let original = String::from("pillow-test-canary-keep-original");
+    let created = service
+        .create_grok_api_key(
+            project.id,
+            "Private model".into(),
+            "https://example.invalid/v1".into(),
+            "model-one".into(),
+            SecretBytes::new(original.clone()),
+        )
+        .unwrap();
+    let original_ref = match &created.slot.kind {
+        RuntimeSlotKind::GovernedGrok {
+            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
+        } => secret_ref.clone(),
+        _ => panic!("expected api-key slot"),
+    };
+
+    let updated = service
+        .update_grok_api_key(
+            project.id,
+            created.slot.id,
+            "Renamed model".into(),
+            "https://example.invalid/v2".into(),
+            "model-two".into(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(updated.slot.display_name, "Renamed model");
+    assert!(updated.secret_configured);
+    let kept_ref = match &updated.slot.kind {
+        RuntimeSlotKind::GovernedGrok {
+            auth:
+                keeper_storage_sqlite::GrokSlotAuth::ApiKey {
+                    base_url,
+                    model_id,
+                    secret_ref,
+                },
+        } => {
+            assert_eq!(base_url, "https://example.invalid/v2");
+            assert_eq!(model_id, "model-two");
+            assert_eq!(secret_ref, &original_ref);
+            secret_ref.clone()
+        }
+        _ => panic!("expected api-key slot"),
+    };
+
+    // Prove the retained key is still decryptable and usable for prepare —
+    // not merely that update returned Ok.
+    let store = DpapiFileSecretStore::new(app_data.join("secrets"));
+    let recovered = store.get(&kept_ref).unwrap();
+    assert_eq!(recovered.as_bytes(), original.as_bytes());
+
+    let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
+    match prepared {
+        PreparedGrokSlot::ApiKey {
+            model_id, api_key, ..
+        } => {
+            assert_eq!(model_id, "model-two");
+            assert_eq!(api_key.as_bytes(), original.as_bytes());
+        }
+        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn update_with_new_api_key_rotates_and_destroys_prior_ciphertext() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+    let original = String::from("pillow-test-canary-original-key");
+    let rotated = String::from("pillow-test-canary-rotated-key");
+    let created = service
+        .create_grok_api_key(
+            project.id,
+            "Private model".into(),
+            "https://example.invalid/v1".into(),
+            "model-one".into(),
+            SecretBytes::new(original.clone()),
+        )
+        .unwrap();
+    let original_ref = match &created.slot.kind {
+        RuntimeSlotKind::GovernedGrok {
+            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
+        } => secret_ref.clone(),
+        _ => panic!("expected api-key slot"),
+    };
+    let original_path = app_data
+        .join("secrets")
+        .join(format!("{original_ref}.dpapi"));
+    assert!(original_path.is_file());
+
+    let updated = service
+        .update_grok_api_key(
+            project.id,
+            created.slot.id,
+            "Private model".into(),
+            "https://example.invalid/v1".into(),
+            "model-one".into(),
+            Some(SecretBytes::new(rotated.clone())),
+        )
+        .unwrap();
+    let new_ref = match &updated.slot.kind {
+        RuntimeSlotKind::GovernedGrok {
+            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
+        } => secret_ref.clone(),
+        _ => panic!("expected api-key slot"),
+    };
+    assert_ne!(new_ref, original_ref);
+    assert!(!original_path.exists(), "old ciphertext file must be gone");
+
+    let store = DpapiFileSecretStore::new(app_data.join("secrets"));
+    let old_lookup = store.get(&original_ref);
+    assert!(
+        matches!(
+            old_lookup,
+            Err(pillow_runtime_slots::RuntimeSlotError::SecretMissing)
+        ),
+        "old secret_ref must not decrypt"
+    );
+    let new_value = store.get(&new_ref).unwrap();
+    assert_eq!(new_value.as_bytes(), rotated.as_bytes());
+    assert_ne!(new_value.as_bytes(), original.as_bytes());
+
+    let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
+    match prepared {
+        PreparedGrokSlot::ApiKey { api_key, .. } => {
+            assert_eq!(api_key.as_bytes(), rotated.as_bytes());
+        }
+        PreparedGrokSlot::Login => panic!("expected api-key preparation"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn delete_destroys_slot_metadata_and_secret_ciphertext() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+    let marker = String::from("pillow-test-canary-delete-me");
+    let created = service
+        .create_grok_api_key(
+            project.id,
+            "Private model".into(),
+            "https://example.invalid/v1".into(),
+            "model-one".into(),
+            SecretBytes::new(marker.clone()),
+        )
+        .unwrap();
+    let secret_ref = match &created.slot.kind {
+        RuntimeSlotKind::GovernedGrok {
+            auth: keeper_storage_sqlite::GrokSlotAuth::ApiKey { secret_ref, .. },
+        } => secret_ref.clone(),
+        _ => panic!("expected api-key slot"),
+    };
+    // Materialize private home so delete must clean it too.
+    let _ = service.prepare_grok(project.id, created.slot.id).unwrap();
+    let secret_path = app_data.join("secrets").join(format!("{secret_ref}.dpapi"));
+    let private_home = app_data
+        .join("runtime-slots")
+        .join(project.id.0.to_string())
+        .join(created.slot.id.0.to_string());
+    assert!(secret_path.is_file());
+    assert!(private_home.is_dir());
+
+    service.delete(project.id, created.slot.id).unwrap();
+
+    assert!(service.list(project.id).unwrap().is_empty());
+    assert!(!secret_path.exists());
+    let store = DpapiFileSecretStore::new(app_data.join("secrets"));
+    assert!(matches!(
+        store.get(&secret_ref),
+        Err(pillow_runtime_slots::RuntimeSlotError::SecretMissing)
+    ));
+    assert!(!private_home.exists());
+    let missing = service
+        .prepare_grok(project.id, created.slot.id)
+        .err()
+        .expect("deleted slot must not prepare");
+    assert_eq!(missing.code(), "runtime_slot_not_found");
+
+    // Ciphertext bytes on disk (if any leftover) must not contain the plaintext marker.
+    if let Ok(entries) = std::fs::read_dir(app_data.join("secrets")) {
+        for entry in entries.flatten() {
+            let bytes = std::fs::read(entry.path()).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+            );
+        }
+    }
+}

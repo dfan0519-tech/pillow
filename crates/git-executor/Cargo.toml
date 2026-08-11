@@ -3,7 +3,7 @@ name = "keeper-git-executor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Read-only Git porcelain parser, bounds, and hardened Git runner for Pillow C4"
+description = "Structured Git porcelain parser, bounds, and hardened Git runner for Pillow C4"
 
 [dependencies]
 keeper-process-executor = { path = "../process-executor" }

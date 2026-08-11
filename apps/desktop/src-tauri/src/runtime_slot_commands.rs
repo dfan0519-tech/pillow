@@ -142,6 +142,53 @@ pub fn start_runtime_slot(
     start_runtime_slot_impl(&slots, &settings, &app, &runtime, project_id, slot_id)
 }
 
+/// Update a governed Grok API-key slot.
+///
+/// `api_key` is optional: omit (or null) to keep the stored secret; provide a
+/// non-empty value to rotate. Empty/whitespace is treated as omit (keep), never clear.
+///
+/// Argument count follows the IPC boundary: Tauri commands receive the wire
+/// fields flat, so bundling them would change the renderer contract rather than
+/// simplify anything. Same precedent as `host/process.rs` and `governed_write.rs`.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn update_grok_api_key_slot(
+    slots: State<'_, RuntimeSlotService>,
+    app: State<'_, AppState>,
+    project_id: String,
+    slot_id: String,
+    display_name: String,
+    base_url: String,
+    model_id: String,
+    api_key: Option<String>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    update_grok_api_key_slot_impl(
+        &slots,
+        &app,
+        project_id,
+        slot_id,
+        display_name,
+        base_url,
+        model_id,
+        api_key,
+    )
+}
+
+/// Delete a project-scoped runtime slot and destroy any associated secret material.
+/// If this slot is the process-active runtime, the runtime is shut down first.
+///
+/// See `update_grok_api_key_slot`: `lib.rs` registration is controller-owned.
+#[tauri::command]
+pub fn delete_runtime_slot(
+    slots: State<'_, RuntimeSlotService>,
+    app: State<'_, AppState>,
+    runtime: State<'_, RuntimeServiceState>,
+    project_id: String,
+    slot_id: String,
+) -> Result<(), CommandError> {
+    delete_runtime_slot_impl(&slots, &app, &runtime, project_id, slot_id)
+}
+
 pub(crate) fn list_runtime_slots_impl(
     slots: &RuntimeSlotService,
     app: &AppState,
@@ -235,6 +282,58 @@ pub(crate) fn get_external_cli_status_impl(
         timed_out,
         truncated,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_grok_api_key_slot_impl(
+    slots: &RuntimeSlotService,
+    app: &AppState,
+    project_id: String,
+    slot_id: String,
+    display_name: String,
+    base_url: String,
+    model_id: String,
+    api_key: Option<String>,
+) -> Result<RuntimeSlotDto, CommandError> {
+    let project_id_value = registered_project_id(app, &project_id)?;
+    let slot_id_value = parse_slot_id(&slot_id)?;
+    // None / empty / whitespace ⇒ keep stored secret. Non-empty is moved into
+    // SecretBytes immediately so it never sits in a serializable DTO path.
+    let secret = match api_key {
+        None => None,
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(SecretBytes::new(value)),
+    };
+    slots
+        .update_grok_api_key(
+            project_id_value,
+            slot_id_value,
+            display_name,
+            base_url,
+            model_id,
+            secret,
+        )
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
+}
+
+pub(crate) fn delete_runtime_slot_impl(
+    slots: &RuntimeSlotService,
+    app: &AppState,
+    runtime: &RuntimeServiceState,
+    project_id: String,
+    slot_id: String,
+) -> Result<(), CommandError> {
+    let project_id_value = registered_project_id(app, &project_id)?;
+    let slot_id_value = parse_slot_id(&slot_id)?;
+    // If this slot is currently the active conversation runtime, stop it first
+    // so delete cannot leave a live process bound to destroyed credentials.
+    runtime
+        .shutdown_if_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
+    slots
+        .delete(project_id_value, slot_id_value)
+        .map_err(map_slot_error)
 }
 
 pub(crate) fn start_runtime_slot_impl(

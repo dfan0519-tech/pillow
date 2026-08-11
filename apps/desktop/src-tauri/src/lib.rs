@@ -45,7 +45,10 @@ use desktop_lifecycle::{
     write_conversation_shutdown_success_marker,
 };
 use exec_commands::{decide_exec_proposal, list_exec_proposals, open_exec_output};
-use git_commands::{GitCommandState, discover_git_repositories, get_git_status, open_git_diff};
+use git_commands::{
+    GitCommandState, commit_git_changes, discover_git_repositories, get_git_status, open_git_diff,
+    push_git_branch, stage_git_paths, unstage_git_paths,
+};
 use keeper_storage_sqlite::SqlitePermissionRuleRepository;
 use keeper_storage_sqlite::SqliteSettingsRepository;
 use permission_rule_commands::{
@@ -64,7 +67,8 @@ use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degra
 use runtime_service_state::RuntimeServiceState;
 use runtime_slot_commands::{
     create_external_cli_slot, create_grok_api_key_slot, create_grok_login_slot,
-    get_external_cli_status, list_runtime_slots, start_runtime_slot,
+    delete_runtime_slot, get_external_cli_status, list_runtime_slots, start_runtime_slot,
+    update_grok_api_key_slot,
 };
 use settings_commands::{
     RuntimeStartupState, clear_runtime_setting, get_onboarding_settings, get_permission_mode,
@@ -111,6 +115,10 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         discover_git_repositories,
         get_git_status,
         open_git_diff,
+        stage_git_paths,
+        unstage_git_paths,
+        commit_git_changes,
+        push_git_branch,
         get_runtime_settings,
         get_runtime_startup,
         set_runtime_adapter,
@@ -126,6 +134,8 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         list_runtime_slots,
         create_grok_login_slot,
         create_grok_api_key_slot,
+        update_grok_api_key_slot,
+        delete_runtime_slot,
         create_external_cli_slot,
         get_external_cli_status,
         start_runtime_slot

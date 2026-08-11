@@ -8,6 +8,7 @@ import { PermissionRulesSection } from "../permissions/PermissionRulesSection";
 import {
   GROK_CLI_LOGIN_SETTINGS_HELP,
 } from "./loginGuidance";
+import { RuntimeSlotsSection } from "./RuntimeSlotsSection";
 import {
   applyDocumentTheme,
   isEnvOverride,
@@ -22,6 +23,7 @@ import {
   type ThemeSettingsView,
   type UiThemeLabel,
 } from "./settingsTypes";
+import type { RuntimeSlotsGateway } from "./runtimeSlotsTypes";
 import "../../styles/settings.css";
 
 export type SettingsPanelProps = {
@@ -38,6 +40,11 @@ export type SettingsPanelProps = {
    * is present; otherwise an in-memory mock (unit tests / non-desktop).
    */
   permissionRulesGateway?: PermissionRulesGateway;
+  /**
+   * Optional runtime-slots gateway. Defaults to Tauri when the IPC bridge
+   * is present; otherwise an in-memory mock (unit tests / non-desktop).
+   */
+  runtimeSlotsGateway?: RuntimeSlotsGateway;
 };
 
 const ADAPTER_OPTIONS_BASE: { value: RuntimeAdapterLabel; label: string }[] = [
@@ -92,6 +99,7 @@ export function SettingsPanel({
   onThemeChanged,
   onPermissionModeChanged,
   permissionRulesGateway: permissionRulesGatewayProp,
+  runtimeSlotsGateway: runtimeSlotsGatewayProp,
 }: SettingsPanelProps) {
   const [scope, setScope] = useState<SettingsScope>("global");
   const [settings, setSettings] = useState<RuntimeSettingsView | null>(null);
@@ -548,6 +556,11 @@ export function SettingsPanel({
             </div>
           </form>
         )}
+
+        <RuntimeSlotsSection
+          gateway={runtimeSlotsGatewayProp}
+          projectId={projectId}
+        />
 
         <PermissionRulesSection
           gateway={permissionRulesGateway}

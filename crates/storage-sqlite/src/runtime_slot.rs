@@ -74,10 +74,27 @@ pub struct NewRuntimeSlot {
     pub kind: RuntimeSlotKind,
 }
 
+/// Metadata update for an existing governed Grok API-key slot.
+///
+/// `secret_ref` is always the authoritative reference after the update: callers
+/// that keep the prior key pass the existing opaque ref; callers that rotate
+/// pass a newly minted ref after writing the new ciphertext.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateGrokApiKeySlot {
+    pub project_id: ProjectId,
+    pub slot_id: RuntimeSlotId,
+    pub display_name: String,
+    pub base_url: String,
+    pub model_id: String,
+    pub secret_ref: String,
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeSlotStoreError {
     #[error("runtime slot shape is invalid")]
     InvalidShape,
+    #[error("runtime slot was not found in this project")]
+    NotFound,
     #[error("stored runtime slot is invalid")]
     InvalidStoredSlot,
     #[error("SQLite runtime slot store error")]
@@ -90,6 +107,7 @@ impl RuntimeSlotStoreError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidShape => "runtime_slot_shape_invalid",
+            Self::NotFound => "runtime_slot_not_found",
             Self::InvalidStoredSlot => "runtime_slot_stored_invalid",
             Self::Sqlite(_) => "runtime_slot_store_unavailable",
             Self::LockPoisoned => "runtime_slot_store_unavailable",
@@ -186,6 +204,111 @@ impl SqliteRuntimeSlotRepository {
             .query_map([project_id.0.to_string()], runtime_slot_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(slots)
+    }
+
+    /// Update display name, endpoint, model, and opaque secret reference for a
+    /// governed Grok API-key slot. Login and external CLI slots are rejected.
+    pub fn update_grok_api_key(
+        &self,
+        input: UpdateGrokApiKeySlot,
+    ) -> Result<RuntimeSlot, RuntimeSlotStoreError> {
+        validate_text(&input.display_name, DISPLAY_NAME_MAX_CHARS)?;
+        validate_text(&input.base_url, CONFIG_VALUE_MAX_CHARS)?;
+        validate_text(&input.model_id, CONFIG_VALUE_MAX_CHARS)?;
+        Uuid::parse_str(&input.secret_ref).map_err(|_| RuntimeSlotStoreError::InvalidShape)?;
+
+        let connection = self.connection()?;
+        let existing = connection
+            .query_row(
+                &format!("{} WHERE project_id = ?1 AND slot_id = ?2", SELECT_SLOT),
+                params![input.project_id.0.to_string(), input.slot_id.0.to_string()],
+                runtime_slot_from_row,
+            )
+            .optional()?;
+        let existing = existing.ok_or(RuntimeSlotStoreError::NotFound)?;
+        match &existing.kind {
+            RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey { .. },
+            } => {}
+            _ => return Err(RuntimeSlotStoreError::InvalidShape),
+        }
+
+        let now = Utc::now();
+        let updated = RuntimeSlot {
+            id: existing.id,
+            project_id: existing.project_id,
+            display_name: input.display_name,
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url: input.base_url,
+                    model_id: input.model_id,
+                    secret_ref: input.secret_ref,
+                },
+            },
+            created_at: existing.created_at,
+            updated_at: now,
+        };
+        let encoded = EncodedSlot::from_slot(&updated)?;
+        let changed = connection.execute(
+            "UPDATE runtime_slots SET
+                display_name = ?1,
+                kind = ?2,
+                governance = ?3,
+                auth_mode = ?4,
+                base_url = ?5,
+                model_id = ?6,
+                secret_ref = ?7,
+                executable_path = NULL,
+                launch_args_json = NULL,
+                status_args_json = NULL,
+                updated_at = ?8
+             WHERE project_id = ?9 AND slot_id = ?10",
+            params![
+                updated.display_name,
+                encoded.kind,
+                updated.governance.as_str(),
+                encoded.auth_mode,
+                encoded.base_url,
+                encoded.model_id,
+                encoded.secret_ref,
+                updated.updated_at.to_rfc3339(),
+                updated.project_id.0.to_string(),
+                updated.id.0.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RuntimeSlotStoreError::NotFound);
+        }
+        Ok(updated)
+    }
+
+    /// Delete a project-scoped slot row. Returns the removed slot so callers can
+    /// destroy any associated secret material. Missing rows yield `Ok(None)`.
+    pub fn delete(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+    ) -> Result<Option<RuntimeSlot>, RuntimeSlotStoreError> {
+        let connection = self.connection()?;
+        let existing = connection
+            .query_row(
+                &format!("{} WHERE project_id = ?1 AND slot_id = ?2", SELECT_SLOT),
+                params![project_id.0.to_string(), slot_id.0.to_string()],
+                runtime_slot_from_row,
+            )
+            .optional()?;
+        let Some(slot) = existing else {
+            return Ok(None);
+        };
+        let changed = connection.execute(
+            "DELETE FROM runtime_slots WHERE project_id = ?1 AND slot_id = ?2",
+            params![project_id.0.to_string(), slot_id.0.to_string()],
+        )?;
+        if changed != 1 {
+            return Err(RuntimeSlotStoreError::NotFound);
+        }
+        Ok(Some(slot))
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, RuntimeSlotStoreError> {

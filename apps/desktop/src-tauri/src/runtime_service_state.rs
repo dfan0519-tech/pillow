@@ -95,6 +95,25 @@ impl RuntimeServiceState {
             None => Ok(false),
         }
     }
+
+    /// Shut down the conversation runtime only when the given project+slot is active.
+    /// Used by slot delete so removing the active slot does not leave a dangling runtime.
+    pub fn shutdown_if_active_slot(
+        &self,
+        project_id: &str,
+        slot_id: &str,
+    ) -> Result<bool, ConversationCommandError> {
+        let is_active = {
+            let inner = self.inner.lock().map_err(|_| state_unavailable())?;
+            inner.active_project_id.as_deref() == Some(project_id)
+                && inner.active_slot_id.as_deref() == Some(slot_id)
+        };
+        if is_active {
+            self.shutdown_if_active()
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 pub(crate) fn require_project_scope(

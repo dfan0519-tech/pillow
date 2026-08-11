@@ -1,7 +1,7 @@
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
     GrokSlotAuth, NewRuntimeSlot, RuntimeSlotGovernance, RuntimeSlotKind, SqliteProjectRepository,
-    SqliteRuntimeSlotRepository,
+    SqliteRuntimeSlotRepository, UpdateGrokApiKeySlot,
 };
 use rusqlite::{Connection, params};
 
@@ -221,4 +221,142 @@ fn deleting_a_project_cascades_its_slots() {
         .query_row("SELECT COUNT(*) FROM runtime_slots", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn update_grok_api_key_rewrites_metadata_and_secret_ref() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let original_ref = uuid::Uuid::new_v4().to_string();
+    let created = repo
+        .create(NewRuntimeSlot {
+            project_id: project.id,
+            display_name: "Private model".into(),
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url: "https://example.invalid/v1".into(),
+                    model_id: "model-one".into(),
+                    secret_ref: original_ref.clone(),
+                },
+            },
+        })
+        .unwrap();
+
+    let rotated_ref = uuid::Uuid::new_v4().to_string();
+    let updated = repo
+        .update_grok_api_key(UpdateGrokApiKeySlot {
+            project_id: project.id,
+            slot_id: created.id,
+            display_name: "Renamed".into(),
+            base_url: "https://example.invalid/v2".into(),
+            model_id: "model-two".into(),
+            secret_ref: rotated_ref.clone(),
+        })
+        .unwrap();
+
+    assert_eq!(updated.display_name, "Renamed");
+    assert!(updated.updated_at >= created.updated_at);
+    assert!(matches!(
+        updated.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::ApiKey {
+                ref base_url,
+                ref model_id,
+                secret_ref: ref stored_ref,
+            }
+        } if base_url == "https://example.invalid/v2"
+            && model_id == "model-two"
+            && stored_ref == &rotated_ref
+    ));
+    assert_eq!(
+        repo.get(project.id, created.id).unwrap(),
+        Some(updated.clone())
+    );
+}
+
+#[test]
+fn update_grok_api_key_rejects_missing_and_non_api_slots() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let login = repo
+        .create(NewRuntimeSlot {
+            project_id: project.id,
+            display_name: "Login".into(),
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::Login,
+            },
+        })
+        .unwrap();
+
+    let missing = repo
+        .update_grok_api_key(UpdateGrokApiKeySlot {
+            project_id: project.id,
+            slot_id: keeper_storage_sqlite::RuntimeSlotId(uuid::Uuid::new_v4()),
+            display_name: "Nope".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "model-one".into(),
+            secret_ref: uuid::Uuid::new_v4().to_string(),
+        })
+        .unwrap_err();
+    assert_eq!(missing.code(), "runtime_slot_not_found");
+
+    let wrong_kind = repo
+        .update_grok_api_key(UpdateGrokApiKeySlot {
+            project_id: project.id,
+            slot_id: login.id,
+            display_name: "Nope".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model_id: "model-one".into(),
+            secret_ref: uuid::Uuid::new_v4().to_string(),
+        })
+        .unwrap_err();
+    assert_eq!(wrong_kind.code(), "runtime_slot_shape_invalid");
+}
+
+#[test]
+fn delete_removes_the_row_and_is_project_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let alpha = seed_project(&db, &temp, "alpha");
+    let beta = seed_project(&db, &temp, "beta");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let secret_ref = uuid::Uuid::new_v4().to_string();
+    let slot = repo
+        .create(NewRuntimeSlot {
+            project_id: alpha.id,
+            display_name: "Private model".into(),
+            governance: RuntimeSlotGovernance::Full,
+            kind: RuntimeSlotKind::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url: "https://example.invalid/v1".into(),
+                    model_id: "model-one".into(),
+                    secret_ref: secret_ref.clone(),
+                },
+            },
+        })
+        .unwrap();
+
+    assert!(repo.delete(beta.id, slot.id).unwrap().is_none());
+    assert_eq!(repo.get(alpha.id, slot.id).unwrap(), Some(slot.clone()));
+
+    let removed = repo.delete(alpha.id, slot.id).unwrap().unwrap();
+    assert_eq!(removed.id, slot.id);
+    assert!(matches!(
+        removed.kind,
+        RuntimeSlotKind::GovernedGrok {
+            auth: GrokSlotAuth::ApiKey {
+                secret_ref: ref stored_ref,
+                ..
+            }
+        } if stored_ref == &secret_ref
+    ));
+    assert!(repo.get(alpha.id, slot.id).unwrap().is_none());
+    assert!(repo.list(alpha.id).unwrap().is_empty());
+    assert!(repo.delete(alpha.id, slot.id).unwrap().is_none());
 }

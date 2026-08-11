@@ -15,7 +15,7 @@
 }
 
 .settings-panel {
-  width: min(480px, 100%);
+  width: min(520px, 100%);
   max-height: min(90vh, 720px);
   overflow: auto;
   gap: 14px;
