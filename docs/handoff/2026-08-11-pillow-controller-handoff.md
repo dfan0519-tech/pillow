@@ -13,9 +13,9 @@
 
 ## 1. 一句话状态
 
-**代理现在有两只受管的手:写文件、跑命令,每一次都要人工批准。**
+**代理有两只受管的手:写文件、跑命令。默认每次问你,可以用规则逐段免问。**
 
-自 `9b2abba` 起 17 个提交,HEAD `7b2e50c`。门 OK,**E2E 10/10**
+自 `9b2abba` 起 18 个提交,HEAD `ee7f175`。门 OK,**E2E 10/10**
 (含 shell 场景,`7b2e50c` 那次是它们第一次真正执行)。
 
 规则也能用了:`Bash(cargo*)` **不会**放行 `cargo test; rm -rf x` ——
@@ -124,7 +124,19 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ## 7. 在途 Worker(接手先看)
 
-**codex1 —— shell 命令的逐段「总是允许」**(`.superpowers/round28/`,台账 `3a6ddabe`)。
+**无。** 全部收口。
+
+已完成并验收:S2 拆段 + 规则合取、shell → UI 的 E2E 覆盖、
+**shell 命令的逐段「总是允许」**(`ee7f175`)。
+
+最后一单我亲自验的两条不变量,改这块前必须重看:
+
+1. **求值与显示是同一批拆分结果**(live 路径 `segments.clone()` 传递,不重算)。
+   两个拆分器早晚分叉,一旦分叉,**用户允许的那一段就不是被匹配的那一段**。
+2. **拆不动 = 不给入口,绝不回退整串**(`and_then` 失败即 `None`)。
+   破了这条,`cargo test && rm -rf x` 会变成一条**可保存的 allow 规则**。
+
+〔历史,已完成〕原缺口:
 
 缺口:S2 让规则对 shell 生效了(`ApprovalPolicy::ShellRules` 逐段合取求值),
 **但审批条上没有入口** —— 宿主对 shell 的 `rule_subject` 仍是空串
@@ -146,7 +158,10 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 - ~~E2E 无 shell → UI 覆盖~~ **已补**(`shell-approve` / `shell-reject`,
   且在 spec 的 REQUIRED 列表里 —— 场景缺失会红,不会静默通过)
-- **规则有了,入口还没有**:见 §7,在途
+- ~~规则有了,入口还没有~~ **已补**(`ee7f175`):批准时可逐段存规则。
+  链式命令仍需**每段各自放行**,点一次 `cargo test` 不会顺带授权 `&& rm -rf`
+- **重启恢复的行拿不到段**:存储只有 argv 摘要,重建不出原始命令,
+  故不可自动决策 —— **没有为此把原始命令串写进 durable 存储**(那是新的泄露面)
 - **归属只显示一条规则**:合取可能由多条规则分别放行不同段,
   durable 收据记了完整的逐段快照,**事件载荷只带代表规则**。
   账本是全的,UI 不全。审计要看收据,不要看事件。
