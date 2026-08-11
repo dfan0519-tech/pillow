@@ -1,7 +1,7 @@
 # Pillow 总控交接手册(2026-08-11)
 
 工作目录:`<repo>`
-分支 / HEAD:`main` / `729c11a`(**本地 = 远程**)
+分支 / HEAD:`main` / `fd4ad7d`(**本地 = 远程**)
 远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
 
 > 本文件取代 `docs/handoff/2026-08-10-pillow-controller-handoff.md`。
@@ -21,7 +21,7 @@
 规则也能用了:`Bash(cargo*)` **不会**放行 `cargo test; rm -rf x` ——
 allow 逐段合取,拆不动就要求确认。
 
-⚠️ **有一个 Worker 在途**,见 §7。
+**在途 Worker:无**,全部收口(§7)。
 
 ---
 
@@ -54,7 +54,7 @@ mcpServers:       []
 | 面 | 机制 |
 | --- | --- |
 | **写** | 原生 `write` → `fs/write_text_file` → 既有 `execute_write` 治理链 |
-| **进程** | 原生 `run_terminal_cmd` → `terminal/*` → 同一条链,**每条命令人工批准** |
+| **进程** | 原生 `run_terminal_cmd` → `terminal/*` → 同一条链;默认问人,可逐段规则免问 |
 | **MCP** | **切断**(禁两个元工具);环境侧 MCP 关不掉,这是唯一的杠杆 |
 
 **allowlist 管原生工具,fail-closed;denylist 只关 MCP 那一扇门。**
@@ -136,22 +136,6 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 2. **拆不动 = 不给入口,绝不回退整串**(`and_then` 失败即 `None`)。
    破了这条,`cargo test && rm -rf x` 会变成一条**可保存的 allow 规则**。
 
-〔历史,已完成〕原缺口:
-
-缺口:S2 让规则对 shell 生效了(`ApprovalPolicy::ShellRules` 逐段合取求值),
-**但审批条上没有入口** —— 宿主对 shell 的 `rule_subject` 仍是空串
-(`host/process.rs:2244`),所以「总是允许此模式」拿不到主体。
-用户只能去设置面板手敲,**最自然的路径(批准时顺手加规则)不可用**。
-
-🔴 **这是一次跨宿主/渲染层的改动 —— 就是 §5 那个栽了三次的接缝。**
-契约已在简报里定死:新增可选 `rule_segments`,**拆不动就省略**,
-**绝不回退成整串一条规则**(否则 `cargo test && rm -rf x` 会变成一条可保存的 allow)。
-验收时**先查两侧是否同批落地**:宿主发的键必须在
-`tauriExecGateway.ts` 的 `only(value, proposalKeys)` 白名单里。
-
-已完成并验收的前一批:S2 拆段(变异证据:去掉逐段要求 → 两个测试红,
-其中一个同时钉正反两个方向)+ shell → UI 的 E2E 覆盖。
-
 ---
 
 ## 8. 已知缺口
@@ -191,8 +175,10 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ## 10. 下一步
 
-1. 两单落地 → 跑门 + E2E → 提交
-2. S2 之后:**你可以设"总是允许 `cargo test`"这类规则**,不必每条都点
-3. 之后才是外审(简报已备:`docs/references/external-audit-brief.md`)
+🔴 **建议下一步不是继续加功能,是用户亲自试跑一轮真实任务。**
+"每条都点有多烦、规则该怎么设计"只有用过才知道,总控猜不出来。
 
-**用户已可上手**:`target/release/pillow.exe`,启动约 1.6 秒。
+之后:外审(简报已备:`docs/references/external-audit-brief.md`,自带上下文)。
+
+**已可上手**:`target/release/pillow.exe`,启动约 1.6 秒。
+批准某条命令时可顺手把它的每一段存成规则,下次自动放行。
