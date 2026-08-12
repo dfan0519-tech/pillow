@@ -346,6 +346,10 @@ async function waitForCdpPortReleased(port, timeoutMs = 15_000, label = "cdp") {
  * is a real interruptible limit (spawnSync cannot be aborted by performance.now()).
  */
 const DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS = 3_000;
+/** Attempts, not seconds: shortening the delay table must not disable retry. */
+const SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_RETRY_DELAYS_MS = [250, 1_000];
+const SNAPSHOT_RETRY_FALLBACK_DELAY_MS = 1_000;
 /** Per-scan cap inside a short readiness poll (must stay below outer budget). */
 const MARKER_SCAN_MAX_MS = 1_500;
 /** Consecutive snapshot environment failures before fail-closed. */
@@ -370,11 +374,57 @@ class ProcessSnapshotError extends Error {
 }
 
 /**
- * @param {{ timeoutMs?: number }} [options]
+ * Snapshot every Windows process with its command line.
+ *
+ * Retries on a timeout because the snapshot shells out to PowerShell and
+ * enumerates every process on the box: on a loaded machine, interpreter startup
+ * alone can eat most of the per-attempt budget. A single transient timeout used
+ * to abort the whole acceptance run before any case executed, which reads as a
+ * product failure and costs a 30-minute rerun to disprove. Observed on
+ * 2026-08-12 with two other build sessions running.
+ *
+ * Retrying does not soften the check. Exhausting every attempt still throws,
+ * and the thrown error still refuses to pretend the process list is empty — a
+ * stalled environment must not read as "nothing is running". Exhaustion is
+ * decided by the attempt counter, never by whether a delay remains in the
+ * table, so shortening that table cannot silently disable the retry.
+ *
+ * Callers that own a deadline of their own (see `waitForMarkedNodeProcessesGone`)
+ * pass `attempts: 1` and do their own pacing.
+ *
+ * @param {{ timeoutMs?: number, attempts?: number }} [options]
  * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
  */
 function snapshotWindowsProcessesWithCommandLine(options = {}) {
   if (process.platform !== "win32") return [];
+  const attempts = Math.max(1, Math.floor(options.attempts ?? SNAPSHOT_ATTEMPTS));
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return snapshotWindowsProcessesOnce(options);
+    } catch (error) {
+      if (!(error instanceof ProcessSnapshotError)) throw error;
+      lastError = error;
+      if (attempt < attempts - 1) {
+        sleepSync(
+          SNAPSHOT_RETRY_DELAYS_MS[attempt] ?? SNAPSHOT_RETRY_FALLBACK_DELAY_MS,
+        );
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** Block this thread; the snapshot path is synchronous by construction. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
+ */
+function snapshotWindowsProcessesOnce(options = {}) {
   const timeoutMs = Math.max(
     1,
     Math.floor(options.timeoutMs ?? DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS),
@@ -557,7 +607,8 @@ async function waitForKnownPidsNaturalExit(supervisor, graceMs, label, scope) {
  * @param {{ timeoutMs?: number }} [options]
  */
 function findMarkedNodeProcesses(markers, options = {}) {
-  const processes = snapshotWindowsProcessesWithCommandLine(options);
+  // This caller owns a deadline and paces its own rescans.
+  const processes = snapshotWindowsProcessesWithCommandLine({ ...options, attempts: 1 });
   return processes.filter((entry) => {
     const name = String(entry.name ?? "").toLowerCase();
     if (name !== "node.exe" && name !== "node") return false;

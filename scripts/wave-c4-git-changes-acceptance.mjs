@@ -352,6 +352,10 @@ async function waitForCdpPortReleased(port, timeoutMs = 15_000, label = "cdp") {
  * without an explicit `timeout` option.
  */
 const DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS = 3_000;
+/** Attempts, not seconds: shortening the delay table must not disable retry. */
+const SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_RETRY_DELAYS_MS = [250, 1_000];
+const SNAPSHOT_RETRY_FALLBACK_DELAY_MS = 1_000;
 
 /**
  * Environment-class process snapshot failure (timeout / abort / spawn error).
@@ -372,11 +376,57 @@ class ProcessSnapshotError extends Error {
 }
 
 /**
- * @param {{ timeoutMs?: number }} [options]
+ * Snapshot every Windows process with its command line.
+ *
+ * Retries on a timeout because the snapshot shells out to PowerShell and
+ * enumerates every process on the box: on a loaded machine, interpreter startup
+ * alone can eat most of the per-attempt budget. A single transient timeout used
+ * to abort the whole acceptance run before any case executed, which reads as a
+ * product failure and costs a 30-minute rerun to disprove. Observed on
+ * 2026-08-12 with two other build sessions running.
+ *
+ * Retrying does not soften the check. Exhausting every attempt still throws,
+ * and the thrown error still refuses to pretend the process list is empty — a
+ * stalled environment must not read as "nothing is running". Exhaustion is
+ * decided by the attempt counter, never by whether a delay remains in the
+ * table, so shortening that table cannot silently disable the retry.
+ *
+ * A caller that owns a deadline of its own can pass `attempts: 1` and pace its
+ * rescans itself. This harness has no such caller today.
+ *
+ * @param {{ timeoutMs?: number, attempts?: number }} [options]
  * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
  */
 function snapshotWindowsProcessesWithCommandLine(options = {}) {
   if (process.platform !== "win32") return [];
+  const attempts = Math.max(1, Math.floor(options.attempts ?? SNAPSHOT_ATTEMPTS));
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return snapshotWindowsProcessesOnce(options);
+    } catch (error) {
+      if (!(error instanceof ProcessSnapshotError)) throw error;
+      lastError = error;
+      if (attempt < attempts - 1) {
+        sleepSync(
+          SNAPSHOT_RETRY_DELAYS_MS[attempt] ?? SNAPSHOT_RETRY_FALLBACK_DELAY_MS,
+        );
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** Block this thread; the snapshot path is synchronous by construction. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Array<{ commandLine: string, name: string, parentPid: number, pid: number }>}
+ */
+function snapshotWindowsProcessesOnce(options = {}) {
   const timeoutMs = Math.max(
     1,
     Math.floor(options.timeoutMs ?? DEFAULT_PROCESS_SNAPSHOT_TIMEOUT_MS),
