@@ -3,8 +3,10 @@
  * Progressive disclosure only; no Tauri, fetch, persist or authority.
  */
 
+import { Fragment } from "react";
 import type { CommandActivityView, CommandState } from "./executionTypes";
 import {
+  formatArgvTokenDisplay,
   formatCommandArgvDisplay,
   isShellProgram,
 } from "./executionTypes";
@@ -124,14 +126,33 @@ export function CommandActivityRow({
               {activity.programLabel}
             </code>
           )}
-          <code
+          <span
             className="command-activity-row__argv"
             data-full-command={argvText}
             data-testid="command-activity-argv"
             title={argvText}
           >
-            {argvText}
-          </code>
+            {isShell ? (
+              <code
+                className="command-activity-row__argv-token"
+                data-testid="command-argv-token"
+              >
+                {argvText}
+              </code>
+            ) : (
+              activity.argv.map((arg, index) => (
+                <Fragment key={index}>
+                  {index > 0 ? " " : null}
+                  <code
+                    className="command-activity-row__argv-token"
+                    data-testid="command-argv-token"
+                  >
+                    {formatArgvTokenDisplay(arg)}
+                  </code>
+                </Fragment>
+              ))
+            )}
+          </span>
           {activity.exitCode !== undefined && activity.exitCode !== null ? (
             <span
               className="command-activity-row__meta"

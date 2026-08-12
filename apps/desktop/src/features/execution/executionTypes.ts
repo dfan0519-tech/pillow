@@ -104,30 +104,65 @@ export function isShellProgram(programLabel: string): boolean {
 }
 
 /**
+ * EA-06 audit-listed Unicode bidi *formatting* controls (category Format).
+ * Not matched by typical control-character checks; they reorder visual layout.
+ * RTL script letters (Arabic/Hebrew) are intentionally excluded.
+ */
+const BIDI_FORMATTING_RE = /[\u202A\u202B\u202D\u202E\u2066\u2067\u2068\u2069]/g;
+
+/**
+ * Human-audit escape for bidi formatting controls → visible `\uXXXX`.
+ *
+ * - Returns a **new** string; does not mutate the caller's sealed argv.
+ * - Escaped segments are ASCII (`\` `u` hex) and cannot re-decode to Format
+ *   characters when painted as DOM text content (not `innerHTML`).
+ * - Machine-readable / receipt argv must stay on the original `string[]`.
+ */
+export function escapeBidiFormattingForDisplay(text: string): string {
+  return text.replace(BIDI_FORMATTING_RE, (ch) => {
+    const hex = ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0");
+    return `\\u${hex}`;
+  });
+}
+
+/**
+ * Display encoding for one sealed argv token (JSON string + bidi escape).
+ * Display only — never parse, shell-join, or execute the result.
+ */
+export function formatArgvTokenDisplay(arg: string): string {
+  return escapeBidiFormattingForDisplay(JSON.stringify(arg));
+}
+
+/**
  * Format sealed argv as a display-only literal string.
  *
- * Encoding: each argument is `JSON.stringify`'d, then joined with a single
- * space. This preserves empty strings, quotes, backslashes, whitespace and
- * Unicode, and keeps sealed argument boundaries unambiguous for approval and
- * review. Display only — never parse, shell-join, or execute the result.
+ * Encoding: each argument is `JSON.stringify`'d, then bidi formatting controls
+ * are escaped to `\uXXXX`, then tokens are joined with a single space. This
+ * preserves empty strings, quotes, backslashes, whitespace and safe Unicode,
+ * and keeps sealed argument boundaries unambiguous for approval and review.
+ * Display only — never parse, shell-join, or execute the result.
  *
  * For shell proposals (`programLabel === "shell"`), use
  * {@link formatCommandArgvDisplay} instead so the full command string is not
- * JSON-escaped.
+ * JSON-escaped (bidi formatting still escapes).
  */
 export function formatArgvDisplay(argv: readonly string[]): string {
-  return argv.map((arg) => JSON.stringify(arg)).join(" ");
+  return argv
+    .map((arg) => escapeBidiFormattingForDisplay(JSON.stringify(arg)))
+    .join(" ");
 }
 
 /**
  * Display text for the command body (argv area) on approval / activity surfaces.
  *
  * - **shell**: host seals the full command as a single argv element. Return that
- *   string **character-identical** to what will execute — no JSON escape, no
- *   whitespace normalize, no rejoin.
- * - **structured**: existing {@link formatArgvDisplay} (JSON-stringify each arg).
+ *   string character-identical except for EA-06 bidi formatting escapes — no
+ *   JSON escape, no whitespace normalize, no rejoin.
+ * - **structured**: existing {@link formatArgvDisplay} (JSON-stringify each arg
+ *   + bidi escape).
  *
- * Display only — never parse, shell-join, or execute the result.
+ * Display only — never parse, shell-join, or execute the result. Does not
+ * mutate the caller's `argv` array (receipt / machine-readable dual-rep).
  */
 export function formatCommandArgvDisplay(
   programLabel: string,
@@ -135,8 +170,11 @@ export function formatCommandArgvDisplay(
 ): string {
   if (isShellProgram(programLabel)) {
     // Host contract: argv is exactly one element — the full command string.
-    // Do not join, trim, or re-encode; empty argv yields empty display.
-    return argv.length === 0 ? "" : argv[0]!;
+    // Do not join, trim, or JSON-encode; empty argv yields empty display.
+    // Bidi formatting controls still escape for human-audit safety.
+    return argv.length === 0
+      ? ""
+      : escapeBidiFormattingForDisplay(argv[0]!);
   }
   return formatArgvDisplay(argv);
 }

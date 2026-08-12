@@ -7,7 +7,6 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   FIXED_INVALID_WRITE_RESPONSE_MESSAGE,
   WriteApprovalGatewayError,
-  isCanonicalApprovalGrant,
   isWritePublicErrorCode,
   normalizeWriteApprovalError,
   type WriteApprovalGateway,
@@ -166,7 +165,7 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
       "state",
       "summary",
       "expiresAt",
-      "approvalGrant",
+      "decisionAvailable",
       "errorCode",
       "ruleSubject",
       "autoApprovedByRule",
@@ -183,6 +182,7 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     || typeof value.summary !== "string"
     || value.summary.length > MAX_SUMMARY_CHARS
     || !isFiniteTimestamp(value.expiresAt)
+    || typeof value.decisionAvailable !== "boolean"
     || !isRuleSubjectValue(value.ruleSubject)
     || (value.autoApprovedByRule !== undefined
       && !isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES))
@@ -191,6 +191,7 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
   }
 
   // Reject authority-smuggling fields if a host ever nests them.
+  // Raw grants must never reappear on the write proposal wire (EA-03).
   for (const forbidden of [
     "root",
     "content",
@@ -202,22 +203,12 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     "proposedContent",
     "baseContent",
     "projectRoot",
+    "approvalGrant",
+    "approval_grant",
   ]) {
     if (forbidden in value) {
       throw invalidWriteResponse();
     }
-  }
-
-  const isPending = value.state === "pending_approval";
-
-  // Pending requires exactly one canonical 43-char base64url grant.
-  // Every non-pending state must omit the grant.
-  if (isPending) {
-    if (!isCanonicalApprovalGrant(value.approvalGrant)) {
-      throw invalidWriteResponse();
-    }
-  } else if (value.approvalGrant !== undefined) {
-    throw invalidWriteResponse();
   }
 
   if (
@@ -235,6 +226,7 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     state: value.state,
     summary: value.summary,
     expiresAt: value.expiresAt,
+    decisionAvailable: value.decisionAvailable,
     ruleSubject: value.ruleSubject,
   };
   if (isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES)) {
@@ -243,9 +235,6 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
       pattern: value.autoApprovedByRule.pattern,
       action: value.autoApprovedByRule.action,
     };
-  }
-  if (isPending && typeof value.approvalGrant === "string") {
-    view.approvalGrant = value.approvalGrant;
   }
   if (isWritePublicErrorCode(value.errorCode)) {
     view.errorCode = value.errorCode;
@@ -335,14 +324,13 @@ export class TauriWriteApprovalGateway implements WriteApprovalGateway {
   async decideWriteProposal(input: {
     conversationId: string;
     proposalId: string;
-    approvalGrant: string;
     decision: WriteDecision;
   }): Promise<WriteProposalView> {
     try {
+      // Host looks up the live grant; renderer never supplies grant material.
       const payload = await invoke<unknown>("decide_write_proposal", {
         conversationId: input.conversationId,
         proposalId: input.proposalId,
-        approvalGrant: input.approvalGrant,
         decision: input.decision,
       });
       return parseWriteProposalView(payload);

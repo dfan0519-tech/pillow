@@ -19,7 +19,6 @@ fn decide_rejects_unknown_decision_verb() {
         .decide_write_proposal(
             "00000000-0000-0000-0000-000000000001".into(),
             "00000000-0000-0000-0000-000000000002".into(),
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
             "approve_session".into(),
         )
         .unwrap_err();
@@ -73,5 +72,25 @@ fn bare_conversation_uuid_fails_list_before_any_grant() {
         "bare UUID must not list proposals: {} / {}",
         err.code,
         err.message
+    );
+}
+
+/// EA-03 sequence A: Tauri decide command must not accept renderer grant material.
+#[test]
+fn decide_write_command_source_does_not_accept_renderer_grant() {
+    let source = include_str!("write_commands.rs");
+    assert!(
+        !source.contains("approval_grant"),
+        "decide_write_proposal command must not take approval_grant from the renderer"
+    );
+    assert!(
+        source.contains("// Host resolves the live grant; no renderer grant parameter."),
+        "host-private grant comment must remain on decide path"
+    );
+    // Parameter list: conversation_id, proposal_id, decision — no grant.
+    assert!(
+        source
+            .contains("conversation_id: String,\n    proposal_id: String,\n    decision: String,"),
+        "decide command signature must be conversation/proposal/decision only"
     );
 }

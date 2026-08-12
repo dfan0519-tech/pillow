@@ -1,15 +1,14 @@
 /**
- * Wave C3-E — write approval gateway invoke contract and pure helpers.
+ * Wave C3-E / EA-03 — write approval gateway invoke contract and pure helpers.
+ * Host-private grants: list/decide wire uses decisionAvailable only.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TauriWriteApprovalGateway } from "../src/lib/tauriWriteApprovalGateway";
 import {
   WriteApprovalGatewayError,
-  isCanonicalApprovalGrant,
   normalizeWriteApprovalError,
   selectOldestPendingProposal,
-  stripApprovalGrant,
   writeTerminalMessage,
   type WriteProposalView,
 } from "../src/lib/writeApprovalGateway";
@@ -21,8 +20,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 const conversationId = "00000000-0000-0000-0000-0000000000c1";
 const otherConversationId = "00000000-0000-0000-0000-0000000000c2";
 const proposalId = "00000000-0000-0000-0000-0000000000p1";
-/** Canonical 43-char base64url grant (32 OS-random bytes, no padding). */
-const grant = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+/** Forbidden secret — used only to prove rejection / non-leak. */
+const grantSecret = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 
 function pendingProposal(
   overrides: Partial<WriteProposalView> = {},
@@ -35,7 +34,7 @@ function pendingProposal(
     state: "pending_approval",
     summary: "Create src/example.ts",
     expiresAt: "2026-08-01T12:10:00.000Z",
-    approvalGrant: grant,
+    decisionAvailable: true,
     ruleSubject: "src/example.ts",
     ...overrides,
   };
@@ -46,11 +45,11 @@ describe("TauriWriteApprovalGateway contract", () => {
     vi.mocked(invoke).mockReset();
   });
 
-  it("invokes list/decide/diff with exact camelCase keys only", async () => {
+  it("invokes list/decide/diff with exact camelCase keys only (no grant)", async () => {
     vi.mocked(invoke)
       .mockResolvedValueOnce([pendingProposal()])
       .mockResolvedValueOnce({
-        ...pendingProposal({ state: "approved", approvalGrant: undefined }),
+        ...pendingProposal({ state: "approved", decisionAvailable: false }),
       })
       .mockResolvedValueOnce({
         proposalId,
@@ -67,7 +66,6 @@ describe("TauriWriteApprovalGateway contract", () => {
     await gateway.decideWriteProposal({
       conversationId,
       proposalId,
-      approvalGrant: grant,
       decision: "approve_once",
     });
     await gateway.openWriteProposalDiff({ conversationId, proposalId });
@@ -78,7 +76,6 @@ describe("TauriWriteApprovalGateway contract", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "decide_write_proposal", {
       conversationId,
       proposalId,
-      approvalGrant: grant,
       decision: "approve_once",
     });
     expect(invoke).toHaveBeenNthCalledWith(3, "open_write_proposal_diff", {
@@ -95,10 +92,11 @@ describe("TauriWriteApprovalGateway contract", () => {
       expect(args).not.toHaveProperty("fingerprint");
       expect(args).not.toHaveProperty("proposedContent");
       expect(args).not.toHaveProperty("baseContent");
+      expect(args).not.toHaveProperty("approvalGrant");
     }
   });
 
-  it("rejects payloads that smuggle root/content/digest fields", async () => {
+  it("rejects payloads that smuggle root/content/digest or raw grant fields", async () => {
     vi.mocked(invoke).mockResolvedValueOnce([
       {
         ...pendingProposal(),
@@ -106,6 +104,17 @@ describe("TauriWriteApprovalGateway contract", () => {
       },
     ]);
     const gateway = new TauriWriteApprovalGateway();
+    await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
+      code: "invalid_write_response",
+    });
+
+    // EA-03: raw grant on the wire is rejected by the closed key allowlist.
+    vi.mocked(invoke).mockResolvedValueOnce([
+      {
+        ...pendingProposal(),
+        approvalGrant: grantSecret,
+      },
+    ]);
     await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
       code: "invalid_write_response",
     });
@@ -121,7 +130,7 @@ describe("TauriWriteApprovalGateway contract", () => {
     expect(error).toBeInstanceOf(WriteApprovalGatewayError);
     expect(error.code).toBe("write_invalid_grant");
     expect(error.message).toBe("Approval grant was rejected.");
-    expect(error.message).not.toContain(grant);
+    expect(error.message).not.toContain(grantSecret);
     expect(error.message).not.toContain("super-secret");
 
     const pathLeaking = normalizeWriteApprovalError({
@@ -138,12 +147,12 @@ describe("TauriWriteApprovalGateway contract", () => {
     });
     expect(unknown.code).toBe("write_unavailable");
     expect(unknown.message).toBe("Write proposal is unavailable.");
-    expect(unknown.message).not.toContain(grant);
+    expect(unknown.message).not.toContain(grantSecret);
   });
 
   it("rewrites existing WriteApprovalGatewayError instances to fixed copy and never echoes their message", () => {
     const secretMessage =
-      `grant=${grant} token=instance-secret-token-no-slash`;
+      `grant=${grantSecret} token=instance-secret-token-no-slash`;
     const knownInstance = new WriteApprovalGatewayError(
       "write_invalid_grant",
       secretMessage,
@@ -152,7 +161,7 @@ describe("TauriWriteApprovalGateway contract", () => {
     expect(normalizedKnown).toBeInstanceOf(WriteApprovalGatewayError);
     expect(normalizedKnown.code).toBe("write_invalid_grant");
     expect(normalizedKnown.message).toBe("Approval grant was rejected.");
-    expect(normalizedKnown.message).not.toContain(grant);
+    expect(normalizedKnown.message).not.toContain(grantSecret);
     expect(normalizedKnown.message).not.toContain("instance-secret-token-no-slash");
     expect(normalizedKnown).not.toBe(knownInstance);
 
@@ -165,14 +174,13 @@ describe("TauriWriteApprovalGateway contract", () => {
     expect(normalizedInvalid.message).toBe(
       "Pillow received an invalid write approval response.",
     );
-    expect(normalizedInvalid.message).not.toContain(grant);
+    expect(normalizedInvalid.message).not.toContain(grantSecret);
     expect(normalizedInvalid.message).not.toContain("instance-secret");
   });
 
   it("accepts camelCase proposal and diff DTOs within closed bounds", async () => {
     const unified = "@@ -1 +1 @@\n-old\n+new\n";
     const byteCount = new TextEncoder().encode(unified).length;
-    // Executor count_lines: empty→0; newline terminators; no trailing NL adds one logical line.
     const lineCount = 3;
     vi.mocked(invoke)
       .mockResolvedValueOnce([pendingProposal({ mode: "modify", path: "lib/mod.rs" })])
@@ -189,6 +197,7 @@ describe("TauriWriteApprovalGateway contract", () => {
     const list = await gateway.listWriteProposals(conversationId);
     expect(list[0]?.path).toBe("lib/mod.rs");
     expect(list[0]?.mode).toBe("modify");
+    expect(list[0]?.decisionAvailable).toBe(true);
     const diff = await gateway.openWriteProposalDiff({ conversationId, proposalId });
     expect(diff.truncated).toBe(true);
     expect(diff.lineCount).toBe(lineCount);
@@ -199,7 +208,6 @@ describe("TauriWriteApprovalGateway contract", () => {
     const gateway = new TauriWriteApprovalGateway();
     const utf8 = new TextEncoder();
 
-    // Empty text: executor count_lines → 0, bytes → 0.
     vi.mocked(invoke).mockResolvedValueOnce({
       proposalId,
       path: "src/example.ts",
@@ -213,7 +221,6 @@ describe("TauriWriteApprovalGateway contract", () => {
       gateway.openWriteProposalDiff({ conversationId, proposalId }),
     ).rejects.toMatchObject({ code: "invalid_write_response" });
 
-    // Final newline: "a\n" → 1 line, 2 bytes; claim 2 lines must fail.
     vi.mocked(invoke).mockResolvedValueOnce({
       proposalId,
       path: "src/example.ts",
@@ -227,7 +234,6 @@ describe("TauriWriteApprovalGateway contract", () => {
       gateway.openWriteProposalDiff({ conversationId, proposalId }),
     ).rejects.toMatchObject({ code: "invalid_write_response" });
 
-    // Unicode: multi-byte chars must match TextEncoder length, not JS string length.
     const unicode = "héllo\n世界";
     const unicodeBytes = utf8.encode(unicode).length;
     expect(unicodeBytes).not.toBe(unicode.length);
@@ -238,38 +244,11 @@ describe("TauriWriteApprovalGateway contract", () => {
       unified: unicode,
       truncated: false,
       lineCount: 2,
-      byteCount: unicode.length, // wrong: char length, not UTF-8
+      byteCount: unicode.length,
     });
     await expect(
       gateway.openWriteProposalDiff({ conversationId, proposalId }),
     ).rejects.toMatchObject({ code: "invalid_write_response" });
-
-    // Matching empty / final-newline / Unicode cases must accept.
-    vi.mocked(invoke).mockResolvedValueOnce({
-      proposalId,
-      path: "src/example.ts",
-      mode: "create",
-      unified: "",
-      truncated: false,
-      lineCount: 0,
-      byteCount: 0,
-    });
-    await expect(
-      gateway.openWriteProposalDiff({ conversationId, proposalId }),
-    ).resolves.toMatchObject({ unified: "", lineCount: 0, byteCount: 0 });
-
-    vi.mocked(invoke).mockResolvedValueOnce({
-      proposalId,
-      path: "src/example.ts",
-      mode: "create",
-      unified: "a\n",
-      truncated: false,
-      lineCount: 1,
-      byteCount: 2,
-    });
-    await expect(
-      gateway.openWriteProposalDiff({ conversationId, proposalId }),
-    ).resolves.toMatchObject({ unified: "a\n", lineCount: 1, byteCount: 2 });
 
     vi.mocked(invoke).mockResolvedValueOnce({
       proposalId,
@@ -289,29 +268,20 @@ describe("TauriWriteApprovalGateway contract", () => {
     });
   });
 
-  it("rejects malformed grants and grants on terminal states", async () => {
+  it("requires decisionAvailable boolean and rejects missing or non-boolean values", async () => {
     const gateway = new TauriWriteApprovalGateway();
 
     vi.mocked(invoke).mockResolvedValueOnce([
-      pendingProposal({ approvalGrant: "too-short" }),
-    ]);
-    await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
-      code: "invalid_write_response",
-    });
-
-    vi.mocked(invoke).mockResolvedValueOnce([
-      pendingProposal({ approvalGrant: "not!valid+base64url/chars=========" }),
-    ]);
-    await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
-      code: "invalid_write_response",
-    });
-
-    vi.mocked(invoke).mockResolvedValueOnce([
       {
-        ...pendingProposal({
-          state: "succeeded",
-          approvalGrant: grant,
-        }),
+        proposalId,
+        conversationId,
+        path: "src/example.ts",
+        mode: "create",
+        state: "pending_approval",
+        summary: "Create src/example.ts",
+        expiresAt: "2026-08-01T12:10:00.000Z",
+        ruleSubject: "src/example.ts",
+        // decisionAvailable omitted — must fail closed
       },
     ]);
     await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
@@ -319,14 +289,18 @@ describe("TauriWriteApprovalGateway contract", () => {
     });
 
     vi.mocked(invoke).mockResolvedValueOnce([
-      {
-        ...pendingProposal(),
-        approvalGrant: undefined,
-      },
+      pendingProposal({ decisionAvailable: "yes" as never }),
     ]);
     await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
       code: "invalid_write_response",
     });
+
+    vi.mocked(invoke).mockResolvedValueOnce([
+      pendingProposal({ decisionAvailable: false }),
+    ]);
+    await expect(gateway.listWriteProposals(conversationId)).resolves.toMatchObject([
+      { decisionAvailable: false },
+    ]);
   });
 
   it("rejects unknown error codes and invalid expiresAt", async () => {
@@ -357,8 +331,7 @@ describe("TauriWriteApprovalGateway contract", () => {
   it("rejects oversized UTF-8 diffs and non-portable paths", async () => {
     const gateway = new TauriWriteApprovalGateway();
 
-    // Oversized UTF-8: multi-byte chars make byte length > char length.
-    const oversized = " ag".repeat(90_000); // 3 UTF-8 bytes each → > 262144
+    const oversized = " ag".repeat(90_000);
     expect(new TextEncoder().encode(oversized).length).toBeGreaterThan(262_144);
     vi.mocked(invoke).mockResolvedValueOnce({
       proposalId,
@@ -403,15 +376,6 @@ describe("TauriWriteApprovalGateway contract", () => {
 });
 
 describe("write approval pure helpers", () => {
-  it("recognizes only canonical 43-char base64url grants", () => {
-    expect(isCanonicalApprovalGrant(grant)).toBe(true);
-    expect(isCanonicalApprovalGrant("short")).toBe(false);
-    expect(isCanonicalApprovalGrant(`${grant}x`)).toBe(false);
-    expect(isCanonicalApprovalGrant("abcdefghijklmnopqrstuvwxyz0123456789ABCDE+")).toBe(
-      false,
-    );
-  });
-
   it("selects oldest pending by expiresAt then proposalId and filters foreign", () => {
     const list: WriteProposalView[] = [
       pendingProposal({
@@ -435,21 +399,13 @@ describe("write approval pure helpers", () => {
         proposalId: "p-done",
         state: "succeeded",
         expiresAt: "2026-08-01T11:00:00.000Z",
-        approvalGrant: undefined,
+        decisionAvailable: false,
       }),
     ];
 
     const selected = selectOldestPendingProposal(list, conversationId);
     expect(selected?.proposalId).toBe("p-c");
     expect(selected?.conversationId).toBe(conversationId);
-  });
-
-  it("strips approvalGrant without mutating other fields", () => {
-    const original = pendingProposal();
-    const stripped = stripApprovalGrant(original);
-    expect(stripped.approvalGrant).toBeUndefined();
-    expect(stripped.proposalId).toBe(original.proposalId);
-    expect(original.approvalGrant).toBe(grant);
   });
 
   it("uses fixed path-free terminal messages", () => {

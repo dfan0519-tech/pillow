@@ -41,8 +41,11 @@ export type WriteProposalView = {
   state: WriteProposalState;
   summary: string;
   expiresAt: string;
-  /** Opaque one-shot grant — component memory only; never DOM/log/storage. */
-  approvalGrant?: string;
+  /**
+   * Non-authority availability bit from the host (EA-03).
+   * Raw approval grants stay host-private — never cross this boundary.
+   */
+  decisionAvailable: boolean;
   /** Host-normalized permission-rule match subject (portable path). */
   ruleSubject: string;
   /** Present only when a permission rule, not a human, decided this. */
@@ -63,7 +66,6 @@ export type WriteDiffView = {
 export type DecideWriteProposalInput = {
   conversationId: string;
   proposalId: string;
-  approvalGrant: string;
   decision: WriteDecision;
 };
 
@@ -121,11 +123,6 @@ export const WRITE_PUBLIC_ERROR_CODES: readonly WritePublicErrorCode[] = [
   "cancelled",
   "interrupted",
 ] as const;
-
-/** Canonical raw grant: 32 OS-random bytes as base64url without padding. */
-export const CANONICAL_APPROVAL_GRANT_LENGTH = 43;
-
-const BASE64URL_GRANT_RE = /^[A-Za-z0-9_-]+$/;
 
 export class WriteApprovalGatewayError extends Error {
   readonly code: WriteApprovalGatewayErrorCode;
@@ -185,15 +182,6 @@ export function selectOldestPendingProposal(
   return sorted[0] ?? null;
 }
 
-/** Strip the opaque grant so view models never carry it into render props. */
-export function stripApprovalGrant(
-  proposal: WriteProposalView,
-): WriteProposalView {
-  if (proposal.approvalGrant === undefined) return proposal;
-  const { approvalGrant: _grant, ...rest } = proposal;
-  return rest;
-}
-
 /** Fixed path-free terminal copy. Success alone is handled by the Open file CTA. */
 export function writeTerminalMessage(
   state: WriteProposalState,
@@ -224,14 +212,6 @@ export function isWritePublicErrorCode(
 ): value is WritePublicErrorCode {
   return typeof value === "string"
     && (WRITE_PUBLIC_ERROR_CODES as readonly string[]).includes(value);
-}
-
-export function isCanonicalApprovalGrant(value: unknown): value is string {
-  return (
-    typeof value === "string"
-    && value.length === CANONICAL_APPROVAL_GRANT_LENGTH
-    && BASE64URL_GRANT_RE.test(value)
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

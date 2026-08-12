@@ -119,7 +119,7 @@ function pending(
     state: "pending_approval",
     summary: "Create example",
     expiresAt: futureExpiry(),
-    approvalGrant: grantSecret,
+    decisionAvailable: true,
     ruleSubject: "src/example.ts",
     ...overrides,
   };
@@ -173,7 +173,7 @@ function createWriteGateway(
             proposalId: input.proposalId,
             conversationId: input.conversationId,
             state: input.decision === "approve_once" ? "succeeded" : "rejected",
-            approvalGrant: undefined,
+            decisionAvailable: false,
           }),
         },
       ];
@@ -339,9 +339,9 @@ describe("write approval workbench integration", () => {
     expect(writeGateway.decideCalls[0]).toEqual({
       conversationId: convAId,
       proposalId: proposalOldId,
-      approvalGrant: grantSecret,
       decision: "approve_once",
     });
+    expect(writeGateway.decideCalls[0]).not.toHaveProperty("approvalGrant");
     await waitFor(() => {
       expect(writeGateway.listCalls.length).toBeGreaterThan(listBefore);
     });
@@ -787,21 +787,21 @@ describe("write approval workbench integration", () => {
     });
   });
 
-  it("atomically drops a raw grant when the next list omits it or terminalizes", async () => {
-    let listPhase: "with-grant" | "no-grant" | "terminal" = "with-grant";
+  it("atomically drops decision availability when the next list omits it or terminalizes", async () => {
+    let listPhase: "available" | "unavailable" | "terminal" = "available";
     const writeGateway = createWriteGateway({
       listImpl: async () => {
-        if (listPhase === "with-grant") {
+        if (listPhase === "available") {
           return [pending()];
         }
-        if (listPhase === "no-grant") {
-          // Same live proposal id, grant revoked by another actor / host.
-          return [pending({ approvalGrant: undefined })];
+        if (listPhase === "unavailable") {
+          // Same live proposal id; host no longer exposes decision availability.
+          return [pending({ decisionAvailable: false })];
         }
         return [
           pending({
             state: "expired",
-            approvalGrant: undefined,
+            decisionAvailable: false,
           }),
         ];
       },
@@ -825,7 +825,7 @@ describe("write approval workbench integration", () => {
       expect(screen.getByTestId("write-approval-approve")).not.toBeDisabled();
     });
 
-    listPhase = "no-grant";
+    listPhase = "unavailable";
     rerender(
       <Workbench
         conversationId={convAId}
@@ -924,7 +924,7 @@ describe("write approval workbench integration", () => {
     const adversarial = {
       code: "write_invalid_grant",
       message: `rejected grant=${grantSecret} token=host-secret-token-no-slash`,
-      approvalGrant: grantSecret,
+      decisionAvailable: true,
     };
 
     const writeGateway = createWriteGateway({
@@ -1162,7 +1162,7 @@ describe("write approval workbench integration", () => {
       conversationId: convAId,
       path: "src/alpha-only.ts",
       summary: "Create alpha only",
-      approvalGrant: grantSecret,
+      decisionAvailable: true,
     });
     const writeGateway = createWriteGateway({
       listImpl: async (/* conversation filtered below */) => [pendingA],

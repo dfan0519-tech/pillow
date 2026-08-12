@@ -100,6 +100,7 @@ pub(crate) fn add_permission_rule_impl(
             "Project scope may only deny; allow rules must be global.",
         ));
     }
+    let pattern = command_pattern_or_reject(&pattern)?;
     rules
         .add(AddPermissionRule {
             scope,
@@ -146,6 +147,28 @@ fn validated_scope(
             Ok((scope, Some(project_id.to_owned())))
         }
     }
+}
+
+/// Native-boundary pattern check, kept separate so it can be tested on its own.
+///
+/// The repository rejects empty patterns too, and both rejections surface the
+/// same `permission_rules_invalid_pattern` code — so an end-to-end test cannot
+/// tell which layer said no, and this one could be deleted with every test
+/// still green. Defence in depth that nothing pins is defence in depth that
+/// rots. Calling it directly is what makes this layer's own behaviour testable.
+///
+/// Renderer trim is not an authorization boundary (EA-03 sequence B): kernel
+/// policy reads an empty pattern as match-all, so anything that reaches storage
+/// blank is a global allow.
+pub(crate) fn command_pattern_or_reject(pattern: &str) -> Result<String, CommandError> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Err(permission_error(
+            "permission_rules_invalid_pattern",
+            "Pattern must be a non-empty string within length limits.",
+        ));
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn map_rule_error(error: PermissionRuleError) -> CommandError {

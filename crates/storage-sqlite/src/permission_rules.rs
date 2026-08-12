@@ -257,14 +257,17 @@ impl SqlitePermissionRuleRepository {
         {
             return Err(PermissionRuleError::ProjectAllowForbidden);
         }
-        validate_pattern(&input.pattern)?;
+        // Trim then reject empty: empty patterns are match-all in kernel-policy.
+        // This layer must not rely on renderer-only validation.
+        let pattern = input.pattern.trim().to_owned();
+        validate_pattern(&pattern)?;
 
         let rule = PermissionRule {
             rule_id: Uuid::new_v4().to_string(),
             scope: input.scope,
             project_id: input.project_id,
             prefix: input.prefix,
-            pattern: input.pattern,
+            pattern,
             action: input.action,
             content_digest: String::new(),
             created_at: Utc::now(),
@@ -480,8 +483,14 @@ fn validate_scope_shape(
     }
 }
 
+/// Pattern invariants enforced at the repository boundary (not renderer-only).
+///
+/// Empty / whitespace-only patterns are rejected: kernel-policy treats an empty
+/// pattern as match-all, so fail-open seams here become global allow/deny.
 fn validate_pattern(pattern: &str) -> Result<(), PermissionRuleError> {
-    if pattern.len() > PERMISSION_RULE_PATTERN_BYTE_CAP
+    if pattern.is_empty()
+        || pattern.trim().is_empty()
+        || pattern.len() > PERMISSION_RULE_PATTERN_BYTE_CAP
         || pattern.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n'))
     {
         return Err(PermissionRuleError::InvalidPattern);

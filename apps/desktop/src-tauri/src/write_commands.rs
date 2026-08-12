@@ -1,4 +1,7 @@
 //! Typed Tauri commands for governed write proposals.
+//!
+//! Decide accepts conversation/proposal/decision only. Raw approval grants
+//! stay host-private (same contract as process proposals).
 
 use tauri::{State, WebviewWindow};
 
@@ -40,7 +43,6 @@ pub fn decide_write_proposal<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     conversation_id: String,
     proposal_id: String,
-    approval_grant: String,
     decision: String,
 ) -> Result<WriteProposalDto, CommandError> {
     service
@@ -50,7 +52,8 @@ pub fn decide_write_proposal<R: tauri::Runtime>(
             let _ = state
                 .require_conversation_root_for_window(window.label(), project_id, id, &root)
                 .map_err(command_to_conversation)?;
-            service.decide_write_proposal(conversation_id, proposal_id, approval_grant, decision)
+            // Host resolves the live grant; no renderer grant parameter.
+            service.decide_write_proposal(conversation_id, proposal_id, decision)
         })
         .map_err(map_error)
 }

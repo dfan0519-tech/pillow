@@ -1,6 +1,7 @@
 /**
- * Single conversation-owned write approval bar (Wave C3-E).
- * One pending proposal at a time; grant stays in component memory only.
+ * Single conversation-owned write approval bar (Wave C3-E / EA-03).
+ * One pending proposal at a time; decisions use host-private grants only.
+ * Renderer holds a non-authority decisionAvailable bit — never raw grant.
  */
 
 import {
@@ -27,14 +28,13 @@ import {
 import "../../styles/write-approval.css";
 
 export type WriteApprovalBarProps = {
-  /** Display-safe proposal — must not include approvalGrant. */
+  /** Display-safe proposal — never includes raw approval grant. */
   proposal: WriteProposalView;
   /**
-   * Opaque one-shot grant for the exact owning pending proposal.
-   * Held only in this component's memory for the native decision call.
-   * Never rendered, logged, stored, or snapshotted.
+   * Non-authority availability bit from the host.
+   * Enables Approve/Reject when true; host still owns the grant.
    */
-  approvalGrant: string | null;
+  decisionAvailable: boolean;
   disabled?: boolean;
   onDecide: (decision: WriteDecision) => void | Promise<void>;
   onReviewDiff: () => void | Promise<void>;
@@ -67,7 +67,7 @@ function formatExpiry(expiresAt: string): string {
 
 export function WriteApprovalBar({
   proposal,
-  approvalGrant,
+  decisionAvailable,
   disabled = false,
   onDecide,
   onReviewDiff,
@@ -81,19 +81,16 @@ export function WriteApprovalBar({
   const approveRef = useRef<HTMLButtonElement>(null);
   const rejectRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
-  /** Local grant mirror — never written into React state objects that re-render. */
-  const grantRef = useRef<string | null>(approvalGrant);
-  grantRef.current = approvalGrant;
 
   const [submitting, setSubmitting] = useState(false);
   const [deadlinePassed, setDeadlinePassed] = useState(false);
   const [alwaysRuleAction, setAlwaysRuleAction] = useState<
     "allow" | "deny" | null
   >(null);
-  /** Approve/Reject require a live grant and a non-expired deadline. */
+  /** Approve/Reject require host decision availability and a live deadline. */
   const decisionLocked =
-    disabled || submitting || deadlinePassed || !approvalGrant;
-  /** Review diff is allowed without grant, but not after the displayed deadline. */
+    disabled || submitting || deadlinePassed || !decisionAvailable;
+  /** Review diff is allowed without decision, but not after the displayed deadline. */
   const reviewLocked = disabled || submitting || deadlinePassed;
   const ruleSubject =
     ruleSubjectProp
@@ -131,13 +128,10 @@ export function WriteApprovalBar({
   const submit = useCallback(
     async (decision: WriteDecision) => {
       if (decisionLocked) return;
-      const grant = grantRef.current;
-      if (!grant) return;
       setSubmitting(true);
       try {
         await onDecide(decision);
       } finally {
-        // Parent clears grant after settle; local ref follows prop updates.
         setSubmitting(false);
       }
     },

@@ -521,9 +521,13 @@ fn validate_process_argv(program: &str, argv: &[String]) -> Result<(), ToolProto
     }
     let mut combined = program.len();
     for entry in argv {
-        if entry.chars().any(char::is_control) {
+        // Control (Cc) plus bidi Format controls — see is_bidi_formatting_char.
+        if entry
+            .chars()
+            .any(|character| character.is_control() || is_bidi_formatting_char(character))
+        {
             return Err(invalid_arguments(
-                "process.run argv entries must not contain control characters",
+                "process.run argv entries must not contain control or bidi formatting characters",
             ));
         }
         combined = combined.saturating_add(entry.len());
@@ -534,6 +538,26 @@ fn validate_process_argv(program: &str, argv: &[String]) -> Result<(), ToolProto
         }
     }
     Ok(())
+}
+
+/// Unicode bidi *formatting* controls (category Format). These are **not**
+/// matched by `char::is_control` (Control/Cc only), so they previously passed
+/// process argv and path validation while still reordering browser display.
+///
+/// Audit EA-06 list: U+202A, U+202B, U+202D, U+202E, U+2066..=U+2069.
+/// RTL script letters (Arabic/Hebrew) are intentionally **not** included.
+fn is_bidi_formatting_char(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202A}' // LEFT-TO-RIGHT EMBEDDING
+            | '\u{202B}' // RIGHT-TO-LEFT EMBEDDING
+            | '\u{202D}' // LEFT-TO-RIGHT OVERRIDE
+            | '\u{202E}' // RIGHT-TO-LEFT OVERRIDE
+            | '\u{2066}' // LEFT-TO-RIGHT ISOLATE
+            | '\u{2067}' // RIGHT-TO-LEFT ISOLATE
+            | '\u{2068}' // FIRST STRONG ISOLATE
+            | '\u{2069}' // POP DIRECTIONAL ISOLATE
+    )
 }
 
 fn validate_stream_digest(value: &str) -> Result<(), ToolProtocolError> {
@@ -587,7 +611,9 @@ fn validate_project_path_inner(path: &str) -> Result<(), &'static str> {
             return Err("path component has a trailing dot or space alias");
         }
         if component.chars().any(|character| {
-            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+            character.is_control()
+                || is_bidi_formatting_char(character)
+                || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
         }) {
             return Err("path component contains non-portable characters");
         }

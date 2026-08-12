@@ -1222,3 +1222,131 @@ describe("formatArgvDisplay", () => {
     expect(helper).not.toMatch(/isShellProgram|formatCommandArgvDisplay/);
   });
 });
+
+/**
+ * EA-06 — Unicode bidi formatting characters must not reach human-audit display
+ * as raw Format code points. Machine argv stays raw; display escapes to \uXXXX.
+ *
+ * RED contract: without escape, JSON.stringify preserves U+202E literally and
+ * the approval surface paints a string whose visual order can diverge from argv.
+ */
+describe("EA-06 bidi formatting display safety", () => {
+  /** Audit-listed bidi formatting controls (Format category, not Control). */
+  const BIDI_FORMAT_CHARS = [
+    "\u202A", // LRE
+    "\u202B", // RLE
+    "\u202D", // LRO
+    "\u202E", // RLO
+    "\u2066", // LRI
+    "\u2067", // RLI
+    "\u2068", // FSI
+    "\u2069", // PDI
+  ] as const;
+
+  it("escapes RLO so display text cannot reverse extension order (visual ≠ argv)", () => {
+    // Classic spoof: RLO between stem and reversed extension chars.
+    const raw = "photo\u202Egnp.exe";
+    const argv = [raw];
+    // Machine-readable argv remains the sealed raw string.
+    expect(argv[0]).toContain("\u202E");
+    expect(argv[0]).toBe(raw);
+
+    const display = formatArgvDisplay(argv);
+    // Human-audit display must not contain the raw Format character.
+    expect(display).not.toContain("\u202E");
+    // Visible escape sequence (backslash + u + hex), not a re-decoded char.
+    expect(display).toContain("\\u202E");
+    // Still one JSON-string token (sealed boundary preserved).
+    expect(display.startsWith('"')).toBe(true);
+    expect(display.endsWith('"')).toBe(true);
+    expect(display).toBe('"photo\\u202Egnp.exe"');
+  });
+
+  it("escapes every audit-listed bidi formatting control in structured argv", () => {
+    for (const ch of BIDI_FORMAT_CHARS) {
+      const hex = ch
+        .codePointAt(0)!
+        .toString(16)
+        .toUpperCase()
+        .padStart(4, "0");
+      const raw = `a${ch}b.txt`;
+      const display = formatArgvDisplay([raw]);
+      expect(display, `raw Format U+${hex} must not appear`).not.toContain(ch);
+      expect(display).toContain(`\\u${hex}`);
+    }
+  });
+
+  it("escapes bidi controls in shell command display without mutating argv", () => {
+    const cmd = "cat photo\u202Egnp.exe";
+    const argv = [cmd];
+    const display = formatCommandArgvDisplay(SHELL_PROGRAM_LABEL, argv);
+    expect(argv[0]).toBe(cmd);
+    expect(display).not.toContain("\u202E");
+    expect(display).toBe("cat photo\\u202Egnp.exe");
+  });
+
+  it("preserves LTR+RTL letter filenames without inventing escapes", () => {
+    // Arabic / Hebrew letters are not formatting controls.
+    expect(formatArgvDisplay(["ملف.txt"])).toBe('"ملف.txt"');
+    expect(formatArgvDisplay(["שלום.js"])).toBe('"שלום.js"');
+    expect(formatArgvDisplay(["docs/ملف/readme.md"])).toBe(
+      '"docs/ملف/readme.md"',
+    );
+  });
+
+  it("mixed LTR+RTL stem with extension stays readable after any Format strip", () => {
+    const mixed = "report-ملف\u202Etxt.exe";
+    const display = formatArgvDisplay([mixed]);
+    expect(display).not.toContain("\u202E");
+    expect(display).toContain("ملف");
+    expect(display).toContain("\\u202E");
+    expect(display).toBe('"report-ملف\\u202Etxt.exe"');
+  });
+
+  it("approval bar paints escaped argv and isolates each token", () => {
+    const spoof = "photo\u202Egnp.exe";
+    render(
+      <CommandApprovalBar
+        decisionAvailable
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        proposal={pendingProposal({
+          programLabel: "node",
+          argv: ["-e", spoof],
+        })}
+      />,
+    );
+    const argvHost = screen.getByTestId("command-approval-argv");
+    // Combined text is the escaped human-audit form.
+    expect(argvHost.textContent).toBe('"-e" "photo\\u202Egnp.exe"');
+    expect(argvHost.textContent).not.toContain("\u202E");
+    // Per-token isolation containers (second layer).
+    const tokens = within(argvHost).getAllByTestId("command-argv-token");
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toHaveTextContent('"-e"');
+    expect(tokens[1]).toHaveTextContent('"photo\\u202Egnp.exe"');
+    for (const token of tokens) {
+      expect(token.tagName.toLowerCase()).toBe("code");
+      expect(token.className).toMatch(/argv-token/);
+    }
+    // Machine argv on the proposal object is unchanged (receipt dual-rep).
+    expect(spoof).toContain("\u202E");
+  });
+
+  it("activity row isolates argv tokens and never paints raw RLO", () => {
+    const spoof = "safe\u2067secret.txt";
+    render(
+      <CommandActivityRow
+        activity={activityFixture({
+          programLabel: "cargo",
+          argv: ["test", spoof],
+        })}
+      />,
+    );
+    const argvHost = screen.getByTestId("command-activity-argv");
+    expect(argvHost.textContent).not.toContain("\u2067");
+    expect(argvHost.textContent).toContain("\\u2067");
+    const tokens = within(argvHost).getAllByTestId("command-argv-token");
+    expect(tokens).toHaveLength(2);
+  });
+});

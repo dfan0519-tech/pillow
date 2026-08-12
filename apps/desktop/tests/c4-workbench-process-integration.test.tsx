@@ -107,7 +107,7 @@ function pendingWrite(
     state: "pending_approval",
     summary: "Create example",
     expiresAt: futureExpiry(20),
-    approvalGrant: grantSecret,
+    decisionAvailable: true,
     ruleSubject: "src/example.ts",
     ...overrides,
   };
@@ -198,7 +198,7 @@ function createWriteGateway(
             proposalId: input.proposalId,
             conversationId: input.conversationId,
             state: input.decision === "approve_once" ? "succeeded" : "rejected",
-            approvalGrant: undefined,
+            decisionAvailable: false,
           }),
         },
       ];
@@ -502,16 +502,15 @@ describe("C4 workbench process integration — single approval bar", () => {
     expect(bars).toHaveLength(1);
   });
 
-  it("does not let an older grant-less write hide a newer actionable process", async () => {
+  it("does not let an older decision-unavailable write hide a newer actionable process", async () => {
     // Write expires sooner so arbitration would pick it first when available.
-    // Without an opaque grant it must not be decision-available and cannot
-    // hide a later, host-available process proposal.
+    // Without decisionAvailable it cannot hide a later, host-available process.
     const writeGateway = createWriteGateway();
     writeGateway.setListResult([
       pendingWrite({
-        approvalGrant: undefined,
+        decisionAvailable: false,
         expiresAt: futureExpiry(5),
-        summary: "Grant-less older write",
+        summary: "Unavailable older write",
       }),
     ]);
     const execGateway = createExecGateway();
@@ -1065,9 +1064,9 @@ describe("C4 workbench process integration — write path regression", () => {
       expect(writeGateway.decideCalls[0]).toEqual({
         conversationId: convAId,
         proposalId: writeProposalId,
-        approvalGrant: grantSecret,
         decision: "approve_once",
       });
+      expect(writeGateway.decideCalls[0]).not.toHaveProperty("approvalGrant");
     });
     await waitFor(() => {
       expect(screen.queryByTestId("write-approval-bar")).toBeNull();

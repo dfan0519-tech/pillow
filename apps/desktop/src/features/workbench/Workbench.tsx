@@ -19,7 +19,6 @@ import type { ProjectDto } from "../../lib/projectGateway";
 import type { ResourceGateway } from "../../lib/resourceGateway";
 import {
   isPendingWriteProposal,
-  stripApprovalGrant,
   type WriteApprovalGateway,
   type WriteDecision,
   type WriteProposalView,
@@ -223,7 +222,7 @@ export function Workbench({
   );
   const [terminalOutputTarget, setTerminalOutputTarget] =
     useState<TerminalOutputTarget | null>(null);
-  /** Display-safe pending write proposal — never carries approvalGrant. */
+  /** Display-safe pending write proposal — never carries raw grant. */
   const [pendingWriteProposal, setPendingWriteProposal] =
     useState<WriteProposalView | null>(null);
   /** Full process proposal for the selected conversation (host decisionAvailable). */
@@ -244,14 +243,9 @@ export function Workbench({
   const [approvalsRetrying, setApprovalsRetrying] = useState(false);
 
   /**
-   * Opaque write grants live only in this ref map. Never React state, DOM, log,
-   * storage, or snapshot. Cleared after decide settles and on scope change.
-   * Process authority never enters this map.
-   */
-  const grantByProposalRef = useRef<Map<string, string>>(new Map());
-  /**
    * Latest listed proposals keyed for bar rendering after arbitration.
    * Not a process cache outside the workbench — cleared on scope change.
+   * Write grants stay host-private (EA-03); only decisionAvailable crosses.
    */
   const writeByIdRef = useRef<Map<string, WriteProposalView>>(new Map());
   const processByIdRef = useRef<Map<string, ExecProposalView>>(new Map());
@@ -313,7 +307,6 @@ export function Workbench({
    */
   const clearApprovalScope = useCallback(
     (options?: { clearTerminal?: boolean }) => {
-      grantByProposalRef.current.clear();
       writeByIdRef.current.clear();
       processByIdRef.current.clear();
       setPendingWriteProposal(null);
@@ -348,8 +341,7 @@ export function Workbench({
       writeList: WriteProposalView[],
       processList: ExecProposalView[],
     ) => {
-      // Authoritative same-scope lists: atomically replace grant/process maps.
-      grantByProposalRef.current.clear();
+      // Authoritative same-scope lists: atomically replace proposal maps.
       writeByIdRef.current.clear();
       processByIdRef.current.clear();
 
@@ -359,19 +351,15 @@ export function Workbench({
         if (item.conversationId !== conversation) continue;
         if (!isPendingWriteProposal(item)) continue;
         writeByIdRef.current.set(item.proposalId, item);
-        // Opaque grant stays in the ref map only — never React state/DOM/logs.
-        if (item.approvalGrant) {
-          grantByProposalRef.current.set(item.proposalId, item.approvalGrant);
-        }
-        // Decision-available only when the current list carried a grant.
-        // Grant-less pending writes must not win arbitration over process.
+        // Host-private grant: only the non-authority availability bit is used.
+        // Pending without decisionAvailable must not win arbitration over process.
         candidates.push({
           domain: "write",
           projectId: project,
           requestId: item.proposalId,
           conversationId: conversation,
           expiresAt: item.expiresAt,
-          decisionAvailable: Boolean(item.approvalGrant),
+          decisionAvailable: item.decisionAvailable,
           summary: item.summary,
           risk: item.mode,
         });
@@ -407,8 +395,9 @@ export function Workbench({
       }
 
       if (selected.domain === "write") {
-        const raw = writeByIdRef.current.get(selected.requestId) ?? null;
-        setPendingWriteProposal(raw ? stripApprovalGrant(raw) : null);
+        setPendingWriteProposal(
+          writeByIdRef.current.get(selected.requestId) ?? null,
+        );
         setPendingProcessProposal(null);
         setWriteDiffTarget((current) => {
           if (
@@ -472,9 +461,8 @@ export function Workbench({
             if (!isScopeCurrent(generation, project, conversation)) return;
             continue;
           }
-          // Never log the caught value — host errors may carry grants/secrets.
+          // Never log the caught value — host errors may carry secrets.
           console.error("Failed to list governed approvals.");
-          grantByProposalRef.current.clear();
           writeByIdRef.current.clear();
           processByIdRef.current.clear();
           setPendingWriteProposal(null);
@@ -584,29 +572,26 @@ export function Workbench({
         || !pendingWriteProposal
         || !projectId
         || !conversationId
+        || !pendingWriteProposal.decisionAvailable
       ) {
         return;
       }
       const proposalId = pendingWriteProposal.proposalId;
-      const grant = grantByProposalRef.current.get(proposalId) ?? null;
-      if (!grant) return;
 
       const generation = scopeRef.current.generation;
       setDecisionBusy(true);
       try {
+        // Host looks up the live grant; renderer sends decision only.
         await writeApprovalGateway.decideWriteProposal({
           conversationId,
           proposalId,
-          approvalGrant: grant,
           decision,
         });
       } catch {
         if (!isScopeCurrent(generation, projectId, conversationId)) return;
-        // Never log the caught value — may contain grant/token text.
+        // Never log the caught value — may contain secret text.
         console.error("Failed to decide write proposal.");
       } finally {
-        // Clear the local grant reference after the native call settles.
-        grantByProposalRef.current.delete(proposalId);
         if (isScopeCurrent(generation, projectId, conversationId)) {
           setDecisionBusy(false);
           // Reconcile from durable/native list — never optimistic-only terminal.
@@ -760,11 +745,6 @@ export function Workbench({
       scope.conversationId,
     );
   }, [relistApprovals]);
-
-  const grantForBar =
-    pendingWriteProposal
-      ? grantByProposalRef.current.get(pendingWriteProposal.proposalId) ?? null
-      : null;
 
   const showWriteBar = Boolean(
     visibleApproval
@@ -927,7 +907,7 @@ export function Workbench({
           ) : null}
           {showWriteBar && pendingWriteProposal ? (
             <WriteApprovalBar
-              approvalGrant={grantForBar}
+              decisionAvailable={pendingWriteProposal.decisionAvailable}
               disabled={decisionBusy}
               onDecide={handleWriteDecide}
               onExpiryDeadline={handleExpiryDeadline}

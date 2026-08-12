@@ -5,6 +5,7 @@
  */
 
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -25,6 +26,7 @@ import type {
 } from "./executionTypes";
 import {
   COMMAND_DISPLAY_EXPAND_THRESHOLD,
+  formatArgvTokenDisplay,
   formatCommandArgvDisplay,
   isShellProgram,
 } from "./executionTypes";
@@ -231,7 +233,7 @@ export function CommandApprovalBar({
             >
               Shell 命令
             </span>
-            <code
+            <span
               className={
                 commandExpanded
                   ? "command-approval-bar__command-text command-approval-bar__command-text--expanded"
@@ -241,8 +243,14 @@ export function CommandApprovalBar({
               data-testid="command-approval-argv"
               title={commandText}
             >
-              {commandText}
-            </code>
+              {/* EA-06: isolated token container; display already bidi-escaped. */}
+              <code
+                className="command-approval-bar__argv-token"
+                data-testid="command-argv-token"
+              >
+                {commandText}
+              </code>
+            </span>
             {isLongCommand ? (
               <button
                 className="command-approval-bar__expand"
@@ -262,7 +270,7 @@ export function CommandApprovalBar({
             <span aria-hidden="true" className="command-approval-bar__sep">
               {" "}
             </span>
-            <code
+            <span
               className={
                 commandExpanded
                   ? "command-approval-bar__command-text command-approval-bar__command-text--expanded"
@@ -272,8 +280,19 @@ export function CommandApprovalBar({
               data-testid="command-approval-argv"
               title={commandText}
             >
-              {commandText}
-            </code>
+              {/* EA-06: one isolated container per sealed argv token. */}
+              {proposal.argv.map((arg, index) => (
+                <Fragment key={index}>
+                  {index > 0 ? " " : null}
+                  <code
+                    className="command-approval-bar__argv-token"
+                    data-testid="command-argv-token"
+                  >
+                    {formatArgvTokenDisplay(arg)}
+                  </code>
+                </Fragment>
+              ))}
+            </span>
             {isLongCommand ? (
               <button
                 className="command-approval-bar__expand"

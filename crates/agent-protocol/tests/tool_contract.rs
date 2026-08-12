@@ -1066,6 +1066,77 @@ fn process_run_rejects_nul_and_controls_in_argv() {
     }
 }
 
+/// EA-06: bidi *formatting* controls (Unicode Format, not Control) must not
+/// pass process argv validation. `char::is_control` alone is insufficient.
+#[test]
+fn process_run_rejects_bidi_formatting_controls_in_argv() {
+    // Audit list: U+202A/U+202B/U+202D/U+202E, U+2066..=U+2069.
+    const BIDI_FORMAT: [char; 8] = [
+        '\u{202A}', // LRE
+        '\u{202B}', // RLE
+        '\u{202D}', // LRO
+        '\u{202E}', // RLO — classic extension-order spoof
+        '\u{2066}', // LRI
+        '\u{2067}', // RLI
+        '\u{2068}', // FSI
+        '\u{2069}', // PDI
+    ];
+    for ch in BIDI_FORMAT {
+        // Classic visual spoof: RLO reverses "gnp.exe" toward ".exe.png"-like order.
+        let spoofed = format!("photo{ch}gnp.exe");
+        let proposal = process_run_proposal("node", &[&spoofed], None);
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "bidi formatting U+{:04X} must be rejected in argv",
+            ch as u32
+        );
+        // Mixing into an otherwise-valid flag must still fail.
+        let mixed = format!("--file={ch}secret");
+        let proposal = process_run_proposal("cargo", &[&mixed], None);
+        assert_eq!(
+            proposal
+                .validate_for_context(&active_context())
+                .unwrap_err()
+                .code(),
+            ToolProtocolErrorCode::InvalidArguments,
+            "embedded bidi formatting U+{:04X} must be rejected",
+            ch as u32
+        );
+    }
+}
+
+/// EA-06: RTL *letters* (Arabic/Hebrew) are not formatting controls and must
+/// still be accepted so legitimate locale filenames are not broken.
+#[test]
+fn process_run_accepts_rtl_script_letters_without_bidi_controls() {
+    for entry in ["ملف.txt", "שלום.js", "docs/ملف/readme.md", "עברית-name"] {
+        let proposal = process_run_proposal("node", &[entry], None);
+        assert!(
+            proposal.validate_for_context(&active_context()).is_ok(),
+            "RTL letter filename must validate: {entry}"
+        );
+    }
+}
+
+/// EA-06: project-relative paths also reject bidi formatting (filename surface).
+#[test]
+fn process_run_cwd_and_fs_paths_reject_bidi_formatting() {
+    let rlo_path = "src/photo\u{202E}gnp.exe";
+    let proposal = process_run_proposal("cargo", &["test"], Some(rlo_path));
+    assert_eq!(
+        proposal
+            .validate_for_context(&active_context())
+            .unwrap_err()
+            .code(),
+        ToolProtocolErrorCode::InvalidArguments,
+        "cwd with RLO must be rejected"
+    );
+}
+
 #[test]
 fn process_run_argv_count_boundary_is_sixty_four() {
     let at_cap: Vec<String> = (0..PROCESS_ARGV_COUNT_CAP)

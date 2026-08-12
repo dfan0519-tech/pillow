@@ -1173,7 +1173,7 @@ describe("C4 D3B4 Git workbench composition", () => {
               state: "pending_approval",
               summary: "Create example",
               expiresAt: writeExpiresAt,
-              approvalGrant: grantSecret,
+              decisionAvailable: true,
               ruleSubject: "src/example.ts",
             } satisfies WriteProposalView,
           ],

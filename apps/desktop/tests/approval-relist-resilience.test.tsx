@@ -64,7 +64,7 @@ function pendingProposal(): WriteProposalView {
     state: "pending_approval",
     summary: "Create example",
     expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-    approvalGrant: grantSecret,
+    decisionAvailable: true,
     ruleSubject: "src/example.ts",
   };
 }

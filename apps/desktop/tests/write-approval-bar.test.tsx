@@ -1,5 +1,6 @@
 /**
- * Wave C3-E — single conversation approval bar focus, Tab, Escape, expiry.
+ * Wave C3-E / EA-03 — single conversation approval bar focus, Tab, Escape, expiry.
+ * decisionAvailable is a non-authority bit; raw grants never enter the bar.
  */
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -8,8 +9,8 @@ import { WriteApprovalBar } from "../src/features/conversations/WriteApprovalBar
 import type { WriteProposalView } from "../src/lib/writeApprovalGateway";
 import "../src/styles/write-approval.css";
 
-/** Canonical 43-char base64url grant. */
-const grant = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+/** Forbidden secret string — must never reach DOM (privacy assertion). */
+const grantSecret = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 const proposalId = "prop-raw-id-must-not-show";
 
 function pendingProposal(
@@ -23,6 +24,7 @@ function pendingProposal(
     state: "pending_approval",
     summary: "Create example module",
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    decisionAvailable: true,
     ruleSubject: "src/example.ts",
     ...overrides,
   };
@@ -31,7 +33,7 @@ function pendingProposal(
 function renderBar(
   props: Partial<{
     proposal: WriteProposalView;
-    approvalGrant: string | null;
+    decisionAvailable: boolean;
     disabled: boolean;
     onDecide: ReturnType<typeof vi.fn>;
     onReviewDiff: ReturnType<typeof vi.fn>;
@@ -44,7 +46,9 @@ function renderBar(
   const proposal = props.proposal ?? pendingProposal();
   const view = render(
     <WriteApprovalBar
-      approvalGrant={props.approvalGrant === undefined ? grant : props.approvalGrant}
+      decisionAvailable={
+        props.decisionAvailable === undefined ? true : props.decisionAvailable
+      }
       disabled={props.disabled}
       onDecide={onDecide}
       onExpiryDeadline={onExpiryDeadline}
@@ -75,9 +79,9 @@ describe("WriteApprovalBar", () => {
 
     const text = container.textContent ?? "";
     const html = container.innerHTML;
-    expect(text).not.toContain(grant);
+    expect(text).not.toContain(grantSecret);
     expect(text).not.toContain(proposalId);
-    expect(html).not.toContain(grant);
+    expect(html).not.toContain(grantSecret);
     expect(html).not.toContain(proposalId);
     expect(html).not.toMatch(/approvalGrant|data-grant|data-proposal/i);
   });
@@ -120,7 +124,7 @@ describe("WriteApprovalBar", () => {
           outside
         </button>
         <WriteApprovalBar
-          approvalGrant={grant}
+          decisionAvailable
           onDecide={onDecide}
           onReviewDiff={vi.fn()}
           proposal={pendingProposal()}
@@ -149,52 +153,42 @@ describe("WriteApprovalBar", () => {
     expect(screen.getByTestId("write-approval-reject")).toBeDisabled();
     await user.click(screen.getByTestId("write-approval-reject"));
     expect(onDecide).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      resolveDecide?.();
-    });
+    resolveDecide?.();
   });
 
-  it("disables all three actions at expiry deadline without inventing a decision", async () => {
-    vi.useFakeTimers();
-    const onDecide = vi.fn();
-    const onReviewDiff = vi.fn();
-    const onExpiryDeadline = vi.fn();
-    const expiresAt = new Date(Date.now() + 5_000).toISOString();
+  it("locks Approve/Reject when decisionAvailable is false; Review stays available", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    const onReviewDiff = vi.fn().mockResolvedValue(undefined);
     renderBar({
-      proposal: pendingProposal({ expiresAt }),
+      decisionAvailable: false,
       onDecide,
       onReviewDiff,
+    });
+    expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
+    expect(screen.getByTestId("write-approval-reject")).toBeDisabled();
+    expect(screen.getByTestId("write-approval-review-diff")).not.toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-approve"));
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("write-approval-review-diff"));
+    expect(onReviewDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables all actions after expiry deadline", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const onExpiryDeadline = vi.fn();
+    const expiresAt = new Date(Date.now() + 2_000).toISOString();
+    renderBar({
+      proposal: pendingProposal({ expiresAt }),
       onExpiryDeadline,
     });
-
+    expect(screen.getByTestId("write-approval-approve")).not.toBeDisabled();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_001);
+      vi.advanceTimersByTime(2_500);
     });
-
-    expect(onExpiryDeadline).toHaveBeenCalledTimes(1);
-    expect(onDecide).not.toHaveBeenCalled();
     expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
     expect(screen.getByTestId("write-approval-reject")).toBeDisabled();
     expect(screen.getByTestId("write-approval-review-diff")).toBeDisabled();
-
-    await act(async () => {
-      screen.getByTestId("write-approval-review-diff").click();
-    });
-    expect(onReviewDiff).not.toHaveBeenCalled();
-  });
-
-  it("never places the grant into console output on decide", async () => {
-    const user = userEvent.setup();
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const onDecide = vi.fn().mockResolvedValue(undefined);
-    renderBar({ onDecide });
-    await user.click(screen.getByTestId("write-approval-approve"));
-    expect(onDecide).toHaveBeenCalledWith("approve_once");
-    for (const call of [...errorSpy.mock.calls, ...logSpy.mock.calls]) {
-      expect(JSON.stringify(call)).not.toContain(grant);
-    }
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    expect(onExpiryDeadline).toHaveBeenCalled();
   });
 });

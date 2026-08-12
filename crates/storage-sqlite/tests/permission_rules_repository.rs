@@ -283,6 +283,62 @@ fn scope_shape_and_bounded_pattern_fail_closed() {
     assert_eq!(bounded, PermissionRuleError::InvalidPattern);
 }
 
+/// EA-03 sequence B: empty / whitespace-only patterns must fail at repository
+/// boundary (kernel treats empty pattern as match-all). Not renderer-only.
+#[test]
+fn empty_and_whitespace_patterns_are_rejected_by_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = SqlitePermissionRuleRepository::open(db_path(&temp)).unwrap();
+
+    let empty = repo
+        .add(add(
+            PermissionRuleScope::Global,
+            None,
+            PermissionRulePrefix::Process,
+            "",
+            PermissionRuleAction::Allow,
+        ))
+        .expect_err("empty pattern must fail closed at repository");
+    assert_eq!(empty, PermissionRuleError::InvalidPattern);
+    assert_eq!(empty.code(), "permission_rule_invalid_pattern");
+
+    let whitespace = repo
+        .add(add(
+            PermissionRuleScope::Global,
+            None,
+            PermissionRulePrefix::Process,
+            "   \t  ",
+            PermissionRuleAction::Allow,
+        ))
+        .expect_err("whitespace-only pattern must fail closed at repository");
+    assert_eq!(whitespace, PermissionRuleError::InvalidPattern);
+
+    assert!(
+        repo.list(PermissionRuleScope::Global, None)
+            .unwrap()
+            .is_empty(),
+        "no empty-pattern global process allow may be stored"
+    );
+}
+
+/// EA-03: repository trims pattern before persist so leading/trailing space
+/// cannot smuggle a different match subject.
+#[test]
+fn repository_trims_pattern_before_persist() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = SqlitePermissionRuleRepository::open(db_path(&temp)).unwrap();
+    let rule = repo
+        .add(add(
+            PermissionRuleScope::Global,
+            None,
+            PermissionRulePrefix::Process,
+            "  cargo test *  ",
+            PermissionRuleAction::Allow,
+        ))
+        .unwrap();
+    assert_eq!(rule.pattern, "cargo test *");
+}
+
 #[test]
 fn permission_rule_authority_has_no_project_directory_config_loader() {
     let source = include_str!("../src/permission_rules.rs").to_ascii_lowercase();

@@ -44,6 +44,10 @@ pub struct PreparedDispatch {
     /// Stable call id used for durable reservation (also the dispatch audit key
     /// until a proposal_id is known).
     pub call_id: String,
+    /// Initiator frozen while the native host prepares the assignment from its
+    /// project-scoped Controller resolution. Keep this private so the ledger
+    /// cannot be redirected by later mutation of the public assignment view.
+    host_derived_initiator_slot_id: SlotId,
 }
 
 /// In-memory audit record linking an assignment to a process proposal.
@@ -81,6 +85,8 @@ pub enum DispatchError {
     Process(GovernedProcessBridgeError),
     #[error("dispatch ledger is unavailable")]
     LedgerUnavailable,
+    #[error("dispatch initiator attribution no longer matches the host-derived initiator")]
+    InitiatorAttributionMismatch,
 }
 
 impl DispatchError {
@@ -91,6 +97,7 @@ impl DispatchError {
             Self::UnsupportedAuth => "role_dispatch_unsupported_auth",
             Self::Process(_) => "role_dispatch_process_unavailable",
             Self::LedgerUnavailable => "role_dispatch_ledger_unavailable",
+            Self::InitiatorAttributionMismatch => "role_dispatch_initiator_attribution_mismatch",
         }
     }
 }
@@ -109,12 +116,18 @@ pub fn prepare_dispatch(input: BuildAssignmentInput) -> Result<PreparedDispatch,
 }
 
 fn prepared_from_new_assignment(new: NewAssignment) -> PreparedDispatch {
+    // `BuildAssignmentInput` is constructed at the native boundary, where the
+    // renderer claim has already been resolved to the current project's
+    // Controller slot. Freeze that host-derived identity separately from the
+    // public assignment projection used by the rest of the process chain.
+    let host_derived_initiator_slot_id = new.initiator_slot_id;
     let call_id = format!("dispatch-{}", new.id.0);
     let provider = provider_proposal_from_command(&new.proposed_command, call_id.clone());
     PreparedDispatch {
         assignment: Assignment::from(new),
         provider,
         call_id,
+        host_derived_initiator_slot_id,
     }
 }
 
@@ -177,10 +190,16 @@ pub fn register_dispatch_on_requested(
     run_id: RunId,
     proposal_id: impl Into<String>,
 ) -> Result<DispatchRecord, DispatchError> {
+    // Do not let a later consumer reattribute the ledger by altering the
+    // public assignment struct. A mismatch is an explicit fail-closed error.
+    if prepared.assignment.initiator_slot_id != prepared.host_derived_initiator_slot_id {
+        return Err(DispatchError::InitiatorAttributionMismatch);
+    }
+
     let proposal_id = proposal_id.into();
     let record = DispatchRecord {
         assignment_id: prepared.assignment.id,
-        initiator_slot_id: prepared.assignment.initiator_slot_id,
+        initiator_slot_id: prepared.host_derived_initiator_slot_id,
         target_slot_id: prepared.assignment.target_slot_id,
         governance: prepared.assignment.governance,
         proposal_id: Some(proposal_id.clone()),
@@ -574,6 +593,69 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.code(), "role_dispatch_empty_argv_element");
+    }
+
+    #[test]
+    fn ledger_records_the_host_derived_initiator() {
+        let host_derived_initiator = SlotId::new();
+        let target_id = SlotId::new();
+        let prepared = prepare_dispatch(BuildAssignmentInput {
+            initiator_slot_id: host_derived_initiator,
+            target: Some(local_cli_target(target_id, "node")),
+            requested_role: None,
+            requested_slot_id: Some(target_id),
+            task_text: "record attribution".into(),
+            cwd: None,
+        })
+        .unwrap();
+
+        let proposal_id = format!("ledger-{}", Uuid::new_v4());
+        let record = register_dispatch_on_requested(
+            &prepared,
+            "conversation-for-ledger-test",
+            RunId::new(),
+            proposal_id,
+        )
+        .expect("host-derived initiator must be recordable");
+
+        assert_eq!(record.initiator_slot_id, host_derived_initiator);
+        assert_eq!(
+            record.initiator_slot_id,
+            prepared.host_derived_initiator_slot_id
+        );
+    }
+
+    #[test]
+    fn ledger_refuses_reattribution_after_preparation() {
+        let host_derived_initiator = SlotId::new();
+        let target_id = SlotId::new();
+        let mut prepared = prepare_dispatch(BuildAssignmentInput {
+            initiator_slot_id: host_derived_initiator,
+            target: Some(local_cli_target(target_id, "node")),
+            requested_role: None,
+            requested_slot_id: Some(target_id),
+            task_text: "record attribution".into(),
+            cwd: None,
+        })
+        .unwrap();
+        prepared.assignment.initiator_slot_id = SlotId::new();
+
+        let proposal_id = format!("forged-ledger-{}", Uuid::new_v4());
+        let err = register_dispatch_on_requested(
+            &prepared,
+            "conversation-for-ledger-test",
+            RunId::new(),
+            proposal_id.clone(),
+        )
+        .expect_err("the ledger must not accept a reattributed assignment");
+
+        assert_eq!(err.code(), "role_dispatch_initiator_attribution_mismatch");
+        assert!(
+            get_dispatch_record(&proposal_id)
+                .expect("ledger lookup")
+                .is_none(),
+            "a rejected reattribution must never create a ledger record"
+        );
     }
 
     #[test]

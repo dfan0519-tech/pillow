@@ -122,7 +122,6 @@ fn build_assignment_input(
     task_text: String,
     cwd: Option<String>,
 ) -> Result<BuildAssignmentInput, ConversationCommandError> {
-    let initiator = parse_dispatch_slot_id(initiator_slot_id)?;
     let requested_slot_id = target_slot_id.map(parse_dispatch_slot_id).transpose()?;
     let requested_role = target_role.map(parse_dispatch_role).transpose()?;
 
@@ -132,6 +131,11 @@ fn build_assignment_input(
             "role dispatch target slot was not found",
         ));
     }
+
+    // The Tauri payload only *claims* an initiator. Resolve it from the current
+    // project's host-loaded slots so downstream domain state and the ledger
+    // receive a host-derived Controller id, never the raw renderer value.
+    let initiator = resolve_controller_initiator(project_slots, initiator_slot_id)?;
 
     let target_view =
         resolve_target_view(project_slots, requested_slot_id, requested_role.as_ref());
@@ -148,6 +152,36 @@ fn build_assignment_input(
         task_text,
         cwd,
     })
+}
+
+/// Resolve the claimed initiator against the slots loaded for the current
+/// project. `RuntimeSlotService::list(project_id)` is deliberately the source
+/// of truth: an arbitrary UUID is not a dispatch authority.
+fn resolve_controller_initiator(
+    project_slots: &[RuntimeSlotView],
+    claimed_slot_id: &str,
+) -> Result<SlotId, ConversationCommandError> {
+    let claimed = parse_dispatch_initiator_slot_id(claimed_slot_id)?;
+    let Some(view) = project_slots
+        .iter()
+        .find(|view| view.slot.id.0 == claimed.0)
+    else {
+        return Err(ConversationCommandError::new(
+            "role_dispatch_initiator_not_in_project",
+            "role dispatch initiator slot does not belong to the current project",
+        ));
+    };
+
+    if !matches!(view.slot.role, StorageSlotRole::Controller) {
+        return Err(ConversationCommandError::new(
+            "role_dispatch_initiator_not_controller",
+            "role dispatch initiator slot is not the current project's Controller",
+        ));
+    }
+
+    // Return the id from host-loaded slot metadata rather than the parsed wire
+    // claim. Equality above binds the claim; this value is what gets recorded.
+    Ok(SlotId(view.slot.id.0))
 }
 
 fn resolve_target_view<'a>(
@@ -228,6 +262,15 @@ fn parse_dispatch_slot_id(value: &str) -> Result<SlotId, ConversationCommandErro
     })
 }
 
+fn parse_dispatch_initiator_slot_id(value: &str) -> Result<SlotId, ConversationCommandError> {
+    Uuid::parse_str(value).map(SlotId).map_err(|_| {
+        ConversationCommandError::new(
+            "role_dispatch_initiator_id_invalid",
+            "role dispatch initiator slot id is invalid",
+        )
+    })
+}
+
 fn parse_dispatch_role(value: &str) -> Result<SlotRole, ConversationCommandError> {
     match value {
         "controller" => Ok(SlotRole::Controller),
@@ -261,12 +304,55 @@ fn command_to_conversation(error: CommandError) -> ConversationCommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use keeper_project::ProjectId;
     // Imported here, not at module scope: only tests construct raw slot ids,
     // and clippy does not compile test code, so a module-level import reads as
     // unused and fails -D warnings while the tests still need it.
-    use keeper_storage_sqlite::RuntimeSlotId;
-    use keeper_storage_sqlite::SlotAuth;
+    use keeper_storage_sqlite::{RuntimeSlot, RuntimeSlotId, SlotAuth};
     use pillow_role_dispatch::{GovernanceCapability, ProposeError, build_assignment};
+
+    fn slot_view(
+        project_id: ProjectId,
+        slot_id: Uuid,
+        role: StorageSlotRole,
+        auth: SlotAuth,
+    ) -> RuntimeSlotView {
+        RuntimeSlotView {
+            slot: RuntimeSlot {
+                id: RuntimeSlotId(slot_id),
+                project_id,
+                display_name: "test slot".into(),
+                auth,
+                role,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            secret_configured: true,
+        }
+    }
+
+    fn controller_slot(project_id: ProjectId, slot_id: Uuid) -> RuntimeSlotView {
+        slot_view(
+            project_id,
+            slot_id,
+            StorageSlotRole::Controller,
+            SlotAuth::GrokLogin { model_id: None },
+        )
+    }
+
+    fn worker_slot(project_id: ProjectId, slot_id: Uuid) -> RuntimeSlotView {
+        slot_view(
+            project_id,
+            slot_id,
+            StorageSlotRole::Custom("worker".into()),
+            SlotAuth::LocalCli {
+                executable_path: "node".into(),
+                launch_args: vec!["--version".into()],
+                status_args: vec![],
+            },
+        )
+    }
 
     fn sample_local(slot: Uuid) -> TargetSlotRecord {
         TargetSlotRecord {
@@ -330,6 +416,128 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "role_dispatch_target_missing");
+    }
+
+    #[test]
+    fn project_controller_is_accepted_as_dispatch_initiator() {
+        let project_id = ProjectId::new();
+        let controller_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let project_slots = vec![
+            controller_slot(project_id, controller_id),
+            worker_slot(project_id, target_id),
+        ];
+
+        let input = build_assignment_input(
+            &project_slots,
+            &controller_id.to_string(),
+            Some(&target_id.to_string()),
+            None,
+            "delegate this task".into(),
+            Some(".".into()),
+        )
+        .expect("the current project's Controller must be able to dispatch");
+
+        assert_eq!(input.initiator_slot_id, SlotId(controller_id));
+        assert_eq!(input.target.expect("target").slot_id, SlotId(target_id));
+    }
+
+    #[test]
+    fn random_initiator_id_is_rejected_at_native_dispatch_boundary() {
+        let project_id = ProjectId::new();
+        let controller_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let project_slots = vec![
+            controller_slot(project_id, controller_id),
+            worker_slot(project_id, target_id),
+        ];
+
+        let err = build_assignment_input(
+            &project_slots,
+            &Uuid::new_v4().to_string(),
+            Some(&target_id.to_string()),
+            None,
+            "delegate this task".into(),
+            Some(".".into()),
+        )
+        .expect_err("a random initiator must not enter the governed process chain");
+
+        assert_eq!(err.code, "role_dispatch_initiator_not_in_project");
+    }
+
+    #[test]
+    fn other_project_initiator_is_rejected_at_native_dispatch_boundary() {
+        let project_id = ProjectId::new();
+        let controller_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let project_slots = vec![
+            controller_slot(project_id, controller_id),
+            worker_slot(project_id, target_id),
+        ];
+        let other_project_controller = controller_slot(ProjectId::new(), Uuid::new_v4());
+
+        let err = build_assignment_input(
+            &project_slots,
+            &other_project_controller.slot.id.0.to_string(),
+            Some(&target_id.to_string()),
+            None,
+            "delegate this task".into(),
+            Some(".".into()),
+        )
+        .expect_err("a Controller from another project must not dispatch here");
+
+        assert_eq!(err.code, "role_dispatch_initiator_not_in_project");
+    }
+
+    #[test]
+    fn non_controller_initiator_is_rejected_at_native_dispatch_boundary() {
+        let project_id = ProjectId::new();
+        let controller_id = Uuid::new_v4();
+        let librarian_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let project_slots = vec![
+            controller_slot(project_id, controller_id),
+            slot_view(
+                project_id,
+                librarian_id,
+                StorageSlotRole::Librarian,
+                SlotAuth::GrokLogin { model_id: None },
+            ),
+            worker_slot(project_id, target_id),
+        ];
+
+        let err = build_assignment_input(
+            &project_slots,
+            &librarian_id.to_string(),
+            Some(&target_id.to_string()),
+            None,
+            "delegate this task".into(),
+            Some(".".into()),
+        )
+        .expect_err("a non-Controller initiator must be rejected");
+
+        assert_eq!(err.code, "role_dispatch_initiator_not_controller");
+    }
+
+    #[test]
+    fn controller_self_dispatch_remains_rejected_after_initiator_resolution() {
+        let project_id = ProjectId::new();
+        let controller_id = Uuid::new_v4();
+        let project_slots = vec![controller_slot(project_id, controller_id)];
+
+        let input = build_assignment_input(
+            &project_slots,
+            &controller_id.to_string(),
+            Some(&controller_id.to_string()),
+            None,
+            "delegate this task".into(),
+            Some(".".into()),
+        )
+        .expect("the Controller identity is valid before the domain self-dispatch check");
+
+        let err = build_assignment(input).expect_err("self-dispatch must remain forbidden");
+        assert!(matches!(err, ProposeError::SelfDispatch { .. }));
+        assert_eq!(err.code(), "role_dispatch_self_dispatch");
     }
 
     #[test]

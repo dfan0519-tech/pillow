@@ -7,7 +7,8 @@ use keeper_storage_sqlite::{SqlitePermissionRuleRepository, SqliteProjectReposit
 
 use crate::app_state::AppState;
 use crate::permission_rule_commands::{
-    add_permission_rule_impl, delete_permission_rule_impl, list_permission_rules_impl,
+    add_permission_rule_impl, command_pattern_or_reject, delete_permission_rule_impl,
+    list_permission_rules_impl,
 };
 
 fn harness() -> (
@@ -135,4 +136,71 @@ fn desktop_invoke_handler_registers_exact_permission_rule_commands() {
             "missing invoke command {command}"
         );
     }
+}
+
+/// EA-03 sequence B: direct native invoke (bypassing TS gateway) cannot plant
+/// an empty or whitespace-only global process allow (match-all) rule.
+#[test]
+fn direct_invoke_rejects_empty_and_whitespace_process_allow_patterns() {
+    let (_temp, app, rules, _project_id) = harness();
+
+    let empty = add_permission_rule_impl(
+        &rules,
+        &app,
+        "global".into(),
+        None,
+        "process".into(),
+        "".into(),
+        "allow".into(),
+    )
+    .expect_err("empty pattern must fail at native command boundary");
+    assert_eq!(empty.code, "permission_rules_invalid_pattern");
+
+    let whitespace = add_permission_rule_impl(
+        &rules,
+        &app,
+        "global".into(),
+        None,
+        "process".into(),
+        "   \t  ".into(),
+        "allow".into(),
+    )
+    .expect_err("whitespace-only pattern must fail at native command boundary");
+    assert_eq!(whitespace.code, "permission_rules_invalid_pattern");
+
+    // Bypass command-layer trim by going through repository is covered in
+    // storage tests; here prove the listed global set stays empty after
+    // rejected direct invokes.
+    assert!(
+        list_permission_rules_impl(&rules, &app, "global".into(), None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Pins the command layer on its own.
+///
+/// `direct_invoke_rejects_empty_and_whitespace_process_allow_patterns` above
+/// goes through the repository, which rejects blank patterns as well and
+/// reports the same code — so it stays green even with the command-layer check
+/// deleted. Verified by mutation: removing that check left the whole suite
+/// green. These call the boundary directly, so the second layer of the
+/// defence the external audit asked for is actually held in place.
+#[test]
+fn command_layer_rejects_blank_patterns_without_consulting_the_repository() {
+    for blank in ["", "   ", "\t", " \t \r\n "] {
+        let error = command_pattern_or_reject(blank)
+            .expect_err("command boundary must reject a blank pattern on its own");
+        assert_eq!(error.code, "permission_rules_invalid_pattern");
+    }
+}
+
+#[test]
+fn command_layer_trims_before_the_pattern_reaches_storage() {
+    // Storage trims too. This pins that the value handed on is already
+    // trimmed, so the two layers cannot disagree about what was stored.
+    assert_eq!(
+        command_pattern_or_reject("  cargo test *  ").expect("non-blank pattern"),
+        "cargo test *"
+    );
 }
