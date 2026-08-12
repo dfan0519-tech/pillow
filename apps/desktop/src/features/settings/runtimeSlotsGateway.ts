@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   defaultMockProviderLoginCatalog,
+  looksLikePublicAuthorizeUrl,
   mapOauthLoginErrorMessage,
 } from "./oauthLoginUi";
 import {
@@ -1009,6 +1010,7 @@ export function mapRuntimeSlotErrorMessage(code: string): string {
     case "runtime_slot_oauth_device_denied":
     case "runtime_slot_oauth_login_state_mismatch":
     case "runtime_slot_oauth_loopback_state_mismatch":
+    case "runtime_slot_oauth_browser_open_failed":
       return mapOauthLoginErrorMessage(code);
     case "runtime_slot_provider_login_catalog_unavailable":
       return "无法加载 OAuth 提供方目录，请稍后重试。";
@@ -1075,10 +1077,22 @@ export function normalizeRuntimeSlotsError(
   if (error instanceof RuntimeSlotsGatewayError) return error;
   if (isRecord(error) && typeof error.code === "string") {
     const code = error.code;
-    // Never use host message text — may carry secrets or paths.
+    // Host messages are ignored by default (may carry secrets/paths).
+    // Exception: browser-open / loopback-timeout put a *public* authorize URL
+    // in `message` so the UI can offer a copyable manual-open fallback.
+    let authorizeUrl: string | null = null;
+    if (
+      (code === "runtime_slot_oauth_browser_open_failed"
+        || code === "runtime_slot_oauth_loopback_timeout")
+      && typeof error.message === "string"
+      && looksLikePublicAuthorizeUrl(error.message)
+    ) {
+      authorizeUrl = error.message.trim();
+    }
     return new RuntimeSlotsGatewayError(
       code,
       mapRuntimeSlotErrorMessage(code),
+      authorizeUrl,
     );
   }
   return new RuntimeSlotsGatewayError(
@@ -1375,6 +1389,8 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
    * never appends a slot (no optimistic success).
    */
   private oauthLoginFailCode: string | null = null;
+  /** Public authorize URL paired with browser-open / timeout injection. */
+  private oauthLoginFailAuthorizeUrl: string | null = null;
   /** Non-secret account label returned on successful mock OAuth create. */
   private oauthSuccessAccountLabel: string | null = "user@example.test";
   private oauthSuccessExpiresAt: string =
@@ -1402,10 +1418,15 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
 
   /**
    * Inject OAuth login failure. Failure never creates a slot.
-   * Codes: timeout / denied / state_mismatch families.
+   * Codes: timeout / denied / state_mismatch / browser_open_failed families.
+   * Optional `authorizeUrl` is public only (manual-open fallback).
    */
-  setOauthLoginFail(code: string | null): void {
+  setOauthLoginFail(
+    code: string | null,
+    authorizeUrl: string | null = null,
+  ): void {
     this.oauthLoginFailCode = code;
+    this.oauthLoginFailAuthorizeUrl = authorizeUrl;
   }
 
   setOauthLoginSuccessMeta(options: {
@@ -1595,6 +1616,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         throw new RuntimeSlotsGatewayError(
           code,
           mapRuntimeSlotErrorMessage(code),
+          this.oauthLoginFailAuthorizeUrl,
         );
       }
       if (!input.providerId?.trim()) {

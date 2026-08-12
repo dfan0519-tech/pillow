@@ -11,6 +11,7 @@ import { MockRuntimeSlotsGateway } from "../src/features/settings/runtimeSlotsGa
 import {
   GOVERNED_GROK_BADGE,
   OAUTH_AUTH_BADGE,
+  OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
   OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON,
   OAUTH_LOGIN_DENIED_MESSAGE,
   OAUTH_LOGIN_IN_PROGRESS,
@@ -330,6 +331,42 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       );
     });
     expect(gateway.getSlotsSnapshot()).toHaveLength(0);
+  });
+
+  it("browser open failed: shows readable copy + copyable authorize URL, no slot", async () => {
+    const user = userEvent.setup();
+    const gateway = new MockRuntimeSlotsGateway();
+    const publicUrl =
+      "https://as.example.test/oauth/authorize?client_id=test&state=abc";
+    gateway.setOauthLoginFail(
+      "runtime_slot_oauth_browser_open_failed",
+      publicUrl,
+    );
+    render(
+      <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
+    );
+
+    await fillOpenaiOauthForm(user);
+    await user.click(screen.getByTestId("runtime-slots-form-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("runtime-slots-error")).toHaveTextContent(
+        OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
+      );
+    });
+    const urlInput = screen.getByTestId(
+      "runtime-slots-oauth-authorize-url",
+    ) as HTMLInputElement;
+    expect(urlInput.value).toBe(publicUrl);
+    expect(urlInput).toHaveAttribute("readonly");
+    expect(gateway.getSlotsSnapshot()).toHaveLength(0);
+    expect(screen.queryByTestId("runtime-slots-list")).toBeNull();
+    // No token-shaped material in the DOM fallback surface.
+    assertMaterialAbsentFromDom(
+      TOKEN_SENTINEL,
+      REFRESH_SENTINEL,
+      CODE_SENTINEL,
+    );
   });
 
   it("shows in-progress copy while login is outstanding (no optimistic slot)", async () => {

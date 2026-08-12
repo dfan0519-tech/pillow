@@ -4,6 +4,7 @@ mod catalog;
 mod execution_path;
 mod grok_config;
 mod oauth;
+mod oauth_login;
 mod oauth_transport;
 mod provider_login;
 mod secret;
@@ -39,6 +40,12 @@ pub use oauth::{
     access_token_needs_refresh_now, build_authorize_url, build_code_exchange_form,
     build_refresh_token_form, expiry_from_expires_in, generate_pkce, parse_token_response,
     s256_challenge, verify_s256_challenge,
+};
+pub use oauth_login::{
+    DEFAULT_OAUTH_LOGIN_LOOPBACK_TIMEOUT, NullOauthLoginProgress, OauthLoginFailure,
+    OauthLoginInput, OauthLoginOptions, OauthLoginProgress, OauthLoginProgressEvent,
+    OauthLoginTokens, RecordingOauthLoginProgress, perform_oauth_login,
+    perform_oauth_login_production,
 };
 pub use oauth_transport::{
     AuthorizationCode, AuthorizeUrlPolicy, BrowserOpener, DEFAULT_DEVICE_POLL_INTERVAL,

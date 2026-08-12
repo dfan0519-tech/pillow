@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   MockPermissionRulesGateway,
   TauriPermissionRulesGateway,
@@ -8,6 +8,17 @@ import { PermissionRulesSection } from "../permissions/PermissionRulesSection";
 import {
   GROK_CLI_LOGIN_SETTINGS_HELP,
 } from "./loginGuidance";
+import {
+  BYPASS_AVAILABLE_HELP,
+  BYPASS_AVAILABLE_LABEL,
+  BYPASS_PROJECT_LOCKED_NOTE,
+  PERMISSION_DENY_RECEIPT_NOTE,
+  PERMISSION_MODE_OPTIONS,
+  PERMISSION_TWO_AXIS_NOTE,
+  PROJECT_MODE_HELP,
+  PROJECT_MODE_NO_PROJECT_NOTE,
+  permissionModeOption,
+} from "./permissionCopy";
 import { RuntimeSlotsSection } from "./RuntimeSlotsSection";
 import { LibrarianMonitorSection } from "./LibrarianMonitorSection";
 import {
@@ -16,7 +27,7 @@ import {
   parseUiThemeLabel,
   sourceLabel,
   type PermissionModeLabel,
-  type PermissionModeSettingsView,
+  type PermissionPolicyView,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type SettingsGateway,
@@ -51,6 +62,46 @@ export type SettingsPanelProps = {
   librarianAuditGateway?: LibrarianAuditGateway;
 };
 
+/** Settings category ids — IDE-style left nav (VS Code / Cursor / Zed). */
+export type SettingsCategoryId =
+  | "security"
+  | "agents"
+  | "runtime"
+  | "appearance"
+  | "diagnostics";
+
+export const SETTINGS_CATEGORIES: {
+  id: SettingsCategoryId;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "security",
+    label: "安全与权限",
+    description: "批准策略、两级 Bypass、权限规则",
+  },
+  {
+    id: "agents",
+    label: "代理与槽位",
+    description: "运行时槽位、角色与模型",
+  },
+  {
+    id: "runtime",
+    label: "运行时",
+    description: "适配器与 Grok 路径（高级）",
+  },
+  {
+    id: "appearance",
+    label: "外观",
+    description: "主题",
+  },
+  {
+    id: "diagnostics",
+    label: "维护与诊断",
+    description: "项目体检",
+  },
+];
+
 const ADAPTER_OPTIONS_BASE: { value: RuntimeAdapterLabel; label: string }[] = [
   { value: "grok-acp", label: "Grok ACP（默认）" },
 ];
@@ -75,16 +126,9 @@ const THEME_OPTIONS: { value: UiThemeLabel; label: string }[] = [
   { value: "light", label: "浅色" },
 ];
 
-const PERMISSION_MODE_OPTIONS: { value: PermissionModeLabel; label: string }[] = [
-  { value: "default", label: "默认：写入与命令都询问" },
-  { value: "accept_edits", label: "接受改动：写入自动，命令询问" },
-  { value: "bypass", label: "全开：写入与命令都自动" },
-];
-
 /**
- * S0 settings surface: runtime adapter + Grok paths + global UI theme.
+ * Settings surface: IDE-style category nav + two-tier permission policy.
  * Env overrides are visible and read-only (ADR-0003).
- * Content form — high contrast, small radius, no per-row glass.
  */
 function defaultPermissionRulesGateway(): PermissionRulesGateway {
   if (
@@ -106,16 +150,17 @@ export function SettingsPanel({
   runtimeSlotsGateway: runtimeSlotsGatewayProp,
   librarianAuditGateway,
 }: SettingsPanelProps) {
+  const [category, setCategory] = useState<SettingsCategoryId>("security");
   const [scope, setScope] = useState<SettingsScope>("global");
   const [settings, setSettings] = useState<RuntimeSettingsView | null>(null);
   const [themeSettings, setThemeSettings] = useState<ThemeSettingsView | null>(
     null,
   );
-  const [permissionModeSettings, setPermissionModeSettings] =
-    useState<PermissionModeSettingsView | null>(null);
+  const [policy, setPolicy] = useState<PermissionPolicyView | null>(null);
   const [adapterDraft, setAdapterDraft] = useState<RuntimeAdapterLabel>("grok-acp");
   const [themeDraft, setThemeDraft] = useState<UiThemeLabel>("dark");
-  const [permissionModeDraft, setPermissionModeDraft] =
+  const [bypassAvailableDraft, setBypassAvailableDraft] = useState(true);
+  const [projectModeDraft, setProjectModeDraft] =
     useState<PermissionModeLabel>("default");
   const [executableDraft, setExecutableDraft] = useState("");
   const [profileDraft, setProfileDraft] = useState("");
@@ -142,25 +187,31 @@ export function SettingsPanel({
     setThemeDraft(parseUiThemeLabel(view.theme.value));
   }, []);
 
-  const applyPermissionModeView = useCallback((view: PermissionModeSettingsView) => {
-    setPermissionModeSettings(view);
-    setPermissionModeDraft(view.mode);
+  const applyPolicyView = useCallback((view: PermissionPolicyView) => {
+    setPolicy(view);
+    setBypassAvailableDraft(view.bypassAvailable);
+    if (view.projectMode) {
+      setProjectModeDraft(view.projectMode);
+    } else {
+      // No project: seed draft from effective so the select is not empty when opened later.
+      setProjectModeDraft(view.effectiveMode);
+    }
   }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [view, themeView, permissionModeView] = await Promise.all([
+      const [view, themeView, policyView] = await Promise.all([
         gateway.getRuntimeSettings(effectiveProjectId),
         // Theme is global-only in the product UI; resolve without project so
         // project-scoped rows (if any) do not affect the editor value.
         gateway.getThemeSettings(null),
-        gateway.getPermissionMode(),
+        gateway.getPermissionPolicy(projectId),
       ]);
       applyView(view);
       applyThemeView(themeView);
-      applyPermissionModeView(permissionModeView);
+      applyPolicyView(policyView);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "加载设置失败。";
@@ -169,11 +220,12 @@ export function SettingsPanel({
       setLoading(false);
     }
   }, [
-    applyPermissionModeView,
+    applyPolicyView,
     applyThemeView,
     applyView,
     effectiveProjectId,
     gateway,
+    projectId,
   ]);
 
   useEffect(() => {
@@ -187,56 +239,86 @@ export function SettingsPanel({
     }
   }, [projectId, scope]);
 
-  async function handleSave(event: FormEvent) {
-    event.preventDefault();
+  async function handleSave() {
     if (!settings) return;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       let view = settings;
-      if (!isEnvOverride(settings.adapter)) {
-        view = await gateway.setRuntimeAdapter(
-          scope,
-          effectiveProjectId,
-          adapterDraft,
-        );
-      }
-      if (!isEnvOverride(settings.grokExecutable)) {
-        const trimmed = executableDraft.trim();
-        if (trimmed.length > 0) {
-          view = await gateway.setGrokExecutable(
-            scope,
-            effectiveProjectId,
-            trimmed,
+      let policyView = policy;
+
+      if (category === "security") {
+        policyView = await gateway.setBypassAvailable(bypassAvailableDraft);
+        applyPolicyView(policyView);
+        if (projectId) {
+          // Clamp draft if capability just turned off while Bypass was selected.
+          const modeToWrite =
+            projectModeDraft === "bypass" && !policyView.bypassAvailable
+              ? "default"
+              : projectModeDraft;
+          if (modeToWrite !== projectModeDraft) {
+            setProjectModeDraft(modeToWrite);
+          }
+          policyView = await gateway.setProjectPermissionMode(
+            projectId,
+            modeToWrite,
           );
+          applyPolicyView(policyView);
+        }
+        onPermissionModeChanged?.(policyView.effectiveMode);
+      }
+
+      if (category === "appearance") {
+        if (themeSettings && !isEnvOverride(themeSettings.theme)) {
+          const themeView = await gateway.setUiTheme(themeDraft);
+          applyThemeView(themeView);
+          const applied = parseUiThemeLabel(themeView.theme.value);
+          applyDocumentTheme(applied);
+          onThemeChanged?.(applied);
         }
       }
-      if (!isEnvOverride(settings.grokProfile)) {
-        const trimmed = profileDraft.trim();
-        if (trimmed.length > 0) {
-          view = await gateway.setGrokProfile(
+
+      if (category === "runtime") {
+        if (!isEnvOverride(settings.adapter)) {
+          view = await gateway.setRuntimeAdapter(
             scope,
             effectiveProjectId,
-            trimmed,
+            adapterDraft,
           );
         }
+        if (!isEnvOverride(settings.grokExecutable)) {
+          const trimmed = executableDraft.trim();
+          if (trimmed.length > 0) {
+            view = await gateway.setGrokExecutable(
+              scope,
+              effectiveProjectId,
+              trimmed,
+            );
+          }
+        }
+        if (!isEnvOverride(settings.grokProfile)) {
+          const trimmed = profileDraft.trim();
+          if (trimmed.length > 0) {
+            view = await gateway.setGrokProfile(
+              scope,
+              effectiveProjectId,
+              trimmed,
+            );
+          }
+        }
+        applyView(view);
       }
-      // Theme is always global scope in the UI (never project).
-      if (themeSettings && !isEnvOverride(themeSettings.theme)) {
-        const themeView = await gateway.setUiTheme(themeDraft);
-        applyThemeView(themeView);
-        const applied = parseUiThemeLabel(themeView.theme.value);
-        applyDocumentTheme(applied);
-        onThemeChanged?.(applied);
-      }
-      if (scope === "global" && permissionModeSettings) {
-        const permissionModeView = await gateway.setPermissionMode(permissionModeDraft);
-        applyPermissionModeView(permissionModeView);
-        onPermissionModeChanged?.(permissionModeView.mode);
-      }
-      applyView(view);
-      setNotice("已保存。主题与权限模式立即生效；运行时适配器与 Grok 路径在重启 Pillow 后生效。");
+
+      const noticeByCategory: Record<SettingsCategoryId, string> = {
+        security: "已保存。权限策略立即生效。",
+        appearance: "已保存。主题立即生效。",
+        runtime:
+          "已保存。运行时适配器与 Grok 路径在重启 Pillow 后生效。",
+        agents: "已保存。",
+        diagnostics: "已保存。",
+      };
+      setNotice(noticeByCategory[category]);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "保存设置失败。";
@@ -266,6 +348,15 @@ export function SettingsPanel({
       ? [...adapterOptions, ADAPTER_OPTION_FAKE]
       : adapterOptions;
 
+  const bypassOptionDisabled = !bypassAvailableDraft;
+  const projectModeSelectDisabled = saving || !projectId;
+  const activeCategoryMeta = SETTINGS_CATEGORIES.find((c) => c.id === category);
+
+  const showSave =
+    category === "security"
+    || category === "runtime"
+    || category === "appearance";
+
   return (
     <div
       aria-labelledby="settings-panel-title"
@@ -278,7 +369,7 @@ export function SettingsPanel({
         <header className="modal-card__head settings-panel__head">
           <div>
             <h2 id="settings-panel-title">设置</h2>
-            <p>非密钥运行时配置。Grok 登录由 Grok CLI 管理，Pillow 不存储该登录。</p>
+            <p>按功能分区。非密钥运行时配置；Grok 登录由 Grok CLI 管理。</p>
           </div>
           <button
             aria-label="关闭设置"
@@ -298,286 +389,575 @@ export function SettingsPanel({
           {GROK_CLI_LOGIN_SETTINGS_HELP}
         </p>
 
-        <div className="settings-scope" role="group" aria-label="设置作用域">
-          <button
-            aria-pressed={scope === "global"}
-            className={
-              scope === "global"
-                ? "settings-scope__btn settings-scope__btn--active"
-                : "settings-scope__btn"
-            }
-            onClick={() => setScope("global")}
-            type="button"
+        <div className="settings-layout">
+          <nav
+            aria-label="设置分类"
+            className="settings-nav"
+            data-testid="settings-nav"
           >
-            全局
-          </button>
-          <button
-            aria-pressed={scope === "project"}
-            className={
-              scope === "project"
-                ? "settings-scope__btn settings-scope__btn--active"
-                : "settings-scope__btn"
-            }
-            disabled={!projectId}
-            onClick={() => setScope("project")}
-            title={projectId ? "当前项目设置" : "打开项目后可编辑项目设置"}
-            type="button"
-          >
-            当前项目
-          </button>
-        </div>
-
-        {loading ? (
-          <p className="settings-status">正在加载设置…</p>
-        ) : (
-          <form className="settings-form" onSubmit={(e) => void handleSave(e)}>
-            <label className="settings-field">
-              <span className="settings-field__label">
-                权限模式
-                {permissionModeSettings ? (
-                  <SourceBadge source={permissionModeSettings.source} />
-                ) : null}
-              </span>
-              <select
-                aria-label="权限模式"
-                className="settings-field__control"
-                data-testid="settings-permission-mode"
-                disabled={saving || scope === "project"}
-                onChange={(event) =>
-                  setPermissionModeDraft(event.target.value as PermissionModeLabel)
-                }
-                title={scope === "project" ? "权限模式仅支持全局设置" : undefined}
-                value={permissionModeDraft}
-              >
-                {PERMISSION_MODE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              {scope === "project" ? (
-                <p
-                  className="settings-env-note"
-                  data-testid="settings-permission-mode-global-only"
-                  role="status"
-                >
-                  权限模式只能由全局设置修改；项目不能为自己开启自动批准。
-                </p>
-              ) : permissionModeDraft === "default" ? (
-                <p className="settings-env-note" role="note">
-                  写入与命令均需逐次确认。
-                </p>
-              ) : (
-                <p className="settings-permission-warning" role="note">
-                  deny 规则始终优先；自动批准仍会生成提案、执行记录与持久收据。
-                </p>
-              )}
-            </label>
-
-            <label className="settings-field">
-              <span className="settings-field__label">
-                外观主题
-                {themeSettings ? (
-                  <SourceBadge
-                    envVar={themeSettings.theme.envVar}
-                    source={themeSettings.theme.source}
-                  />
-                ) : null}
-              </span>
-              <select
-                aria-label="外观主题"
-                className="settings-field__control"
-                data-testid="settings-theme"
-                disabled={themeLocked || saving || scope === "project"}
-                onChange={(e) =>
-                  setThemeDraft(e.target.value as UiThemeLabel)
-                }
-                title={
-                  scope === "project"
-                    ? "主题仅支持全局设置"
-                    : undefined
-                }
-                value={themeDraft}
-              >
-                {THEME_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              {scope === "project" && !themeLocked ? (
-                <p className="settings-env-note" role="status">
-                  主题仅支持全局设置；切换到「全局」作用域可编辑。
-                </p>
-              ) : null}
-              {themeLocked ? (
-                <EnvOverrideNote
-                  envVar={themeSettings?.theme.envVar ?? "PILLOW_THEME"}
-                  testId="settings-theme-env-override"
-                />
-              ) : null}
-            </label>
-
-            <label className="settings-field">
-              <span className="settings-field__label">
-                运行时适配器
-                {settings ? (
-                  <SourceBadge
-                    envVar={settings.adapter.envVar}
-                    source={settings.adapter.source}
-                  />
-                ) : null}
-              </span>
-              <select
-                aria-label="运行时适配器"
-                className="settings-field__control"
-                data-testid="settings-adapter"
-                disabled={adapterLocked || saving}
-                onChange={(e) =>
-                  setAdapterDraft(e.target.value as RuntimeAdapterLabel)
-                }
-                value={adapterDraft}
-              >
-                {adapterSelectOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              {adapterLocked ? (
-                <EnvOverrideNote
-                  envVar={settings?.adapter.envVar ?? "PILLOW_RUNTIME"}
-                  testId="settings-adapter-env-override"
-                />
-              ) : null}
-              {settings
-              && settings.adapter.value === "fake"
-              && !settings.fakeAdapterSelectable
-              && !adapterLocked ? (
-                <p
-                  className="settings-env-note"
-                  data-testid="settings-fake-not-selectable"
-                  role="status"
-                >
-                  当前构建不提供 Fake 适配器（仅开发构建可选）。请改为 Grok
-                  ACP 后保存并重启。已存值不会被静默改写。
-                </p>
-              ) : null}
-            </label>
-
-            <label className="settings-field">
-              <span className="settings-field__label">
-                Grok 可执行文件路径
-                {settings ? (
-                  <SourceBadge
-                    envVar={settings.grokExecutable.envVar}
-                    source={settings.grokExecutable.source}
-                  />
-                ) : null}
-              </span>
-              <input
-                aria-label="Grok 可执行文件路径"
-                autoComplete="off"
-                className="settings-field__control"
-                data-testid="settings-grok-executable"
-                disabled={executableLocked || saving}
-                onChange={(e) => setExecutableDraft(e.target.value)}
-                placeholder="例如 C:\tools\grok.exe（留空则使用 PATH）"
-                spellCheck={false}
-                type="text"
-                value={executableDraft}
-              />
-              {executableLocked ? (
-                <EnvOverrideNote
-                  envVar={
-                    settings?.grokExecutable.envVar ?? "PILLOW_GROK_EXECUTABLE"
-                  }
-                  testId="settings-executable-env-override"
-                />
-              ) : null}
-            </label>
-
-            <label className="settings-field">
-              <span className="settings-field__label">
-                Grok profile 路径
-                {settings ? (
-                  <SourceBadge
-                    envVar={settings.grokProfile.envVar}
-                    source={settings.grokProfile.source}
-                  />
-                ) : null}
-              </span>
-              <input
-                aria-label="Grok profile 路径"
-                autoComplete="off"
-                className="settings-field__control"
-                data-testid="settings-grok-profile"
-                disabled={profileLocked || saving}
-                onChange={(e) => setProfileDraft(e.target.value)}
-                placeholder="进程主目录（仅路径；不会打开 auth 文件）"
-                spellCheck={false}
-                type="text"
-                value={profileDraft}
-              />
-              {profileLocked ? (
-                <EnvOverrideNote
-                  envVar={settings?.grokProfile.envVar ?? "PILLOW_GROK_PROFILE"}
-                  testId="settings-profile-env-override"
-                />
-              ) : null}
-            </label>
-
-            {error ? (
-              <p className="settings-error" data-testid="settings-error" role="alert">
-                {error}
-              </p>
-            ) : null}
-            {notice ? (
-              <p className="settings-notice" data-testid="settings-notice">
-                {notice}
-              </p>
-            ) : null}
-
-            <div className="settings-actions modal-actions">
-              <button onClick={onClose} type="button">
-                关闭
-              </button>
+            {SETTINGS_CATEGORIES.map((item) => (
               <button
-                data-testid="settings-save"
-                disabled={
-                  saving
-                  || loading
-                  || (
-                    adapterLocked
-                    && executableLocked
-                    && profileLocked
-                    && (themeLocked || scope === "project")
-                  )
+                key={item.id}
+                aria-current={category === item.id ? "page" : undefined}
+                className={
+                  category === item.id
+                    ? "settings-nav__item settings-nav__item--active"
+                    : "settings-nav__item"
                 }
-                type="submit"
+                data-testid={`settings-nav-${item.id}`}
+                onClick={() => {
+                  setCategory(item.id);
+                  setNotice(null);
+                  setError(null);
+                }}
+                type="button"
               >
-                {saving ? "保存中…" : "保存"}
+                <span className="settings-nav__label">{item.label}</span>
+                <span className="settings-nav__desc">{item.description}</span>
               </button>
-            </div>
-          </form>
-        )}
+            ))}
+          </nav>
 
-        <LibrarianMonitorSection
-          auditGateway={librarianAuditGateway}
-          projectId={projectId}
-          runtimeSlotsGateway={runtimeSlotsGatewayProp}
-        />
+          <div className="settings-content" data-testid="settings-content">
+            {activeCategoryMeta ? (
+              <header className="settings-content__head">
+                <h3 data-testid="settings-category-title">
+                  {activeCategoryMeta.label}
+                </h3>
+                <p className="settings-content__lede">
+                  {activeCategoryMeta.description}
+                </p>
+              </header>
+            ) : null}
 
-        <RuntimeSlotsSection
-          gateway={runtimeSlotsGatewayProp}
-          projectId={projectId}
-        />
+            {loading ? (
+              <p className="settings-status">正在加载设置…</p>
+            ) : (
+              /* Not a <form>: child sections (permission rules, slots) own
+               * their own forms; nesting would be invalid HTML. */
+              <div className="settings-form">
+                {category === "security" ? (
+                  <SecurityCategory
+                    bypassAvailableDraft={bypassAvailableDraft}
+                    bypassOptionDisabled={bypassOptionDisabled}
+                    onBypassAvailableChange={setBypassAvailableDraft}
+                    onProjectModeChange={setProjectModeDraft}
+                    permissionRulesGateway={permissionRulesGateway}
+                    policy={policy}
+                    projectId={projectId}
+                    projectModeDraft={projectModeDraft}
+                    projectModeSelectDisabled={projectModeSelectDisabled}
+                    saving={saving}
+                  />
+                ) : null}
 
-        <PermissionRulesSection
-          gateway={permissionRulesGateway}
-          projectId={projectId}
-        />
+                {category === "agents" ? (
+                  <RuntimeSlotsSection
+                    gateway={runtimeSlotsGatewayProp}
+                    projectId={projectId}
+                  />
+                ) : null}
+
+                {category === "runtime" ? (
+                  <RuntimeCategory
+                    adapterDraft={adapterDraft}
+                    adapterLocked={adapterLocked}
+                    adapterSelectOptions={adapterSelectOptions}
+                    executableDraft={executableDraft}
+                    executableLocked={executableLocked}
+                    onAdapterChange={setAdapterDraft}
+                    onExecutableChange={setExecutableDraft}
+                    onProfileChange={setProfileDraft}
+                    onScopeChange={setScope}
+                    profileDraft={profileDraft}
+                    profileLocked={profileLocked}
+                    projectId={projectId}
+                    saving={saving}
+                    scope={scope}
+                    settings={settings}
+                  />
+                ) : null}
+
+                {category === "appearance" ? (
+                  <AppearanceCategory
+                    onThemeChange={setThemeDraft}
+                    saving={saving}
+                    themeDraft={themeDraft}
+                    themeLocked={themeLocked}
+                    themeSettings={themeSettings}
+                  />
+                ) : null}
+
+                {category === "diagnostics" ? (
+                  <LibrarianMonitorSection
+                    auditGateway={librarianAuditGateway}
+                    projectId={projectId}
+                    runtimeSlotsGateway={runtimeSlotsGatewayProp}
+                  />
+                ) : null}
+
+                {error ? (
+                  <p
+                    className="settings-error"
+                    data-testid="settings-error"
+                    role="alert"
+                  >
+                    {error}
+                  </p>
+                ) : null}
+                {notice ? (
+                  <p className="settings-notice" data-testid="settings-notice">
+                    {notice}
+                  </p>
+                ) : null}
+
+                {showSave ? (
+                  <div className="settings-actions modal-actions">
+                    <button onClick={onClose} type="button">
+                      关闭
+                    </button>
+                    <button
+                      data-testid="settings-save"
+                      disabled={
+                        saving
+                        || loading
+                        || (
+                          category === "runtime"
+                          && adapterLocked
+                          && executableLocked
+                          && profileLocked
+                        )
+                        || (
+                          category === "appearance"
+                          && themeLocked
+                        )
+                      }
+                      onClick={() => void handleSave()}
+                      type="button"
+                    >
+                      {saving ? "保存中…" : "保存"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="settings-actions modal-actions">
+                    <button onClick={onClose} type="button">
+                      关闭
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function SecurityCategory({
+  bypassAvailableDraft,
+  bypassOptionDisabled,
+  onBypassAvailableChange,
+  onProjectModeChange,
+  permissionRulesGateway,
+  policy,
+  projectId,
+  projectModeDraft,
+  projectModeSelectDisabled,
+  saving,
+}: {
+  bypassAvailableDraft: boolean;
+  bypassOptionDisabled: boolean;
+  onBypassAvailableChange: (value: boolean) => void;
+  onProjectModeChange: (mode: PermissionModeLabel) => void;
+  permissionRulesGateway: PermissionRulesGateway;
+  policy: PermissionPolicyView | null;
+  projectId: string | null;
+  projectModeDraft: PermissionModeLabel;
+  projectModeSelectDisabled: boolean;
+  saving: boolean;
+}) {
+  const modeDetail = permissionModeOption(projectModeDraft).detail;
+  const showDenyReceipt =
+    projectModeDraft === "accept_edits" || projectModeDraft === "bypass";
+
+  return (
+    <div className="settings-category" data-testid="settings-category-security">
+      <p
+        className="settings-two-axis-note"
+        data-testid="settings-permission-two-axis-note"
+        role="note"
+      >
+        {PERMISSION_TWO_AXIS_NOTE}
+      </p>
+
+      <section
+        className="settings-section"
+        data-testid="settings-permission-global"
+      >
+        <h4 className="settings-section__title">全局层 · Bypass 能力</h4>
+        <p className="settings-section__help">{BYPASS_AVAILABLE_HELP}</p>
+        <label className="settings-field settings-field--row">
+          <span className="settings-field__label">
+            {BYPASS_AVAILABLE_LABEL}
+            {policy ? (
+              <SourceBadge source={policy.bypassAvailableSource} />
+            ) : null}
+          </span>
+          <input
+            aria-label={BYPASS_AVAILABLE_LABEL}
+            checked={bypassAvailableDraft}
+            className="settings-field__checkbox"
+            data-testid="settings-bypass-available"
+            disabled={saving}
+            onChange={(event) => onBypassAvailableChange(event.target.checked)}
+            type="checkbox"
+          />
+        </label>
+      </section>
+
+      <section
+        className="settings-section"
+        data-testid="settings-permission-project"
+      >
+        <h4 className="settings-section__title">项目层 · 批准模式</h4>
+        <p className="settings-section__help">{PROJECT_MODE_HELP}</p>
+        <label className="settings-field">
+          <span className="settings-field__label">
+            权限模式
+            {policy?.projectModeSource ? (
+              <SourceBadge source={policy.projectModeSource} />
+            ) : null}
+            {policy ? (
+              <span
+                className="settings-source"
+                data-testid="settings-permission-effective"
+                title="两级求值后的有效模式"
+              >
+                有效：{permissionModeOption(policy.effectiveMode).label}
+              </span>
+            ) : null}
+          </span>
+          <select
+            aria-label="权限模式"
+            className="settings-field__control"
+            data-testid="settings-permission-mode"
+            disabled={projectModeSelectDisabled}
+            onChange={(event) =>
+              onProjectModeChange(event.target.value as PermissionModeLabel)
+            }
+            title={
+              !projectId
+                ? "打开项目后可编辑项目权限模式"
+                : undefined
+            }
+            value={projectModeDraft}
+          >
+            {PERMISSION_MODE_OPTIONS.map((option) => (
+              <option
+                disabled={option.value === "bypass" && bypassOptionDisabled}
+                key={option.value}
+                value={option.value}
+              >
+                {option.label}
+              </option>
+            ))}
+          </select>
+          {!projectId ? (
+            <p
+              className="settings-env-note"
+              data-testid="settings-permission-mode-no-project"
+              role="status"
+            >
+              {PROJECT_MODE_NO_PROJECT_NOTE}
+            </p>
+          ) : bypassOptionDisabled && projectModeDraft === "bypass" ? (
+            <p
+              className="settings-env-note"
+              data-testid="settings-bypass-project-locked"
+              role="status"
+            >
+              {BYPASS_PROJECT_LOCKED_NOTE}
+            </p>
+          ) : bypassOptionDisabled ? (
+            <p
+              className="settings-env-note"
+              data-testid="settings-bypass-project-locked"
+              role="status"
+            >
+              {BYPASS_PROJECT_LOCKED_NOTE}
+            </p>
+          ) : (
+            <p
+              className="settings-field__detail"
+              data-testid="settings-permission-mode-detail"
+              role="note"
+            >
+              {modeDetail}
+            </p>
+          )}
+          {projectId && showDenyReceipt ? (
+            <p className="settings-permission-warning" role="note">
+              {PERMISSION_DENY_RECEIPT_NOTE}
+            </p>
+          ) : null}
+        </label>
+      </section>
+
+      <PermissionRulesSection
+        gateway={permissionRulesGateway}
+        projectId={projectId}
+      />
+    </div>
+  );
+}
+
+function RuntimeCategory({
+  adapterDraft,
+  adapterLocked,
+  adapterSelectOptions,
+  executableDraft,
+  executableLocked,
+  onAdapterChange,
+  onExecutableChange,
+  onProfileChange,
+  onScopeChange,
+  profileDraft,
+  profileLocked,
+  projectId,
+  saving,
+  scope,
+  settings,
+}: {
+  adapterDraft: RuntimeAdapterLabel;
+  adapterLocked: boolean;
+  adapterSelectOptions: { value: RuntimeAdapterLabel; label: string }[];
+  executableDraft: string;
+  executableLocked: boolean;
+  onAdapterChange: (value: RuntimeAdapterLabel) => void;
+  onExecutableChange: (value: string) => void;
+  onProfileChange: (value: string) => void;
+  onScopeChange: (scope: SettingsScope) => void;
+  profileDraft: string;
+  profileLocked: boolean;
+  projectId: string | null;
+  saving: boolean;
+  scope: SettingsScope;
+  settings: RuntimeSettingsView | null;
+}) {
+  return (
+    <div className="settings-category" data-testid="settings-category-runtime">
+      <p className="settings-advanced-badge" data-testid="settings-runtime-advanced">
+        高级 · 安装级运行时覆盖
+      </p>
+      <p className="settings-section__help">
+        适配器与 Grok 可执行文件影响宿主如何启动治理对话。profile 路径
+        <strong>只影响登录型槽位</strong>
+        ；API key 槽位使用各自私有 home，不受此字段支配。
+      </p>
+
+      <div className="settings-scope" role="group" aria-label="设置作用域">
+        <button
+          aria-pressed={scope === "global"}
+          className={
+            scope === "global"
+              ? "settings-scope__btn settings-scope__btn--active"
+              : "settings-scope__btn"
+          }
+          onClick={() => onScopeChange("global")}
+          type="button"
+        >
+          全局
+        </button>
+        <button
+          aria-pressed={scope === "project"}
+          className={
+            scope === "project"
+              ? "settings-scope__btn settings-scope__btn--active"
+              : "settings-scope__btn"
+          }
+          disabled={!projectId}
+          onClick={() => onScopeChange("project")}
+          title={projectId ? "当前项目设置" : "打开项目后可编辑项目设置"}
+          type="button"
+        >
+          当前项目
+        </button>
+      </div>
+
+      <label className="settings-field">
+        <span className="settings-field__label">
+          运行时适配器
+          {settings ? (
+            <SourceBadge
+              envVar={settings.adapter.envVar}
+              source={settings.adapter.source}
+            />
+          ) : null}
+        </span>
+        <select
+          aria-label="运行时适配器"
+          className="settings-field__control"
+          data-testid="settings-adapter"
+          disabled={adapterLocked || saving}
+          onChange={(e) =>
+            onAdapterChange(e.target.value as RuntimeAdapterLabel)
+          }
+          value={adapterDraft}
+        >
+          {adapterSelectOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        {adapterLocked ? (
+          <EnvOverrideNote
+            envVar={settings?.adapter.envVar ?? "PILLOW_RUNTIME"}
+            testId="settings-adapter-env-override"
+          />
+        ) : null}
+        {settings
+        && settings.adapter.value === "fake"
+        && !settings.fakeAdapterSelectable
+        && !adapterLocked ? (
+          <p
+            className="settings-env-note"
+            data-testid="settings-fake-not-selectable"
+            role="status"
+          >
+            当前构建不提供 Fake 适配器（仅开发构建可选）。请改为 Grok
+            ACP 后保存并重启。已存值不会被静默改写。
+          </p>
+        ) : null}
+      </label>
+
+      <label className="settings-field">
+        <span className="settings-field__label">
+          Grok 可执行文件路径
+          {settings ? (
+            <SourceBadge
+              envVar={settings.grokExecutable.envVar}
+              source={settings.grokExecutable.source}
+            />
+          ) : null}
+        </span>
+        <input
+          aria-label="Grok 可执行文件路径"
+          autoComplete="off"
+          className="settings-field__control"
+          data-testid="settings-grok-executable"
+          disabled={executableLocked || saving}
+          onChange={(e) => onExecutableChange(e.target.value)}
+          placeholder="例如 C:\tools\grok.exe（留空则使用 PATH）"
+          spellCheck={false}
+          type="text"
+          value={executableDraft}
+        />
+        <p className="settings-field__detail" role="note">
+          本机 Grok CLI 安装位置。治理 Grok 槽共用此二进制（非每槽位路径）。
+        </p>
+        {executableLocked ? (
+          <EnvOverrideNote
+            envVar={
+              settings?.grokExecutable.envVar ?? "PILLOW_GROK_EXECUTABLE"
+            }
+            testId="settings-executable-env-override"
+          />
+        ) : null}
+      </label>
+
+      <label className="settings-field">
+        <span className="settings-field__label">
+          Grok profile 路径
+          <span className="settings-advanced-inline">高级</span>
+          {settings ? (
+            <SourceBadge
+              envVar={settings.grokProfile.envVar}
+              source={settings.grokProfile.source}
+            />
+          ) : null}
+        </span>
+        <input
+          aria-label="Grok profile 路径"
+          autoComplete="off"
+          className="settings-field__control"
+          data-testid="settings-grok-profile"
+          disabled={profileLocked || saving}
+          onChange={(e) => onProfileChange(e.target.value)}
+          placeholder="进程主目录（仅路径；不会打开 auth 文件）"
+          spellCheck={false}
+          type="text"
+          value={profileDraft}
+        />
+        <p
+          className="settings-field__detail"
+          data-testid="settings-profile-scope-note"
+          role="note"
+        >
+          仅影响<strong>登录型槽位</strong>的配置根覆盖。API key
+          槽位使用 Pillow 按槽生成的私有 home，不受此字段支配。
+        </p>
+        {profileLocked ? (
+          <EnvOverrideNote
+            envVar={settings?.grokProfile.envVar ?? "PILLOW_GROK_PROFILE"}
+            testId="settings-profile-env-override"
+          />
+        ) : null}
+      </label>
+    </div>
+  );
+}
+
+function AppearanceCategory({
+  onThemeChange,
+  saving,
+  themeDraft,
+  themeLocked,
+  themeSettings,
+}: {
+  onThemeChange: (theme: UiThemeLabel) => void;
+  saving: boolean;
+  themeDraft: UiThemeLabel;
+  themeLocked: boolean;
+  themeSettings: ThemeSettingsView | null;
+}) {
+  return (
+    <div className="settings-category" data-testid="settings-category-appearance">
+      <label className="settings-field">
+        <span className="settings-field__label">
+          外观主题
+          {themeSettings ? (
+            <SourceBadge
+              envVar={themeSettings.theme.envVar}
+              source={themeSettings.theme.source}
+            />
+          ) : null}
+        </span>
+        <select
+          aria-label="外观主题"
+          className="settings-field__control"
+          data-testid="settings-theme"
+          disabled={themeLocked || saving}
+          onChange={(e) => onThemeChange(e.target.value as UiThemeLabel)}
+          value={themeDraft}
+        >
+          {THEME_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <p className="settings-field__detail" role="note">
+          主题仅支持全局设置。
+        </p>
+        {themeLocked ? (
+          <EnvOverrideNote
+            envVar={themeSettings?.theme.envVar ?? "PILLOW_THEME"}
+            testId="settings-theme-env-override"
+          />
+        ) : null}
+      </label>
     </div>
   );
 }
@@ -586,7 +966,7 @@ function SourceBadge({
   source,
   envVar,
 }: {
-  source: RuntimeSettingsView["adapter"]["source"];
+  source: RuntimeSettingsView["adapter"]["source"] | "global" | "default" | "project";
   envVar?: string | null;
 }) {
   const env = source === "env";
@@ -600,7 +980,7 @@ function SourceBadge({
       data-source={source}
       title={env && envVar ? `由 ${envVar} 覆盖` : undefined}
     >
-      {env ? "已被环境变量覆盖" : sourceLabel(source)}
+      {env ? "已被环境变量覆盖" : sourceLabel(source as RuntimeSettingsView["adapter"]["source"])}
     </span>
   );
 }

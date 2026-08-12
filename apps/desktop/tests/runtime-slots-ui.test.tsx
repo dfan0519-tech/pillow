@@ -298,7 +298,7 @@ describe("RuntimeSlotsSection — probe paths", () => {
 });
 
 describe("SettingsPanel — slots section without regressing existing controls", () => {
-  it("still offers permission mode and theme while showing slots for a project", async () => {
+  it("keeps permission / theme / runtime controls and shows slots under agents", async () => {
     const user = userEvent.setup();
     const settings = new MockSettingsGateway();
     const slots = new MockRuntimeSlotsGateway([
@@ -314,14 +314,26 @@ describe("SettingsPanel — slots section without regressing existing controls",
       />,
     );
 
-    // Existing settings controls.
+    // Security category (default): permission mode.
     expect(await screen.findByTestId("settings-permission-mode")).toBeVisible();
-    expect(screen.getByTestId("settings-theme")).toBeVisible();
-    expect(screen.getByTestId("settings-adapter")).toBeVisible();
-    expect(screen.getByTestId("settings-grok-executable")).toBeVisible();
     expect(screen.getByTestId("settings-save")).toBeVisible();
 
-    // Slots section present with list.
+    // Appearance: theme.
+    await user.click(screen.getByTestId("settings-nav-appearance"));
+    expect(screen.getByTestId("settings-theme")).toBeVisible();
+    await user.selectOptions(screen.getByTestId("settings-theme"), "light");
+    await user.click(screen.getByTestId("settings-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-notice")).toBeVisible();
+    });
+
+    // Runtime: adapter + paths.
+    await user.click(screen.getByTestId("settings-nav-runtime"));
+    expect(screen.getByTestId("settings-adapter")).toBeVisible();
+    expect(screen.getByTestId("settings-grok-executable")).toBeVisible();
+
+    // Agents: slots section present with list.
+    await user.click(screen.getByTestId("settings-nav-agents"));
     const section = await screen.findByTestId("runtime-slots-section");
     expect(within(section).getByText("运行时槽位")).toBeVisible();
     expect(within(section).getByText("Grok API")).toBeVisible();
@@ -329,16 +341,10 @@ describe("SettingsPanel — slots section without regressing existing controls",
     expect(
       within(section).getByTestId("runtime-slot-ungoverned-slot-ext-1"),
     ).toHaveTextContent(EXTERNAL_CLI_UNGOVERNED_HEADING);
-
-    // Save existing settings still works.
-    await user.selectOptions(screen.getByTestId("settings-theme"), "light");
-    await user.click(screen.getByTestId("settings-save"));
-    await waitFor(() => {
-      expect(screen.getByTestId("settings-notice")).toBeVisible();
-    });
   });
 
   it("shows no-project hint when projectId is null", async () => {
+    const user = userEvent.setup();
     render(
       <SettingsPanel
         gateway={new MockSettingsGateway()}
@@ -347,6 +353,7 @@ describe("SettingsPanel — slots section without regressing existing controls",
         runtimeSlotsGateway={new MockRuntimeSlotsGateway()}
       />,
     );
+    await user.click(await screen.findByTestId("settings-nav-agents"));
     expect(await screen.findByTestId("runtime-slots-no-project")).toBeVisible();
   });
 });

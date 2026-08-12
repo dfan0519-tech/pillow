@@ -1,5 +1,5 @@
 /*
- * S0 settings surface — content form (not chrome glass).
+ * Settings surface — IDE-style category nav (VS Code / Cursor / Zed) + content.
  * Uses existing tokens only; no new color constants.
  * Container modal reuses .modal-card glass; form controls stay opaque.
  */
@@ -15,10 +15,13 @@
 }
 
 .settings-panel {
-  width: min(520px, 100%);
-  max-height: min(90vh, 720px);
-  overflow: auto;
-  gap: 14px;
+  width: min(920px, 100%);
+  max-height: min(90vh, 760px);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding-bottom: 0;
 }
 
 .settings-panel__head {
@@ -26,6 +29,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .settings-panel__close {
@@ -48,6 +52,193 @@
 .settings-panel__close:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
+}
+
+/* —— Category layout (left nav + right content) ———————————————— */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(148px, 200px) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  border-top: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  overflow-y: auto;
+}
+
+.settings-nav__item {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.settings-nav__item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-nav__item--active {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.settings-nav__item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.settings-nav__label {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.settings-nav__desc {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-tertiary);
+}
+
+.settings-nav__item--active .settings-nav__desc {
+  color: var(--text-secondary);
+}
+
+.settings-content {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-content__head {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-content__head h3 {
+  margin: 0;
+  font-size: var(--text-md, 15px);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.settings-content__lede {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.settings-category {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.settings-section__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.settings-section__help {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.settings-two-axis-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elevated));
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.settings-advanced-badge {
+  margin: 0;
+  display: inline-flex;
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.settings-advanced-inline {
+  display: inline-flex;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.settings-field__detail {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.settings-field--row {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.settings-field__checkbox {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.settings-field__checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .settings-scope {
@@ -425,4 +616,5 @@
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
+  flex-shrink: 0;
 }

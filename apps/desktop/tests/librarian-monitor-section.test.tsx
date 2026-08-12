@@ -138,6 +138,9 @@ describe("Librarian monitoring surface", () => {
 
     render(<SettingsPanel {...props} />);
 
+    // Diagnostics category hosts the librarian monitor surface.
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("settings-nav-diagnostics"));
     const section = await screen.findByTestId("librarian-monitor-section");
     expect(await within(section).findAllByText("PASS")).toHaveLength(4);
     expect(within(section).queryByText("FAIL")).toBeNull();

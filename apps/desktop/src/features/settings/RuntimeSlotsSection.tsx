@@ -47,10 +47,12 @@ import {
   LOCAL_CLI_DETECT_NONE_FOUND,
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   OAUTH_AUTH_BADGE,
+  OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
   OAUTH_CATALOG_EMPTY,
   OAUTH_CATALOG_LOAD_BUSY,
   OAUTH_LOGIN_FORM_HINT,
   OAUTH_LOGIN_IN_PROGRESS,
+  RUNTIME_SLOT_OAUTH_PROGRESS_EVENT,
   SECRET_CONFIGURED_LABEL,
   SECRET_NOT_CONFIGURED_LABEL,
   SLOT_AUTH_METHODS,
@@ -126,6 +128,41 @@ function mapSaveError(cause: unknown): string {
     return cause.message;
   }
   return "保存槽位失败。";
+}
+
+function authorizeUrlFromError(cause: unknown): string | null {
+  if (
+    cause instanceof RuntimeSlotsGatewayError
+    && typeof cause.authorizeUrl === "string"
+    && cause.authorizeUrl.trim().length > 0
+  ) {
+    return cause.authorizeUrl.trim();
+  }
+  return null;
+}
+
+type OauthProgressPayload = {
+  authorizeUrl?: unknown;
+  browserOpened?: unknown;
+  userCode?: unknown;
+};
+
+function parseOauthProgressPayload(
+  payload: unknown,
+): { authorizeUrl: string; browserOpened: boolean; userCode: string | null } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as OauthProgressPayload;
+  if (typeof record.authorizeUrl !== "string" || !record.authorizeUrl.trim()) {
+    return null;
+  }
+  return {
+    authorizeUrl: record.authorizeUrl.trim(),
+    browserOpened: record.browserOpened === true,
+    userCode:
+      typeof record.userCode === "string" && record.userCode.trim()
+        ? record.userCode.trim()
+        : null,
+  };
 }
 
 function authModeBadge(slot: RuntimeSlotView): string {
@@ -224,6 +261,14 @@ export function RuntimeSlotsSection({
   );
   /** True while host is performing browser OAuth (no optimistic slot). */
   const [oauthLoginBusy, setOauthLoginBusy] = useState(false);
+  /** Public authorize URL from host progress / browser-open failure (copyable). */
+  const [oauthAuthorizeUrl, setOauthAuthorizeUrl] = useState<string | null>(
+    null,
+  );
+  /** False when host reported browser open failed (still may be waiting). */
+  const [oauthBrowserOpened, setOauthBrowserOpened] = useState(true);
+  /** Device-code user_code when host reports one (never the secret device_code). */
+  const [oauthUserCode, setOauthUserCode] = useState<string | null>(null);
 
   /** Inline role editor for an existing list row. */
   const [roleEditSlotId, setRoleEditSlotId] = useState<string | null>(null);
@@ -315,6 +360,9 @@ export function RuntimeSlotsSection({
     setOauthProviderId("");
     setOauthDraftFields(emptyOauthDraftFields());
     setOauthLoginBusy(false);
+    setOauthAuthorizeUrl(null);
+    setOauthBrowserOpened(true);
+    setOauthUserCode(null);
   }
 
   async function loadOauthCatalog(): Promise<void> {
@@ -659,7 +707,33 @@ export function RuntimeSlotsSection({
           }
           // In-progress only — never optimistically add a slot before host OK.
           setOauthLoginBusy(true);
+          setOauthAuthorizeUrl(null);
+          setOauthBrowserOpened(true);
+          setOauthUserCode(null);
+          let unlistenProgress: (() => void) | null = null;
           try {
+            // Subscribe before invoke so mid-login progress is not missed.
+            // Only in a real Tauri shell — vitest/mock has no event bus.
+            const inTauri =
+              typeof window !== "undefined"
+              && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+            if (inTauri) {
+              try {
+                const { listen } = await import("@tauri-apps/api/event");
+                unlistenProgress = await listen(
+                  RUNTIME_SLOT_OAUTH_PROGRESS_EVENT,
+                  (event) => {
+                    const parsed = parseOauthProgressPayload(event.payload);
+                    if (!parsed) return;
+                    setOauthAuthorizeUrl(parsed.authorizeUrl);
+                    setOauthBrowserOpened(parsed.browserOpened);
+                    setOauthUserCode(parsed.userCode);
+                  },
+                );
+              } catch {
+                unlistenProgress = null;
+              }
+            }
             await gateway.createSlot({
               projectId,
               displayName: name,
@@ -672,10 +746,21 @@ export function RuntimeSlotsSection({
               providerId: selectedOauthProvider.providerId,
               oauthSupplement: buildOauthSupplement(),
             });
+            setOauthAuthorizeUrl(null);
+            setOauthUserCode(null);
+            setNotice(
+              "已通过 OAuth 创建槽位。令牌由宿主保管，界面仅显示账号标识与过期时间。",
+            );
           } finally {
+            if (unlistenProgress) {
+              try {
+                unlistenProgress();
+              } catch {
+                // ignore unlisten errors
+              }
+            }
             setOauthLoginBusy(false);
           }
-          setNotice("已通过 OAuth 创建槽位。令牌由宿主保管，界面仅显示账号标识与过期时间。");
         } else {
           const statusArgs = parseArgvField(statusArgsText);
           if (!executablePath.trim()) {
@@ -708,6 +793,11 @@ export function RuntimeSlotsSection({
       // Failure: form stays open only if we did not close; ensure no slot paint.
       setOauthLoginBusy(false);
       setError(mapSaveError(cause));
+      const fallbackUrl = authorizeUrlFromError(cause);
+      if (fallbackUrl) {
+        setOauthAuthorizeUrl(fallbackUrl);
+        setOauthBrowserOpened(false);
+      }
     } finally {
       setBusy(false);
       setOauthLoginBusy(false);
@@ -1606,8 +1696,10 @@ export function RuntimeSlotsSection({
               data-testid="runtime-slots-login-hint"
               role="note"
             >
-              使用本机默认 Grok 登录 profile。登录由 Grok CLI 管理，Pillow
-              不存储该登录。
+              「已登录的 Grok」不会弹出浏览器。Pillow 使用本机默认 Grok CLI
+              登录 profile，不存储该登录。请先在终端运行{" "}
+              <code>grok login</code>，完成后再创建槽位；需要浏览器 OAuth
+              时请改选「OAuth 登录」。
             </p>
           ) : null}
 
@@ -1744,6 +1836,43 @@ export function RuntimeSlotsSection({
                 >
                   {OAUTH_LOGIN_IN_PROGRESS}
                 </p>
+              ) : null}
+              {oauthLoginBusy && !oauthBrowserOpened ? (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-oauth-browser-failed-hint"
+                  role="status"
+                >
+                  {OAUTH_BROWSER_OPEN_FAILED_MESSAGE}
+                </p>
+              ) : null}
+              {oauthUserCode ? (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-oauth-user-code"
+                  role="status"
+                >
+                  设备码：<code>{oauthUserCode}</code>
+                </p>
+              ) : null}
+              {oauthAuthorizeUrl ? (
+                <label
+                  className="settings-field"
+                  data-testid="runtime-slots-oauth-authorize-url-field"
+                >
+                  <span className="settings-field__label">
+                    授权链接（可复制，手动打开）
+                  </span>
+                  <input
+                    aria-label="OAuth 授权链接"
+                    className="settings-field__control"
+                    data-testid="runtime-slots-oauth-authorize-url"
+                    readOnly
+                    spellCheck={false}
+                    type="text"
+                    value={oauthAuthorizeUrl}
+                  />
+                </label>
               ) : null}
             </div>
           ) : null}

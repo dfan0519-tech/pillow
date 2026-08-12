@@ -192,6 +192,8 @@ describe("App runtime-unavailable send guidance", () => {
 
     await user.click(screen.getByTestId("runtime-slot-guidance-open-settings"));
     expect(await screen.findByTestId("settings-panel")).toBeVisible();
+    // Slots live under the agents category after settings IA split.
+    await user.click(screen.getByTestId("settings-nav-agents"));
     expect(await screen.findByTestId("runtime-slots-section")).toBeVisible();
   });
 
@@ -232,6 +234,7 @@ describe("App runtime-unavailable send guidance", () => {
 
     await user.click(screen.getByTestId("runtime-slot-guidance-open-settings"));
     expect(await screen.findByTestId("settings-panel")).toBeVisible();
+    await user.click(screen.getByTestId("settings-nav-agents"));
     expect(
       await screen.findByTestId(`runtime-slot-needs-start-slot-g1`),
     ).toBeVisible();

@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   SettingsGatewayError,
+  resolveEffectivePermissionMode,
   type OnboardingSettingsView,
   type PermissionModeLabel,
   type PermissionModeSettingsView,
+  type PermissionPolicyView,
   type RuntimeAdapterLabel,
   type RuntimeSettingsView,
   type RuntimeStartupView,
@@ -15,6 +17,8 @@ import {
 } from "./settingsTypes";
 
 const INVALID_RESPONSE = "Pillow received an invalid settings response.";
+const HOST_POLICY_MISSING =
+  "宿主尚未提供两级权限接口（get_permission_policy / set_bypass_available / set_project_permission_mode）。";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -33,6 +37,10 @@ function isSettingSource(value: unknown): value is SettingSource {
   );
 }
 
+function isPermissionMode(value: unknown): value is PermissionModeLabel {
+  return value === "default" || value === "accept_edits" || value === "bypass";
+}
+
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const allowed = [...expected].sort();
@@ -46,16 +54,53 @@ export function parsePermissionModeSettings(value: unknown): PermissionModeSetti
   if (
     !isRecord(value)
     || !hasExactKeys(value, ["mode", "source"])
-    || !(
-      value.mode === "default"
-      || value.mode === "accept_edits"
-      || value.mode === "bypass"
-    )
+    || !isPermissionMode(value.mode)
     || !(value.source === "global" || value.source === "default")
   ) {
     throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
   }
   return { mode: value.mode, source: value.source };
+}
+
+/**
+ * Closed-key validator for the two-tier policy DTO.
+ * Host must send exactly these keys — adding fields is a breaking change.
+ */
+export function parsePermissionPolicy(value: unknown): PermissionPolicyView {
+  assertNoSecretFields(value);
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, [
+      "bypassAvailable",
+      "bypassAvailableSource",
+      "projectMode",
+      "projectModeSource",
+      "effectiveMode",
+    ])
+    || typeof value.bypassAvailable !== "boolean"
+    || !(value.bypassAvailableSource === "global" || value.bypassAvailableSource === "default")
+    || !(value.projectMode === null || isPermissionMode(value.projectMode))
+    || !(
+      value.projectModeSource === null
+      || value.projectModeSource === "project"
+      || value.projectModeSource === "default"
+    )
+    || !isPermissionMode(value.effectiveMode)
+  ) {
+    throw new SettingsGatewayError("invalid_settings_response", INVALID_RESPONSE);
+  }
+  // Fail-closed: never accept effective bypass when capability is off.
+  const effectiveMode = resolveEffectivePermissionMode(
+    value.bypassAvailable,
+    value.effectiveMode,
+  );
+  return {
+    bypassAvailable: value.bypassAvailable,
+    bypassAvailableSource: value.bypassAvailableSource,
+    projectMode: value.projectMode,
+    projectModeSource: value.projectModeSource,
+    effectiveMode,
+  };
 }
 
 function parseResolvedSetting(
@@ -257,6 +302,33 @@ async function invokePermissionModeSettings(
   }
 }
 
+/**
+ * Synthesize a two-tier policy from the legacy global-only mode DTO.
+ * Used when the host has not shipped the policy commands yet.
+ * Writes (setBypassAvailable / setProjectPermissionMode) still require host.
+ */
+export function synthesizePolicyFromLegacy(
+  legacy: PermissionModeSettingsView,
+  projectId: string | null | undefined,
+): PermissionPolicyView {
+  // Capability: treat Bypass as available so the UI is not falsely locked
+  // until the host can express a real global off switch. Effective mode
+  // still mirrors the legacy global mode.
+  const bypassAvailable = true;
+  const projectMode = projectId ? legacy.mode : null;
+  const projectModeSource: PermissionPolicyView["projectModeSource"] = projectId
+    ? "default"
+    : null;
+  const effectiveMode = resolveEffectivePermissionMode(bypassAvailable, legacy.mode);
+  return {
+    bypassAvailable,
+    bypassAvailableSource: "default",
+    projectMode,
+    projectModeSource,
+    effectiveMode,
+  };
+}
+
 /** Tauri settings gateway — host owns storage; renderer never touches the DB. */
 export class TauriSettingsGateway implements SettingsGateway {
   getPermissionMode(): Promise<PermissionModeSettingsView> {
@@ -265,6 +337,77 @@ export class TauriSettingsGateway implements SettingsGateway {
 
   setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView> {
     return invokePermissionModeSettings("set_permission_mode", { mode });
+  }
+
+  async getPermissionPolicy(
+    projectId?: string | null,
+  ): Promise<PermissionPolicyView> {
+    try {
+      const payload = await invoke<unknown>("get_permission_policy", {
+        projectId: projectId ?? null,
+      });
+      return parsePermissionPolicy(payload);
+    } catch (error) {
+      // Fall back to legacy global mode so the settings surface still loads.
+      const normalized = normalizeSettingsError(error);
+      if (
+        normalized.code === "invalid_settings_response"
+        || normalized.message.includes("invalid settings")
+      ) {
+        throw normalized;
+      }
+      try {
+        const legacy = await this.getPermissionMode();
+        return synthesizePolicyFromLegacy(legacy, projectId);
+      } catch {
+        throw new SettingsGatewayError(
+          "permission_policy_host_missing",
+          HOST_POLICY_MISSING,
+        );
+      }
+    }
+  }
+
+  async setBypassAvailable(available: boolean): Promise<PermissionPolicyView> {
+    try {
+      const payload = await invoke<unknown>("set_bypass_available", {
+        available,
+      });
+      return parsePermissionPolicy(payload);
+    } catch (error) {
+      const normalized = normalizeSettingsError(error);
+      throw new SettingsGatewayError(
+        normalized.code === "settings_command_failed"
+          ? "permission_policy_host_missing"
+          : normalized.code,
+        normalized.code === "settings_command_failed"
+          ? HOST_POLICY_MISSING
+          : normalized.message,
+      );
+    }
+  }
+
+  async setProjectPermissionMode(
+    projectId: string,
+    mode: PermissionModeLabel,
+  ): Promise<PermissionPolicyView> {
+    try {
+      const payload = await invoke<unknown>("set_project_permission_mode", {
+        projectId,
+        mode,
+      });
+      return parsePermissionPolicy(payload);
+    } catch (error) {
+      const normalized = normalizeSettingsError(error);
+      throw new SettingsGatewayError(
+        normalized.code === "settings_command_failed"
+          ? "permission_policy_host_missing"
+          : normalized.code,
+        normalized.code === "settings_command_failed"
+          ? HOST_POLICY_MISSING
+          : normalized.message,
+      );
+    }
   }
 
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView> {
@@ -373,7 +516,18 @@ export class MockSettingsGateway implements SettingsGateway {
   private themeState: ThemeSettingsView;
   private startup: RuntimeStartupView;
   private onboarding: OnboardingSettingsView;
-  private permissionMode: PermissionModeSettingsView;
+  /** Global Bypass capability. */
+  private bypassAvailable: boolean;
+  private bypassAvailableSource: "global" | "default";
+  /**
+   * Installation preferred mode (used when no project context, and as the
+   * seed for project default until a project row is written).
+   */
+  private preferredMode: PermissionModeLabel;
+  /** Project-scoped mode selections. */
+  private projectModes = new Map<string, PermissionModeLabel>();
+  /** Last project id used by policy reads (for effective mode in setBypass). */
+  private lastPolicyProjectId: string | null = null;
 
   constructor(
     initial?: Partial<RuntimeSettingsView>,
@@ -381,6 +535,11 @@ export class MockSettingsGateway implements SettingsGateway {
     startupInitial?: Partial<RuntimeStartupView>,
     onboardingInitial?: Partial<OnboardingSettingsView>,
     permissionModeInitial?: Partial<PermissionModeSettingsView>,
+    policyInitial?: {
+      bypassAvailable?: boolean;
+      preferredMode?: PermissionModeLabel;
+      projectModes?: Record<string, PermissionModeLabel>;
+    },
   ) {
     this.state = {
       adapter: {
@@ -413,15 +572,68 @@ export class MockSettingsGateway implements SettingsGateway {
       source: "default",
       ...onboardingInitial,
     };
-    this.permissionMode = {
-      mode: "default",
-      source: "default",
-      ...permissionModeInitial,
+    const initialMode = permissionModeInitial?.mode ?? "default";
+    this.preferredMode = policyInitial?.preferredMode ?? initialMode;
+    // Capability defaults open so legacy fixtures that set mode=bypass still work.
+    // Explicit policyInitial.bypassAvailable wins; otherwise open unless tests pin it.
+    this.bypassAvailable = policyInitial?.bypassAvailable ?? true;
+    this.bypassAvailableSource =
+      policyInitial?.bypassAvailable !== undefined ? "global" : "default";
+    if (policyInitial?.projectModes) {
+      for (const [id, mode] of Object.entries(policyInitial.projectModes)) {
+        this.projectModes.set(id, mode);
+      }
+    }
+  }
+
+  private buildPolicy(projectId: string | null | undefined): PermissionPolicyView {
+    const pid =
+      typeof projectId === "string" && projectId.trim().length > 0
+        ? projectId
+        : null;
+    this.lastPolicyProjectId = pid;
+    let projectMode: PermissionModeLabel | null = null;
+    let projectModeSource: PermissionPolicyView["projectModeSource"] = null;
+    if (pid) {
+      if (this.projectModes.has(pid)) {
+        projectMode = this.projectModes.get(pid)!;
+        projectModeSource = "project";
+      } else {
+        projectMode = this.preferredMode;
+        projectModeSource = "default";
+      }
+    }
+    const modeForEffective = projectMode ?? this.preferredMode;
+    const effectiveMode = resolveEffectivePermissionMode(
+      this.bypassAvailable,
+      modeForEffective,
+    );
+    return {
+      bypassAvailable: this.bypassAvailable,
+      bypassAvailableSource: this.bypassAvailableSource,
+      projectMode,
+      projectModeSource,
+      effectiveMode,
     };
   }
 
   getPermissionModeSnapshot(): PermissionModeSettingsView {
-    return structuredClone(this.permissionMode);
+    const effective = resolveEffectivePermissionMode(
+      this.bypassAvailable,
+      this.preferredMode,
+    );
+    return {
+      mode: effective,
+      source: this.preferredMode === "default" && this.bypassAvailableSource === "default"
+        ? "default"
+        : "global",
+    };
+  }
+
+  getPermissionPolicySnapshot(
+    projectId?: string | null,
+  ): PermissionPolicyView {
+    return this.buildPolicy(projectId);
   }
 
   async getPermissionMode(): Promise<PermissionModeSettingsView> {
@@ -429,8 +641,46 @@ export class MockSettingsGateway implements SettingsGateway {
   }
 
   async setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView> {
-    this.permissionMode = { mode, source: "global" };
+    // Workbench "恢复默认" and legacy callers: set preferred mode.
+    // Opening Bypass via legacy write also enables the capability (old one-axis UX).
+    if (mode === "bypass") {
+      this.bypassAvailable = true;
+      this.bypassAvailableSource = "global";
+    }
+    this.preferredMode = mode;
+    if (mode === "default") {
+      // Reset project rows so effective falls back cleanly.
+      this.projectModes.clear();
+    }
     return this.getPermissionModeSnapshot();
+  }
+
+  async getPermissionPolicy(
+    projectId?: string | null,
+  ): Promise<PermissionPolicyView> {
+    return this.buildPolicy(projectId);
+  }
+
+  async setBypassAvailable(available: boolean): Promise<PermissionPolicyView> {
+    this.bypassAvailable = available;
+    this.bypassAvailableSource = "global";
+    return this.buildPolicy(this.lastPolicyProjectId);
+  }
+
+  async setProjectPermissionMode(
+    projectId: string,
+    mode: PermissionModeLabel,
+  ): Promise<PermissionPolicyView> {
+    if (mode === "bypass" && !this.bypassAvailable) {
+      throw new SettingsGatewayError(
+        "permission_bypass_not_available",
+        "全局已关闭 Bypass，项目不能选择该模式。",
+      );
+    }
+    this.projectModes.set(projectId, mode);
+    // Keep preferred in sync so workbench indicator (no project arg) tracks last choice.
+    this.preferredMode = mode;
+    return this.buildPolicy(projectId);
   }
 
   /** Test seam: force degraded conversation runtime (not Fake). */

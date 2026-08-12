@@ -21,6 +21,7 @@ import {
   mapModelCatalogUnsupportedReason,
   mapModelSwitchResultMessage,
   mapRuntimeSlotErrorMessage,
+  normalizeRuntimeSlotsError,
   parseExternalCliStatusView,
   parseProviderLoginCatalogEntry,
   parseRuntimeSlotModelCatalogView,
@@ -33,6 +34,7 @@ import {
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   MODEL_SWITCH_RESTARTED_MESSAGE,
   MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
+  OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
   OAUTH_LOGIN_DENIED_MESSAGE,
   OAUTH_LOGIN_STATE_MISMATCH_MESSAGE,
   OAUTH_LOGIN_TIMEOUT_MESSAGE,
@@ -232,6 +234,27 @@ describe("runtime slot DTO parsers", () => {
     expect(
       mapRuntimeSlotErrorMessage("runtime_slot_oauth_login_state_mismatch"),
     ).toBe(OAUTH_LOGIN_STATE_MISMATCH_MESSAGE);
+    expect(
+      mapRuntimeSlotErrorMessage("runtime_slot_oauth_browser_open_failed"),
+    ).toBe(OAUTH_BROWSER_OPEN_FAILED_MESSAGE);
+  });
+
+  it("normalizeRuntimeSlotsError lifts public authorize URL for browser-open fail", () => {
+    const url =
+      "https://as.example.test/oauth/authorize?client_id=demo&state=s";
+    const err = normalizeRuntimeSlotsError({
+      code: "runtime_slot_oauth_browser_open_failed",
+      message: url,
+    });
+    expect(err.code).toBe("runtime_slot_oauth_browser_open_failed");
+    expect(err.message).toBe(OAUTH_BROWSER_OPEN_FAILED_MESSAGE);
+    expect(err.authorizeUrl).toBe(url);
+    // Non-URL host messages must not become authorizeUrl (secret safety).
+    const scrubbed = normalizeRuntimeSlotsError({
+      code: "runtime_slot_oauth_browser_open_failed",
+      message: "C:\\Users\\secret\\token.json",
+    });
+    expect(scrubbed.authorizeUrl).toBeNull();
   });
 
   it("rejects governance/kind mismatches (host field is explicit)", () => {

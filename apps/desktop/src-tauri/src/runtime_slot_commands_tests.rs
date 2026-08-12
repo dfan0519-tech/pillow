@@ -179,6 +179,9 @@ fn serialized_slot_dto_has_an_exact_allowlist_and_never_contains_the_key() {
     assert_eq!(
         keys,
         vec![
+            // OAuth non-secret fields (null for API-key slots).
+            "accessExpiresAt",
+            "accountLabel",
             "authMode",
             "baseUrl",
             "createdAt",
@@ -311,12 +314,39 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
         "start_runtime_slot",
         "detect_local_clis",
         "probe_model_catalog",
+        "list_provider_login_catalog",
     ] {
         assert!(
             handler.contains(command),
             "missing invoke command {command}"
         );
     }
+}
+
+#[test]
+fn create_slot_source_accepts_oauth_auth_kind_and_opens_browser_path() {
+    let source = include_str!("runtime_slot_commands.rs");
+    assert!(
+        source.contains("\"oauth\""),
+        "create_slot must accept auth_kind oauth"
+    );
+    assert!(
+        source.contains("perform_oauth_login_production") || source.contains("perform_oauth_login"),
+        "oauth create must call login orchestration"
+    );
+    assert!(
+        source.contains("SystemBrowser") || source.contains("open_system_browser"),
+        "oauth path must attempt system browser open"
+    );
+    assert!(
+        source.contains("RUNTIME_SLOT_OAUTH_PROGRESS_EVENT")
+            || source.contains("runtime-slot-oauth-progress"),
+        "host must emit progress with authorize URL"
+    );
+    assert!(
+        source.contains("runtime_slot_oauth_browser_open_failed"),
+        "browser-open failure code must be mappable for UI fallback"
+    );
 }
 
 /// Every command the renderer actually invokes must be registered.

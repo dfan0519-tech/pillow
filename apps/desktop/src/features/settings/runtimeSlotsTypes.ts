@@ -315,15 +315,26 @@ export type RuntimeSlotsGatewayErrorCode =
   | "runtime_slot_oauth_device_expired"
   | "runtime_slot_oauth_device_denied"
   | "runtime_slot_oauth_http_timeout"
+  | "runtime_slot_oauth_browser_open_failed"
   | "runtime_slot_provider_login_catalog_unavailable";
 
 export class RuntimeSlotsGatewayError extends Error {
   readonly code: string;
+  /**
+   * Public authorize / verification URL when the host could not open a browser
+   * (or timed out after browser-open failure). Never a token or code.
+   */
+  readonly authorizeUrl: string | null;
 
-  constructor(code: string, message: string) {
+  constructor(
+    code: string,
+    message: string,
+    authorizeUrl: string | null = null,
+  ) {
     super(message);
     this.name = "RuntimeSlotsGatewayError";
     this.code = code;
+    this.authorizeUrl = authorizeUrl;
   }
 }
 
@@ -606,6 +617,13 @@ export type OauthUserFieldRequirement = {
 export const OAUTH_LOGIN_IN_PROGRESS =
   "正在登录…请在浏览器中完成授权，完成后将自动返回。切勿关闭此窗口。";
 
+/**
+ * Shown when the host could not launch the system browser. Always paired with
+ * a copyable authorize URL (never silent).
+ */
+export const OAUTH_BROWSER_OPEN_FAILED_MESSAGE =
+  "无法自动打开系统浏览器完成授权。请复制下方链接，在浏览器中手动打开后继续。";
+
 /** Distinct failure copy — never imply success. */
 export const OAUTH_LOGIN_TIMEOUT_MESSAGE =
   "登录超时：在限定时间内未完成浏览器授权。请重试。";
@@ -618,6 +636,14 @@ export const OAUTH_LOGIN_STATE_MISMATCH_MESSAGE =
 
 export const OAUTH_LOGIN_GENERIC_FAILURE =
   "OAuth 登录失败。请检查提供方配置后重试。";
+
+/**
+ * Host Tauri event while OAuth login is outstanding. Payload is public only
+ * (authorize URL + browser_opened flag). Listeners must not log raw payloads
+ * if they ever grow secret fields — currently they do not.
+ */
+export const RUNTIME_SLOT_OAUTH_PROGRESS_EVENT =
+  "runtime-slot-oauth-progress";
 
 export const OAUTH_CATALOG_LOAD_BUSY = "正在加载可登录的提供方…";
 

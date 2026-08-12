@@ -10,10 +10,37 @@ export type UiThemeLabel = "dark" | "light";
 /** Pillow-owned approval gate; never forwarded to a provider runtime. */
 export type PermissionModeLabel = "default" | "accept_edits" | "bypass";
 
-/** Installation-wide only. A project source is intentionally unrepresentable. */
+/**
+ * Legacy installation-wide mode DTO (Rust `PermissionModeSettingsDto`).
+ * Still used by the workbench indicator via `getPermissionMode` until the
+ * host ships two-tier effective-mode resolution with a project context.
+ */
 export type PermissionModeSettingsView = {
   mode: PermissionModeLabel;
   source: "global" | "default";
+};
+
+/**
+ * Two-tier permission policy (global Bypass capability ∧ project mode).
+ * Closed-key host DTO — adding fields is a breaking change for the parser.
+ *
+ * effectiveMode = projectMode when projectMode !== "bypass"
+ *               | "bypass" when bypassAvailable && projectMode === "bypass"
+ *               | fail-closed fallback when project wants bypass but global denies.
+ * When projectMode is null (no project), effectiveMode uses the host's
+ * installation preferred mode with the same Bypass gate.
+ */
+export type PermissionPolicyView = {
+  /** Global layer: whether Bypass may be selected. */
+  bypassAvailable: boolean;
+  bypassAvailableSource: "global" | "default";
+  /**
+   * Project layer selection when a projectId was requested; null when no project.
+   */
+  projectMode: PermissionModeLabel | null;
+  projectModeSource: "project" | "default" | null;
+  /** Resolved approval mode after two-tier gate. */
+  effectiveMode: PermissionModeLabel;
 };
 
 export type SettingsScope = "global" | "project";
@@ -78,6 +105,8 @@ export type SettingsGatewayErrorCode =
   | "invalid_theme_selection"
   | "invalid_permission_mode"
   | "permission_mode_global_only"
+  | "permission_policy_host_missing"
+  | "permission_bypass_not_available"
   | "settings_invalid_scope"
   | "settings_scope_shape"
   | "settings_unknown_key"
@@ -107,8 +136,29 @@ export class SettingsGatewayError extends Error {
 }
 
 export interface SettingsGateway {
+  /**
+   * Legacy effective mode for workbench indicator (no project argument).
+   * Prefer `getPermissionPolicy` for the settings two-tier surface.
+   */
   getPermissionMode(): Promise<PermissionModeSettingsView>;
+  /**
+   * Legacy write used by workbench "恢复默认". Implementations should clear
+   * project override toward default and keep Bypass capability unchanged
+   * unless product policy says otherwise.
+   */
   setPermissionMode(mode: PermissionModeLabel): Promise<PermissionModeSettingsView>;
+  /** Two-tier policy for the security settings category. */
+  getPermissionPolicy(projectId?: string | null): Promise<PermissionPolicyView>;
+  /** Global layer: enable/disable Bypass as a selectable capability. */
+  setBypassAvailable(available: boolean): Promise<PermissionPolicyView>;
+  /**
+   * Project layer: select mode for a project.
+   * Host must reject `bypass` when global capability is off.
+   */
+  setProjectPermissionMode(
+    projectId: string,
+    mode: PermissionModeLabel,
+  ): Promise<PermissionPolicyView>;
   getRuntimeSettings(projectId?: string | null): Promise<RuntimeSettingsView>;
   /** Optional: process startup ready/degraded status (Tauri host). */
   getRuntimeStartup?(): Promise<RuntimeStartupView>;
@@ -173,4 +223,18 @@ export function sourceLabel(source: SettingSource): string {
     default:
       return source;
   }
+}
+
+/**
+ * Two-tier resolution: project cannot break out of a global Bypass deny.
+ * Fail-closed: requested bypass with capability off → `default`.
+ */
+export function resolveEffectivePermissionMode(
+  bypassAvailable: boolean,
+  mode: PermissionModeLabel,
+): PermissionModeLabel {
+  if (mode === "bypass" && !bypassAvailable) {
+    return "default";
+  }
+  return mode;
 }

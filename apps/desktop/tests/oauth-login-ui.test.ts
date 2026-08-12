@@ -6,12 +6,14 @@ import { describe, expect, it } from "vitest";
 import {
   defaultMockProviderLoginCatalog,
   isOauthLoginFailureCode,
+  looksLikePublicAuthorizeUrl,
   mapOauthLoginErrorMessage,
   oauthCapableProviders,
   oauthFieldRequiresUserInput,
   oauthFieldsRequiringUserInput,
 } from "../src/features/settings/oauthLoginUi";
 import {
+  OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
   OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON,
   OAUTH_LOGIN_DENIED_MESSAGE,
   OAUTH_LOGIN_STATE_MISMATCH_MESSAGE,
@@ -138,7 +140,16 @@ describe("mapOauthLoginErrorMessage — three failure modes", () => {
     }
   });
 
-  it("keeps the three user-facing strings distinct", () => {
+  it("maps browser-open-failed to browser-open copy", () => {
+    expect(
+      mapOauthLoginErrorMessage("runtime_slot_oauth_browser_open_failed"),
+    ).toBe(OAUTH_BROWSER_OPEN_FAILED_MESSAGE);
+    expect(
+      isOauthLoginFailureCode("runtime_slot_oauth_browser_open_failed"),
+    ).toBe(true);
+  });
+
+  it("keeps the user-facing failure strings distinct", () => {
     expect(OAUTH_LOGIN_TIMEOUT_MESSAGE).not.toBe(OAUTH_LOGIN_DENIED_MESSAGE);
     expect(OAUTH_LOGIN_TIMEOUT_MESSAGE).not.toBe(
       OAUTH_LOGIN_STATE_MISMATCH_MESSAGE,
@@ -146,5 +157,18 @@ describe("mapOauthLoginErrorMessage — three failure modes", () => {
     expect(OAUTH_LOGIN_DENIED_MESSAGE).not.toBe(
       OAUTH_LOGIN_STATE_MISMATCH_MESSAGE,
     );
+    expect(OAUTH_BROWSER_OPEN_FAILED_MESSAGE).not.toBe(
+      OAUTH_LOGIN_TIMEOUT_MESSAGE,
+    );
+  });
+
+  it("looksLikePublicAuthorizeUrl accepts https authorize URLs only", () => {
+    expect(
+      looksLikePublicAuthorizeUrl(
+        "https://as.example.test/oauth/authorize?client_id=x",
+      ),
+    ).toBe(true);
+    expect(looksLikePublicAuthorizeUrl("not a url")).toBe(false);
+    expect(looksLikePublicAuthorizeUrl("ftp://evil")).toBe(false);
   });
 });

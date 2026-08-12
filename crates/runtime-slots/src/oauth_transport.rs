@@ -499,12 +499,20 @@ fn open_system_browser_impl(url: &str) -> Result<(), RuntimeSlotError> {
     // CREATE_NO_WINDOW — avoid flashing a console for the launcher.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // rundll32 avoids `cmd /C start` quoting hazards for query strings.
-    Command::new("rundll32")
+    // Mechanism mirrors OpenCode's `open` package intent (OS default handler)
+    // without pulling that dependency into the Rust host.
+    let mut child = Command::new("rundll32")
         .args(["url.dll,FileProtocolHandler", url])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|_| RuntimeSlotError::OauthBrowserOpenFailed)?;
-    Ok(())
+    // If the launcher exits immediately with a non-zero code, treat as failure.
+    // (Many handlers exit 0 after handing off; non-zero is a hard fail.)
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => Err(RuntimeSlotError::OauthBrowserOpenFailed),
+        Ok(_) => Ok(()),
+        Err(_) => Err(RuntimeSlotError::OauthBrowserOpenFailed),
+    }
 }
 
 #[cfg(not(windows))]

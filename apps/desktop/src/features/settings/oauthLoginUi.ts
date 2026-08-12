@@ -4,6 +4,7 @@
  */
 
 import {
+  OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
   OAUTH_FIELD_ACCOUNT_LABEL_REASON,
   OAUTH_FIELD_AUTHORIZE_REASON,
   OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON,
@@ -119,7 +120,7 @@ export function oauthFieldRequiresUserInput(
 
 /**
  * Map host OAuth login error codes to distinct, secret-free Chinese copy.
- * Timeout / denied / state-mismatch each stay distinguishable.
+ * Timeout / denied / state-mismatch / browser-open each stay distinguishable.
  */
 export function mapOauthLoginErrorMessage(code: string): string {
   switch (code) {
@@ -135,12 +136,14 @@ export function mapOauthLoginErrorMessage(code: string): string {
     case "runtime_slot_oauth_login_state_mismatch":
     case "runtime_slot_oauth_loopback_state_mismatch":
       return OAUTH_LOGIN_STATE_MISMATCH_MESSAGE;
+    case "runtime_slot_oauth_browser_open_failed":
+      return OAUTH_BROWSER_OPEN_FAILED_MESSAGE;
     default:
       return OAUTH_LOGIN_GENERIC_FAILURE;
   }
 }
 
-/** Whether a gateway error code is one of the three OAuth login failure modes. */
+/** Whether a gateway error code is one of the OAuth login failure modes. */
 export function isOauthLoginFailureCode(code: string): boolean {
   return (
     code === "runtime_slot_oauth_login_timeout"
@@ -152,7 +155,24 @@ export function isOauthLoginFailureCode(code: string): boolean {
     || code === "runtime_slot_oauth_device_denied"
     || code === "runtime_slot_oauth_login_state_mismatch"
     || code === "runtime_slot_oauth_loopback_state_mismatch"
+    || code === "runtime_slot_oauth_browser_open_failed"
   );
+}
+
+/**
+ * True when a string looks like a public http(s) authorize URL (not a token).
+ * Used only to lift host error messages that carry the manual-open fallback.
+ */
+export function looksLikePublicAuthorizeUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 12 || trimmed.length > 8_192) return false;
+  if (trimmed.includes("\n") || trimmed.includes("\r")) return false;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 /**

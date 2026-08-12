@@ -1,14 +1,21 @@
 /**
- * S0 settings UI: env override is visible + read-only; no secret fields.
+ * Settings IA: category nav, two-tier permission policy, env override surface.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "../src/App";
 import {
   MockSettingsGateway,
   parsePermissionModeSettings,
+  parsePermissionPolicy,
+  synthesizePolicyFromLegacy,
 } from "../src/features/settings/settingsGateway";
+import {
+  PERMISSION_DENY_RECEIPT_NOTE,
+  PERMISSION_MODE_OPTIONS,
+  PERMISSION_TWO_AXIS_NOTE,
+} from "../src/features/settings/permissionCopy";
 import {
   adapterOptionsForBuild,
   SettingsPanel,
@@ -36,7 +43,14 @@ function fixtureGateway(): ProjectGateway {
   };
 }
 
-describe("SettingsPanel", () => {
+async function openCategory(
+  user: ReturnType<typeof userEvent.setup>,
+  id: "security" | "agents" | "runtime" | "appearance" | "diagnostics",
+): Promise<void> {
+  await user.click(screen.getByTestId(`settings-nav-${id}`));
+}
+
+describe("SettingsPanel — DTO contracts", () => {
   it("accepts the exact permission-mode DTO and rejects unknown or missing keys", () => {
     expect(
       parsePermissionModeSettings({ mode: "bypass", source: "global" }),
@@ -56,7 +70,112 @@ describe("SettingsPanel", () => {
     ).toThrow(/invalid settings response/i);
   });
 
-  it("offers exactly three global permission modes and saves the selection", async () => {
+  it("accepts the exact permission-policy DTO and rejects smuggled keys", () => {
+    expect(
+      parsePermissionPolicy({
+        bypassAvailable: true,
+        bypassAvailableSource: "global",
+        projectMode: "accept_edits",
+        projectModeSource: "project",
+        effectiveMode: "accept_edits",
+      }),
+    ).toEqual({
+      bypassAvailable: true,
+      bypassAvailableSource: "global",
+      projectMode: "accept_edits",
+      projectModeSource: "project",
+      effectiveMode: "accept_edits",
+    });
+    // Fail-closed: host claiming effective bypass while capability is off.
+    expect(
+      parsePermissionPolicy({
+        bypassAvailable: false,
+        bypassAvailableSource: "global",
+        projectMode: "bypass",
+        projectModeSource: "project",
+        effectiveMode: "bypass",
+      }).effectiveMode,
+    ).toBe("default");
+    expect(() =>
+      parsePermissionPolicy({
+        bypassAvailable: true,
+        bypassAvailableSource: "global",
+        projectMode: "default",
+        projectModeSource: "project",
+        effectiveMode: "default",
+        nativePath: "C:\\smuggled",
+      }),
+    ).toThrow(/invalid settings response/i);
+  });
+
+  it("synthesizes policy from legacy global mode for host gap", () => {
+    const policy = synthesizePolicyFromLegacy(
+      { mode: "accept_edits", source: "global" },
+      "proj-1",
+    );
+    expect(policy.bypassAvailable).toBe(true);
+    expect(policy.projectMode).toBe("accept_edits");
+    expect(policy.effectiveMode).toBe("accept_edits");
+  });
+});
+
+describe("SettingsPanel — category IA", () => {
+  it("exposes five IDE-style categories in the left nav", async () => {
+    render(
+      <SettingsPanel
+        gateway={new MockSettingsGateway()}
+        onClose={() => undefined}
+        projectId={null}
+      />,
+    );
+    await screen.findByTestId("settings-nav");
+    for (const id of [
+      "security",
+      "agents",
+      "runtime",
+      "appearance",
+      "diagnostics",
+    ] as const) {
+      expect(screen.getByTestId(`settings-nav-${id}`)).toBeInTheDocument();
+    }
+    // Default category is security (two-axis permission surface).
+    expect(screen.getByTestId("settings-category-security")).toBeVisible();
+    expect(screen.getByTestId("settings-permission-two-axis-note")).toHaveTextContent(
+      PERMISSION_TWO_AXIS_NOTE,
+    );
+  });
+
+  it("places theme under appearance and runtime paths under runtime", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsPanel
+        gateway={new MockSettingsGateway()}
+        onClose={() => undefined}
+        projectId={null}
+      />,
+    );
+    await screen.findByTestId("settings-nav");
+    expect(screen.queryByTestId("settings-theme")).toBeNull();
+    expect(screen.queryByTestId("settings-adapter")).toBeNull();
+
+    await openCategory(user, "appearance");
+    expect(screen.getByTestId("settings-theme")).toBeVisible();
+
+    await openCategory(user, "runtime");
+    expect(screen.getByTestId("settings-adapter")).toBeVisible();
+    expect(screen.getByTestId("settings-grok-executable")).toBeVisible();
+    expect(screen.getByTestId("settings-runtime-advanced")).toBeVisible();
+    expect(screen.getByTestId("settings-profile-scope-note").textContent).toMatch(
+      /登录型槽位/,
+    );
+    expect(screen.getByTestId("settings-profile-scope-note").textContent).toMatch(
+      /API key/,
+    );
+  });
+});
+
+describe("SettingsPanel — permission two-tier (T2/T3)", () => {
+  it("offers three project modes with two-axis copy (no unbounded 全开 wording)", async () => {
     const user = userEvent.setup();
     const gateway = new MockSettingsGateway();
     const applied: string[] = [];
@@ -65,7 +184,7 @@ describe("SettingsPanel", () => {
         gateway={gateway}
         onClose={() => undefined}
         onPermissionModeChanged={(mode) => applied.push(mode)}
-        projectId={null}
+        projectId="project-1"
       />,
     );
 
@@ -75,17 +194,44 @@ describe("SettingsPanel", () => {
       "accept_edits",
       "bypass",
     ]);
+    // Labels must not imply unbounded access.
+    const labels = [...select.querySelectorAll("option")].map(
+      (option) => option.textContent ?? "",
+    );
+    for (const label of labels) {
+      expect(label).not.toMatch(/无界|无限制|任意目录|整个磁盘/);
+    }
+    expect(screen.getByTestId("settings-permission-two-axis-note")).toHaveTextContent(
+      PERMISSION_TWO_AXIS_NOTE,
+    );
+    expect(PERMISSION_MODE_OPTIONS.every((o) => o.detail.includes("项目"))).toBe(
+      true,
+    );
+
     await user.selectOptions(select, "accept_edits");
     await user.click(screen.getByTestId("settings-save"));
     await waitFor(() => {
-      expect(gateway.getPermissionModeSnapshot().mode).toBe("accept_edits");
+      expect(gateway.getPermissionPolicySnapshot("project-1").projectMode).toBe(
+        "accept_edits",
+      );
+      expect(gateway.getPermissionPolicySnapshot("project-1").effectiveMode).toBe(
+        "accept_edits",
+      );
     });
     expect(applied).toContain("accept_edits");
+    expect(screen.getByText(PERMISSION_DENY_RECEIPT_NOTE)).toBeVisible();
   });
 
-  it("keeps permission mode global-only when project scope is selected", async () => {
+  it("T3 positive: when global Bypass is available, project can select Bypass", async () => {
     const user = userEvent.setup();
-    const gateway = new MockSettingsGateway();
+    const gateway = new MockSettingsGateway(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { bypassAvailable: true },
+    );
     render(
       <SettingsPanel
         gateway={gateway}
@@ -94,10 +240,80 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    await screen.findByTestId("settings-permission-mode");
-    await user.click(screen.getByRole("button", { name: "当前项目" }));
-    expect(screen.getByTestId("settings-permission-mode")).toBeDisabled();
-    expect(screen.getByTestId("settings-permission-mode-global-only")).toBeVisible();
+    const select = await screen.findByTestId("settings-permission-mode");
+    const bypassOption = within(select).getByRole("option", {
+      name: /Bypass/,
+    }) as HTMLOptionElement;
+    expect(bypassOption).not.toBeDisabled();
+
+    await user.selectOptions(select, "bypass");
+    await user.click(screen.getByTestId("settings-save"));
+    await waitFor(() => {
+      const policy = gateway.getPermissionPolicySnapshot("project-1");
+      expect(policy.bypassAvailable).toBe(true);
+      expect(policy.projectMode).toBe("bypass");
+      expect(policy.effectiveMode).toBe("bypass");
+    });
+  });
+
+  it("T3 negative: when global Bypass is off, project Bypass option is disabled with reason", async () => {
+    const user = userEvent.setup();
+    const gateway = new MockSettingsGateway(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { bypassAvailable: false, preferredMode: "default" },
+    );
+    render(
+      <SettingsPanel
+        gateway={gateway}
+        onClose={() => undefined}
+        projectId="project-1"
+      />,
+    );
+
+    const select = await screen.findByTestId("settings-permission-mode");
+    const bypassOption = within(select).getByRole("option", {
+      name: /Bypass/,
+    }) as HTMLOptionElement;
+    expect(bypassOption).toBeDisabled();
+    expect(screen.getByTestId("settings-bypass-project-locked")).toBeVisible();
+    expect(screen.getByTestId("settings-bypass-project-locked").textContent).toMatch(
+      /全局已关闭 Bypass/,
+    );
+
+    // Mock gateway also rejects forced project bypass write.
+    await expect(
+      gateway.setProjectPermissionMode("project-1", "bypass"),
+    ).rejects.toMatchObject({ code: "permission_bypass_not_available" });
+
+    // Toggle capability on, save, then Bypass becomes selectable.
+    await user.click(screen.getByTestId("settings-bypass-available"));
+    await user.click(screen.getByTestId("settings-save"));
+    await waitFor(() => {
+      expect(gateway.getPermissionPolicySnapshot("project-1").bypassAvailable).toBe(
+        true,
+      );
+    });
+    expect(
+      (within(screen.getByTestId("settings-permission-mode")).getByRole("option", {
+        name: /Bypass/,
+      }) as HTMLOptionElement),
+    ).not.toBeDisabled();
+  });
+
+  it("disables project mode select when no project is open", async () => {
+    render(
+      <SettingsPanel
+        gateway={new MockSettingsGateway()}
+        onClose={() => undefined}
+        projectId={null}
+      />,
+    );
+    expect(await screen.findByTestId("settings-permission-mode")).toBeDisabled();
+    expect(screen.getByTestId("settings-permission-mode-no-project")).toBeVisible();
   });
 
   it.each([
@@ -123,8 +339,11 @@ describe("SettingsPanel", () => {
       expect(screen.queryByTestId("permission-mode-indicator")).toBeNull();
     });
   });
+});
 
+describe("SettingsPanel — runtime / theme / shell", () => {
   it("shows env override state and keeps the field read-only", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway();
     gateway.setEnvOverride("adapter", "fake", "PILLOW_RUNTIME");
     gateway.setEnvOverride(
@@ -141,6 +360,7 @@ describe("SettingsPanel", () => {
       />,
     );
 
+    await openCategory(user, "runtime");
     await waitFor(() => {
       expect(screen.getByTestId("settings-adapter")).toBeDisabled();
     });
@@ -161,6 +381,7 @@ describe("SettingsPanel", () => {
   });
 
   it("uses a constrained adapter select, not a free-text adapter input", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway();
     render(
       <SettingsPanel
@@ -169,6 +390,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "runtime");
     await waitFor(() => {
       expect(screen.getByTestId("settings-adapter")).toBeInTheDocument();
     });
@@ -179,6 +401,7 @@ describe("SettingsPanel", () => {
   });
 
   it("hides Fake when host reports fakeAdapterSelectable false (release gate)", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway({
       fakeAdapterSelectable: false,
     });
@@ -189,6 +412,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "runtime");
     await waitFor(() => {
       expect(screen.getByTestId("settings-adapter")).toBeInTheDocument();
     });
@@ -201,6 +425,7 @@ describe("SettingsPanel", () => {
   });
 
   it("shows Fake when host reports fakeAdapterSelectable true (dev gate)", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway({
       fakeAdapterSelectable: true,
     });
@@ -211,6 +436,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "runtime");
     await waitFor(() => {
       expect(screen.getByTestId("settings-adapter")).toBeInTheDocument();
     });
@@ -299,6 +525,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "runtime");
     await waitFor(() => {
       expect(screen.getByTestId("settings-adapter")).not.toBeDisabled();
     });
@@ -312,6 +539,7 @@ describe("SettingsPanel", () => {
   });
 
   it("shows theme env override state and keeps the field read-only", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway();
     gateway.setEnvOverride("theme", "light", "PILLOW_THEME");
 
@@ -322,6 +550,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "appearance");
 
     await waitFor(() => {
       expect(screen.getByTestId("settings-theme")).toBeDisabled();
@@ -349,6 +578,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "appearance");
     await waitFor(() => {
       expect(screen.getByTestId("settings-theme")).not.toBeDisabled();
     });
@@ -364,6 +594,7 @@ describe("SettingsPanel", () => {
   });
 
   it("does not expose system as a theme option", async () => {
+    const user = userEvent.setup();
     const gateway = new MockSettingsGateway();
     render(
       <SettingsPanel
@@ -372,6 +603,7 @@ describe("SettingsPanel", () => {
         projectId={null}
       />,
     );
+    await openCategory(user, "appearance");
     await waitFor(() => {
       expect(screen.getByTestId("settings-theme")).toBeInTheDocument();
     });

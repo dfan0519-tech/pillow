@@ -14,17 +14,23 @@ use keeper_storage_sqlite::{
 use pillow_cli_detect::{AuthState, CliDetection};
 use pillow_runtime_slots::{
     AccountIdentifierStrategy, ClientIdSource, CreateSlotAuth, ExternalCliStatus, ModelCatalog,
-    ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason, ProfileField,
-    ProviderLoginMethod, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView, SecretBytes,
-    UpdateSlotAuthInput, fetch_openai_model_catalog, provider_login_profiles,
+    ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason, OauthLoginFailure,
+    OauthLoginInput, OauthLoginProgress, OauthLoginProgressEvent, ProfileField,
+    ProviderLoginMethod, ProviderLoginSupplement, RuntimeSlotError, RuntimeSlotService,
+    RuntimeSlotView, SecretBytes, SystemBrowser, UpdateSlotAuthInput, WinHttpOauthTokenClient,
+    fetch_openai_model_catalog, perform_oauth_login_production, provider_login_profile,
+    provider_login_profiles,
 };
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::app_state::{AppState, CommandError};
 use crate::runtime_composition::{build_slot_grok_config, discover_grok_executable_with_override};
 use crate::runtime_service_state::RuntimeServiceState;
+
+/// Tauri event name while OAuth login is in progress (public URL only).
+pub const RUNTIME_SLOT_OAUTH_PROGRESS_EVENT: &str = "runtime-slot-oauth-progress";
 
 /// Hard timeout for each CLI probe during `detect_local_clis` (per binary).
 const DETECT_LOCAL_CLI_TIMEOUT: Duration = Duration::from_secs(8);
@@ -39,7 +45,7 @@ pub struct RuntimeSlotDto {
     pub kind: String,
     /// Derived from auth: `full` | `none`.
     pub governance: String,
-    /// Derived: `login` | `api_key` | null.
+    /// Derived: `login` | `api_key` | `oauth` | null.
     pub auth_mode: Option<String>,
     pub base_url: Option<String>,
     pub model_id: Option<String>,
@@ -54,6 +60,32 @@ pub struct RuntimeSlotDto {
     pub role_custom_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// OAuth non-secret account label; null for non-OAuth.
+    pub account_label: Option<String>,
+    /// OAuth access-token expiry (RFC3339); null for non-OAuth. Never token text.
+    pub access_expires_at: Option<String>,
+}
+
+/// Public OAuth supplement from the renderer (never tokens/codes/secrets).
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OauthLoginSupplementDto {
+    pub client_id: Option<String>,
+    pub issuer: Option<String>,
+    pub authorize_endpoint: Option<String>,
+    pub device_authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub account_label: Option<String>,
+}
+
+/// Progress payload for `runtime-slot-oauth-progress` (closed, secret-free).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OauthLoginProgressDto {
+    pub authorize_url: String,
+    pub browser_opened: bool,
+    pub user_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -173,11 +205,16 @@ pub fn list_runtime_slots(
 
 /// Unified create command. Auth kind is selected by `auth_kind`.
 ///
-/// `auth_kind`: `api_key` | `grok_login` | `local_cli`
+/// `auth_kind`: `api_key` | `grok_login` | `local_cli` | `oauth`
 /// `role`: `controller` | `librarian` | `custom` (default custom / 未分配 when omitted)
+///
+/// For `oauth`, the host performs browser / device-code login inside this
+/// invoke and emits [`RUNTIME_SLOT_OAUTH_PROGRESS_EVENT`] with a copyable
+/// authorize URL (especially when the system browser cannot be opened).
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn create_slot(
+pub fn create_slot<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
     slots: State<'_, RuntimeSlotService>,
     app: State<'_, AppState>,
     project_id: String,
@@ -191,8 +228,11 @@ pub fn create_slot(
     executable_path: Option<String>,
     launch_args: Option<Vec<String>>,
     status_args: Option<Vec<String>>,
+    provider_id: Option<String>,
+    oauth_supplement: Option<OauthLoginSupplementDto>,
 ) -> Result<RuntimeSlotDto, CommandError> {
     create_slot_impl(
+        &app_handle,
         &slots,
         &app,
         project_id,
@@ -206,6 +246,8 @@ pub fn create_slot(
         executable_path,
         launch_args,
         status_args,
+        provider_id,
+        oauth_supplement,
     )
 }
 
@@ -516,7 +558,8 @@ pub(crate) fn list_runtime_slots_impl(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn create_slot_impl(
+pub(crate) fn create_slot_impl<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
     slots: &RuntimeSlotService,
     app: &AppState,
     project_id: String,
@@ -530,6 +573,8 @@ pub(crate) fn create_slot_impl(
     executable_path: Option<String>,
     launch_args: Option<Vec<String>>,
     status_args: Option<Vec<String>>,
+    provider_id: Option<String>,
+    oauth_supplement: Option<OauthLoginSupplementDto>,
 ) -> Result<RuntimeSlotDto, CommandError> {
     let project_id = registered_project_id(app, &project_id)?;
     let role = parse_role(role, role_custom_name)?;
@@ -560,6 +605,19 @@ pub(crate) fn create_slot_impl(
                 command_error("runtime_slot_input_invalid", "status_args is required.")
             })?,
         },
+        "oauth" => {
+            return create_oauth_slot_impl(
+                app_handle,
+                slots,
+                project_id,
+                display_name,
+                role,
+                base_url,
+                model_id,
+                provider_id,
+                oauth_supplement.unwrap_or_default(),
+            );
+        }
         _ => {
             return Err(command_error(
                 "runtime_slot_input_invalid",
@@ -573,27 +631,143 @@ pub(crate) fn create_slot_impl(
         .map_err(map_slot_error)
 }
 
+/// Perform browser/device OAuth login then persist tokens host-side.
+#[allow(clippy::too_many_arguments)]
+fn create_oauth_slot_impl<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    slots: &RuntimeSlotService,
+    project_id: keeper_project::ProjectId,
+    display_name: String,
+    role: SlotRole,
+    base_url: Option<String>,
+    model_id: Option<String>,
+    provider_id: Option<String>,
+    oauth_supplement: OauthLoginSupplementDto,
+) -> Result<RuntimeSlotDto, CommandError> {
+    let provider_id = provider_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            command_error(
+                "runtime_slot_input_invalid",
+                "provider_id is required for oauth.",
+            )
+        })?;
+    let base_url = base_url
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| command_error("runtime_slot_input_invalid", "base_url is required."))?;
+    let model_id = model_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| command_error("runtime_slot_input_invalid", "model_id is required."))?;
+    let profile = provider_login_profile(&provider_id)
+        .ok_or_else(|| command_error("runtime_slot_input_invalid", "Unknown OAuth provider_id."))?;
+
+    let account_label = oauth_supplement.account_label.clone();
+    let input = OauthLoginInput {
+        provider_id: provider_id.clone(),
+        base_url,
+        model_id,
+        supplement: supplement_from_dto(&oauth_supplement),
+        account_label,
+    };
+    let progress = HostOauthLoginProgress {
+        app: app_handle.clone(),
+    };
+    let token_client = WinHttpOauthTokenClient::default();
+    let tokens =
+        perform_oauth_login_production(profile, &input, &SystemBrowser, &token_client, &progress)
+            .map_err(map_oauth_login_failure)?;
+
+    let auth = CreateSlotAuth::Oauth {
+        provider_id: tokens.provider_id,
+        issuer: tokens.issuer,
+        client_id: tokens.client_id,
+        scopes: tokens.scopes,
+        token_endpoint: tokens.token_endpoint,
+        account_label: tokens.account_label,
+        base_url: tokens.base_url,
+        model_id: tokens.model_id,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        access_expires_at: tokens.access_expires_at,
+    };
+    slots
+        .create_slot(project_id, display_name, auth, role)
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
+}
+
+fn supplement_from_dto(dto: &OauthLoginSupplementDto) -> ProviderLoginSupplement {
+    ProviderLoginSupplement {
+        issuer: dto.issuer.clone(),
+        authorize_endpoint: dto.authorize_endpoint.clone(),
+        device_authorization_endpoint: dto.device_authorization_endpoint.clone(),
+        token_endpoint: dto.token_endpoint.clone(),
+        scopes: dto.scopes.clone(),
+        client_id: dto.client_id.clone(),
+    }
+}
+
+struct HostOauthLoginProgress<R: tauri::Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: tauri::Runtime> OauthLoginProgress for HostOauthLoginProgress<R> {
+    fn on_authorize_ready(&self, event: &OauthLoginProgressEvent) {
+        let payload = OauthLoginProgressDto {
+            authorize_url: event.authorize_url.clone(),
+            browser_opened: event.browser_opened,
+            user_code: event.user_code.clone(),
+        };
+        // Best-effort: UI may miss the event if it has not subscribed yet, but
+        // terminal failures still carry authorize_url on the error path.
+        let _ = self.app.emit(RUNTIME_SLOT_OAUTH_PROGRESS_EVENT, payload);
+    }
+}
+
+fn map_oauth_login_failure(failure: OauthLoginFailure) -> CommandError {
+    // For browser-open failure, put the public authorize URL in `message` so
+    // the renderer can show a copyable fallback. Other codes keep a fixed
+    // non-secret Display string (gateway never echoes host messages except
+    // for this specific code).
+    if failure.error.code() == "runtime_slot_oauth_browser_open_failed"
+        && let Some(url) = failure.authorize_url
+    {
+        return CommandError {
+            code: "runtime_slot_oauth_browser_open_failed",
+            message: url,
+        };
+    }
+    // Timeout / denied / etc.: include authorize URL only in message when
+    // present and code is browser-related; otherwise standard Display.
+    if let Some(url) = failure.authorize_url.as_ref()
+        && failure.error.code() == "runtime_slot_oauth_loopback_timeout"
+    {
+        // Still surface URL so the user can diagnose a missed browser open.
+        return CommandError {
+            code: failure.error.code(),
+            message: url.clone(),
+        };
+    }
+    map_slot_error(failure.error)
+}
+
 pub(crate) fn create_grok_login_slot_impl(
     slots: &RuntimeSlotService,
     app: &AppState,
     project_id: String,
     display_name: String,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    create_slot_impl(
-        slots,
-        app,
-        project_id,
-        display_name,
-        "grok_login".into(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    // Legacy thin wrapper — no OAuth AppHandle path required.
+    let project_id = registered_project_id(app, &project_id)?;
+    slots
+        .create_slot(
+            project_id,
+            display_name,
+            CreateSlotAuth::GrokLogin { model_id: None },
+            SlotRole::default_unassigned(),
+        )
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
 }
 
 pub(crate) fn create_grok_api_key_slot_impl(
@@ -605,21 +779,21 @@ pub(crate) fn create_grok_api_key_slot_impl(
     model_id: String,
     api_key: String,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    create_slot_impl(
-        slots,
-        app,
-        project_id,
-        display_name,
-        "api_key".into(),
-        None,
-        None,
-        Some(base_url),
-        Some(model_id),
-        Some(api_key),
-        None,
-        None,
-        None,
-    )
+    let project_id = registered_project_id(app, &project_id)?;
+    let secret = SecretBytes::new(api_key);
+    slots
+        .create_slot(
+            project_id,
+            display_name,
+            CreateSlotAuth::ApiKey {
+                base_url,
+                model_id,
+                api_key: secret,
+            },
+            SlotRole::default_unassigned(),
+        )
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
 }
 
 pub(crate) fn create_external_cli_slot_impl(
@@ -631,21 +805,20 @@ pub(crate) fn create_external_cli_slot_impl(
     launch_args: Vec<String>,
     status_args: Vec<String>,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    create_slot_impl(
-        slots,
-        app,
-        project_id,
-        display_name,
-        "local_cli".into(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(executable_path),
-        Some(launch_args),
-        Some(status_args),
-    )
+    let project_id = registered_project_id(app, &project_id)?;
+    slots
+        .create_slot(
+            project_id,
+            display_name,
+            CreateSlotAuth::LocalCli {
+                executable_path,
+                launch_args,
+                status_args,
+            },
+            SlotRole::default_unassigned(),
+        )
+        .map(slot_to_dto)
+        .map_err(map_slot_error)
 }
 
 pub(crate) fn get_external_cli_status_impl(
@@ -1173,12 +1346,16 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         executable_path,
         launch_args,
         status_args,
+        account_label,
+        access_expires_at,
     ) = match &slot.auth {
         SlotAuth::GrokLogin { model_id } => (
             slot.auth.wire_kind().into(),
             slot.auth.wire_auth_mode().map(str::to_owned),
             None,
             model_id.clone(),
+            None,
+            None,
             None,
             None,
             None,
@@ -1197,6 +1374,8 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
             None,
             None,
             None,
+            None,
+            None,
         ),
         SlotAuth::LocalCli {
             executable_path,
@@ -1211,24 +1390,27 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
             Some(executable_path.clone()),
             Some(launch_args.clone()),
             Some(status_args.clone()),
+            None,
+            None,
         ),
-        // OAuth / future auth: closed wire labels via SlotAuth helpers; no secrets.
-        other => (
-            other.wire_kind().into(),
-            other.wire_auth_mode().map(str::to_owned),
-            match other {
-                SlotAuth::Oauth { base_url, .. } => Some(base_url.clone()),
-                _ => None,
-            },
-            match other {
-                SlotAuth::Oauth { model_id, .. } => Some(model_id.clone()),
-                _ => None,
-            },
-            // Never surface DPAPI secret refs for OAuth (access/refresh stay host-private).
+        // OAuth: closed wire labels; never surface DPAPI secret refs.
+        SlotAuth::Oauth {
+            base_url,
+            model_id,
+            account_label,
+            access_expires_at,
+            ..
+        } => (
+            slot.auth.wire_kind().into(),
+            slot.auth.wire_auth_mode().map(str::to_owned),
+            Some(base_url.clone()),
+            Some(model_id.clone()),
             None,
             None,
             None,
             None,
+            account_label.clone(),
+            Some(access_expires_at.to_rfc3339()),
         ),
     };
     let (role, role_custom_name) = match &slot.role {
@@ -1256,6 +1438,8 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         role_custom_name,
         created_at: slot.created_at.to_rfc3339(),
         updated_at: slot.updated_at.to_rfc3339(),
+        account_label,
+        access_expires_at,
     }
 }
 
