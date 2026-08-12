@@ -1,10 +1,27 @@
 //! Pure permission-rule matching and precedence.
 //!
 //! Pillow pins a small deterministic wildcard language rather than claiming
-//! bit-for-bit Grok compatibility. Matching is case-sensitive on every host;
-//! only `*` and `**` are operators. Process rules use literal-prefix OR
-//! whole-subject wildcard matching. Write/edit rules use whole portable-path
-//! wildcard matching only.
+//! bit-for-bit Grok compatibility. Only `*` and `**` are operators.
+//!
+//! # Path identity (write / edit) — platform semantics
+//!
+//! Rule subjects are portable project-relative paths. The OS may resolve those
+//! paths with different case-sensitivity than a byte-wise string compare:
+//!
+//! | Platform | Deny match | Allow match | Rationale |
+//! | --- | --- | --- | --- |
+//! | Windows | Case-folded (Unicode lowercase) identity | Case-sensitive | NTFS default is case-insensitive; deny must not miss aliases. Narrower allow is fail-closed for auto-approve. |
+//! | non-Windows | Case-sensitive | Case-sensitive | Typical Unix volumes are case-sensitive. Residual: case-insensitive mounts (some macOS APFS) are documented as residual risk. |
+//!
+//! Fail-closed for deny: when identity is ambiguous under the platform table,
+//! deny matching uses the broader (folded) comparison so aliases cannot slip
+//! into mode auto-approval.
+//!
+//! # Process subjects
+//!
+//! Process subjects use a versioned length-prefix encoding ([`canonical_process_subject`])
+//! so argv boundaries are recoverable. Legacy space-joined subjects do not
+//! decode and therefore never auto-allow (fail-closed migration).
 
 use serde::{Deserialize, Serialize};
 
@@ -218,7 +235,11 @@ fn finish_shell_segment(
     if tokens.is_empty() || !simple_shell_tokens_are_reliable(tokens) {
         return None;
     }
-    segments.push(tokens.join(" "));
+    // Emit the same injective process subject encoding used for structured
+    // proposals so shell segments never re-introduce space-join collisions.
+    let program = tokens[0].as_str();
+    let argv = tokens[1..].to_vec();
+    segments.push(canonical_process_subject(program, &argv));
     tokens.clear();
     Some(())
 }
@@ -323,32 +344,183 @@ fn is_shell_interpreter(token: &str) -> bool {
     )
 }
 
-/// Canonical process subject: catalog label followed by literal argv tokens,
-/// each separated by one ASCII space. No shell quoting or parsing occurs.
+/// Version mark for process subject v1 encoding (ASCII RS + `p1`).
+///
+/// Placed after `{program} ` so durable rule-receipt validation that requires
+/// `match_subject == program || match_subject.starts_with(program + " ")` still
+/// holds without widening storage contracts.
+const PROCESS_SUBJECT_V1_MARK: &str = "\u{1e}p1";
+
+/// Canonical process subject: injective, reversible encoding of
+/// `(program, argv)`.
+///
+/// # Encoding (v1)
+///
+/// - Empty argv → `{program}`
+/// - Non-empty → `{program} \u{1e}p1` then for each arg `:{hex_byte_len}:{utf8}`
+///   where `hex_byte_len` is the lowercase hex UTF-8 byte length of that arg.
+///
+/// No shell quoting. Argv boundaries are always recoverable via
+/// [`decode_process_subject`]. Distinct structured argv values never share a
+/// subject (including space-containing, empty, and multi-space args).
 pub fn canonical_process_subject(program: &str, argv: &[String]) -> String {
-    let suffix_bytes = argv.iter().map(|arg| arg.len() + 1).sum::<usize>();
-    let mut subject = String::with_capacity(program.len() + suffix_bytes);
+    if argv.is_empty() {
+        return program.to_owned();
+    }
+    let mut subject = String::with_capacity(
+        program.len()
+            + 1
+            + PROCESS_SUBJECT_V1_MARK.len()
+            + argv.iter().map(|arg| 1 + 8 + 1 + arg.len()).sum::<usize>(),
+    );
     subject.push_str(program);
+    subject.push(' ');
+    subject.push_str(PROCESS_SUBJECT_V1_MARK);
     for argument in argv {
-        subject.push(' ');
+        subject.push(':');
+        subject.push_str(&format!("{:x}", argument.len()));
+        subject.push(':');
         subject.push_str(argument);
     }
     subject
 }
 
+/// Decode a [`canonical_process_subject`] value into `[program, ...argv]`.
+///
+/// Returns `None` for legacy space-joined subjects and any malformed payload.
+/// Callers must treat `None` as fail-closed (no auto-allow).
+pub fn decode_process_subject(subject: &str) -> Option<Vec<String>> {
+    if subject.is_empty() || subject.contains('\0') {
+        return None;
+    }
+
+    // Program-only form (empty argv).
+    if !subject.contains(' ') {
+        // Reject stray version marks inside a bare program label.
+        if subject.contains('\u{1e}') {
+            return None;
+        }
+        return Some(vec![subject.to_owned()]);
+    }
+
+    let (program, after_program) = subject.split_once(' ')?;
+    if program.is_empty() || program.contains('\u{1e}') {
+        return None;
+    }
+    let Some(mut cursor) = after_program.strip_prefix(PROCESS_SUBJECT_V1_MARK) else {
+        // Legacy flat "program arg1 arg2" subjects intentionally do not decode.
+        return None;
+    };
+    if cursor.is_empty() {
+        // Mark without args is not a produced form.
+        return None;
+    }
+
+    let mut tokens = vec![program.to_owned()];
+    while !cursor.is_empty() {
+        if !cursor.starts_with(':') {
+            return None;
+        }
+        cursor = &cursor[1..];
+        let (len_hex, after_len) = cursor.split_once(':')?;
+        if len_hex.is_empty() || !len_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        // Reject leading zeros except for the single digit `0` (empty arg).
+        if len_hex.len() > 1 && len_hex.starts_with('0') {
+            return None;
+        }
+        let len = usize::from_str_radix(len_hex, 16).ok()?;
+        let raw = after_len.as_bytes();
+        if raw.len() < len {
+            return None;
+        }
+        let arg = std::str::from_utf8(&raw[..len]).ok()?.to_owned();
+        tokens.push(arg);
+        cursor = &after_len[len..];
+    }
+    Some(tokens)
+}
+
+/// True when space-joining tokens is a bijection (no empty token, no embedded
+/// ASCII space or subject version mark). Used only as a **pattern match surface**
+/// for Grok-compatible process globs against simple toolchain argv.
+fn bijective_space_join(tokens: &[String]) -> Option<String> {
+    if tokens.is_empty() {
+        return None;
+    }
+    if tokens
+        .iter()
+        .any(|token| token.is_empty() || token.contains(' ') || token.contains('\u{1e}'))
+    {
+        return None;
+    }
+    Some(tokens.join(" "))
+}
+
 /// Match one normalized subject against a pattern for its rule class.
+///
+/// Path matching here is **case-sensitive** on every platform. Windows write/edit
+/// **deny** identity folding is applied in [`evaluate_permission_rules`], not
+/// in this primitive — allow and deny path semantics deliberately differ.
 pub fn permission_rule_matches(prefix: PermissionRulePrefix, pattern: &str, subject: &str) -> bool {
     if pattern.is_empty() {
         return true;
     }
 
     match prefix {
-        PermissionRulePrefix::Process => {
-            subject.starts_with(pattern) || wildcard_match(pattern, subject, WildcardMode::Process)
-        }
+        PermissionRulePrefix::Process => process_rule_matches(pattern, subject),
         PermissionRulePrefix::Write | PermissionRulePrefix::Edit => {
             wildcard_match(pattern, subject, WildcardMode::PortablePath)
         }
+    }
+}
+
+fn process_rule_matches(pattern: &str, subject: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    let Some(tokens) = decode_process_subject(subject) else {
+        // Undecodable / legacy flat subjects never match non-empty patterns.
+        return false;
+    };
+
+    // When argv is bijective under space-join, keep the historical Grok-style
+    // character prefix/glob surface so patterns like `cargo *` and `node*` still
+    // work for ordinary toolchain commands.
+    if let Some(flat) = bijective_space_join(&tokens) {
+        return flat.starts_with(pattern) || wildcard_match(pattern, &flat, WildcardMode::Process);
+    }
+
+    // Non-bijective argv (embedded spaces, empty args, …): match only against
+    // the injective encoding. Space-oriented patterns cannot alias a different
+    // structured argv. Broad program patterns (`node*`) still hit the encoded
+    // subject via character prefix/glob on the canonical form.
+    subject.starts_with(pattern) || wildcard_match(pattern, subject, WildcardMode::Process)
+}
+
+/// Whether write/edit **deny** matching should use OS path-identity case fold.
+///
+/// Windows: yes (NTFS default case-insensitive). Other platforms: no (byte-wise
+/// case-sensitive deny, matching typical Unix FS semantics).
+pub fn path_deny_uses_identity_case_fold() -> bool {
+    cfg!(windows)
+}
+
+fn fold_path_identity(path: &str) -> String {
+    path.to_lowercase()
+}
+
+fn path_deny_matches(pattern: &str, subject: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if path_deny_uses_identity_case_fold() {
+        let pattern = fold_path_identity(pattern);
+        let subject = fold_path_identity(subject);
+        wildcard_match(&pattern, &subject, WildcardMode::PortablePath)
+    } else {
+        wildcard_match(pattern, subject, WildcardMode::PortablePath)
     }
 }
 
@@ -360,6 +532,9 @@ pub fn permission_rule_matches(prefix: PermissionRulePrefix, pattern: &str, subj
 /// free of opaque evaluation / command-delegation payloads. Anything we cannot
 /// confirm fails closed to [`PermissionRuleEvaluation::RequireConfirmation`].
 /// Deny is never weakened by this gate.
+///
+/// Write/edit **deny** uses platform path-identity folding (see module docs).
+/// Write/edit **allow** stays case-sensitive on every platform.
 pub fn evaluate_permission_rules(
     prefix: PermissionRulePrefix,
     subject: &str,
@@ -372,8 +547,18 @@ pub fn evaluate_permission_rules(
         if rule.prefix != prefix
             || (rule.scope == PermissionRuleScope::Project
                 && rule.action == PermissionRuleAction::Allow)
-            || !permission_rule_matches(prefix, &rule.pattern, subject)
         {
+            continue;
+        }
+
+        let hits = match (prefix, rule.action) {
+            (
+                PermissionRulePrefix::Write | PermissionRulePrefix::Edit,
+                PermissionRuleAction::Deny,
+            ) => path_deny_matches(&rule.pattern, subject),
+            _ => permission_rule_matches(prefix, &rule.pattern, subject),
+        };
+        if !hits {
             continue;
         }
 
@@ -411,17 +596,17 @@ pub fn evaluate_permission_rules(
 /// non-eval meanings (e.g. `git -c key=value`, `grep -e pattern`, `ls -c`,
 /// `ps -e`) are positively confirmed for those flag letters only.
 ///
-/// This is pure shape analysis on the already-canonical space-joined subject.
+/// Shape analysis runs on the **decoded** program/argv token list. Legacy
+/// space-joined subjects that do not decode return `false` (fail-closed).
 pub fn process_subject_confirmed_for_allow(subject: &str) -> bool {
-    let tokens: Vec<&str> = subject
-        .split(' ')
-        .filter(|token| !token.is_empty())
-        .collect();
+    let Some(tokens) = decode_process_subject(subject) else {
+        return false;
+    };
     if tokens.is_empty() {
         return false;
     }
 
-    let program = program_basename(tokens[0]);
+    let program = program_basename(&tokens[0]);
     if command_delegation_program(program) {
         // Outer subject alone cannot confirm what the delegated command is.
         return false;
@@ -429,7 +614,7 @@ pub fn process_subject_confirmed_for_allow(subject: &str) -> bool {
 
     let mut index = 1usize;
     while index < tokens.len() {
-        let token = tokens[index];
+        let token = tokens[index].as_str();
 
         if matches!(token, "-exec" | "-execdir") {
             return false;

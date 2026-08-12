@@ -1839,6 +1839,49 @@ mod unit_tests {
         ));
     }
 
+    /// EA-02: rule evaluation subject is built from the same structured argv
+    /// the executor later hands to the OS — boundaries are not re-split.
+    #[test]
+    fn rule_subject_argv_is_identical_to_execution_argv() {
+        use keeper_policy::{canonical_process_subject, decode_process_subject};
+        use std::ffi::OsString;
+
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            ("node", vec!["safe.js".into(), "--version".into()]),
+            ("node", vec!["safe.js --version".into()]),
+            ("python", vec!["two words".into(), "a/b".into()]),
+            ("prog", vec!["".into(), "x".into()]),
+            ("prog", vec!["a  b".into()]),
+        ];
+
+        for (program, argv) in cases {
+            let subject = canonical_process_subject(program, &argv);
+            let decoded = decode_process_subject(&subject).expect("v1 subject decodes");
+            assert_eq!(decoded[0], program);
+            assert_eq!(&decoded[1..], argv.as_slice());
+
+            // Executor path: Structured sealed uses sealed.argv as OsString list.
+            let execution: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let from_subject: Vec<OsString> = decoded[1..].iter().map(OsString::from).collect();
+            assert_eq!(
+                execution, from_subject,
+                "execution argv must equal rule-decoded argv for {program:?} {argv:?}"
+            );
+            // Distinct structures must not collapse (collision guard).
+            if argv.len() == 1 && argv[0].contains(' ') {
+                let split: Vec<String> = argv[0]
+                    .split(' ')
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if split.len() > 1 {
+                    let other = canonical_process_subject(program, &split);
+                    assert_ne!(subject, other);
+                }
+            }
+        }
+    }
+
     #[test]
     fn combined_program_argv_byte_boundary_is_enforced() {
         let program = "node";

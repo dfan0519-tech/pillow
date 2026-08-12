@@ -15,6 +15,7 @@ import { isProjectAllowForbidden } from "../../lib/permissionRulesGateway";
 import {
   PERMISSION_WORD_BOUNDARY_NOTE,
   actionLabel,
+  displayRulePattern,
   prefixLabel,
   scopeLabel,
 } from "./permissionPattern";
@@ -370,7 +371,7 @@ function RuleList({
                   )}
                 </span>
                 <code data-testid="permission-rule-pattern">
-                  {rule.prefix}:{rule.pattern}
+                  {rule.prefix}:{displayRulePattern(rule.prefix, rule.pattern)}
                 </code>
                 <span
                   className="permission-rules-list__scope"
@@ -380,7 +381,9 @@ function RuleList({
                 </span>
               </div>
               <button
-                aria-label={`删除规则 ${rule.prefix}:${rule.pattern}`}
+                aria-label={`删除规则 ${rule.prefix}:${
+                  displayRulePattern(rule.prefix, rule.pattern)
+                }`}
                 className="permission-rules-list__delete"
                 data-testid="permission-rule-delete"
                 onClick={() => onDelete(rule.rule_id)}

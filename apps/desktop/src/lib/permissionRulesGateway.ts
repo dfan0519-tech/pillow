@@ -249,8 +249,10 @@ export function readRuleSubject(proposal: unknown): string | undefined {
   if (!isRecord(proposal)) return undefined;
   const raw = proposal.rule_subject ?? proposal.ruleSubject;
   if (typeof raw !== "string") return undefined;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+  // Blank subjects are dropped, but a present one is returned byte-for-byte.
+  // Process subjects are length-prefixed, so trimming an argument that ends in
+  // whitespace would silently yield a subject that no longer decodes.
+  return raw.trim().length > 0 ? raw : undefined;
 }
 
 /**

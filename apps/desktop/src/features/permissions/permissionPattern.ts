@@ -8,6 +8,11 @@ import type {
   PermissionRuleAction,
   PermissionRulePrefix,
 } from "../../lib/permissionRulesGateway";
+import {
+  decodeProcessSubject,
+  formatProcessSubjectForDisplay,
+  spaceJoinIsBijective,
+} from "./processSubject";
 
 /**
  * Word-boundary warning shown whenever the user is about to write a rule.
@@ -17,11 +22,24 @@ export const PERMISSION_WORD_BOUNDARY_NOTE =
   "模式按前缀/通配匹配，没有词边界：例如「cargo」会同时命中「cargotest」。"
   + "若只想匹配该程序及其参数，请使用「cargo *」这类带空格与通配符的形态。";
 
+/**
+ * A rule pattern as a human should read it.
+ *
+ * A process pattern may be an exact v1 subject, which carries a control
+ * character and hex length prefixes. Display only — never write a stored
+ * pattern back from this value.
+ */
+export function displayRulePattern(prefix: string, pattern: string): string {
+  return prefix === "process"
+    ? formatProcessSubjectForDisplay(pattern)
+    : pattern;
+}
+
 /** Compact timeline / chip summary, e.g. `allow process:cargo *`. */
 export function formatRuleSummary(rule: AutoApprovedByRule): string {
   const action = rule.action.trim() || "allow";
   const prefix = rule.prefix.trim() || "process";
-  const pattern = rule.pattern.trim();
+  const pattern = displayRulePattern(prefix, rule.pattern).trim();
   return pattern.length > 0
     ? `${action} ${prefix}:${pattern}`
     : `${action} ${prefix}`;
@@ -45,16 +63,33 @@ export function suggestPatternFromSubject(
   prefix: PermissionRulePrefix,
   ruleSubject: string,
 ): string {
-  const subject = ruleSubject.trim();
-  if (!subject) {
+  if (ruleSubject.trim().length === 0) {
     return prefix === "process" ? "*" : "**/*";
   }
+
+  // Trimming would corrupt a v1 subject whose final argument ends in
+  // whitespace, so process subjects are read exactly as the host produced them.
+  const subject = prefix === "process" ? ruleSubject : ruleSubject.trim();
 
   if (prefix === "process") {
     // Already a glob-like pattern — keep it.
     if (subject.includes("*")) return subject;
-    const tokens = subject.split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) return "*";
+
+    // Host subjects are v1-encoded (see processSubject.ts). Splitting one on
+    // whitespace would slice through the encoding and suggest a rule that can
+    // never match, so decode instead of tokenizing the raw string.
+    const tokens = decodeProcessSubject(subject);
+    if (!tokens || tokens.length === 0) {
+      // Legacy or malformed: the host will not auto-match this subject at all.
+      // Show it verbatim rather than inventing a shape it does not have.
+      return subject;
+    }
+    if (!spaceJoinIsBijective(tokens)) {
+      // Argv with embedded spaces or empty elements has no faithful
+      // space-joined pattern — that ambiguity is exactly what EA-02 exploited.
+      // The exact canonical subject is the only pattern that means this argv.
+      return subject;
+    }
     if (tokens.length === 1) {
       // Bare program → force space+wildcard so `cargo` does not hit `cargotest`.
       return `${tokens[0]} *`;

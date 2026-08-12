@@ -415,7 +415,8 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
         .expect("rule-attributed process receipt");
     assert_eq!(stored.rule_id, rule.rule_id);
     assert_eq!(stored.rule_pattern, "node --version");
-    assert_eq!(stored.match_subject, "node --version");
+    let expected_subject = keeper_policy::canonical_process_subject("node", &["--version".into()]);
+    assert_eq!(stored.match_subject, expected_subject);
 
     let view = host
         .list_process_proposals(&fx.conversation_id)
@@ -423,7 +424,7 @@ fn global_process_allow_auto_executes_with_canonical_subject_and_receipt() {
         .into_iter()
         .find(|view| view.proposal_id == receipt.proposal_id)
         .unwrap();
-    assert_eq!(view.rule_subject, "node --version");
+    assert_eq!(view.rule_subject, expected_subject);
     assert_eq!(view.rule_segments, None);
     assert!(!view.decision_available);
     let attribution = view.auto_approved_by_rule.expect("rule attribution view");
@@ -530,7 +531,10 @@ fn reliable_shell_rule_segments_survive_live_and_stored_decision_views() {
     register(&host, &fx);
     let conversation_id = fx.conversation_id.clone();
     let decision_host = Arc::clone(&host);
-    let expected_segments = vec!["cargo test".to_owned(), "cargo build".to_owned()];
+    let expected_segments = vec![
+        keeper_policy::canonical_process_subject("cargo", &["test".into()]),
+        keeper_policy::canonical_process_subject("cargo", &["build".into()]),
+    ];
     let expected_in_thread = expected_segments.clone();
     let decide = thread::spawn(move || {
         let proposal_id = wait_live_pending(&decision_host, &conversation_id);
@@ -566,7 +570,13 @@ fn reliable_shell_rule_segments_survive_live_and_stored_decision_views() {
 
     assert_eq!(receipt.process.state, ExecProposalState::Rejected);
     assert_eq!(receipt.process.started, None);
-    assert_eq!(expected_segments, vec!["cargo test", "cargo build"]);
+    assert_eq!(
+        expected_segments,
+        vec![
+            keeper_policy::canonical_process_subject("cargo", &["test".into()]),
+            keeper_policy::canonical_process_subject("cargo", &["build".into()]),
+        ]
+    );
     host.shutdown().unwrap();
 }
 
@@ -627,10 +637,16 @@ fn simple_shell_conjunction_auto_executes_and_persists_each_contributing_rule() 
     assert_eq!(segment_receipts.len(), 2);
     assert_eq!(segment_receipts[0].segment_index, 0);
     assert_eq!(segment_receipts[0].receipt.rule_id, first_rule.rule_id);
-    assert_eq!(segment_receipts[0].receipt.match_subject, "echo s2-first");
+    assert_eq!(
+        segment_receipts[0].receipt.match_subject,
+        keeper_policy::canonical_process_subject("echo", &["s2-first".into()])
+    );
     assert_eq!(segment_receipts[1].segment_index, 1);
     assert_eq!(segment_receipts[1].receipt.rule_id, second_rule.rule_id);
-    assert_eq!(segment_receipts[1].receipt.match_subject, "echo s2-second");
+    assert_eq!(
+        segment_receipts[1].receipt.match_subject,
+        keeper_policy::canonical_process_subject("echo", &["s2-second".into()])
+    );
 
     let representative = receipt
         .process
@@ -705,7 +721,54 @@ fn project_deny_in_a_later_shell_segment_beats_global_allow_without_execution() 
     assert_eq!(segment_receipts.len(), 1);
     assert_eq!(segment_receipts[0].segment_index, 1);
     assert_eq!(segment_receipts[0].receipt.rule_id, deny.rule_id);
-    assert_eq!(segment_receipts[0].receipt.match_subject, "rm -rf x");
+    assert_eq!(
+        segment_receipts[0].receipt.match_subject,
+        keeper_policy::canonical_process_subject("rm", &["-rf".into(), "x".into()])
+    );
+    host.shutdown().unwrap();
+}
+
+/// EA-02 host reproduction: a durable allow for argv `["safe.js","--version"]`
+/// must not auto-approve the distinct argv `["safe.js --version"]`.
+#[test]
+fn process_allow_rule_does_not_cross_argv_boundaries() {
+    let fx = fixture();
+    // User-facing pattern language is still space-oriented for simple tokens.
+    add_process_rule(&fx, "node safe.js *", PermissionRuleAction::Allow);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+
+    // Colliding shape must stay pending for a human (default mode).
+    let conversation_id = fx.conversation_id.clone();
+    let decision_host = Arc::clone(&host);
+    let decide = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&decision_host, &conversation_id);
+        let view = decision_host
+            .list_process_proposals(&conversation_id)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.proposal_id == proposal_id)
+            .unwrap();
+        assert!(
+            view.decision_available,
+            "one-arg space-containing operand must not rule-auto-approve"
+        );
+        assert!(view.auto_approved_by_rule.is_none());
+        decision_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+    });
+
+    let cancel = AtomicBool::new(false);
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node("ea02-collision", vec!["safe.js --version"]),
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+    decide.join().unwrap();
+    assert_eq!(receipt.state, ExecProposalState::Rejected);
     host.shutdown().unwrap();
 }
 

@@ -304,6 +304,119 @@ fn bypass_write_still_obeys_project_deny_and_never_creates_mode_receipt() {
     host.shutdown().unwrap();
 }
 
+/// EA-01: Windows case alias of a denied path must not write under bypass /
+/// accept_edits, and must not mint a mode approval receipt.
+#[test]
+#[cfg(windows)]
+fn windows_case_alias_modify_cannot_bypass_project_deny_under_auto_modes() {
+    for mode in [PermissionMode::Bypass, PermissionMode::AcceptEdits] {
+        let fx = fixture();
+        fs::create_dir_all(fx.root.join("blocked")).unwrap();
+        fs::write(fx.root.join("blocked").join("secret.txt"), "original\n").unwrap();
+        set_permission_mode(&fx, mode);
+        let deny = add_rule(
+            &fx,
+            PermissionRuleScope::Project,
+            PermissionRulePrefix::Edit,
+            "blocked/**",
+            PermissionRuleAction::Deny,
+        );
+        let host = host_for(&fx);
+        register(&host, &fx);
+        let cancel = AtomicBool::new(false);
+
+        // Agent spells the same NTFS object with alternate case.
+        let receipt = execute_governed_write(
+            fx.run_id,
+            provider_modify(
+                "ea01-alias-modify",
+                "BLOCKED/SECRET.TXT",
+                "should-not-land\n",
+            ),
+            &cancel,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            receipt.resolved.state,
+            WriteProposalState::Rejected,
+            "mode={mode:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(fx.root.join("blocked").join("secret.txt")).unwrap(),
+            "original\n",
+            "mode={mode:?}: physical file must be unchanged"
+        );
+        let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+        assert!(
+            store
+                .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+                .unwrap()
+                .is_none(),
+            "mode={mode:?}: no mode approval receipt"
+        );
+        let rule_receipt = store
+            .get_rule_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .expect("deny attribution");
+        assert_eq!(rule_receipt.rule_id, deny.rule_id);
+        assert_eq!(rule_receipt.rule_action, PermissionRuleAction::Deny);
+        assert_eq!(rule_receipt.match_subject, "BLOCKED/SECRET.TXT");
+        host.shutdown().unwrap();
+    }
+}
+
+/// EA-01: create under a case-aliased denied parent must also fail closed.
+#[test]
+#[cfg(windows)]
+fn windows_case_alias_create_under_denied_parent_is_blocked() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join("blocked")).unwrap();
+    set_permission_mode(&fx, PermissionMode::Bypass);
+    let deny = add_rule(
+        &fx,
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Write,
+        "blocked/**",
+        PermissionRuleAction::Deny,
+    );
+    let host = host_for(&fx);
+    register(&host, &fx);
+    let cancel = AtomicBool::new(false);
+
+    let receipt = execute_governed_write(
+        fx.run_id,
+        provider_create("ea01-alias-create", "BLOCKED/new.txt", "must not exist"),
+        &cancel,
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(receipt.resolved.state, WriteProposalState::Rejected);
+    assert!(!fx.root.join("blocked").join("new.txt").exists());
+    // Also ensure the alternate-case path did not create a second tree.
+    assert!(
+        !fx.root.join("BLOCKED").join("new.txt").exists() || {
+            // On case-insensitive volumes BLOCKED and blocked are the same directory.
+            !fx.root.join("blocked").join("new.txt").exists()
+        }
+    );
+    let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+    assert!(
+        store
+            .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .is_none()
+    );
+    let rule_receipt = store
+        .get_rule_receipt(&receipt.resolved.proposal_id)
+        .unwrap()
+        .expect("deny attribution");
+    assert_eq!(rule_receipt.rule_id, deny.rule_id);
+    host.shutdown().unwrap();
+}
+
 #[test]
 fn global_allow_auto_applies_write_and_exposes_rule_subject_and_attribution() {
     let fx = fixture();

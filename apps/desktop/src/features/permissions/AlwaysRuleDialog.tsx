@@ -19,6 +19,10 @@ import {
   prefixLabel,
   suggestPatternFromSubject,
 } from "./permissionPattern";
+import {
+  formatProcessSubjectForDisplay,
+  processSubjectIsEncoded,
+} from "./processSubject";
 import "../../styles/permission-rules.css";
 
 export type AlwaysRuleDialogProps = {
@@ -203,6 +207,17 @@ export function AlwaysRuleDialog({
             {action} {prefix}:{pattern.trim() || "…"}
           </code>
         </p>
+
+        {prefix === "process" && processSubjectIsEncoded(pattern) ? (
+          <p
+            className="permission-rule-dialog__exact"
+            data-testid="always-rule-decoded-preview"
+          >
+            对应的命令：<code>{formatProcessSubjectForDisplay(pattern)}</code>
+            <br />
+            该命令的参数含空格或空值，模式必须用带长度前缀的精确编码才能只匹配这一条参数序列；改成按空格书写会同时命中别的命令。
+          </p>
+        ) : null}
 
         <p
           className="permission-rule-word-boundary"

@@ -21,6 +21,7 @@ import {
   PERMISSION_WORD_BOUNDARY_NOTE,
   suggestPatternFromSubject,
 } from "../src/features/permissions/permissionPattern";
+import { encodeProcessSubject } from "../src/features/permissions/processSubject";
 import { SettingsPanel } from "../src/features/settings/SettingsPanel";
 import { MockSettingsGateway } from "../src/features/settings/settingsGateway";
 import {
@@ -294,7 +295,13 @@ describe("Permission rules — always allow from approval bar", () => {
     const user = userEvent.setup();
     const rulesGateway = new MockPermissionRulesGateway();
     const proposal = pendingCommand();
-    const ruleSubject = "cargo test -p kernel-policy";
+    // Host subjects are v1-encoded since EA-02; a flat "cargo test -p x"
+    // string is no longer a shape the host can produce.
+    const ruleSubject = encodeProcessSubject("cargo", [
+      "test",
+      "-p",
+      "kernel-policy",
+    ]);
 
     render(
       <CommandApprovalBar
@@ -691,8 +698,22 @@ describe("Permission rules — dual-skin contrast", () => {
 describe("Permission pattern helpers", () => {
   it("suggests word-boundary-safe process patterns", () => {
     expect(suggestPatternFromSubject("process", "cargo")).toBe("cargo *");
-    expect(suggestPatternFromSubject("process", "cargo test -p kernel-policy"))
-      .toBe("cargo test *");
+    expect(
+      suggestPatternFromSubject(
+        "process",
+        encodeProcessSubject("cargo", ["test", "-p", "kernel-policy"]),
+      ),
+    ).toBe("cargo test *");
     expect(suggestPatternFromSubject("edit", "src/lib.rs")).toBe("src/lib.rs");
+  });
+
+  it("does not generalize a subject whose argv boundaries are unknown", () => {
+    // This assertion used to read `.toBe("cargo test *")` — generalizing a flat
+    // string whose argv boundaries had already been lost. The resulting rule
+    // auto-approves commands the user never saw, which is EA-02. A subject the
+    // host cannot decode stays verbatim so it fails closed instead of widening.
+    expect(
+      suggestPatternFromSubject("process", "cargo test -p kernel-policy"),
+    ).toBe("cargo test -p kernel-policy");
   });
 });

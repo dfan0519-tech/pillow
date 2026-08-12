@@ -46,8 +46,18 @@ proposal → one-shot human approval → host execution → durable receipt
 Ordering invariant: `validate → persist → commit → emit`. Nothing reaches the
 UI before it is durable.
 
-**The renderer is a view.** It never executes, never holds authority, and in
-this snapshot makes no outbound network requests at all.
+**The renderer is *meant* to be a view.** It never executes, and in this
+snapshot makes no outbound network requests at all.
+
+🔴 **Do not take "view" as a proven property — the first external audit
+falsified it.** EA-03 found the renderer holding a write-approval grant that
+could be replayed, and an empty pattern slipping past renderer-side validation
+into a durable global rule. So: treat any claim that a constraint "only lives
+in the renderer" as unproven until you have checked the native boundary
+yourself. A well-behaved UI sending the right `controller.slotId` is politeness,
+not enforcement. This sentence used to read "the renderer is a view, it never
+holds authority" — it was the single claim in this brief we were most confident
+about, and it was wrong.
 
 A convenience bug is a nuisance. A governance bug means the agent did something
 nobody authorised, or the record of what it did is wrong. **Weight accordingly.**

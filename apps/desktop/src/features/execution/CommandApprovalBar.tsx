@@ -18,6 +18,7 @@ import {
   type PermissionRulesGateway,
 } from "../../lib/permissionRulesGateway";
 import { AlwaysRuleDialog } from "../permissions/AlwaysRuleDialog";
+import { encodeProcessSubject } from "../permissions/processSubject";
 import type {
   CommandDecision,
   CommandProposalView,
@@ -74,11 +75,15 @@ function formatExpiry(expiresAt: string): string {
  * Fallback match subject for structured commands when the host omits
  * `ruleSubject`. Shell commands must never invent a subject in the renderer.
  */
+/**
+ * Subject to use when the host omitted `rule_subject`.
+ *
+ * Must use the host encoding. A space-joined fallback does not decode host-side,
+ * so any rule saved from it would fail closed and never fire again — silently
+ * useless to the user, who believes they granted something.
+ */
 function fallbackProcessSubject(proposal: CommandProposalView): string {
-  const argvText = proposal.argv.join(" ").trim();
-  return argvText
-    ? `${proposal.programLabel} ${argvText}`.trim()
-    : proposal.programLabel;
+  return encodeProcessSubject(proposal.programLabel, proposal.argv);
 }
 
 export function CommandApprovalBar({

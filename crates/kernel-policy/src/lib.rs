@@ -12,8 +12,10 @@ pub use permission_rules::{
     MatchedPermissionRule, MatchedPermissionRuleSegment, PermissionRuleAction,
     PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation, PermissionRulePrefix,
     PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
-    conservative_shell_command_segments, evaluate_permission_rule_conjunction,
-    evaluate_permission_rules, permission_rule_matches, process_subject_confirmed_for_allow,
+    conservative_shell_command_segments, decode_process_subject,
+    evaluate_permission_rule_conjunction, evaluate_permission_rules,
+    path_deny_uses_identity_case_fold, permission_rule_matches,
+    process_subject_confirmed_for_allow,
 };
 
 pub use process::{

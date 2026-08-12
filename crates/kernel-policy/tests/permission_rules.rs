@@ -1,9 +1,17 @@
 use keeper_policy::{
     PermissionRuleAction, PermissionRuleConjunctionEvaluation, PermissionRuleEvaluation,
     PermissionRulePrefix, PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
-    conservative_shell_command_segments, evaluate_permission_rule_conjunction,
-    evaluate_permission_rules, permission_rule_matches, process_subject_confirmed_for_allow,
+    conservative_shell_command_segments, decode_process_subject,
+    evaluate_permission_rule_conjunction, evaluate_permission_rules,
+    path_deny_uses_identity_case_fold, permission_rule_matches,
+    process_subject_confirmed_for_allow,
 };
+
+/// Build the v1 process subject for tests that exercise structured argv.
+fn proc(program: &str, argv: &[&str]) -> String {
+    let argv = argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    canonical_process_subject(program, &argv)
+}
 
 fn rule(
     id: &str,
@@ -23,20 +31,118 @@ fn rule(
     }
 }
 
+fn assert_decoded(subject: &str, expected: &[&str]) {
+    let decoded = decode_process_subject(subject).expect("decode");
+    let as_str: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    assert_eq!(as_str, expected);
+}
+
 #[test]
-fn canonical_process_subject_is_literal_space_join_without_shell_quoting() {
-    assert_eq!(
-        canonical_process_subject(
-            "cargo",
-            &["test".into(), "-p".into(), "kernel-policy".into()]
-        ),
-        "cargo test -p kernel-policy"
-    );
+fn canonical_process_subject_is_injective_and_reversible() {
+    // Empty argv stays the bare program label (receipt validation compatible).
     assert_eq!(canonical_process_subject("node", &[]), "node");
-    assert_eq!(
-        canonical_process_subject("python", &["two words".into(), "a/b".into()]),
-        "python two words a/b"
+    assert_decoded("node", &["node"]);
+
+    let cargo = canonical_process_subject(
+        "cargo",
+        &["test".into(), "-p".into(), "kernel-policy".into()],
     );
+    // Must NOT be a bare space-join (EA-02 regression surface).
+    assert_ne!(cargo, "cargo test -p kernel-policy");
+    assert!(cargo.starts_with("cargo "));
+    assert_decoded(&cargo, &["cargo", "test", "-p", "kernel-policy"]);
+
+    let spaced = canonical_process_subject("python", &["two words".into(), "a/b".into()]);
+    assert_ne!(spaced, "python two words a/b");
+    assert_decoded(&spaced, &["python", "two words", "a/b"]);
+}
+
+#[test]
+fn process_subject_collision_matrix_keeps_argv_boundaries() {
+    // EA-02 reproduction: previously both flattened to "node safe.js --version".
+    let two_args = canonical_process_subject("node", &["safe.js".into(), "--version".into()]);
+    let one_arg = canonical_process_subject("node", &["safe.js --version".into()]);
+    assert_ne!(two_args, one_arg);
+    assert_decoded(&two_args, &["node", "safe.js", "--version"]);
+    assert_decoded(&one_arg, &["node", "safe.js --version"]);
+
+    // Allow rule saved against the two-arg shape must not approve the one-arg shape.
+    let allow_two = rule(
+        "allow-two",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "node safe.js *",
+        PermissionRuleAction::Allow,
+    );
+    match evaluate_permission_rules(
+        PermissionRulePrefix::Process,
+        &two_args,
+        &[allow_two.clone()],
+    ) {
+        PermissionRuleEvaluation::Allow(matched) => {
+            assert_eq!(matched.match_subject, two_args);
+        }
+        other => panic!("two-arg subject must allow under node safe.js *, got {other:?}"),
+    }
+    assert!(matches!(
+        evaluate_permission_rules(PermissionRulePrefix::Process, &one_arg, &[allow_two]),
+        PermissionRuleEvaluation::RequireConfirmation
+    ));
+
+    // Collision matrix: spaces, empty, consecutive spaces, quotes, backslash, unicode.
+    let matrix: Vec<(&str, Vec<String>)> = vec![
+        ("space", vec!["two words".into()]),
+        ("empty", vec!["".into()]),
+        ("multi-space", vec!["a  b".into(), "c".into()]),
+        ("quotes", vec!["say\"hi".into(), "'x'".into()]),
+        ("backslash", vec!["a\\b".into(), "c".into()]),
+        ("unicode", vec!["café".into(), "日本語".into()]),
+        ("colon-len-confusion", vec!["1:x".into(), "x".into()]),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for (label, argv) in matrix {
+        let subject = canonical_process_subject("prog", &argv);
+        assert!(
+            seen.insert(subject.clone()),
+            "{label}: subject must be unique, got {subject:?}"
+        );
+        let decoded = decode_process_subject(&subject).expect(label);
+        assert_eq!(decoded[0], "prog", "{label}");
+        assert_eq!(&decoded[1..], argv.as_slice(), "{label}");
+    }
+
+    // Cross-collision: ["a","b"] vs ["a b"] vs ["a","", "b"] etc.
+    let a = canonical_process_subject("p", &["a".into(), "b".into()]);
+    let b = canonical_process_subject("p", &["a b".into()]);
+    let c = canonical_process_subject("p", &["a".into(), "".into(), "b".into()]);
+    assert_ne!(a, b);
+    assert_ne!(a, c);
+    assert_ne!(b, c);
+}
+
+#[test]
+fn legacy_flat_process_subjects_fail_closed_for_allow() {
+    // Old durable shape: space-joined subject string. Must not decode, must not
+    // auto-allow even under a broad pattern, and must not confirm.
+    let legacy = "node safe.js --version";
+    assert!(decode_process_subject(legacy).is_none());
+    assert!(!process_subject_confirmed_for_allow(legacy));
+    assert!(!permission_rule_matches(
+        PermissionRulePrefix::Process,
+        "node*",
+        legacy
+    ));
+    let allow = rule(
+        "legacy-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "node*",
+        PermissionRuleAction::Allow,
+    );
+    assert!(matches!(
+        evaluate_permission_rules(PermissionRulePrefix::Process, legacy, &[allow]),
+        PermissionRuleEvaluation::RequireConfirmation
+    ));
 }
 
 #[test]
@@ -44,114 +150,121 @@ fn pure_prefix_glob_and_subject_matrix_is_pinned() {
     struct Case {
         prefix: PermissionRulePrefix,
         pattern: &'static str,
-        subject: &'static str,
+        subject: String,
         expected: bool,
         label: &'static str,
     }
 
+    // Process subjects must be v1-encoded; bijective argv still match via the
+    // historical space-join surface inside process_rule_matches.
     let cases = [
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "",
-            subject: "cargo --version",
+            subject: proc("cargo", &["--version"]),
             expected: true,
             label: "bare process matches all",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo*",
-            subject: "cargo --version",
+            subject: proc("cargo", &["--version"]),
             expected: true,
             label: "Bash(cargo*) golden case",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo",
-            subject: "cargo test",
+            subject: proc("cargo", &["test"]),
             expected: true,
             label: "literal process prefix",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo",
-            subject: "cargo-nextest run",
+            subject: proc("cargo-nextest", &["run"]),
             expected: true,
             label: "known no-word-boundary behavior",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo *",
-            subject: "cargo",
+            subject: proc("cargo", &[]),
             expected: false,
             label: "space-star requires separator",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo *",
-            subject: "cargo test -p a/b",
+            subject: proc("cargo", &["test", "-p", "a/b"]),
             expected: true,
             label: "process star crosses spaces and slash",
         },
         Case {
             prefix: PermissionRulePrefix::Process,
             pattern: "cargo?",
-            subject: "cargoX",
+            subject: proc("cargoX", &[]),
             expected: false,
             label: "question mark is literal",
         },
         Case {
             prefix: PermissionRulePrefix::Edit,
             pattern: "src/*",
-            subject: "src/lib.rs",
+            subject: "src/lib.rs".into(),
             expected: true,
             label: "path star matches one segment",
         },
         Case {
             prefix: PermissionRulePrefix::Edit,
             pattern: "src/*",
-            subject: "src/nested/lib.rs",
+            subject: "src/nested/lib.rs".into(),
             expected: false,
             label: "path star does not cross slash",
         },
         Case {
             prefix: PermissionRulePrefix::Edit,
             pattern: "src/**",
-            subject: "src/nested/lib.rs",
+            subject: "src/nested/lib.rs".into(),
             expected: true,
             label: "path double-star crosses slash",
         },
         Case {
             prefix: PermissionRulePrefix::Write,
             pattern: "src/**/*.rs",
-            subject: "src/lib.rs",
+            subject: "src/lib.rs".into(),
             expected: true,
             label: "double-star slash matches zero directories",
         },
         Case {
             prefix: PermissionRulePrefix::Write,
             pattern: "src/**/*.rs",
-            subject: "src/a/b/lib.rs",
+            subject: "src/a/b/lib.rs".into(),
             expected: true,
             label: "double-star slash matches multiple directories",
         },
         Case {
             prefix: PermissionRulePrefix::Write,
             pattern: "src/**/*.rs",
-            subject: "src/a/b/lib.ts",
+            subject: "src/a/b/lib.ts".into(),
             expected: false,
             label: "literal suffix remains exact",
         },
         Case {
+            // Raw matcher stays case-sensitive on every platform. EA-01 deny
+            // identity fold is evaluate-time only (allow remains strict).
+            // Old contract "matching is case-sensitive on every platform" was
+            // wrong for Windows *deny* because OS object identity is not
+            // case-sensitive — see windows_write_edit_deny_folds_path_identity.
             prefix: PermissionRulePrefix::Write,
             pattern: "SRC/**",
-            subject: "src/lib.rs",
+            subject: "src/lib.rs".into(),
             expected: false,
-            label: "matching is case-sensitive on every platform",
+            label: "raw path matcher is case-sensitive (deny fold is evaluate-time)",
         },
         Case {
             prefix: PermissionRulePrefix::Edit,
             pattern: "src/lib.rs",
-            subject: "src/lib.rs.bak",
+            subject: "src/lib.rs.bak".into(),
             expected: false,
             label: "path literal is whole-subject, not prefix",
         },
@@ -159,13 +272,76 @@ fn pure_prefix_glob_and_subject_matrix_is_pinned() {
 
     for case in cases {
         assert_eq!(
-            permission_rule_matches(case.prefix, case.pattern, case.subject),
+            permission_rule_matches(case.prefix, case.pattern, &case.subject),
             case.expected,
             "{}: prefix={:?} pattern={:?} subject={:?}",
             case.label,
             case.prefix,
             case.pattern,
             case.subject
+        );
+    }
+}
+
+#[test]
+fn windows_write_edit_deny_folds_path_identity_allow_stays_strict() {
+    // EA-01: deny must catch case aliases of the same project-relative object
+    // on Windows; allow stays case-sensitive (narrower auto-approve).
+    let deny = rule(
+        "deny-blocked",
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Edit,
+        "blocked/**",
+        PermissionRuleAction::Deny,
+    );
+    let allow = rule(
+        "allow-blocked",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Edit,
+        "blocked/**",
+        PermissionRuleAction::Allow,
+    );
+    let alias = "BLOCKED/SECRET.TXT";
+
+    if path_deny_uses_identity_case_fold() {
+        match evaluate_permission_rules(PermissionRulePrefix::Edit, alias, &[deny.clone()]) {
+            PermissionRuleEvaluation::Deny(matched) => {
+                assert_eq!(matched.rule.rule_id, "deny-blocked");
+                assert_eq!(matched.match_subject, alias);
+            }
+            other => panic!("Windows deny must fold path identity, got {other:?}"),
+        }
+        // Allow does not fold: case mismatch requires confirmation (mode may
+        // still auto-approve; deny is what stops the bypass).
+        assert!(matches!(
+            evaluate_permission_rules(PermissionRulePrefix::Edit, alias, &[allow]),
+            PermissionRuleEvaluation::RequireConfirmation
+        ));
+        // Create-class deny (write prefix) likewise folds.
+        let write_deny = rule(
+            "deny-write",
+            PermissionRuleScope::Project,
+            PermissionRulePrefix::Write,
+            "blocked/**",
+            PermissionRuleAction::Deny,
+        );
+        assert!(matches!(
+            evaluate_permission_rules(
+                PermissionRulePrefix::Write,
+                "BLOCKED/new.txt",
+                &[write_deny]
+            ),
+            PermissionRuleEvaluation::Deny(_)
+        ));
+    } else {
+        // Unix: case-sensitive deny — alias does not hit `blocked/**`.
+        assert!(matches!(
+            evaluate_permission_rules(PermissionRulePrefix::Edit, alias, &[deny]),
+            PermissionRuleEvaluation::RequireConfirmation
+        ));
+        assert!(
+            !path_deny_uses_identity_case_fold(),
+            "non-Windows must document case-sensitive deny"
         );
     }
 }
@@ -203,15 +379,12 @@ fn deny_beats_allow_regardless_of_input_order() {
         PermissionRuleAction::Deny,
     );
 
+    let subject = proc("cargo", &["test", "-p", "keeper-policy"]);
     for rules in [vec![allow.clone(), deny.clone()], vec![deny.clone(), allow]] {
-        match evaluate_permission_rules(
-            PermissionRulePrefix::Process,
-            "cargo test -p keeper-policy",
-            &rules,
-        ) {
+        match evaluate_permission_rules(PermissionRulePrefix::Process, &subject, &rules) {
             PermissionRuleEvaluation::Deny(matched) => {
                 assert_eq!(matched.rule.rule_id, deny.rule_id);
-                assert_eq!(matched.match_subject, "cargo test -p keeper-policy");
+                assert_eq!(matched.match_subject, subject);
             }
             other => panic!("expected deny, got {other:?}"),
         }
@@ -245,7 +418,11 @@ fn no_matching_rule_still_requires_confirmation() {
     )];
 
     assert!(matches!(
-        evaluate_permission_rules(PermissionRulePrefix::Process, "cargo check", &rules),
+        evaluate_permission_rules(
+            PermissionRulePrefix::Process,
+            &proc("cargo", &["check"]),
+            &rules
+        ),
         PermissionRuleEvaluation::RequireConfirmation
     ));
 }
@@ -254,18 +431,18 @@ fn no_matching_rule_still_requires_confirmation() {
 fn conservative_shell_segmenter_accepts_only_simple_tokens_and_pinned_operators() {
     assert_eq!(
         conservative_shell_command_segments("cargo test"),
-        Some(vec!["cargo test".to_owned()])
+        Some(vec![proc("cargo", &["test"])])
     );
     assert_eq!(
         conservative_shell_command_segments(
             "cargo   test\t-p kernel-policy && rustc --version || node --version; python -V | cargo check"
         ),
         Some(vec![
-            "cargo test -p kernel-policy".to_owned(),
-            "rustc --version".to_owned(),
-            "node --version".to_owned(),
-            "python -V".to_owned(),
-            "cargo check".to_owned(),
+            proc("cargo", &["test", "-p", "kernel-policy"]),
+            proc("rustc", &["--version"]),
+            proc("node", &["--version"]),
+            proc("python", &["-V"]),
+            proc("cargo", &["check"]),
         ])
     );
 }
@@ -331,6 +508,7 @@ fn conjunctive_allow_proves_normal_cargo_test_and_requires_every_segment() {
     );
 
     let cargo_only = conservative_shell_command_segments("cargo test").unwrap();
+    let cargo_subject = proc("cargo", &["test"]);
     match evaluate_permission_rule_conjunction(
         PermissionRulePrefix::Process,
         &cargo_only,
@@ -340,7 +518,7 @@ fn conjunctive_allow_proves_normal_cargo_test_and_requires_every_segment() {
             assert_eq!(matched.len(), 1);
             assert_eq!(matched[0].segment_index, 0);
             assert_eq!(matched[0].matched.rule.rule_id, "cargo-allow");
-            assert_eq!(matched[0].matched.match_subject, "cargo test");
+            assert_eq!(matched[0].matched.match_subject, cargo_subject);
         }
         other => panic!("normal cargo test must be allowed, got {other:?}"),
     }
@@ -397,7 +575,7 @@ fn deny_in_any_segment_beats_allows_and_an_earlier_unmatched_segment() {
         PermissionRuleConjunctionEvaluation::Deny(matched) => {
             assert_eq!(matched.segment_index, 2);
             assert_eq!(matched.matched.rule.rule_id, "rm-deny");
-            assert_eq!(matched.matched.match_subject, "rm -rf x");
+            assert_eq!(matched.matched.match_subject, proc("rm", &["-rf", "x"]));
         }
         other => panic!("deny must win across the whole chain, got {other:?}"),
     }
@@ -462,32 +640,32 @@ fn assert_process_requires_confirmation(subject: &str, pattern: &str) {
 fn opaque_eval_shapes_do_not_auto_allow_under_broad_program_rules() {
     // Matching allow alone is not enough: opaque evaluation shapes must prompt.
     let adversarial = [
-        ("node -e code", "node*"),
-        ("node --eval code", "node*"),
-        ("node.exe -e code", "node*"),
-        ("python -c code", "python*"),
-        ("python3 -c code", "python*"),
-        ("/usr/bin/python3 -c code", "python*"),
-        ("perl -e code", "perl*"),
-        ("ruby -e code", "ruby*"),
-        ("php -r code", "php*"),
-        ("deno eval code", "deno*"),
-        ("sh -c cargo test", "sh*"),
-        ("bash -c cargo test", "bash*"),
-        ("bash -xc cargo test", "bash*"),
-        ("env node --version", "env*"),
-        ("xargs rm -rf /", "xargs*"),
-        ("find . -exec rm {} ;", "find*"),
-        ("find . -execdir rm {} ;", "find*"),
-        ("npx cowsay hi", "npx*"),
-        ("uvx ruff check", "uvx*"),
-        ("bunx cowsay hi", "bunx*"),
+        (proc("node", &["-e", "code"]), "node*"),
+        (proc("node", &["--eval", "code"]), "node*"),
+        (proc("node.exe", &["-e", "code"]), "node*"),
+        (proc("python", &["-c", "code"]), "python*"),
+        (proc("python3", &["-c", "code"]), "python*"),
+        (proc("/usr/bin/python3", &["-c", "code"]), "python*"),
+        (proc("perl", &["-e", "code"]), "perl*"),
+        (proc("ruby", &["-e", "code"]), "ruby*"),
+        (proc("php", &["-r", "code"]), "php*"),
+        (proc("deno", &["eval", "code"]), "deno*"),
+        (proc("sh", &["-c", "cargo test"]), "sh*"),
+        (proc("bash", &["-c", "cargo test"]), "bash*"),
+        (proc("bash", &["-xc", "cargo test"]), "bash*"),
+        (proc("env", &["node", "--version"]), "env*"),
+        (proc("xargs", &["rm", "-rf", "/"]), "xargs*"),
+        (proc("find", &[".", "-exec", "rm", "{}", ";"]), "find*"),
+        (proc("find", &[".", "-execdir", "rm", "{}", ";"]), "find*"),
+        (proc("npx", &["cowsay", "hi"]), "npx*"),
+        (proc("uvx", &["ruff", "check"]), "uvx*"),
+        (proc("bunx", &["cowsay", "hi"]), "bunx*"),
     ];
 
     for (subject, pattern) in adversarial {
-        assert_process_requires_confirmation(subject, pattern);
+        assert_process_requires_confirmation(&subject, pattern);
         assert!(
-            !process_subject_confirmed_for_allow(subject),
+            !process_subject_confirmed_for_allow(&subject),
             "shape must be unconfirmed: {subject}"
         );
     }
@@ -497,26 +675,32 @@ fn opaque_eval_shapes_do_not_auto_allow_under_broad_program_rules() {
 fn normal_toolchain_commands_still_auto_allow_under_matching_rules() {
     // Positive direction: a reject-everything implementation would fail these.
     let benign = [
-        ("cargo test", "cargo*"),
-        ("cargo test -p keeper-policy", "cargo test*"),
-        ("npm run build", "npm*"),
-        ("git status", "git*"),
-        ("git -c advice.detachedHead=false status", "git*"),
-        ("rustc --version", "rustc*"),
-        ("node --version", "node*"),
-        ("python --version", "python*"),
-        ("ls -c", "ls*"),
-        ("ps -ef", "ps*"),
-        ("grep -e pattern file.txt", "grep*"),
-        ("find . -name *.rs", "find*"),
+        (proc("cargo", &["test"]), "cargo*"),
+        (
+            proc("cargo", &["test", "-p", "keeper-policy"]),
+            "cargo test*",
+        ),
+        (proc("npm", &["run", "build"]), "npm*"),
+        (proc("git", &["status"]), "git*"),
+        (
+            proc("git", &["-c", "advice.detachedHead=false", "status"]),
+            "git*",
+        ),
+        (proc("rustc", &["--version"]), "rustc*"),
+        (proc("node", &["--version"]), "node*"),
+        (proc("python", &["--version"]), "python*"),
+        (proc("ls", &["-c"]), "ls*"),
+        (proc("ps", &["-ef"]), "ps*"),
+        (proc("grep", &["-e", "pattern", "file.txt"]), "grep*"),
+        (proc("find", &[".", "-name", "*.rs"]), "find*"),
     ];
 
     for (subject, pattern) in benign {
         assert!(
-            process_subject_confirmed_for_allow(subject),
+            process_subject_confirmed_for_allow(&subject),
             "shape must be confirmed: {subject}"
         );
-        assert_process_allow(subject, pattern);
+        assert_process_allow(&subject, pattern);
     }
 }
 
@@ -530,12 +714,9 @@ fn deny_still_wins_on_opaque_eval_shapes() {
         "node -e",
         PermissionRuleAction::Deny,
     );
+    let subject = proc("node", &["-e", "code"]);
 
-    match evaluate_permission_rules(
-        PermissionRulePrefix::Process,
-        "node -e code",
-        &[allow, deny],
-    ) {
+    match evaluate_permission_rules(PermissionRulePrefix::Process, &subject, &[allow, deny]) {
         PermissionRuleEvaluation::Deny(matched) => {
             assert_eq!(matched.rule.rule_id, "node-deny");
         }

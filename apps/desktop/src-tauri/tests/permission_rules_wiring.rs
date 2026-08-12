@@ -11,7 +11,7 @@ use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId as ProtocolRunId, RuntimeError, RuntimeProbe,
     RuntimeSession, SendTurn, StartSession,
 };
-use keeper_policy::{ExecDecision, ExecProposalState};
+use keeper_policy::{ExecDecision, ExecProposalState, canonical_process_subject};
 use keeper_project::CreateProject;
 use keeper_runtime_host::{
     GovernedProcessLifecycle, HostConfig, ProviderProcessProposal, RuntimeHost,
@@ -193,7 +193,16 @@ fn command_rule_added_after_host_open_auto_decides_next_matching_proposal() {
     assert_eq!(durable.rule_action, PermissionRuleAction::Allow);
     assert!(durable.rule_content_digest.starts_with("sha256:"));
     assert_eq!(durable.rule_content_digest.len(), 71);
-    assert_eq!(durable.match_subject, "node --version");
+    // The receipt records the canonical v1 subject, not a space-joined string.
+    // That is the point of EA-02: a flat "node --version" cannot say whether
+    // the agent ran one argument or two, so a receipt carrying it cannot be
+    // audited after the fact. The rule *pattern* stays human-written
+    // (`node --version` above still matched) — only the recorded subject is
+    // canonical.
+    assert_eq!(
+        durable.match_subject,
+        canonical_process_subject("node", &["--version".to_owned()])
+    );
 
     let view = host
         .list_process_proposals(&conversation.id.0.to_string())

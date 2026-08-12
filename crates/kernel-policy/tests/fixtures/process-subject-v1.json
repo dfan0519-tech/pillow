@@ -1,0 +1,156 @@
+{
+  "note": [
+    "Shared conformance vectors for the process-subject v1 encoding.",
+    "The host (crates/kernel-policy/src/permission_rules.rs) and the renderer",
+    "(apps/desktop/src/features/permissions/processSubject.ts) each carry an",
+    "implementation, and each has a test that reads THIS file. A change to one",
+    "implementation that the other does not match turns one of those two tests",
+    "red. Do not edit a vector to make a test pass: this encoding is a durable",
+    "rule-storage format, so changing it silently reinterprets rules that users",
+    "have already saved.",
+    "Encoding: empty argv -> bare program. Otherwise '{program} \u001ep1' then",
+    "':{hex utf8 byte length}:{arg}' per argument, where \u001e is U+001E."
+  ],
+  "vectors": [
+    {
+      "name": "bare program, empty argv",
+      "program": "cargo",
+      "argv": [],
+      "subject": "cargo"
+    },
+    {
+      "name": "single flag",
+      "program": "node",
+      "argv": [
+        "--version"
+      ],
+      "subject": "node \u001ep1:9:--version"
+    },
+    {
+      "name": "two plain arguments",
+      "program": "cargo",
+      "argv": [
+        "test",
+        "--all"
+      ],
+      "subject": "cargo \u001ep1:4:test:5:--all"
+    },
+    {
+      "name": "EA-02 collision pair, separate arguments",
+      "program": "node",
+      "argv": [
+        "safe.js",
+        "--version"
+      ],
+      "subject": "node \u001ep1:7:safe.js:9:--version"
+    },
+    {
+      "name": "EA-02 collision pair, one argument containing a space",
+      "program": "node",
+      "argv": [
+        "safe.js --version"
+      ],
+      "subject": "node \u001ep1:11:safe.js --version"
+    },
+    {
+      "name": "empty argument keeps its slot",
+      "program": "printf",
+      "argv": [
+        "",
+        "x"
+      ],
+      "subject": "printf \u001ep1:0::1:x"
+    },
+    {
+      "name": "multi-byte argument: byte length is not character count",
+      "program": "grep",
+      "argv": [
+        "中文"
+      ],
+      "subject": "grep \u001ep1:6:中文"
+    },
+    {
+      "name": "argument containing the delimiter colon",
+      "program": "git",
+      "argv": [
+        "-c",
+        "user.name=a:b"
+      ],
+      "subject": "git \u001ep1:2:-c:d:user.name=a:b"
+    },
+    {
+      "name": "argument containing the record separator itself",
+      "program": "echo",
+      "argv": [
+        "a\u001eb"
+      ],
+      "subject": "echo \u001ep1:3:a\u001eb"
+    },
+    {
+      "name": "argument that is only whitespace",
+      "program": "printf",
+      "argv": [
+        " "
+      ],
+      "subject": "printf \u001ep1:1: "
+    },
+    {
+      "name": "trailing whitespace inside an argument survives",
+      "program": "printf",
+      "argv": [
+        "a "
+      ],
+      "subject": "printf \u001ep1:2:a "
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "legacy space-joined subject",
+      "subject": "node --version"
+    },
+    {
+      "name": "legacy space-joined subject with a path",
+      "subject": "node safe.js --version"
+    },
+    {
+      "name": "empty subject",
+      "subject": ""
+    },
+    {
+      "name": "version mark with no arguments is not a produced form",
+      "subject": "node \u001ep1"
+    },
+    {
+      "name": "declared length longer than the remaining payload",
+      "subject": "node \u001ep1:2:a"
+    },
+    {
+      "name": "leading zero in the length prefix",
+      "subject": "node \u001ep1:01:a"
+    },
+    {
+      "name": "non-hex length prefix",
+      "subject": "node \u001ep1:zz:a"
+    },
+    {
+      "name": "length prefix with no closing colon",
+      "subject": "node \u001ep1:1a"
+    },
+    {
+      "name": "length that splits a multi-byte character",
+      "subject": "grep \u001ep1:1:中"
+    },
+    {
+      "name": "record separator inside the program label",
+      "subject": "no\u001ede \u001ep1:1:a"
+    },
+    {
+      "name": "bare label carrying a stray version mark",
+      "subject": "\u001ep1"
+    },
+    {
+      "name": "NUL is never part of a subject",
+      "subject": "node \u0000x"
+    }
+  ]
+}
