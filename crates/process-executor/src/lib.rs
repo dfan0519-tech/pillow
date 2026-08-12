@@ -458,6 +458,106 @@ fn fail_suspended_setup(
     ProcessError::CleanupUnproven
 }
 
+/// A liveness check pinned to one process, rather than to a process id.
+///
+/// A pid identifies a process only for as long as that process object exists.
+/// Once the process exits and the last handle to it is closed, the OS may hand
+/// the same number to something else — on a loaded machine, build churn makes
+/// that happen in milliseconds. So asking [`process_gone`] about a pid *after*
+/// a teardown answers a question about whoever holds that number now, which
+/// need not be the process the caller meant.
+///
+/// Capturing a probe **before** teardown keeps a handle open. That pins the pid
+/// to this process for as long as the probe lives, so the later answer is about
+/// the intended process and nothing else.
+///
+/// This exists for teardown assertions in tests, which are the callers that
+/// have to reason across the moment a process dies. Supervision itself does not
+/// need it: [`SupervisedChild`] owns its child handle and its job object, and
+/// proves cleanup through those rather than by looking up numbers.
+pub struct ProcessLivenessProbe {
+    pid: u32,
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: the probe exclusively owns one process handle, and only ever waits on
+// it or closes it.
+#[cfg(windows)]
+unsafe impl Send for ProcessLivenessProbe {}
+
+impl ProcessLivenessProbe {
+    /// Pin `pid` to the process that currently owns it.
+    ///
+    /// Fails when the pid cannot be opened, which is the case once the process
+    /// has exited *and* every handle to it has been released — at that point
+    /// there is nothing left to pin and any later answer would be about
+    /// whoever takes the number next. An exited process that someone still
+    /// holds a handle to can still be pinned, and reports as exited.
+    pub fn capture(pid: u32) -> Result<Self, ProcessError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                return Err(ProcessError::Setup);
+            }
+            Ok(Self { pid, handle })
+        }
+        #[cfg(not(windows))]
+        {
+            // No pid-stable handle without pidfd; the pid is all we have. Reuse
+            // remains possible here, so treat this path as best effort.
+            if process_gone(pid)? {
+                return Err(ProcessError::Setup);
+            }
+            Ok(Self { pid })
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Whether the pinned process has exited.
+    pub fn has_exited(&self) -> Result<bool, ProcessError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0};
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+            // The handle is signalled once the process terminates, and stays
+            // signalled while we hold it open. No polling window to lose.
+            let wait = unsafe { WaitForSingleObject(self.handle, 0) };
+            if wait == WAIT_FAILED {
+                return Err(ProcessError::CleanupUnproven);
+            }
+            Ok(wait == WAIT_OBJECT_0)
+        }
+        #[cfg(not(windows))]
+        {
+            process_gone(self.pid)
+        }
+    }
+}
+
+impl Drop for ProcessLivenessProbe {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::CloseHandle;
+
+            if !self.handle.is_null() {
+                unsafe {
+                    let _ = CloseHandle(self.handle);
+                }
+                self.handle = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
 pub fn process_gone(pid: u32) -> Result<bool, ProcessError> {
     #[cfg(windows)]
     {

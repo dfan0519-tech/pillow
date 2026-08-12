@@ -285,3 +285,64 @@ fn fixture_child() {
         _ => {}
     }
 }
+
+/// The two properties teardown assertions depend on.
+///
+/// Adapter tests ask "is this process gone?" across a shutdown. Asking by pid
+/// answers about whoever holds that number at the time of asking, and a number
+/// is released the moment its process exits and the last handle to it closes.
+/// Under build churn something else takes it within milliseconds, which is how
+/// a passing teardown reports a live orphan that is not there.
+mod liveness_probe {
+    use super::fixture_path;
+    use keeper_process_executor::ProcessLivenessProbe;
+
+    fn spawn_sleeper() -> std::process::Child {
+        let mut command = std::process::Command::new(fixture_path());
+        command.args(["--exact", "fixture_child", "--nocapture"]);
+        command.env("KPE_FIXTURE_MODE", "sleep");
+        // No pipes. A probe must be answerable without depending on stdio
+        // lifetime — that coupling is what turns a survivor into a hang.
+        command.stdin(std::process::Stdio::null());
+        command.stdout(std::process::Stdio::null());
+        command.stderr(std::process::Stdio::null());
+        command.spawn().expect("fixture sleeper")
+    }
+
+    #[test]
+    fn a_probe_reports_exit_only_after_the_pinned_process_ends() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let probe = ProcessLivenessProbe::capture(pid).expect("pin a running process");
+        assert_eq!(probe.pid(), pid);
+        assert!(
+            !probe.has_exited().expect("probe answers while running"),
+            "a running process must not report as exited"
+        );
+
+        child.kill().expect("kill fixture sleeper");
+        child.wait().expect("reap fixture sleeper");
+
+        assert!(
+            probe.has_exited().expect("probe answers after exit"),
+            "pid {pid} exited but the probe still reports it running"
+        );
+        // Latched, not a level read: asking again must not race back to false.
+        assert!(
+            probe.has_exited().expect("probe answers repeatedly"),
+            "exit must stay observable for as long as the probe is held"
+        );
+    }
+
+    #[test]
+    fn a_pid_that_cannot_be_opened_is_refused_rather_than_assumed() {
+        // Pid 0 is never an openable process. Refusing beats returning some
+        // default, because both defaults are wrong: "running" makes a teardown
+        // assertion fail on a process that is gone, and "exited" makes it pass
+        // on one that is not.
+        assert!(
+            ProcessLivenessProbe::capture(0).is_err(),
+            "capture must fail rather than invent an answer"
+        );
+    }
+}

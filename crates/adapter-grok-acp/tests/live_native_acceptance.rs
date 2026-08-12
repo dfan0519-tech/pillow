@@ -23,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, process_gone_for_tests};
+use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, ProcessLivenessProbe};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
@@ -489,12 +489,16 @@ fn controlled_live_native_acceptance() {
     let owned_provider_root_pid = adapter_arc
         .owned_provider_root_pid_for_acceptance()
         .expect("owned provider root pid before shutdown");
+    // Pin the identity before the teardown; a pid alone stops naming this
+    // process the moment it exits.
+    let owned_root = ProcessLivenessProbe::capture(owned_provider_root_pid)
+        .expect("owned provider root must be live before shutdown");
     assert!(
-        !process_gone_for_tests(owned_provider_root_pid),
+        !owned_root.has_exited().expect("probe query"),
         "owned provider root must be live before shutdown"
     );
     adapter_arc.shutdown().expect("shutdown");
-    let owned_tree_clean = process_gone_for_tests(owned_provider_root_pid);
+    let owned_tree_clean = owned_root.has_exited().expect("probe query");
     assert!(
         owned_tree_clean,
         "owned provider root pid {owned_provider_root_pid} survived shutdown"

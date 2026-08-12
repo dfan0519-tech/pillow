@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, process_gone_for_tests};
+use keeper_adapter_grok_acp::{GrokAcpAdapter, GrokAcpConfig, ProcessLivenessProbe};
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
     StartSession,
@@ -346,6 +346,11 @@ fn rpc_error_after_cancel_terminates_provider_before_cancelled_terminal() {
     );
     let session = start(&adapter);
     let parent_pid = wait_for_pid_file(&parent_pid_path);
+    // Pin identity before anything can end this process: a pid stops naming it
+    // the moment it exits and the last handle closes, and build churn reuses
+    // freed numbers within milliseconds.
+    let parent = ProcessLivenessProbe::capture(parent_pid)
+        .expect("provider process must be running when its identity is pinned");
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
     let cancel_adapter = Arc::clone(&adapter);
@@ -372,7 +377,7 @@ fn rpc_error_after_cancel_terminates_provider_before_cancelled_terminal() {
 
     assert_single_terminal(&events, RuntimeEventKind::RunCancelled, None);
     assert!(
-        process_gone_for_tests(parent_pid),
+        parent.has_exited().unwrap(),
         "cancelled RPC error left provider pid {parent_pid} alive"
     );
     assert_eq!(
@@ -473,6 +478,11 @@ fn cooperative_cancel_keeps_reusable_provider_process_alive() {
     );
     let session = start(&adapter);
     let parent_pid = wait_for_pid_file(&parent_pid_path);
+    // Pin identity before anything can end this process: a pid stops naming it
+    // the moment it exits and the last handle closes, and build churn reuses
+    // freed numbers within milliseconds.
+    let parent = ProcessLivenessProbe::capture(parent_pid)
+        .expect("provider process must be running when its identity is pinned");
     let run_id = RunId::new();
     adapter.arm_turn(run_id).unwrap();
     let cancel_adapter = Arc::clone(&adapter);
@@ -499,16 +509,16 @@ fn cooperative_cancel_keeps_reusable_provider_process_alive() {
 
     assert_single_terminal(&events, RuntimeEventKind::RunCancelled, None);
     assert!(
-        !process_gone_for_tests(parent_pid),
+        !parent.has_exited().unwrap(),
         "cooperative cancellation killed reusable provider pid {parent_pid}"
     );
     start(&adapter);
     assert!(
-        !process_gone_for_tests(parent_pid),
+        !parent.has_exited().unwrap(),
         "starting another session replaced the cooperative provider process"
     );
 
     adapter.shutdown().unwrap();
-    assert!(process_gone_for_tests(parent_pid));
+    assert!(parent.has_exited().unwrap());
     let _ = std::fs::remove_file(parent_pid_path);
 }

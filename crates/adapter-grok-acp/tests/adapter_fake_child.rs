@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use keeper_adapter_grok_acp::{
-    GrokAcpAdapter, GrokAcpConfig, PRODUCTION_ACP_ARGV, process_gone_for_tests,
+    GrokAcpAdapter, GrokAcpConfig, PRODUCTION_ACP_ARGV, ProcessLivenessProbe,
 };
 use keeper_agent_protocol::{
     AgentRuntimeAdapter, EventSink, RunId, RuntimeError, RuntimeEvent, RuntimeEventKind, SendTurn,
@@ -555,12 +555,26 @@ fn shutdown_kills_descendant_spawned_immediately_after_resume() {
     // The fake parent records the immediate descendant it starts as its first work after resume.
     let parent_pid = wait_for_pid_file(&parent_pid_path, Duration::from_secs(3));
     let descendant_pid = wait_for_pid_file(&descendant_pid_path, Duration::from_secs(3));
+
+    // Pin both identities *before* the teardown. A pid stops naming a process
+    // the moment that process exits and the last handle to it closes, and the
+    // descendant's only handle belongs to the parent we are about to kill — so
+    // after shutdown its number is immediately available for reuse. Under build
+    // churn something else takes it within milliseconds, and a pid-based check
+    // then reports "descendant still alive" about an unrelated process. Holding
+    // these probes keeps each number bound to the process we mean, which makes
+    // the assertions below stricter rather than weaker: they can no longer be
+    // satisfied *or* defeated by whoever else happens to hold the number.
+    let parent = ProcessLivenessProbe::capture(parent_pid)
+        .expect("parent must be running when its identity is pinned");
+    let descendant = ProcessLivenessProbe::capture(descendant_pid)
+        .expect("descendant must be running when its identity is pinned");
     assert!(
-        !process_gone_for_tests(parent_pid),
+        !parent.has_exited().unwrap(),
         "parent should be alive before shutdown"
     );
     assert!(
-        !process_gone_for_tests(descendant_pid),
+        !descendant.has_exited().unwrap(),
         "descendant should be alive before shutdown"
     );
 
@@ -568,11 +582,11 @@ fn shutdown_kills_descendant_spawned_immediately_after_resume() {
 
     // Prove tree cleanup: direct child and descendant must both be gone.
     assert!(
-        process_gone_for_tests(parent_pid),
+        parent.has_exited().unwrap(),
         "parent pid {parent_pid} still alive after shutdown"
     );
     assert!(
-        process_gone_for_tests(descendant_pid),
+        descendant.has_exited().unwrap(),
         "descendant pid {descendant_pid} still alive after shutdown (job/tree kill failed)"
     );
 

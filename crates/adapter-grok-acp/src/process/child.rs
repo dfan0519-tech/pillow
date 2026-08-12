@@ -104,10 +104,6 @@ pub fn spawn_child(
     })
 }
 
-pub(crate) fn process_gone(pid: u32) -> Result<bool, RuntimeError> {
-    keeper_process_executor::process_gone(pid).map_err(map_error)
-}
-
 fn map_error(error: keeper_process_executor::ProcessError) -> RuntimeError {
     internal(format!("acp_process_executor: {error}"))
 }

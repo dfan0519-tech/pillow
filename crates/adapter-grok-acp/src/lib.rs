@@ -22,8 +22,15 @@ mod turn;
 pub use adapter::GrokAcpAdapter;
 pub use config::{GROK_API_KEY_ENV, GrokAcpConfig, PRODUCTION_ACP_ARGV};
 
-/// Re-export for process-tree cleanup tests (PID liveness without secrets).
+/// Pins a process identity for process-tree cleanup tests.
+///
+/// Replaces an earlier `process_gone_for_tests(pid) -> bool` helper. That one
+/// asked about a pid, which names a process only until it exits and the last
+/// handle to it closes; after a teardown the number may already belong to
+/// something else. It also collapsed a failed OS query to `false`, which reads
+/// as "still running" — a passing setup assertion and a failing teardown
+/// assertion, so an unanswerable query silently became whichever verdict was
+/// wrong. Capturing a probe before the teardown answers about the process the
+/// caller means, and reports a failed query as an error.
 #[doc(hidden)]
-pub fn process_gone_for_tests(pid: u32) -> bool {
-    process::process_gone(pid).unwrap_or(false)
-}
+pub use keeper_process_executor::ProcessLivenessProbe;
