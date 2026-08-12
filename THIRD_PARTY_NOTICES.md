@@ -59,3 +59,58 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## OpenCode
+
+Repository: [`sst/opencode`](https://github.com/sst/opencode)
+
+Fixed commit: `d4704347465c1ee63d0c213ed00e648e7f0231c5`
+
+License source: `LICENSE` at the fixed commit above (MIT).
+
+### Credential-model adaptations
+
+Pillow's OAuth slot auth follows the **shape** of OpenCode's credential model.
+No OpenCode source file is vendored; the claims below are limited to the
+structures named.
+
+| Pillow path | Upstream source (exact) | What was reused |
+| --- | --- | --- |
+| `crates/storage-sqlite/src/runtime_slot.rs` (`SlotAuth::Oauth`) | `packages/opencode/src/auth/index.ts` (`Oauth` / `Api` schema classes) | Credential record shape: refresh + access + expiry + optional non-secret account label, discriminated by auth type and keyed per provider |
+| `crates/runtime-slots/src/lib.rs` (token injection at prepare) | `packages/opencode/src/auth/index.ts` (`OAUTH_DUMMY_KEY`) | The pattern of leaving the static key slot as a placeholder and injecting a live access token at launch time, so an OAuth provider can drive a client that otherwise expects a fixed API key |
+
+**Not claimed as ports:** OpenCode's Effect-based service layer, its provider
+plugins (xAI, GitHub Copilot, OpenAI Codex, Snowflake Cortex), its OAuth
+callback page, its `models.dev` provider catalog, or any transport code.
+
+Pillow deliberately does **not** implement consumer-subscription OAuth
+(ChatGPT Plus / Claude Pro). OpenCode reaches those through vendor-specific
+endpoints with rewritten authorization headers and restricted model
+allowlists — a shape Pillow's grok-shell `base_url` + `env_key` path cannot
+express, so it is left unsupported rather than half-supported.
+
+### MIT License
+
+MIT License
+
+Copyright (c) 2025 opencode
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -10,6 +10,7 @@ pub mod path_scope;
 mod permission_rule_commands;
 mod project_commands;
 mod resource_commands;
+mod role_dispatch_commands;
 pub mod runtime_composition;
 mod runtime_service_state;
 mod runtime_slot_commands;
@@ -24,6 +25,8 @@ mod git_commands_tests;
 mod permission_rule_commands_tests;
 #[cfg(test)]
 mod resource_commands_tests;
+#[cfg(test)]
+mod role_dispatch_commands_tests;
 #[cfg(test)]
 mod runtime_slot_commands_tests;
 #[cfg(test)]
@@ -63,6 +66,7 @@ use resource_commands::{
     list_project_resources, list_recent_project_resources, preview_project_resource,
     read_project_resource, search_project_resources,
 };
+use role_dispatch_commands::{list_role_dispatches, propose_role_dispatch};
 use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degrade};
 use runtime_service_state::RuntimeServiceState;
 use runtime_slot_commands::{
@@ -110,6 +114,8 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         list_exec_proposals,
         decide_exec_proposal,
         open_exec_output,
+        propose_role_dispatch,
+        list_role_dispatches,
         list_permission_rules,
         add_permission_rule,
         delete_permission_rule,

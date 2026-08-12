@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -25,6 +26,12 @@ impl SecretBytes {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretBytes([REDACTED])")
     }
 }
 

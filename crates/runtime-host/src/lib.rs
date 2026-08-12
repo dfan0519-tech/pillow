@@ -5,6 +5,7 @@
 //! socket, or touches SQLite.
 
 mod delivery;
+mod dispatch;
 mod fake;
 mod fixture;
 mod governance_port;
@@ -15,6 +16,16 @@ mod host;
 mod permission_rules;
 mod sink;
 mod worker;
+
+#[cfg(any(test, feature = "test-support"))]
+pub use dispatch::clear_dispatch_ledger_for_tests;
+pub use dispatch::{
+    DispatchError, DispatchRecord, PreparedDispatch, attribute_dispatch_receipt,
+    claimed_governed_execution_for, complete_dispatch_on_receipt, execute_prepared_dispatch,
+    get_dispatch_record, governance_from_wire_label, list_dispatch_records,
+    output_record_from_receipt, prepare_dispatch, provider_proposal_from_command,
+    register_dispatch_on_requested,
+};
 
 pub use delivery::{BoundedDelivery, DEFAULT_EVENT_QUEUE_CAPACITY};
 pub use fake::FakeRuntimeAdapter;

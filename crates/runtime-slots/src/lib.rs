@@ -2,11 +2,15 @@
 
 mod catalog;
 mod grok_config;
+mod oauth;
 mod secret;
 mod status;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, Utc};
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
     NewRuntimeSlot, RuntimeSlot, RuntimeSlotId, SlotAuth, SlotRole, SqliteProjectRepository,
@@ -20,9 +24,25 @@ pub use catalog::{
     ModelCatalog, ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason,
     fetch_openai_model_catalog,
 };
+pub use oauth::{
+    ACCESS_TOKEN_REFRESH_SKEW, PkceCodes, TokenResponse, access_token_needs_refresh,
+    access_token_needs_refresh_now, build_authorize_url, build_code_exchange_form,
+    build_refresh_token_form, expiry_from_expires_in, generate_pkce, parse_token_response,
+    s256_challenge, verify_s256_challenge,
+};
 pub use secret::{DpapiFileSecretStore, SecretBytes, SecretStore};
 
 pub const GROK_API_KEY_ENV: &str = "PILLOW_GROK_SLOT_API_KEY";
+
+/// Injectable token-endpoint transport. Production network is a later ticket;
+/// tests inject canned JSON bodies. Never logs form bodies (may hold tokens).
+pub trait OauthTokenClient: Send + Sync {
+    fn post_token_form(
+        &self,
+        token_endpoint: &str,
+        form_body: &str,
+    ) -> Result<String, RuntimeSlotError>;
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeSlotError {
@@ -58,6 +78,10 @@ pub enum RuntimeSlotError {
     ControllerAlreadyExists,
     #[error("controller role requires governed auth")]
     ControllerRequiresGovernedAuth,
+    #[error("oauth access token refresh failed")]
+    OauthRefreshFailed,
+    #[error("oauth token response is invalid")]
+    OauthTokenResponseInvalid,
 }
 
 impl RuntimeSlotError {
@@ -81,6 +105,8 @@ impl RuntimeSlotError {
             Self::ControllerRequiresGovernedAuth => {
                 "runtime_slot_controller_requires_governed_auth"
             }
+            Self::OauthRefreshFailed => "runtime_slot_oauth_refresh_failed",
+            Self::OauthTokenResponseInvalid => "runtime_slot_oauth_token_response_invalid",
         }
     }
 }
@@ -123,6 +149,20 @@ pub enum CreateSlotAuth {
         launch_args: Vec<String>,
         status_args: Vec<String>,
     },
+    /// Standard OIDC/OAuth only — not consumer-subscription backends.
+    Oauth {
+        provider_id: String,
+        issuer: String,
+        client_id: String,
+        scopes: Vec<String>,
+        token_endpoint: String,
+        account_label: Option<String>,
+        base_url: String,
+        model_id: String,
+        access_token: SecretBytes,
+        refresh_token: SecretBytes,
+        access_expires_at: DateTime<Utc>,
+    },
 }
 
 pub enum PreparedGrokSlot {
@@ -150,12 +190,22 @@ pub struct RuntimeSlotService {
     projects: SqliteProjectRepository,
     secrets: DpapiFileSecretStore,
     private_homes: PathBuf,
+    /// Optional token-endpoint client for OAuth refresh-on-prepare.
+    oauth_client: Option<Arc<dyn OauthTokenClient>>,
 }
 
 impl RuntimeSlotService {
     pub fn open(
         database_path: impl AsRef<Path>,
         app_data_dir: impl AsRef<Path>,
+    ) -> Result<Self, RuntimeSlotError> {
+        Self::open_with_oauth_client(database_path, app_data_dir, None)
+    }
+
+    pub fn open_with_oauth_client(
+        database_path: impl AsRef<Path>,
+        app_data_dir: impl AsRef<Path>,
+        oauth_client: Option<Arc<dyn OauthTokenClient>>,
     ) -> Result<Self, RuntimeSlotError> {
         let database_path = database_path.as_ref();
         let app_data_dir = app_data_dir.as_ref();
@@ -166,6 +216,7 @@ impl RuntimeSlotService {
                 .map_err(|_| RuntimeSlotError::ProjectUnavailable)?,
             secrets: DpapiFileSecretStore::new(app_data_dir.join("secrets")),
             private_homes: app_data_dir.join("runtime-slots"),
+            oauth_client,
         })
     }
 
@@ -256,6 +307,71 @@ impl RuntimeSlotService {
                 Ok(RuntimeSlotView {
                     slot,
                     secret_configured: false,
+                })
+            }
+            CreateSlotAuth::Oauth {
+                provider_id,
+                issuer,
+                client_id,
+                scopes,
+                token_endpoint,
+                account_label,
+                base_url,
+                model_id,
+                access_token,
+                refresh_token,
+                access_expires_at,
+            } => {
+                validate_endpoint(&base_url)?;
+                validate_endpoint(&token_endpoint)?;
+                validate_endpoint(&issuer)?;
+                validate_model(&model_id)?;
+                if provider_id.trim().is_empty()
+                    || client_id.trim().is_empty()
+                    || scopes.is_empty()
+                    || access_token.is_empty()
+                    || refresh_token.is_empty()
+                    || access_token.as_bytes().contains(&0)
+                    || refresh_token.as_bytes().contains(&0)
+                {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                let access_secret_ref = Uuid::new_v4().to_string();
+                let refresh_secret_ref = Uuid::new_v4().to_string();
+                self.secrets.put(&access_secret_ref, &access_token)?;
+                if let Err(error) = self.secrets.put(&refresh_secret_ref, &refresh_token) {
+                    let _ = self.secrets.delete(&access_secret_ref);
+                    return Err(error);
+                }
+                let created = self.slots.create(NewRuntimeSlot {
+                    project_id,
+                    display_name,
+                    auth: SlotAuth::Oauth {
+                        provider_id,
+                        issuer,
+                        client_id,
+                        scopes,
+                        token_endpoint,
+                        account_label,
+                        base_url,
+                        model_id,
+                        access_secret_ref: access_secret_ref.clone(),
+                        refresh_secret_ref: refresh_secret_ref.clone(),
+                        access_expires_at,
+                    },
+                    role,
+                });
+                let slot = match created {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        let _ = self.secrets.delete(&access_secret_ref);
+                        let _ = self.secrets.delete(&refresh_secret_ref);
+                        return Err(map_store_error(error));
+                    }
+                };
+                Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: true,
                 })
             }
         }
@@ -405,6 +521,14 @@ impl RuntimeSlotService {
             (auth, UpdateSlotAuthInput::Keep) => {
                 let secret_configured = match &auth {
                     SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
+                    SlotAuth::Oauth {
+                        access_secret_ref,
+                        refresh_secret_ref,
+                        ..
+                    } => {
+                        self.secrets.exists(access_secret_ref)?
+                            && self.secrets.exists(refresh_secret_ref)?
+                    }
                     _ => false,
                 };
                 (UpdateSlotAuth::Keep, secret_configured)
@@ -488,6 +612,107 @@ impl RuntimeSlotService {
                     false,
                 )
             }
+            (
+                SlotAuth::Oauth {
+                    access_secret_ref: previous_access,
+                    refresh_secret_ref: previous_refresh,
+                    ..
+                },
+                UpdateSlotAuthInput::Oauth {
+                    provider_id,
+                    issuer,
+                    client_id,
+                    scopes,
+                    token_endpoint,
+                    account_label,
+                    base_url,
+                    model_id,
+                    access_token,
+                    refresh_token,
+                    access_expires_at,
+                },
+            ) => {
+                validate_endpoint(&base_url)?;
+                validate_endpoint(&token_endpoint)?;
+                validate_endpoint(&issuer)?;
+                validate_model(&model_id)?;
+                if provider_id.trim().is_empty() || client_id.trim().is_empty() || scopes.is_empty()
+                {
+                    return Err(RuntimeSlotError::InvalidInput);
+                }
+                let (access_secret_ref, access_rotated) = match access_token {
+                    None => (previous_access, None),
+                    Some(secret) => {
+                        if secret.is_empty() || secret.as_bytes().contains(&0) {
+                            return Err(RuntimeSlotError::InvalidInput);
+                        }
+                        let new_ref = Uuid::new_v4().to_string();
+                        self.secrets.put(&new_ref, &secret)?;
+                        (new_ref, Some(previous_access))
+                    }
+                };
+                let (refresh_secret_ref, refresh_rotated) = match refresh_token {
+                    None => (previous_refresh, None),
+                    Some(secret) => {
+                        if secret.is_empty() || secret.as_bytes().contains(&0) {
+                            if access_rotated.is_some() {
+                                let _ = self.secrets.delete(&access_secret_ref);
+                            }
+                            return Err(RuntimeSlotError::InvalidInput);
+                        }
+                        let new_ref = Uuid::new_v4().to_string();
+                        if let Err(error) = self.secrets.put(&new_ref, &secret) {
+                            if access_rotated.is_some() {
+                                let _ = self.secrets.delete(&access_secret_ref);
+                            }
+                            return Err(error);
+                        }
+                        (new_ref, Some(previous_refresh))
+                    }
+                };
+                let updated = self.slots.update(UpdateRuntimeSlot {
+                    project_id,
+                    slot_id,
+                    display_name: display_name.clone(),
+                    role: role.clone(),
+                    auth: UpdateSlotAuth::Oauth {
+                        provider_id,
+                        issuer,
+                        client_id,
+                        scopes,
+                        token_endpoint,
+                        account_label,
+                        base_url,
+                        model_id,
+                        access_secret_ref: access_secret_ref.clone(),
+                        refresh_secret_ref: refresh_secret_ref.clone(),
+                        access_expires_at,
+                    },
+                });
+                let slot = match updated {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        if access_rotated.is_some() {
+                            let _ = self.secrets.delete(&access_secret_ref);
+                        }
+                        if refresh_rotated.is_some() {
+                            let _ = self.secrets.delete(&refresh_secret_ref);
+                        }
+                        return Err(map_store_error(error));
+                    }
+                };
+                if let Some(old) = access_rotated {
+                    self.secrets.delete(&old)?;
+                }
+                if let Some(old) = refresh_rotated {
+                    self.secrets.delete(&old)?;
+                }
+                return Ok(RuntimeSlotView {
+                    slot,
+                    secret_configured: self.secrets.exists(&access_secret_ref)?
+                        && self.secrets.exists(&refresh_secret_ref)?,
+                });
+            }
             _ => return Err(RuntimeSlotError::InvalidInput),
         };
 
@@ -526,12 +751,17 @@ impl RuntimeSlotService {
     ) -> Result<(), RuntimeSlotError> {
         self.ensure_project(project_id)?;
         let existing = self.get(project_id, slot_id)?;
-        let secret_ref = match &existing.auth {
-            SlotAuth::ApiKey { secret_ref, .. } => Some(secret_ref.clone()),
-            _ => None,
+        let secret_refs: Vec<String> = match &existing.auth {
+            SlotAuth::ApiKey { secret_ref, .. } => vec![secret_ref.clone()],
+            SlotAuth::Oauth {
+                access_secret_ref,
+                refresh_secret_ref,
+                ..
+            } => vec![access_secret_ref.clone(), refresh_secret_ref.clone()],
+            _ => vec![],
         };
 
-        if let Some(secret_ref) = &secret_ref {
+        for secret_ref in &secret_refs {
             self.secrets.delete(secret_ref)?;
         }
 
@@ -569,10 +799,7 @@ impl RuntimeSlotService {
                 model_id,
             })
             .map_err(map_store_error)?;
-        let secret_configured = match &slot.auth {
-            SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
-            _ => false,
-        };
+        let secret_configured = self.secret_configured_for(&slot.auth)?;
         Ok(RuntimeSlotView {
             slot,
             secret_configured,
@@ -586,10 +813,7 @@ impl RuntimeSlotService {
             .map_err(|_| RuntimeSlotError::MetadataUnavailable)?
             .into_iter()
             .map(|slot| {
-                let secret_configured = match &slot.auth {
-                    SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref)?,
-                    _ => false,
-                };
+                let secret_configured = self.secret_configured_for(&slot.auth)?;
                 Ok(RuntimeSlotView {
                     slot,
                     secret_configured,
@@ -626,6 +850,30 @@ impl RuntimeSlotService {
                     api_key,
                 })
             }
+            SlotAuth::Oauth {
+                client_id,
+                token_endpoint,
+                base_url,
+                model_id,
+                access_secret_ref,
+                refresh_secret_ref,
+                access_expires_at,
+                provider_id: _,
+                issuer: _,
+                scopes: _,
+                account_label: _,
+            } => self.prepare_oauth_slot(
+                project_id,
+                slot_id,
+                &slot.display_name,
+                &client_id,
+                &token_endpoint,
+                &base_url,
+                &model_id,
+                &access_secret_ref,
+                &refresh_secret_ref,
+                access_expires_at,
+            ),
             SlotAuth::LocalCli { .. } => Err(RuntimeSlotError::NotGovernedGrok),
         }
     }
@@ -651,7 +899,7 @@ impl RuntimeSlotService {
                 &status_args,
                 Path::new(&project.root_path),
             ),
-            SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } => {
+            SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } | SlotAuth::Oauth { .. } => {
                 Err(RuntimeSlotError::InvalidInput)
             }
         }
@@ -684,6 +932,27 @@ impl RuntimeSlotService {
                 let api_key = self.secrets.get(&secret_ref)?;
                 catalog::fetch_openai_model_catalog(&base_url, &api_key)
             }
+            SlotAuth::Oauth {
+                base_url,
+                access_secret_ref,
+                access_expires_at,
+                refresh_secret_ref,
+                client_id,
+                token_endpoint,
+                ..
+            } => {
+                // Catalog uses a valid access token only (never refresh).
+                let access = self.resolve_oauth_access_token(
+                    project_id,
+                    slot_id,
+                    &client_id,
+                    &token_endpoint,
+                    &access_secret_ref,
+                    &refresh_secret_ref,
+                    access_expires_at,
+                )?;
+                catalog::fetch_openai_model_catalog(&base_url, &access)
+            }
             SlotAuth::LocalCli { .. } => Ok(ModelCatalog::unsupported(
                 ModelCatalogSource::ExternalCli,
                 ModelCatalogUnsupportedReason::ExternalCli,
@@ -709,9 +978,182 @@ impl RuntimeSlotService {
             .map(|_| ())
             .ok_or(RuntimeSlotError::ProjectUnavailable)
     }
+
+    fn secret_configured_for(&self, auth: &SlotAuth) -> Result<bool, RuntimeSlotError> {
+        match auth {
+            SlotAuth::ApiKey { secret_ref, .. } => self.secrets.exists(secret_ref),
+            SlotAuth::Oauth {
+                access_secret_ref,
+                refresh_secret_ref,
+                ..
+            } => Ok(self.secrets.exists(access_secret_ref)?
+                && self.secrets.exists(refresh_secret_ref)?),
+            _ => Ok(false),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_oauth_slot(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        display_name: &str,
+        client_id: &str,
+        token_endpoint: &str,
+        base_url: &str,
+        model_id: &str,
+        access_secret_ref: &str,
+        refresh_secret_ref: &str,
+        access_expires_at: DateTime<Utc>,
+    ) -> Result<PreparedGrokSlot, RuntimeSlotError> {
+        let access = self.resolve_oauth_access_token(
+            project_id,
+            slot_id,
+            client_id,
+            token_endpoint,
+            access_secret_ref,
+            refresh_secret_ref,
+            access_expires_at,
+        )?;
+        let private_home = grok_config::write_private_grok_config(
+            &self.private_homes,
+            project_id,
+            slot_id,
+            display_name,
+            base_url,
+            model_id,
+        )?;
+        Ok(PreparedGrokSlot::ApiKey {
+            private_home,
+            model_id: model_id.to_owned(),
+            api_key: access,
+        })
+    }
+
+    /// Return a usable access token, refreshing first when expired.
+    /// Refresh failure is hard-fail (no silent use of expired access).
+    /// Only the access token is returned — never the refresh token.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_oauth_access_token(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        client_id: &str,
+        token_endpoint: &str,
+        access_secret_ref: &str,
+        refresh_secret_ref: &str,
+        access_expires_at: DateTime<Utc>,
+    ) -> Result<SecretBytes, RuntimeSlotError> {
+        let expires_at = datetime_to_system_time(access_expires_at);
+        if !access_token_needs_refresh(expires_at, SystemTime::now(), ACCESS_TOKEN_REFRESH_SKEW) {
+            return self.secrets.get(access_secret_ref);
+        }
+
+        let client = self
+            .oauth_client
+            .as_ref()
+            .ok_or(RuntimeSlotError::OauthRefreshFailed)?;
+
+        let refresh = self.secrets.get(refresh_secret_ref)?;
+        let refresh_str = std::str::from_utf8(refresh.as_bytes())
+            .map_err(|_| RuntimeSlotError::OauthRefreshFailed)?;
+        let form = build_refresh_token_form(client_id, refresh_str)?;
+        // Drop refresh SecretBytes before network-shaped call returns.
+        drop(refresh);
+
+        let body = client
+            .post_token_form(token_endpoint, &form)
+            .map_err(|_| RuntimeSlotError::OauthRefreshFailed)?;
+        // Best-effort zero of form (contains refresh token).
+        drop(form);
+
+        let tokens = parse_token_response(&body)?;
+        let new_access_ref = Uuid::new_v4().to_string();
+        let new_refresh_ref = match &tokens.refresh_token {
+            Some(_) => Uuid::new_v4().to_string(),
+            None => refresh_secret_ref.to_owned(),
+        };
+
+        self.secrets.put(&new_access_ref, &tokens.access_token)?;
+        if let Some(new_refresh) = &tokens.refresh_token
+            && let Err(error) = self.secrets.put(&new_refresh_ref, new_refresh)
+        {
+            let _ = self.secrets.delete(&new_access_ref);
+            return Err(error);
+        }
+
+        let expires_in = tokens.expires_in.unwrap_or(3600);
+        let new_expires = Utc::now() + chrono::Duration::seconds(expires_in as i64);
+
+        // Reload full auth metadata to preserve non-token fields.
+        let existing = self.get(project_id, slot_id)?;
+        let (provider_id, issuer, scopes, account_label, base_url, model_id) = match existing.auth {
+            SlotAuth::Oauth {
+                provider_id,
+                issuer,
+                scopes,
+                account_label,
+                base_url,
+                model_id,
+                ..
+            } => (
+                provider_id,
+                issuer,
+                scopes,
+                account_label,
+                base_url,
+                model_id,
+            ),
+            _ => return Err(RuntimeSlotError::InvalidInput),
+        };
+
+        let updated = self.slots.update(UpdateRuntimeSlot {
+            project_id,
+            slot_id,
+            display_name: existing.display_name,
+            role: existing.role,
+            auth: UpdateSlotAuth::Oauth {
+                provider_id,
+                issuer,
+                client_id: client_id.to_owned(),
+                scopes,
+                token_endpoint: token_endpoint.to_owned(),
+                account_label,
+                base_url,
+                model_id,
+                access_secret_ref: new_access_ref.clone(),
+                refresh_secret_ref: new_refresh_ref.clone(),
+                access_expires_at: new_expires,
+            },
+        });
+        if let Err(error) = updated {
+            let _ = self.secrets.delete(&new_access_ref);
+            if tokens.refresh_token.is_some() {
+                let _ = self.secrets.delete(&new_refresh_ref);
+            }
+            return Err(map_store_error(error));
+        }
+
+        // Destroy prior ciphertext after durable metadata update.
+        let _ = self.secrets.delete(access_secret_ref);
+        if tokens.refresh_token.is_some() && new_refresh_ref != refresh_secret_ref {
+            let _ = self.secrets.delete(refresh_secret_ref);
+        }
+
+        // Return only the access token for the grok shell.
+        Ok(tokens.access_token)
+    }
 }
 
-/// Service-level auth update (ApiKey may rotate secret material).
+fn datetime_to_system_time(value: DateTime<Utc>) -> SystemTime {
+    let millis = value.timestamp_millis();
+    if millis <= 0 {
+        return SystemTime::UNIX_EPOCH;
+    }
+    SystemTime::UNIX_EPOCH + Duration::from_millis(millis as u64)
+}
+
+/// Service-level auth update (ApiKey/Oauth may rotate secret material).
 /// No Debug: may hold SecretBytes.
 pub enum UpdateSlotAuthInput {
     Keep,
@@ -727,6 +1169,21 @@ pub enum UpdateSlotAuthInput {
         executable_path: String,
         launch_args: Vec<String>,
         status_args: Vec<String>,
+    },
+    Oauth {
+        provider_id: String,
+        issuer: String,
+        client_id: String,
+        scopes: Vec<String>,
+        token_endpoint: String,
+        account_label: Option<String>,
+        base_url: String,
+        model_id: String,
+        /// `None` keeps the stored access token.
+        access_token: Option<SecretBytes>,
+        /// `None` keeps the stored refresh token.
+        refresh_token: Option<SecretBytes>,
+        access_expires_at: DateTime<Utc>,
     },
 }
 

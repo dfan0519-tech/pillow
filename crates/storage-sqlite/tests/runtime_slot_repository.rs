@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{
     DEFAULT_CUSTOM_ROLE_NAME, GrokSlotAuth, NewRuntimeSlot, RuntimeSlotGovernance, RuntimeSlotId,
@@ -62,8 +63,29 @@ fn new_local_cli(project_id: keeper_project::ProjectId, name: &str) -> NewRuntim
     }
 }
 
+fn new_oauth(project_id: keeper_project::ProjectId, name: &str) -> NewRuntimeSlot {
+    NewRuntimeSlot {
+        project_id,
+        display_name: name.into(),
+        auth: SlotAuth::Oauth {
+            provider_id: "example-oidc".into(),
+            issuer: "https://issuer.example.invalid".into(),
+            client_id: "pillow-client".into(),
+            scopes: vec!["openid".into(), "offline_access".into()],
+            token_endpoint: "https://issuer.example.invalid/oauth/token".into(),
+            account_label: Some("demo-label".into()),
+            base_url: "https://api.example.invalid/v1".into(),
+            model_id: "model-oauth".into(),
+            access_secret_ref: uuid::Uuid::new_v4().to_string(),
+            refresh_secret_ref: uuid::Uuid::new_v4().to_string(),
+            access_expires_at: Utc::now() + Duration::hours(1),
+        },
+        role: SlotRole::default_unassigned(),
+    }
+}
+
 #[test]
-fn governance_derivation_maps_all_three_auth_variants() {
+fn governance_derivation_maps_all_auth_variants() {
     assert_eq!(
         governance_from_auth(&SlotAuth::ApiKey {
             base_url: "https://example.invalid/v1".into(),
@@ -83,6 +105,22 @@ fn governance_derivation_maps_all_three_auth_variants() {
             status_args: vec!["status".into()],
         }),
         RuntimeSlotGovernance::None
+    );
+    assert_eq!(
+        governance_from_auth(&SlotAuth::Oauth {
+            provider_id: "p".into(),
+            issuer: "https://issuer.example.invalid".into(),
+            client_id: "c".into(),
+            scopes: vec!["openid".into()],
+            token_endpoint: "https://issuer.example.invalid/token".into(),
+            account_label: None,
+            base_url: "https://api.example.invalid/v1".into(),
+            model_id: "m".into(),
+            access_secret_ref: uuid::Uuid::new_v4().to_string(),
+            refresh_secret_ref: uuid::Uuid::new_v4().to_string(),
+            access_expires_at: Utc::now(),
+        }),
+        RuntimeSlotGovernance::Full
     );
 }
 
@@ -747,4 +785,162 @@ fn delete_removes_the_row_and_is_project_scoped() {
     assert!(repo.get(alpha.id, slot.id).unwrap().is_none());
     assert!(repo.list(alpha.id).unwrap().is_empty());
     assert!(repo.delete(alpha.id, slot.id).unwrap().is_none());
+}
+
+/// T1: OAuth round-trip + three legacy variants still persist after 0018.
+#[test]
+fn oauth_and_legacy_auth_variants_round_trip_without_token_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+
+    let login = repo.create(new_login(project.id, "Login")).unwrap();
+    let api_ref = uuid::Uuid::new_v4().to_string();
+    let api = repo
+        .create(new_api_key(project.id, "API", api_ref.clone()))
+        .unwrap();
+    let local = repo.create(new_local_cli(project.id, "Local")).unwrap();
+    let oauth = repo.create(new_oauth(project.id, "OAuth")).unwrap();
+
+    assert_eq!(login.governance(), RuntimeSlotGovernance::Full);
+    assert_eq!(api.governance(), RuntimeSlotGovernance::Full);
+    assert_eq!(local.governance(), RuntimeSlotGovernance::None);
+    assert_eq!(oauth.governance(), RuntimeSlotGovernance::Full);
+    assert_eq!(oauth.auth.wire_auth_mode(), Some("oauth"));
+
+    let access_ref = match &oauth.auth {
+        SlotAuth::Oauth {
+            access_secret_ref,
+            refresh_secret_ref,
+            account_label,
+            scopes,
+            provider_id,
+            ..
+        } => {
+            assert_eq!(provider_id, "example-oidc");
+            assert_eq!(account_label.as_deref(), Some("demo-label"));
+            assert_eq!(
+                scopes,
+                &vec!["openid".to_owned(), "offline_access".to_owned()]
+            );
+            assert_ne!(access_secret_ref, refresh_secret_ref);
+            access_secret_ref.clone()
+        }
+        _ => panic!("expected oauth"),
+    };
+
+    drop(repo);
+    let reopened = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let listed = reopened.list(project.id).unwrap();
+    assert_eq!(listed.len(), 4);
+
+    let login_again = listed.iter().find(|s| s.id == login.id).unwrap();
+    assert_eq!(login_again.auth, SlotAuth::GrokLogin { model_id: None });
+
+    let api_again = listed.iter().find(|s| s.id == api.id).unwrap();
+    assert!(matches!(
+        &api_again.auth,
+        SlotAuth::ApiKey { secret_ref, .. } if secret_ref == &api_ref
+    ));
+
+    let local_again = listed.iter().find(|s| s.id == local.id).unwrap();
+    assert!(matches!(local_again.auth, SlotAuth::LocalCli { .. }));
+
+    let oauth_again = listed.iter().find(|s| s.id == oauth.id).unwrap();
+    match &oauth_again.auth {
+        SlotAuth::Oauth {
+            access_secret_ref,
+            refresh_secret_ref,
+            issuer,
+            token_endpoint,
+            model_id,
+            ..
+        } => {
+            assert_eq!(access_secret_ref, &access_ref);
+            assert!(!refresh_secret_ref.is_empty());
+            assert_eq!(issuer, "https://issuer.example.invalid");
+            assert_eq!(token_endpoint, "https://issuer.example.invalid/oauth/token");
+            assert_eq!(model_id, "model-oauth");
+        }
+        _ => panic!("expected oauth after reopen"),
+    }
+
+    // DB must not store raw token-like columns; only refs + meta JSON.
+    let connection = Connection::open(&db).unwrap();
+    let columns: Vec<String> = connection
+        .prepare("PRAGMA table_info(runtime_slots)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(columns.iter().any(|name| name == "oauth_meta_json"));
+    assert!(columns.iter().any(|name| name == "refresh_secret_ref"));
+    assert!(columns.iter().any(|name| name == "access_expires_at"));
+    assert!(!columns.iter().any(|name| {
+        let lower = name.to_ascii_lowercase();
+        lower == "access_token" || lower == "refresh_token" || lower == "api_key"
+    }));
+
+    // oauth_meta_json must not contain secret-ref UUID values as tokens (refs
+    // are in dedicated columns). Meta JSON holds only OIDC public fields.
+    let meta: String = connection
+        .query_row(
+            "SELECT oauth_meta_json FROM runtime_slots WHERE slot_id = ?1",
+            [oauth.id.0.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(meta.contains("example-oidc"));
+    assert!(meta.contains("provider_id"));
+    assert!(!meta.contains("access_token"));
+    assert!(!meta.contains("refresh_token"));
+}
+
+#[test]
+fn oauth_controller_is_accepted_as_governed() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let mut input = new_oauth(project.id, "OAuth controller");
+    input.role = SlotRole::Controller;
+    let slot = repo.create(input).unwrap();
+    assert_eq!(slot.role, SlotRole::Controller);
+    assert_eq!(slot.governance(), RuntimeSlotGovernance::Full);
+}
+
+#[test]
+fn update_model_works_for_oauth_slot() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let project = seed_project(&db, &temp, "alpha");
+    let repo = SqliteRuntimeSlotRepository::open(&db).unwrap();
+    let created = repo.create(new_oauth(project.id, "OAuth")).unwrap();
+    let access_ref = match &created.auth {
+        SlotAuth::Oauth {
+            access_secret_ref, ..
+        } => access_secret_ref.clone(),
+        _ => panic!("expected oauth"),
+    };
+
+    let updated = repo
+        .update_model(UpdateRuntimeSlotModel {
+            project_id: project.id,
+            slot_id: created.id,
+            model_id: "model-rotated".into(),
+        })
+        .unwrap();
+    match &updated.auth {
+        SlotAuth::Oauth {
+            model_id,
+            access_secret_ref,
+            ..
+        } => {
+            assert_eq!(model_id, "model-rotated");
+            assert_eq!(access_secret_ref, &access_ref);
+        }
+        _ => panic!("expected oauth"),
+    }
 }

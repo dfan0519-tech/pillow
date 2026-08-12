@@ -22,6 +22,7 @@ const RUNTIME_SLOT_LOGIN_MODELS_MIGRATION: &str =
     include_str!("../migrations/0016_runtime_slot_login_models.sql");
 const UNIFORM_SLOT_MODEL_MIGRATION: &str =
     include_str!("../migrations/0017_uniform_slot_model.sql");
+const OAUTH_SLOTS_MIGRATION: &str = include_str!("../migrations/0018_oauth_slots.sql");
 
 /// Apply all schema migrations in order. Each base migration is idempotent
 /// (`CREATE TABLE/INDEX IF NOT EXISTS`). Migration 0006 conditionally rebuilds
@@ -38,6 +39,7 @@ const UNIFORM_SLOT_MODEL_MIGRATION: &str =
 /// Migration 0015 adds project-scoped runtime slots with non-secret metadata.
 /// Migration 0016 lets login-auth Grok slots persist an optional selected model.
 /// Migration 0017 flattens slots to auth+role; governance is derived, not stored.
+/// Migration 0018 adds OAuth/OIDC slot auth (token refs + non-secret OIDC meta).
 pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(PROJECTS_MIGRATION)?;
     connection.execute_batch(CONVERSATIONS_MIGRATION)?;
@@ -56,6 +58,7 @@ pub fn apply(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(RUNTIME_SLOTS_MIGRATION)?;
     upgrade_runtime_slot_login_models(connection)?;
     upgrade_uniform_slot_model(connection)?;
+    upgrade_oauth_slots(connection)?;
     Ok(())
 }
 
@@ -162,6 +165,48 @@ fn upgrade_uniform_slot_model(connection: &Connection) -> rusqlite::Result<()> {
                     extended_code: 1,
                 },
                 Some("uniform slot model upgrade did not produce auth_kind".into()),
+            ))
+        }
+        Err(error) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(error)
+        }
+    }
+}
+
+fn oauth_slot_schema_present(connection: &Connection) -> rusqlite::Result<bool> {
+    if !table_exists(connection, "runtime_slots")? {
+        return Ok(false);
+    }
+    let mut statement = connection.prepare("PRAGMA table_info(runtime_slots)")?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == "oauth_meta_json"))
+}
+
+fn upgrade_oauth_slots(connection: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(connection, "runtime_slots")? || oauth_slot_schema_present(connection)? {
+        return Ok(());
+    }
+    connection.execute("BEGIN IMMEDIATE", [])?;
+    if let Err(error) = connection.execute_batch(OAUTH_SLOTS_MIGRATION) {
+        let _ = connection.execute("ROLLBACK", []);
+        return Err(error);
+    }
+    match oauth_slot_schema_present(connection) {
+        Ok(true) => {
+            connection.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Ok(false) => {
+            let _ = connection.execute("ROLLBACK", []);
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::Unknown,
+                    extended_code: 1,
+                },
+                Some("oauth slot upgrade did not produce oauth_meta_json".into()),
             ))
         }
         Err(error) => {

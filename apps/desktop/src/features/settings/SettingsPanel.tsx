@@ -9,6 +9,7 @@ import {
   GROK_CLI_LOGIN_SETTINGS_HELP,
 } from "./loginGuidance";
 import { RuntimeSlotsSection } from "./RuntimeSlotsSection";
+import { LibrarianMonitorSection } from "./LibrarianMonitorSection";
 import {
   applyDocumentTheme,
   isEnvOverride,
@@ -24,6 +25,7 @@ import {
   type UiThemeLabel,
 } from "./settingsTypes";
 import type { RuntimeSlotsGateway } from "./runtimeSlotsTypes";
+import type { LibrarianAuditGateway } from "./librarianAuditTypes";
 import "../../styles/settings.css";
 
 export type SettingsPanelProps = {
@@ -45,6 +47,8 @@ export type SettingsPanelProps = {
    * is present; otherwise an in-memory mock (unit tests / non-desktop).
    */
   runtimeSlotsGateway?: RuntimeSlotsGateway;
+  /** Injectable project-health gateway; production defaults inside the section. */
+  librarianAuditGateway?: LibrarianAuditGateway;
 };
 
 const ADAPTER_OPTIONS_BASE: { value: RuntimeAdapterLabel; label: string }[] = [
@@ -100,6 +104,7 @@ export function SettingsPanel({
   onPermissionModeChanged,
   permissionRulesGateway: permissionRulesGatewayProp,
   runtimeSlotsGateway: runtimeSlotsGatewayProp,
+  librarianAuditGateway,
 }: SettingsPanelProps) {
   const [scope, setScope] = useState<SettingsScope>("global");
   const [settings, setSettings] = useState<RuntimeSettingsView | null>(null);
@@ -556,6 +561,12 @@ export function SettingsPanel({
             </div>
           </form>
         )}
+
+        <LibrarianMonitorSection
+          auditGateway={librarianAuditGateway}
+          projectId={projectId}
+          runtimeSlotsGateway={runtimeSlotsGatewayProp}
+        />
 
         <RuntimeSlotsSection
           gateway={runtimeSlotsGatewayProp}

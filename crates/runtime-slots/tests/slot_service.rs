@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use chrono::{Duration, Utc};
 use keeper_project::CreateProject;
 use keeper_storage_sqlite::{RuntimeSlotGovernance, SlotAuth, SlotRole, SqliteProjectRepository};
 use pillow_runtime_slots::{
-    CreateSlotAuth, DpapiFileSecretStore, GROK_API_KEY_ENV, PreparedGrokSlot, RuntimeSlotService,
-    SecretBytes, SecretStore,
+    ACCESS_TOKEN_REFRESH_SKEW, CreateSlotAuth, DpapiFileSecretStore, GROK_API_KEY_ENV,
+    OauthTokenClient, PreparedGrokSlot, RuntimeSlotError, RuntimeSlotService, SecretBytes,
+    SecretStore, access_token_needs_refresh,
 };
 
 fn seed_project(db: &Path, temp: &tempfile::TempDir, name: &str) -> keeper_project::Project {
@@ -518,4 +521,248 @@ fn delete_destroys_slot_metadata_and_secret_ciphertext() {
             );
         }
     }
+}
+
+fn runtime_token(prefix: &str, suffix: &str) -> String {
+    format!("{prefix}{suffix}")
+}
+
+struct FakeOauthClient {
+    bodies: Mutex<Vec<String>>,
+    /// Captured form bodies (may contain refresh) — tests assert they never reach grok config.
+    seen_forms: Mutex<Vec<String>>,
+    fail: bool,
+}
+
+impl FakeOauthClient {
+    fn with_body(body: String) -> Arc<Self> {
+        Arc::new(Self {
+            bodies: Mutex::new(vec![body]),
+            seen_forms: Mutex::new(Vec::new()),
+            fail: false,
+        })
+    }
+
+    fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            bodies: Mutex::new(Vec::new()),
+            seen_forms: Mutex::new(Vec::new()),
+            fail: true,
+        })
+    }
+}
+
+impl OauthTokenClient for FakeOauthClient {
+    fn post_token_form(
+        &self,
+        _token_endpoint: &str,
+        form_body: &str,
+    ) -> Result<String, RuntimeSlotError> {
+        self.seen_forms.lock().unwrap().push(form_body.to_owned());
+        if self.fail {
+            return Err(RuntimeSlotError::OauthRefreshFailed);
+        }
+        let mut bodies = self.bodies.lock().unwrap();
+        if bodies.is_empty() {
+            return Err(RuntimeSlotError::OauthRefreshFailed);
+        }
+        Ok(bodies.remove(0))
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn oauth_prepare_injects_only_access_token_never_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+
+    let access = runtime_token("acc-", "ess-prepare-only");
+    let refresh = runtime_token("ref-", "resh-must-not-leak");
+    let created = service
+        .create_slot(
+            project.id,
+            "OAuth slot".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "example-oidc".into(),
+                issuer: "https://issuer.example.invalid".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://issuer.example.invalid/token".into(),
+                account_label: Some("label".into()),
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "model-oauth".into(),
+                access_token: SecretBytes::new(access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() + Duration::hours(2),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+    assert_eq!(created.slot.governance(), RuntimeSlotGovernance::Full);
+    assert!(created.secret_configured);
+    assert!(matches!(created.slot.auth, SlotAuth::Oauth { .. }));
+
+    let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
+    let (private_home, api_key) = match prepared {
+        PreparedGrokSlot::ApiKey {
+            private_home,
+            api_key,
+            model_id,
+        } => {
+            assert_eq!(model_id, "model-oauth");
+            (private_home, api_key)
+        }
+        PreparedGrokSlot::Login { .. } => panic!("expected api-key shaped prepare for oauth"),
+    };
+
+    // Only access token is handed to the grok shell.
+    assert_eq!(api_key.as_bytes(), access.as_bytes());
+    assert_ne!(api_key.as_bytes(), refresh.as_bytes());
+
+    let config = std::fs::read_to_string(private_home.join(".grok").join("config.toml")).unwrap();
+    assert!(config.contains(GROK_API_KEY_ENV));
+    assert!(!config.contains(&access));
+    assert!(!config.contains(&refresh));
+
+    // Slot DTO / Debug never carry token material — only refs.
+    let auth_debug = format!("{:?}", created.slot.auth);
+    assert!(!auth_debug.contains(&access));
+    assert!(!auth_debug.contains(&refresh));
+    assert!(auth_debug.contains("access_secret_ref") || auth_debug.contains("Oauth"));
+
+    let secret_debug = format!("{:?}", SecretBytes::new(access.clone()));
+    assert_eq!(secret_debug, "SecretBytes([REDACTED])");
+    assert!(!secret_debug.contains(&access));
+}
+
+#[cfg(windows)]
+#[test]
+fn oauth_prepare_refreshes_when_expired_and_fails_closed_on_refresh_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+
+    let old_access = runtime_token("acc-", "ess-old-expired");
+    let refresh = runtime_token("ref-", "resh-for-refresh-path");
+    let new_access = runtime_token("acc-", "ess-new-after-refresh");
+    let new_refresh = runtime_token("ref-", "resh-rotated");
+
+    let body = format!(
+        r#"{{"access_token":"{new_access}","refresh_token":"{new_refresh}","expires_in":3600}}"#
+    );
+    let client = FakeOauthClient::with_body(body);
+    let service = RuntimeSlotService::open_with_oauth_client(
+        &db,
+        &app_data,
+        Some(client.clone() as Arc<dyn OauthTokenClient>),
+    )
+    .unwrap();
+
+    let created = service
+        .create_slot(
+            project.id,
+            "OAuth expired".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "example-oidc".into(),
+                issuer: "https://issuer.example.invalid".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://issuer.example.invalid/token".into(),
+                account_label: None,
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "model-oauth".into(),
+                access_token: SecretBytes::new(old_access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                // Already inside the refresh skew window.
+                access_expires_at: Utc::now() - Duration::minutes(1),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+
+    let prepared = service.prepare_grok(project.id, created.slot.id).unwrap();
+    match prepared {
+        PreparedGrokSlot::ApiKey { api_key, .. } => {
+            assert_eq!(api_key.as_bytes(), new_access.as_bytes());
+            assert_ne!(api_key.as_bytes(), old_access.as_bytes());
+            assert_ne!(api_key.as_bytes(), refresh.as_bytes());
+            assert_ne!(api_key.as_bytes(), new_refresh.as_bytes());
+        }
+        PreparedGrokSlot::Login { .. } => panic!("expected access token prepare"),
+    }
+
+    // Refresh form captured by the fake client must include the refresh token,
+    // but that material must never appear in the private grok config.
+    let forms = client.seen_forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 1);
+    assert!(forms[0].contains("grant_type=refresh_token"));
+    assert!(forms[0].contains(&refresh));
+    let private_home = app_data
+        .join("runtime-slots")
+        .join(project.id.0.to_string())
+        .join(created.slot.id.0.to_string());
+    let config = std::fs::read_to_string(private_home.join(".grok").join("config.toml")).unwrap();
+    assert!(!config.contains(&refresh));
+    assert!(!config.contains(&new_refresh));
+    assert!(!config.contains(&new_access));
+
+    // Fail-closed: expired access + failing transport → no silent reuse of old access.
+    let fail_db = temp.path().join("fail.db");
+    let fail_app = temp.path().join("fail-app");
+    let fail_project = seed_project(&fail_db, &temp, "beta");
+    let fail_client = FakeOauthClient::failing();
+    let fail_service = RuntimeSlotService::open_with_oauth_client(
+        &fail_db,
+        &fail_app,
+        Some(fail_client as Arc<dyn OauthTokenClient>),
+    )
+    .unwrap();
+    let expired = fail_service
+        .create_slot(
+            fail_project.id,
+            "OAuth fail".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "example-oidc".into(),
+                issuer: "https://issuer.example.invalid".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://issuer.example.invalid/token".into(),
+                account_label: None,
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "model-oauth".into(),
+                access_token: SecretBytes::new(old_access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() - Duration::hours(1),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+    match fail_service.prepare_grok(fail_project.id, expired.slot.id) {
+        Ok(_) => panic!("expired oauth must not prepare when refresh fails"),
+        Err(err) => assert_eq!(err.code(), "runtime_slot_oauth_refresh_failed"),
+    }
+
+    // Fail-closed without any transport configured.
+    let no_client = RuntimeSlotService::open(&fail_db, &fail_app).unwrap();
+    match no_client.prepare_grok(fail_project.id, expired.slot.id) {
+        Ok(_) => panic!("expired oauth must not prepare without refresh client"),
+        Err(err) => assert_eq!(err.code(), "runtime_slot_oauth_refresh_failed"),
+    }
+}
+
+#[test]
+fn refresh_decision_helpers_exported_for_callers() {
+    use std::time::{Duration as StdDuration, UNIX_EPOCH};
+    let now = UNIX_EPOCH + StdDuration::from_secs(10_000);
+    let skew = ACCESS_TOKEN_REFRESH_SKEW;
+    assert!(access_token_needs_refresh(now, now, skew));
+    assert!(!access_token_needs_refresh(
+        now + skew + StdDuration::from_secs(5),
+        now,
+        skew
+    ));
 }

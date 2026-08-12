@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -13,7 +14,10 @@ use keeper_agent_protocol::{
 };
 use keeper_project::ProjectId;
 use keeper_runtime_host::{
-    GovernedAdapterFactory, HostConfig, PreparedRuntimeHost, RuntimeHost, SpawnedTurn,
+    DispatchError, GovernedAdapterFactory, GovernedProcessLifecycle, HostConfig,
+    PreparedRuntimeHost, RuntimeHost, SpawnedTurn, attribute_dispatch_receipt,
+    complete_dispatch_on_receipt, execute_prepared_dispatch, list_dispatch_records,
+    prepare_dispatch, register_dispatch_on_requested,
 };
 use keeper_session::{
     ConversationId, ConversationRepository, NewConversation, NewRun, RunId, RunStatus,
@@ -21,11 +25,15 @@ use keeper_session::{
 use keeper_storage_sqlite::{
     SqliteConversationRepository, SqliteProjectRepository, SqliteToolCallRepository,
 };
+use pillow_role_dispatch::BuildAssignmentInput;
 
 use crate::conversation_events::{
     ConversationDto, RuntimeEventEmitter, SendTurnResult, TimelineDto, timeline_dto,
 };
 
+use super::dispatch_service::{
+    RoleDispatchProposalDto, RoleDispatchRecordDto, dispatch_proposal_dto,
+};
 use super::ids::{map_session_error, parse_conversation_id, parse_project_id, parse_run_id};
 use super::pipeline::{PumpFailSeams, PumpOutcome, pump_turn};
 use super::project_cwd::resolve_working_directory;
@@ -468,6 +476,176 @@ impl ConversationService {
         })
     }
 
+    /// Propose a controller→role dispatch as an ordinary governed process proposal.
+    ///
+    /// Returns after durable `pending_approval` reserve (Requested). Does **not**
+    /// approve or spawn. Human approval stays on `decide_exec_proposal`.
+    pub fn propose_role_dispatch(
+        &self,
+        conversation_id: String,
+        input: BuildAssignmentInput,
+    ) -> Result<RoleDispatchProposalDto, ConversationCommandError> {
+        let prepared = prepare_dispatch(input).map_err(map_dispatch_error)?;
+
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(ConversationCommandError::new(
+                "conversation_shut_down",
+                "Conversation service is shut down.",
+            ));
+        }
+
+        let (conversation_id, project_id, root) =
+            self.conversation_project_context(&conversation_id)?;
+        let _admission = self.admission.try_admit()?;
+
+        let run = self
+            .repository
+            .create_run(NewRun {
+                conversation_id,
+                user_message: format!("[role-dispatch] {}", prepared.assignment.task_text),
+            })
+            .map_err(map_session_error)?;
+        let protocol_run_id = ProtocolRunId(run.id.0);
+
+        if let Err(error) = self.host.register_governed_process_run(
+            protocol_run_id,
+            project_id.0.to_string(),
+            conversation_id.0.to_string(),
+            &root,
+        ) {
+            self.fail_admitted_run(run.id, RunStatus::Failed);
+            return Err(ConversationCommandError::new(
+                "governed_process_unavailable",
+                error.to_string(),
+            ));
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_worker = Arc::clone(&cancel);
+        let prepared_for_worker = prepared.clone();
+        let conversation_for_worker = conversation_id.0.to_string();
+        let assignment_for_terminal = Arc::new(Mutex::new(prepared.assignment.clone()));
+
+        let worker = thread::spawn(move || {
+            let assignment_lock = Arc::clone(&assignment_for_terminal);
+            let result = execute_prepared_dispatch(
+                protocol_run_id,
+                &prepared_for_worker,
+                cancel_for_worker.as_ref(),
+                |event| match event {
+                    GovernedProcessLifecycle::Requested(requested) => {
+                        if let Err(error) = register_dispatch_on_requested(
+                            &prepared_for_worker,
+                            conversation_for_worker.clone(),
+                            protocol_run_id,
+                            requested.proposal_id.clone(),
+                        ) {
+                            let _ = tx.send(Err(error.code().into()));
+                            return Err(keeper_runtime_host::GovernedProcessBridgeError::Gateway);
+                        }
+                        let _ = tx.send(Ok(requested.proposal_id.clone()));
+                        Ok(())
+                    }
+                    GovernedProcessLifecycle::Decided(_) | GovernedProcessLifecycle::Started(_) => {
+                        Ok(())
+                    }
+                },
+            );
+
+            match result {
+                Ok(receipt) => {
+                    if let Ok(mut assignment) = assignment_lock.lock() {
+                        let _ = complete_dispatch_on_receipt(
+                            &receipt.proposal_id,
+                            &mut assignment,
+                            &receipt,
+                        );
+                    } else {
+                        let _ =
+                            attribute_dispatch_receipt(&prepared_for_worker.assignment, &receipt);
+                    }
+                    let _ = receipt.state;
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                }
+            }
+        });
+
+        let proposal_id = match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(Ok(id)) => id,
+            Ok(Err(message)) => {
+                cancel.store(true, Ordering::SeqCst);
+                self.host.release_governed_process_run(protocol_run_id);
+                self.fail_admitted_run(run.id, RunStatus::Failed);
+                let _ = worker.join();
+                return Err(ConversationCommandError::new(
+                    "role_dispatch_process_unavailable",
+                    message,
+                ));
+            }
+            Err(_) => {
+                cancel.store(true, Ordering::SeqCst);
+                self.host.release_governed_process_run(protocol_run_id);
+                self.fail_admitted_run(run.id, RunStatus::Failed);
+                let _ = worker.join();
+                return Err(ConversationCommandError::new(
+                    "role_dispatch_process_unavailable",
+                    "Timed out waiting for process proposal reserve.",
+                ));
+            }
+        };
+
+        // Detach the waiter so human approval is not required to return the DTO.
+        // Terminal attribution continues on the worker thread.
+        std::mem::forget(worker);
+
+        let views = self
+            .host
+            .list_process_proposals(&conversation_id.0.to_string())
+            .map_err(|error| {
+                ConversationCommandError::new("process_unavailable", error.to_string())
+            })?;
+        let view = views
+            .into_iter()
+            .find(|v| v.proposal_id == proposal_id)
+            .ok_or_else(|| {
+                ConversationCommandError::new(
+                    "process_not_live",
+                    "Dispatch process proposal is not live.",
+                )
+            })?;
+
+        Ok(dispatch_proposal_dto(&prepared, run.id.0.to_string(), view))
+    }
+
+    /// In-memory dispatch records for a conversation (this host instance).
+    pub fn list_role_dispatches(
+        &self,
+        conversation_id: String,
+    ) -> Result<Vec<RoleDispatchRecordDto>, ConversationCommandError> {
+        let _ = self.conversation_project_context(&conversation_id)?;
+        let records = list_dispatch_records(&conversation_id).map_err(map_dispatch_error)?;
+        Ok(records
+            .into_iter()
+            .map(|record| RoleDispatchRecordDto {
+                assignment_id: record.assignment_id.0.to_string(),
+                initiator_slot_id: record.initiator_slot_id.0.to_string(),
+                target_slot_id: record.target_slot_id.0.to_string(),
+                governance: record.governance.as_str().into(),
+                proposal_id: record.proposal_id,
+                call_id: record.call_id,
+                claimed_governed_execution: record
+                    .outcome
+                    .as_ref()
+                    .map(|o| o.claimed_governed_execution),
+                exit_code: record.outcome.as_ref().and_then(|o| o.output.exit_code),
+                duration_ms: record.outcome.as_ref().and_then(|o| o.output.duration_ms),
+            })
+            .collect())
+    }
+
     /// Transition an admitted run that never became a live pump to a terminal
     /// status so shutdown cannot leave a truthful Pending orphan.
     fn fail_admitted_run(&self, run_id: RunId, status: RunStatus) {
@@ -689,6 +867,10 @@ fn open_projects(path: &Path) -> Result<SqliteProjectRepository, ConversationCom
             "Project storage is temporarily unavailable.",
         )
     })
+}
+
+fn map_dispatch_error(error: DispatchError) -> ConversationCommandError {
+    ConversationCommandError::new(error.code(), error.to_string())
 }
 
 fn open_tool_calls(path: &Path) -> Result<SqliteToolCallRepository, ConversationCommandError> {

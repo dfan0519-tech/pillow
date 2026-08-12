@@ -21,6 +21,7 @@ keeper-policy = { path = "../kernel-policy" }
 keeper-process-executor = { path = "../process-executor" }
 keeper-storage-sqlite = { path = "../storage-sqlite" }
 keeper-tool-executor = { path = "../tool-executor" }
+pillow-role-dispatch = { path = "../role-dispatch" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

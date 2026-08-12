@@ -13,6 +13,7 @@
 //! (`open` / `open_with_config`) remain for tests and explicit development
 //! startup only — they are not the production Grok path.
 
+mod dispatch_service;
 pub(crate) mod exec_service;
 mod ids;
 mod pipeline;
@@ -25,6 +26,7 @@ mod write_service;
 #[cfg(test)]
 mod tests;
 
+pub use dispatch_service::{RoleDispatchProposalDto, RoleDispatchRecordDto};
 pub use exec_service::{ExecOutputDto, ExecProposalDto};
 pub use service::ConversationService;
 pub use types::ConversationCommandError;

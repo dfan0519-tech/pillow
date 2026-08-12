@@ -6,11 +6,15 @@ license.workspace = true
 description = "Host-side runtime-slot orchestration and Windows user-scoped secret storage"
 
 [dependencies]
+base64.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
 keeper-process-executor = { path = "../process-executor" }
 keeper-project = { path = "../kernel-project" }
 keeper-storage-sqlite = { path = "../storage-sqlite" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 toml = "0.9.12"
 uuid.workspace = true

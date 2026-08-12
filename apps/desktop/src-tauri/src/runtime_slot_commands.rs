@@ -812,6 +812,9 @@ pub(crate) fn update_slot_impl(
                     command_error("runtime_slot_input_invalid", "status_args is required.")
                 })?,
             },
+            // OAuth / future auth shapes: unified update keeps existing auth
+            // (use dedicated update paths). Fail closed rather than invent fields.
+            _ => UpdateSlotAuthInput::Keep,
         }
     };
 
@@ -1006,8 +1009,8 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         status_args,
     ) = match &slot.auth {
         SlotAuth::GrokLogin { model_id } => (
-            "governed_grok".into(),
-            Some("login".into()),
+            slot.auth.wire_kind().into(),
+            slot.auth.wire_auth_mode().map(str::to_owned),
             None,
             model_id.clone(),
             None,
@@ -1020,8 +1023,8 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
             model_id,
             secret_ref,
         } => (
-            "governed_grok".into(),
-            Some("api_key".into()),
+            slot.auth.wire_kind().into(),
+            slot.auth.wire_auth_mode().map(str::to_owned),
             Some(base_url.clone()),
             Some(model_id.clone()),
             Some(secret_ref.clone()),
@@ -1034,14 +1037,32 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
             launch_args,
             status_args,
         } => (
-            "external_cli".into(),
-            None,
+            slot.auth.wire_kind().into(),
+            slot.auth.wire_auth_mode().map(str::to_owned),
             None,
             None,
             None,
             Some(executable_path.clone()),
             Some(launch_args.clone()),
             Some(status_args.clone()),
+        ),
+        // OAuth / future auth: closed wire labels via SlotAuth helpers; no secrets.
+        other => (
+            other.wire_kind().into(),
+            other.wire_auth_mode().map(str::to_owned),
+            match other {
+                SlotAuth::Oauth { base_url, .. } => Some(base_url.clone()),
+                _ => None,
+            },
+            match other {
+                SlotAuth::Oauth { model_id, .. } => Some(model_id.clone()),
+                _ => None,
+            },
+            // Never surface DPAPI secret refs for OAuth (access/refresh stay host-private).
+            None,
+            None,
+            None,
+            None,
         ),
     };
     let (role, role_custom_name) = match &slot.role {

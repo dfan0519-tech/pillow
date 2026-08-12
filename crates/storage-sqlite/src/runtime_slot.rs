@@ -43,6 +43,11 @@ impl RuntimeSlotGovernance {
 
 /// Authentication shape for a slot. Extensible: new variants may be added;
 /// callers must not assume a closed three-variant set forever.
+///
+/// Tokens and API keys never appear here — only opaque DPAPI secret refs.
+/// Consumer-subscription OAuth (ChatGPT Plus / Claude Pro proprietary backends)
+/// is intentionally unsupported; only standard OIDC/OAuth providers that can
+/// supply a bearer access token for an OpenAI-compatible `base_url` fit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotAuth {
     /// Any OpenAI-compatible endpoint with a DPAPI-backed secret reference.
@@ -59,6 +64,26 @@ pub enum SlotAuth {
         launch_args: Vec<String>,
         status_args: Vec<String>,
     },
+    /// Standard OIDC/OAuth provider. Access + refresh tokens live in DPAPI
+    /// under the two secret refs; metadata below is non-secret.
+    Oauth {
+        provider_id: String,
+        issuer: String,
+        client_id: String,
+        scopes: Vec<String>,
+        token_endpoint: String,
+        /// Non-sensitive account label (e.g. email or display name).
+        account_label: Option<String>,
+        /// OpenAI-compatible base URL for the grok shell.
+        base_url: String,
+        model_id: String,
+        /// DPAPI ref for the access token (injected as env_key at prepare).
+        access_secret_ref: String,
+        /// DPAPI ref for the refresh token (never given to the grok shell).
+        refresh_secret_ref: String,
+        /// UTC expiry of the current access token.
+        access_expires_at: DateTime<Utc>,
+    },
 }
 
 impl SlotAuth {
@@ -74,7 +99,7 @@ impl SlotAuth {
     /// Wire `kind` label retained for existing renderer closed contracts.
     pub fn wire_kind(&self) -> &'static str {
         match self {
-            Self::ApiKey { .. } | Self::GrokLogin { .. } => "governed_grok",
+            Self::ApiKey { .. } | Self::GrokLogin { .. } | Self::Oauth { .. } => "governed_grok",
             Self::LocalCli { .. } => "external_cli",
         }
     }
@@ -84,15 +109,18 @@ impl SlotAuth {
         match self {
             Self::ApiKey { .. } => Some("api_key"),
             Self::GrokLogin { .. } => Some("login"),
+            Self::Oauth { .. } => Some("oauth"),
             Self::LocalCli { .. } => None,
         }
     }
 }
 
-/// Derive governance from auth. Three mappings are pinned by unit tests.
+/// Derive governance from auth. Mappings are pinned by unit tests.
 pub fn governance_from_auth(auth: &SlotAuth) -> RuntimeSlotGovernance {
     match auth {
-        SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } => RuntimeSlotGovernance::Full,
+        SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } | SlotAuth::Oauth { .. } => {
+            RuntimeSlotGovernance::Full
+        }
         SlotAuth::LocalCli { .. } => RuntimeSlotGovernance::None,
     }
 }
@@ -174,7 +202,7 @@ impl TryFrom<SlotAuth> for GrokSlotAuth {
                 model_id,
                 secret_ref,
             }),
-            SlotAuth::LocalCli { .. } => Err(()),
+            SlotAuth::LocalCli { .. } | SlotAuth::Oauth { .. } => Err(()),
         }
     }
 }
@@ -208,6 +236,20 @@ impl From<SlotAuth> for RuntimeSlotKind {
                     base_url,
                     model_id,
                     secret_ref,
+                },
+            },
+            // Historical kind view is lossy for OAuth: only access secret_ref is
+            // retained. Prefer matching on SlotAuth for OAuth slots.
+            SlotAuth::Oauth {
+                base_url,
+                model_id,
+                access_secret_ref,
+                ..
+            } => Self::GovernedGrok {
+                auth: GrokSlotAuth::ApiKey {
+                    base_url,
+                    model_id,
+                    secret_ref: access_secret_ref,
                 },
             },
             SlotAuth::LocalCli {
@@ -361,6 +403,20 @@ pub enum UpdateSlotAuth {
         launch_args: Vec<String>,
         status_args: Vec<String>,
     },
+    /// Replace OAuth non-secret fields and/or token refs. Auth kind stays Oauth.
+    Oauth {
+        provider_id: String,
+        issuer: String,
+        client_id: String,
+        scopes: Vec<String>,
+        token_endpoint: String,
+        account_label: Option<String>,
+        base_url: String,
+        model_id: String,
+        access_secret_ref: String,
+        refresh_secret_ref: String,
+        access_expires_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -442,9 +498,11 @@ impl SqliteRuntimeSlotRepository {
             "INSERT INTO runtime_slots (
                 slot_id, project_id, display_name, auth_kind, role_kind, role_custom_name,
                 base_url, model_id, secret_ref, executable_path,
-                launch_args_json, status_args_json, created_at, updated_at
+                launch_args_json, status_args_json,
+                refresh_secret_ref, access_expires_at, oauth_meta_json,
+                created_at, updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
              )",
             params![
                 slot.id.0.to_string(),
@@ -459,6 +517,9 @@ impl SqliteRuntimeSlotRepository {
                 encoded.executable_path,
                 encoded.launch_args_json,
                 encoded.status_args_json,
+                encoded.refresh_secret_ref,
+                encoded.access_expires_at,
+                encoded.oauth_meta_json,
                 slot.created_at.to_rfc3339(),
                 slot.updated_at.to_rfc3339(),
             ],
@@ -548,6 +609,9 @@ impl SqliteRuntimeSlotRepository {
                 executable_path = NULL,
                 launch_args_json = NULL,
                 status_args_json = NULL,
+                refresh_secret_ref = NULL,
+                access_expires_at = NULL,
+                oauth_meta_json = NULL,
                 updated_at = ?8
              WHERE project_id = ?9 AND slot_id = ?10",
             params![
@@ -631,6 +695,48 @@ impl SqliteRuntimeSlotRepository {
                     status_args: status_args.clone(),
                 }
             }
+            (
+                SlotAuth::Oauth { .. },
+                UpdateSlotAuth::Oauth {
+                    provider_id,
+                    issuer,
+                    client_id,
+                    scopes,
+                    token_endpoint,
+                    account_label,
+                    base_url,
+                    model_id,
+                    access_secret_ref,
+                    refresh_secret_ref,
+                    access_expires_at,
+                },
+            ) => {
+                validate_oauth_fields(
+                    provider_id,
+                    issuer,
+                    client_id,
+                    scopes,
+                    token_endpoint,
+                    account_label.as_deref(),
+                    base_url,
+                    model_id,
+                    access_secret_ref,
+                    refresh_secret_ref,
+                )?;
+                SlotAuth::Oauth {
+                    provider_id: provider_id.clone(),
+                    issuer: issuer.clone(),
+                    client_id: client_id.clone(),
+                    scopes: scopes.clone(),
+                    token_endpoint: token_endpoint.clone(),
+                    account_label: account_label.clone(),
+                    base_url: base_url.clone(),
+                    model_id: model_id.clone(),
+                    access_secret_ref: access_secret_ref.clone(),
+                    refresh_secret_ref: refresh_secret_ref.clone(),
+                    access_expires_at: *access_expires_at,
+                }
+            }
             _ => return Err(RuntimeSlotStoreError::InvalidShape),
         };
 
@@ -658,8 +764,11 @@ impl SqliteRuntimeSlotRepository {
                 executable_path = ?8,
                 launch_args_json = ?9,
                 status_args_json = ?10,
-                updated_at = ?11
-             WHERE project_id = ?12 AND slot_id = ?13",
+                refresh_secret_ref = ?11,
+                access_expires_at = ?12,
+                oauth_meta_json = ?13,
+                updated_at = ?14
+             WHERE project_id = ?15 AND slot_id = ?16",
             params![
                 updated.display_name,
                 encoded.auth_kind,
@@ -671,6 +780,9 @@ impl SqliteRuntimeSlotRepository {
                 encoded.executable_path,
                 encoded.launch_args_json,
                 encoded.status_args_json,
+                encoded.refresh_secret_ref,
+                encoded.access_expires_at,
+                encoded.oauth_meta_json,
                 updated.updated_at.to_rfc3339(),
                 updated.project_id.0.to_string(),
                 updated.id.0.to_string(),
@@ -682,7 +794,7 @@ impl SqliteRuntimeSlotRepository {
         Ok(updated)
     }
 
-    /// Update only the selected model for a governed Grok/ApiKey slot.
+    /// Update only the selected model for a governed Grok/ApiKey/Oauth slot.
     pub fn update_model(
         &self,
         input: UpdateRuntimeSlotModel,
@@ -709,6 +821,31 @@ impl SqliteRuntimeSlotRepository {
                 base_url,
                 model_id: input.model_id,
                 secret_ref,
+            },
+            SlotAuth::Oauth {
+                provider_id,
+                issuer,
+                client_id,
+                scopes,
+                token_endpoint,
+                account_label,
+                base_url,
+                access_secret_ref,
+                refresh_secret_ref,
+                access_expires_at,
+                ..
+            } => SlotAuth::Oauth {
+                provider_id,
+                issuer,
+                client_id,
+                scopes,
+                token_endpoint,
+                account_label,
+                base_url,
+                model_id: input.model_id,
+                access_secret_ref,
+                refresh_secret_ref,
+                access_expires_at,
             },
             SlotAuth::LocalCli { .. } => {
                 return Err(RuntimeSlotStoreError::InvalidShape);
@@ -777,7 +914,8 @@ impl SqliteRuntimeSlotRepository {
 
 const SELECT_SLOT: &str = "SELECT slot_id, project_id, display_name, auth_kind, role_kind,
             role_custom_name, base_url, model_id, secret_ref, executable_path,
-            launch_args_json, status_args_json, created_at, updated_at
+            launch_args_json, status_args_json, created_at, updated_at,
+            refresh_secret_ref, access_expires_at, oauth_meta_json
      FROM runtime_slots";
 
 struct EncodedSlot {
@@ -790,6 +928,20 @@ struct EncodedSlot {
     executable_path: Option<String>,
     launch_args_json: Option<String>,
     status_args_json: Option<String>,
+    refresh_secret_ref: Option<String>,
+    access_expires_at: Option<String>,
+    oauth_meta_json: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OauthMetaStored {
+    provider_id: String,
+    issuer: String,
+    client_id: String,
+    scopes: Vec<String>,
+    token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_label: Option<String>,
 }
 
 impl EncodedSlot {
@@ -802,10 +954,22 @@ impl EncodedSlot {
             executable_path,
             launch_args_json,
             status_args_json,
+            refresh_secret_ref,
+            access_expires_at,
+            oauth_meta_json,
         ) = match &slot.auth {
-            SlotAuth::GrokLogin { model_id } => {
-                ("grok_login", None, model_id.clone(), None, None, None, None)
-            }
+            SlotAuth::GrokLogin { model_id } => (
+                "grok_login",
+                None,
+                model_id.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             SlotAuth::ApiKey {
                 base_url,
                 model_id,
@@ -815,6 +979,9 @@ impl EncodedSlot {
                 Some(base_url.clone()),
                 Some(model_id.clone()),
                 Some(secret_ref.clone()),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -837,7 +1004,46 @@ impl EncodedSlot {
                     serde_json::to_string(status_args)
                         .map_err(|_| RuntimeSlotStoreError::InvalidShape)?,
                 ),
+                None,
+                None,
+                None,
             ),
+            SlotAuth::Oauth {
+                provider_id,
+                issuer,
+                client_id,
+                scopes,
+                token_endpoint,
+                account_label,
+                base_url,
+                model_id,
+                access_secret_ref,
+                refresh_secret_ref,
+                access_expires_at,
+            } => {
+                let meta = OauthMetaStored {
+                    provider_id: provider_id.clone(),
+                    issuer: issuer.clone(),
+                    client_id: client_id.clone(),
+                    scopes: scopes.clone(),
+                    token_endpoint: token_endpoint.clone(),
+                    account_label: account_label.clone(),
+                };
+                let meta_json = serde_json::to_string(&meta)
+                    .map_err(|_| RuntimeSlotStoreError::InvalidShape)?;
+                (
+                    "oauth",
+                    Some(base_url.clone()),
+                    Some(model_id.clone()),
+                    Some(access_secret_ref.clone()),
+                    None,
+                    None,
+                    None,
+                    Some(refresh_secret_ref.clone()),
+                    Some(access_expires_at.to_rfc3339()),
+                    Some(meta_json),
+                )
+            }
         };
         let (role_kind, role_custom_name) = match &slot.role {
             SlotRole::Controller => ("controller", None),
@@ -854,6 +1060,9 @@ impl EncodedSlot {
             executable_path,
             launch_args_json,
             status_args_json,
+            refresh_secret_ref,
+            access_expires_at,
+            oauth_meta_json,
         })
     }
 }
@@ -892,7 +1101,67 @@ fn validate_new_slot(input: &NewRuntimeSlot) -> Result<(), RuntimeSlotStoreError
             }
             Ok(())
         }
+        SlotAuth::Oauth {
+            provider_id,
+            issuer,
+            client_id,
+            scopes,
+            token_endpoint,
+            account_label,
+            base_url,
+            model_id,
+            access_secret_ref,
+            refresh_secret_ref,
+            access_expires_at: _,
+        } => validate_oauth_fields(
+            provider_id,
+            issuer,
+            client_id,
+            scopes,
+            token_endpoint,
+            account_label.as_deref(),
+            base_url,
+            model_id,
+            access_secret_ref,
+            refresh_secret_ref,
+        ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_oauth_fields(
+    provider_id: &str,
+    issuer: &str,
+    client_id: &str,
+    scopes: &[String],
+    token_endpoint: &str,
+    account_label: Option<&str>,
+    base_url: &str,
+    model_id: &str,
+    access_secret_ref: &str,
+    refresh_secret_ref: &str,
+) -> Result<(), RuntimeSlotStoreError> {
+    validate_text(provider_id, CONFIG_VALUE_MAX_CHARS)?;
+    validate_text(issuer, CONFIG_VALUE_MAX_CHARS)?;
+    validate_text(client_id, CONFIG_VALUE_MAX_CHARS)?;
+    validate_text(token_endpoint, CONFIG_VALUE_MAX_CHARS)?;
+    validate_text(base_url, CONFIG_VALUE_MAX_CHARS)?;
+    validate_text(model_id, CONFIG_VALUE_MAX_CHARS)?;
+    if scopes.is_empty() || scopes.len() > ARG_COUNT_MAX {
+        return Err(RuntimeSlotStoreError::InvalidShape);
+    }
+    for scope in scopes {
+        validate_text(scope, ARG_MAX_CHARS)?;
+    }
+    if let Some(label) = account_label {
+        validate_text(label, CONFIG_VALUE_MAX_CHARS)?;
+    }
+    Uuid::parse_str(access_secret_ref).map_err(|_| RuntimeSlotStoreError::InvalidShape)?;
+    Uuid::parse_str(refresh_secret_ref).map_err(|_| RuntimeSlotStoreError::InvalidShape)?;
+    if access_secret_ref == refresh_secret_ref {
+        return Err(RuntimeSlotStoreError::InvalidShape);
+    }
+    Ok(())
 }
 
 /// Controller must be governed auth. LocalCli cannot be Controller.
@@ -958,6 +1227,9 @@ fn runtime_slot_from_row(row: &Row<'_>) -> rusqlite::Result<RuntimeSlot> {
     let status_args_json: Option<String> = row.get(11)?;
     let created_at: String = row.get(12)?;
     let updated_at: String = row.get(13)?;
+    let refresh_secret_ref: Option<String> = row.get(14)?;
+    let access_expires_at: Option<String> = row.get(15)?;
+    let oauth_meta_json: Option<String> = row.get(16)?;
 
     let auth = match auth_kind.as_str() {
         "grok_login"
@@ -965,14 +1237,20 @@ fn runtime_slot_from_row(row: &Row<'_>) -> rusqlite::Result<RuntimeSlot> {
                 && secret_ref.is_none()
                 && executable_path.is_none()
                 && launch_args_json.is_none()
-                && status_args_json.is_none() =>
+                && status_args_json.is_none()
+                && refresh_secret_ref.is_none()
+                && access_expires_at.is_none()
+                && oauth_meta_json.is_none() =>
         {
             SlotAuth::GrokLogin { model_id }
         }
         "api_key"
             if executable_path.is_none()
                 && launch_args_json.is_none()
-                && status_args_json.is_none() =>
+                && status_args_json.is_none()
+                && refresh_secret_ref.is_none()
+                && access_expires_at.is_none()
+                && oauth_meta_json.is_none() =>
         {
             SlotAuth::ApiKey {
                 base_url: base_url.ok_or_else(|| invalid_stored(6))?,
@@ -980,11 +1258,41 @@ fn runtime_slot_from_row(row: &Row<'_>) -> rusqlite::Result<RuntimeSlot> {
                 secret_ref: secret_ref.ok_or_else(|| invalid_stored(8))?,
             }
         }
-        "local_cli" if base_url.is_none() && model_id.is_none() && secret_ref.is_none() => {
+        "local_cli"
+            if base_url.is_none()
+                && model_id.is_none()
+                && secret_ref.is_none()
+                && refresh_secret_ref.is_none()
+                && access_expires_at.is_none()
+                && oauth_meta_json.is_none() =>
+        {
             SlotAuth::LocalCli {
                 executable_path: executable_path.ok_or_else(|| invalid_stored(9))?,
                 launch_args: parse_args(launch_args_json, 10)?,
                 status_args: parse_args(status_args_json, 11)?,
+            }
+        }
+        "oauth"
+            if executable_path.is_none()
+                && launch_args_json.is_none()
+                && status_args_json.is_none() =>
+        {
+            let meta_raw = oauth_meta_json.ok_or_else(|| invalid_stored(16))?;
+            let meta: OauthMetaStored =
+                serde_json::from_str(&meta_raw).map_err(|_| invalid_stored(16))?;
+            let expires_raw = access_expires_at.ok_or_else(|| invalid_stored(15))?;
+            SlotAuth::Oauth {
+                provider_id: meta.provider_id,
+                issuer: meta.issuer,
+                client_id: meta.client_id,
+                scopes: meta.scopes,
+                token_endpoint: meta.token_endpoint,
+                account_label: meta.account_label,
+                base_url: base_url.ok_or_else(|| invalid_stored(6))?,
+                model_id: model_id.ok_or_else(|| invalid_stored(7))?,
+                access_secret_ref: secret_ref.ok_or_else(|| invalid_stored(8))?,
+                refresh_secret_ref: refresh_secret_ref.ok_or_else(|| invalid_stored(14))?,
+                access_expires_at: parse_timestamp(&expires_raw, 15)?,
             }
         }
         _ => return Err(invalid_stored(3)),
@@ -1064,5 +1372,25 @@ mod governance_derivation_tests {
             status_args: vec!["status".into()],
         };
         assert_eq!(governance_from_auth(&auth), RuntimeSlotGovernance::None);
+    }
+
+    #[test]
+    fn oauth_maps_to_full() {
+        let auth = SlotAuth::Oauth {
+            provider_id: "example".into(),
+            issuer: "https://issuer.example.invalid".into(),
+            client_id: "client".into(),
+            scopes: vec!["openid".into()],
+            token_endpoint: "https://issuer.example.invalid/token".into(),
+            account_label: Some("label".into()),
+            base_url: "https://api.example.invalid/v1".into(),
+            model_id: "m".into(),
+            access_secret_ref: uuid::Uuid::new_v4().to_string(),
+            refresh_secret_ref: uuid::Uuid::new_v4().to_string(),
+            access_expires_at: chrono::Utc::now(),
+        };
+        assert_eq!(governance_from_auth(&auth), RuntimeSlotGovernance::Full);
+        assert_eq!(auth.wire_auth_mode(), Some("oauth"));
+        assert_eq!(auth.wire_kind(), "governed_grok");
     }
 }

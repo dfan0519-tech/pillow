@@ -1,0 +1,187 @@
+/*
+ * Project knowledge audit — a compact ledger-like section inside settings.
+ * It reuses the accepted Pillow/Grok baseline and existing semantic tokens.
+ */
+
+.librarian-monitor {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.librarian-monitor__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.librarian-monitor__head h3 {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.librarian-monitor__head p,
+.librarian-monitor > p,
+.librarian-monitor__check > p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.librarian-monitor__head button {
+  flex: 0 0 auto;
+  min-width: 78px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.librarian-monitor__head button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.librarian-monitor__head button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.librarian-monitor__assignment {
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary) !important;
+}
+
+.librarian-monitor__assignment--guide {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-elevated));
+}
+
+.librarian-monitor [role="alert"] {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.librarian-monitor__checks {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.librarian-monitor__check {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.librarian-monitor__check[data-status="pass"] {
+  border-left-color: var(--success);
+}
+
+.librarian-monitor__check[data-status="fail"] {
+  border-left-color: var(--danger);
+}
+
+.librarian-monitor__check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.librarian-monitor__check-head strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.librarian-monitor__badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+[data-status="pass"] > .librarian-monitor__check-head .librarian-monitor__badge {
+  color: var(--success);
+}
+
+[data-status="fail"] > .librarian-monitor__check-head .librarian-monitor__badge {
+  color: var(--danger);
+}
+
+.librarian-monitor__findings {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.librarian-monitor__findings summary {
+  width: fit-content;
+  color: var(--danger);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.librarian-monitor__findings ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.librarian-monitor__findings li {
+  display: grid;
+  gap: 2px;
+  padding-left: 8px;
+  border-left: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border-subtle));
+}
+
+.librarian-monitor__findings code {
+  color: var(--text-tertiary);
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 10px;
+}
+
+.librarian-monitor__findings span {
+  color: var(--text-primary);
+  line-height: 1.45;
+}
+
+@media (max-width: 460px) {
+  .librarian-monitor__head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .librarian-monitor__head button {
+    width: 100%;
+  }
+}
