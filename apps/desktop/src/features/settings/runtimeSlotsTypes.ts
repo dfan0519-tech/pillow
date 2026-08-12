@@ -331,6 +331,19 @@ export interface RuntimeSlotsGateway {
     slotId: string,
     modelId: string,
   ): Promise<RuntimeSlotModelSwitchView>;
+  /**
+   * Scan local agent CLIs (install + auth three-state). Host-only; no secrets.
+   */
+  detectLocalClis(): Promise<LocalCliDetectionView[]>;
+  /**
+   * Draft-state model catalog via host (baseUrl + apiKey in, never out).
+   * `unsupported` is a normal success payload — not a thrown error.
+   * Failures throw `RuntimeSlotsGatewayError` with catalog error codes.
+   */
+  probeModelCatalog(
+    baseUrl: string,
+    apiKey: string,
+  ): Promise<ProbeModelCatalogView>;
 }
 
 /**
@@ -398,3 +411,71 @@ export const MODEL_CATALOG_UNSUPPORTED_ENDPOINT =
 /** Catalog unsupported: external CLI is registration-only. */
 export const MODEL_CATALOG_UNSUPPORTED_EXTERNAL_CLI =
   "外部 CLI 槽位不适用模型目录，仅可登记与查询账号状态。";
+
+// ---------------------------------------------------------------------------
+// Local CLI detect (detect_local_clis) + draft model probe (probe_model_catalog)
+// ---------------------------------------------------------------------------
+
+/** Known agent CLI kinds returned by host detection. */
+export type LocalCliKind =
+  | "grok"
+  | "claude"
+  | "codex"
+  | "opencode"
+  | "gemini";
+
+/**
+ * Three-state auth probe. Missing evidence is `unknown`, never
+ * `not_authenticated` (absence is not negative evidence).
+ */
+export type LocalCliAuthStatus =
+  | "authenticated"
+  | "not_authenticated"
+  | "unknown";
+
+/** Closed host DTO for one CLI detection row. */
+export type LocalCliDetectionView = {
+  kind: LocalCliKind;
+  found: boolean;
+  executablePath: string | null;
+  version: string | null;
+  authStatus: LocalCliAuthStatus;
+  /** Non-sensitive label when authenticated; otherwise null. */
+  accountLabel: string | null;
+  /** Present for unknown (reason code from host); never secret. */
+  authReason: string | null;
+};
+
+/**
+ * Draft-state model catalog (`probe_model_catalog`) — no slot/project ids.
+ * Same status vocabulary as slot catalog; key never appears on this view.
+ */
+export type ProbeModelCatalogView = {
+  status: RuntimeSlotModelCatalogStatus;
+  source: RuntimeSlotModelCatalogSource;
+  models: string[];
+  reasonCode: RuntimeSlotModelCatalogReasonCode | null;
+};
+
+/** UI labels for auth three-state (unknown must not read as 未登录). */
+export const LOCAL_CLI_AUTH_AUTHENTICATED_LABEL = "已登录";
+export const LOCAL_CLI_AUTH_NOT_AUTHENTICATED_LABEL = "未登录";
+/** Missing evidence — never the same string as not_authenticated. */
+export const LOCAL_CLI_AUTH_UNKNOWN_LABEL = "未确定";
+
+export const LOCAL_CLI_DETECT_HINT =
+  "扫描本机已安装的 agent CLI，并读取登录账号状态，便于确认或更换账号。仍可手填路径。";
+
+export const LOCAL_CLI_DETECT_BUSY = "正在扫描本机 CLI…";
+export const LOCAL_CLI_DETECT_NONE_FOUND = "未发现已安装的已知 CLI，请手填可执行文件路径。";
+
+/** Suggested status argv when selecting a detected CLI (space-separated). */
+export const LOCAL_CLI_DEFAULT_STATUS_ARGS: Readonly<
+  Record<LocalCliKind, string>
+> = {
+  grok: "models",
+  claude: "auth status --text",
+  codex: "login status",
+  opencode: "auth list",
+  gemini: "",
+};

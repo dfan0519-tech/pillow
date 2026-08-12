@@ -15,7 +15,8 @@ use crate::runtime_composition::build_slot_grok_config;
 use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 use crate::runtime_slot_commands::{
     create_external_cli_slot_impl, create_grok_api_key_slot_impl, create_grok_login_slot_impl,
-    delete_runtime_slot_impl, get_runtime_slot_model_catalog_impl, list_runtime_slots_impl,
+    delete_runtime_slot_impl, detect_local_clis_impl, get_runtime_slot_model_catalog_impl,
+    list_runtime_slots_impl, local_cli_detection_to_dto, probe_model_catalog_impl,
     set_runtime_slot_model_impl, start_runtime_slot_impl, update_grok_api_key_slot_impl,
 };
 
@@ -308,6 +309,8 @@ fn desktop_commands_use_replaceable_runtime_state_and_register_slot_surface() {
         "get_runtime_slot_model_catalog",
         "set_runtime_slot_model",
         "start_runtime_slot",
+        "detect_local_clis",
+        "probe_model_catalog",
     ] {
         assert!(
             handler.contains(command),
@@ -1143,4 +1146,328 @@ fn update_and_delete_command_symbols_exist_for_host_registration() {
     assert!(source.contains("pub fn delete_runtime_slot"));
     assert!(source.contains("pub fn get_runtime_slot_model_catalog"));
     assert!(source.contains("pub fn set_runtime_slot_model"));
+    assert!(source.contains("pub fn detect_local_clis"));
+    assert!(source.contains("pub fn probe_model_catalog"));
+}
+
+/// Closed DTO keys for `LocalCliDetectionDto` — must match renderer allowlist.
+#[test]
+fn local_cli_detection_dto_keys_are_closed_and_secret_free() {
+    use pillow_cli_detect::{AgentCliKind, AuthState, CliDetection};
+    use std::path::PathBuf;
+
+    let dto = local_cli_detection_to_dto(CliDetection {
+        kind: AgentCliKind::Codex,
+        found: true,
+        executable: Some(PathBuf::from("C:/tools/codex.exe")),
+        version: Some("0.1.0".into()),
+        auth: AuthState::Authenticated {
+            account_label: "ChatGPT".into(),
+        },
+    });
+    let value = serde_json::to_value(&dto).unwrap();
+    let mut keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "accountLabel",
+            "authReason",
+            "authStatus",
+            "executablePath",
+            "found",
+            "kind",
+            "version",
+        ]
+    );
+    // Negative: closed object keys only — no secret-shaped field names.
+    let obj = value.as_object().unwrap();
+    for key in obj.keys() {
+        let lower = key.to_ascii_lowercase();
+        assert!(
+            !matches!(
+                lower.as_str(),
+                "apikey"
+                    | "api_key"
+                    | "password"
+                    | "token"
+                    | "bearer"
+                    | "authorization"
+                    | "credential"
+                    | "privatekey"
+                    | "private_key"
+            ),
+            "DTO must not contain secret-shaped key: {key}"
+        );
+    }
+}
+
+/// Positive: explicit NotAuthenticated maps to `not_authenticated`.
+/// Negative: Unknown (timeout / not_found / no status) never becomes `not_authenticated`.
+#[test]
+fn local_cli_auth_unknown_is_never_not_authenticated() {
+    use pillow_cli_detect::{AgentCliKind, AuthState, CliDetection};
+    use std::path::PathBuf;
+
+    let logged_out = local_cli_detection_to_dto(CliDetection {
+        kind: AgentCliKind::Grok,
+        found: true,
+        executable: Some(PathBuf::from("/bin/grok")),
+        version: Some("1.0".into()),
+        auth: AuthState::NotAuthenticated,
+    });
+    assert_eq!(logged_out.auth_status, "not_authenticated");
+    assert!(logged_out.account_label.is_none());
+    assert!(logged_out.auth_reason.is_none());
+
+    for (reason, label) in [
+        ("timed_out", "timeout"),
+        ("not_found", "missing install"),
+        ("no_headless_status_command", "gemini-class"),
+        ("spawn_failed", "denied/spawn"),
+        ("output_capture_failed", "unparseable"),
+    ] {
+        let unknown = local_cli_detection_to_dto(CliDetection {
+            kind: AgentCliKind::Gemini,
+            found: reason != "not_found",
+            executable: if reason == "not_found" {
+                None
+            } else {
+                Some(PathBuf::from("/bin/gemini"))
+            },
+            version: None,
+            auth: AuthState::Unknown {
+                reason: reason.into(),
+            },
+        });
+        assert_eq!(
+            unknown.auth_status, "unknown",
+            "{label}: expected unknown status"
+        );
+        assert_ne!(
+            unknown.auth_status, "not_authenticated",
+            "{label}: must not collapse missing evidence into logged-out"
+        );
+        assert_eq!(unknown.auth_reason.as_deref(), Some(reason));
+        assert!(unknown.account_label.is_none());
+    }
+
+    let authed = local_cli_detection_to_dto(CliDetection {
+        kind: AgentCliKind::Claude,
+        found: true,
+        executable: Some(PathBuf::from("/bin/claude")),
+        version: Some("2".into()),
+        auth: AuthState::Authenticated {
+            account_label: "user@example.com".into(),
+        },
+    });
+    assert_eq!(authed.auth_status, "authenticated");
+    assert_eq!(authed.account_label.as_deref(), Some("user@example.com"));
+    assert!(authed.auth_reason.is_none());
+}
+
+/// Live detect returns a closed list for every known kind (machine-dependent found flags).
+#[test]
+fn detect_local_clis_returns_all_kinds_with_closed_dto() {
+    let _probe_guard = runtime_probe_guard();
+    let list = detect_local_clis_impl().unwrap();
+    assert_eq!(list.len(), 5, "expected one row per known CLI kind");
+    let kinds: Vec<&str> = list.iter().map(|row| row.kind.as_str()).collect();
+    assert_eq!(kinds, ["grok", "claude", "codex", "opencode", "gemini"]);
+    for row in &list {
+        assert!(
+            matches!(
+                row.auth_status.as_str(),
+                "authenticated" | "not_authenticated" | "unknown"
+            ),
+            "invalid auth_status {}",
+            row.auth_status
+        );
+        if row.auth_status == "unknown" {
+            // Reason may be present; must never claim not_authenticated.
+            assert_ne!(row.auth_status, "not_authenticated");
+        }
+        if row.auth_status != "authenticated" {
+            assert!(row.account_label.is_none());
+        }
+        let raw = serde_json::to_string(row).unwrap();
+        assert!(!raw.contains("apiKey") && !raw.contains("api_key"));
+    }
+}
+
+#[test]
+fn probe_model_catalog_dto_keys_are_closed() {
+    let _probe_guard = runtime_probe_guard();
+    // Unsupported path is pure (no network): empty body status codes map in
+    // fetch; we pin the DTO shape via a synthetic unavailable-error-free path
+    // using invalid base_url → fixed error, and success via TCP on Windows.
+    let err = probe_model_catalog_impl("".into(), "k".into()).unwrap_err();
+    assert_eq!(err.code, "runtime_slot_input_invalid");
+    assert!(!err.message.contains("k"));
+}
+
+#[cfg(windows)]
+#[test]
+fn probe_model_catalog_success_returns_models_without_echoing_key() {
+    let _probe_guard = runtime_probe_guard();
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 || request.len() > 16 * 1024 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let body = br#"{"data":[{"id":"draft-model-a"},{"id":"draft-model-b"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    let marker = "pillow-test-draft-probe-key-9f3a";
+    let dto = probe_model_catalog_impl(format!("http://{address}/v1"), marker.into()).unwrap();
+    assert_eq!(dto.status, "available");
+    assert_eq!(dto.source, "openai_models");
+    assert_eq!(dto.models, ["draft-model-a", "draft-model-b"]);
+    assert_eq!(dto.reason_code, None);
+
+    let value = serde_json::to_value(&dto).unwrap();
+    let mut keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["models", "reasonCode", "source", "status"]);
+
+    let encoded = serde_json::to_string(&dto).unwrap();
+    assert!(
+        !encoded.contains(marker),
+        "success DTO must never echo the API key"
+    );
+    assert!(!encoded.contains("apiKey") && !encoded.contains("Authorization"));
+
+    let request = server.join().unwrap();
+    assert!(request.contains(&format!("Authorization: Bearer {marker}\r\n")));
+}
+
+#[cfg(windows)]
+#[test]
+fn probe_model_catalog_unsupported_endpoint_is_normal_result() {
+    let _probe_guard = runtime_probe_guard();
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let marker = "pillow-test-draft-probe-unsupported-key";
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            request.extend_from_slice(&buffer[..read]);
+            if request.len() > 8 * 1024 {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+
+    let dto = probe_model_catalog_impl(format!("http://{address}/v1"), marker.into()).unwrap();
+    assert_eq!(dto.status, "unsupported");
+    assert_eq!(dto.source, "openai_models");
+    assert!(dto.models.is_empty());
+    assert_eq!(dto.reason_code.as_deref(), Some("endpoint_not_supported"));
+    assert!(!serde_json::to_string(&dto).unwrap().contains(marker));
+    let _ = server.join();
+}
+
+#[cfg(windows)]
+#[test]
+fn probe_model_catalog_failure_does_not_pretend_success_or_echo_key() {
+    let _probe_guard = runtime_probe_guard();
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let marker = "pillow-test-draft-probe-fail-key";
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            request.extend_from_slice(&buffer[..read]);
+            if request.len() > 8 * 1024 {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+
+    let err = probe_model_catalog_impl(format!("http://{address}/v1"), marker.into()).unwrap_err();
+    assert_eq!(err.code, "runtime_slot_model_catalog_unavailable");
+    assert!(!err.message.contains(marker));
+    assert!(!err.code.contains(marker));
+    let _ = server.join();
+}
+
+#[test]
+fn probe_model_catalog_rejects_blank_key_without_network_and_without_echo() {
+    let _probe_guard = runtime_probe_guard();
+    let marker = "pillow-test-blank-should-not-matter";
+    // Whitespace-only key is treated as empty input.
+    let err =
+        probe_model_catalog_impl("https://api.example.test/v1".into(), "   ".into()).unwrap_err();
+    assert_eq!(err.code, "runtime_slot_input_invalid");
+    assert!(!err.message.contains(marker));
 }

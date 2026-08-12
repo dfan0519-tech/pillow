@@ -67,9 +67,9 @@ use runtime_composition::{RuntimeOpenOutcome, open_conversation_service_or_degra
 use runtime_service_state::RuntimeServiceState;
 use runtime_slot_commands::{
     create_external_cli_slot, create_grok_api_key_slot, create_grok_login_slot, create_slot,
-    delete_runtime_slot, get_external_cli_status, get_runtime_slot_model_catalog,
-    list_runtime_slots, set_runtime_slot_model, start_runtime_slot, update_grok_api_key_slot,
-    update_slot,
+    delete_runtime_slot, detect_local_clis, get_external_cli_status,
+    get_runtime_slot_model_catalog, list_runtime_slots, probe_model_catalog,
+    set_runtime_slot_model, start_runtime_slot, update_grok_api_key_slot, update_slot,
 };
 use settings_commands::{
     RuntimeStartupState, clear_runtime_setting, get_onboarding_settings, get_permission_mode,
@@ -143,7 +143,9 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         get_external_cli_status,
         get_runtime_slot_model_catalog,
         set_runtime_slot_model,
-        start_runtime_slot
+        start_runtime_slot,
+        detect_local_clis,
+        probe_model_catalog
     ])
 }
 

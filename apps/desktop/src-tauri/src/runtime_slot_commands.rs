@@ -4,16 +4,18 @@
 //! wire are **derived** labels for existing UI contracts (not independent storage).
 
 use std::path::Path;
+use std::time::Duration;
 
 use keeper_project::ProjectId;
 use keeper_storage_sqlite::{
     RuntimeSlotGovernance, RuntimeSlotId, SlotAuth, SlotRole, SqliteSettingsRepository,
     process_env_map,
 };
+use pillow_cli_detect::{AuthState, CliDetection};
 use pillow_runtime_slots::{
     CreateSlotAuth, ExternalCliStatus, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
     ModelCatalogUnsupportedReason, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView,
-    SecretBytes, UpdateSlotAuthInput,
+    SecretBytes, UpdateSlotAuthInput, fetch_openai_model_catalog,
 };
 use serde::Serialize;
 use tauri::State;
@@ -22,6 +24,9 @@ use uuid::Uuid;
 use crate::app_state::{AppState, CommandError};
 use crate::runtime_composition::{build_slot_grok_config, discover_grok_executable_with_override};
 use crate::runtime_service_state::RuntimeServiceState;
+
+/// Hard timeout for each CLI probe during `detect_local_clis` (per binary).
+const DETECT_LOCAL_CLI_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +97,40 @@ pub struct RuntimeSlotModelSwitchDto {
     pub model_id: String,
     pub runtime_restarted: bool,
     pub session_restore: String,
+}
+
+/// One local CLI probe result. Closed, secret-free.
+///
+/// `auth_status` is three-state: `authenticated` | `not_authenticated` | `unknown`.
+/// Probe failure / missing evidence is always `unknown` (+ `auth_reason`), never
+/// collapsed into `not_authenticated`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCliDetectionDto {
+    /// `grok` | `claude` | `codex` | `opencode` | `gemini`
+    pub kind: String,
+    pub found: bool,
+    pub executable_path: Option<String>,
+    pub version: Option<String>,
+    /// `authenticated` | `not_authenticated` | `unknown`
+    pub auth_status: String,
+    /// Non-sensitive account label when authenticated; otherwise null.
+    pub account_label: Option<String>,
+    /// Present when `auth_status == "unknown"` (or optional detail); never secret.
+    pub auth_reason: Option<String>,
+}
+
+/// Draft-state model catalog probe (no persisted slot). Closed, secret-free.
+///
+/// Same status/source/reason vocabulary as `RuntimeSlotModelCatalogDto`, without
+/// slot/project ids — the key never appears on this wire shape.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeModelCatalogDto {
+    pub status: String,
+    pub source: String,
+    pub models: Vec<String>,
+    pub reason_code: Option<String>,
 }
 
 #[tauri::command]
@@ -212,6 +251,28 @@ pub fn get_runtime_slot_model_catalog(
     slot_id: String,
 ) -> Result<RuntimeSlotModelCatalogDto, CommandError> {
     get_runtime_slot_model_catalog_impl(&slots, &settings, &app, project_id, slot_id)
+}
+
+/// Discover installed agent CLIs and probe login status (read-only).
+///
+/// Does not start conversations, does not write CLI config, and never returns
+/// token/key material — only sanitized account labels when authenticated.
+#[tauri::command]
+pub fn detect_local_clis() -> Result<Vec<LocalCliDetectionDto>, CommandError> {
+    detect_local_clis_impl()
+}
+
+/// Draft-state OpenAI-compatible model list: `base_url` + one-shot `api_key`.
+///
+/// Reuses `pillow_runtime_slots::fetch_openai_model_catalog` (same path as
+/// persisted-slot catalog). The key is moved into `SecretBytes` immediately and
+/// never appears on the success DTO, error code, or error message.
+#[tauri::command]
+pub fn probe_model_catalog(
+    base_url: String,
+    api_key: String,
+) -> Result<ProbeModelCatalogDto, CommandError> {
+    probe_model_catalog_impl(base_url, api_key)
 }
 
 #[tauri::command]
@@ -536,6 +597,89 @@ pub(crate) fn get_runtime_slot_model_catalog_impl(
         )
         .map_err(map_slot_error)?;
     Ok(model_catalog_to_dto(catalog, slot_id, project_id))
+}
+
+pub(crate) fn detect_local_clis_impl() -> Result<Vec<LocalCliDetectionDto>, CommandError> {
+    let detections = pillow_cli_detect::detect_all_with_timeout(DETECT_LOCAL_CLI_TIMEOUT);
+    Ok(detections
+        .into_iter()
+        .map(local_cli_detection_to_dto)
+        .collect())
+}
+
+/// Map a crate-level detection into the closed host DTO.
+///
+/// Pure and side-effect free so unit tests can pin auth three-state mapping
+/// without launching real CLIs.
+pub(crate) fn local_cli_detection_to_dto(detection: CliDetection) -> LocalCliDetectionDto {
+    let (auth_status, account_label, auth_reason) = match detection.auth {
+        AuthState::Authenticated { account_label } => {
+            ("authenticated".into(), Some(account_label), None)
+        }
+        AuthState::NotAuthenticated => ("not_authenticated".into(), None, None),
+        AuthState::Unknown { reason } => ("unknown".into(), None, Some(reason)),
+    };
+    LocalCliDetectionDto {
+        kind: detection.kind.as_str().into(),
+        found: detection.found,
+        executable_path: detection
+            .executable
+            .map(|path| path.to_string_lossy().into_owned()),
+        version: detection.version,
+        auth_status,
+        account_label,
+        auth_reason,
+    }
+}
+
+pub(crate) fn probe_model_catalog_impl(
+    base_url: String,
+    api_key: String,
+) -> Result<ProbeModelCatalogDto, CommandError> {
+    // Move key material into SecretBytes immediately; do not keep the String for
+    // any error-message or DTO path. Empty key is invalid input (fixed copy).
+    if api_key.trim().is_empty() {
+        return Err(command_error(
+            "runtime_slot_input_invalid",
+            "API key is required for model catalog probe.",
+        ));
+    }
+    if base_url.trim().is_empty() {
+        return Err(command_error(
+            "runtime_slot_input_invalid",
+            "base_url is required for model catalog probe.",
+        ));
+    }
+    // Capture length only for the empty check above; drop the owned String into
+    // SecretBytes so Drop zeroizes it. Never format the key into errors.
+    let secret = SecretBytes::new(api_key);
+    let catalog = fetch_openai_model_catalog(base_url.trim(), &secret).map_err(map_slot_error)?;
+    // secret drops here (zeroized). Catalog never carried key material.
+    Ok(probe_catalog_to_dto(catalog))
+}
+
+fn probe_catalog_to_dto(catalog: ModelCatalog) -> ProbeModelCatalogDto {
+    let source = match catalog.source {
+        ModelCatalogSource::OpenAiModels => "openai_models",
+        ModelCatalogSource::GrokCli => "grok_cli",
+        ModelCatalogSource::ExternalCli => "external_cli",
+    };
+    let (status, reason_code) = match catalog.availability {
+        ModelCatalogAvailability::Available => ("available", None),
+        ModelCatalogAvailability::Unsupported { reason } => {
+            let reason = match reason {
+                ModelCatalogUnsupportedReason::Endpoint => "endpoint_not_supported",
+                ModelCatalogUnsupportedReason::ExternalCli => "external_cli_not_supported",
+            };
+            ("unsupported", Some(reason.to_owned()))
+        }
+    };
+    ProbeModelCatalogDto {
+        status: status.into(),
+        source: source.into(),
+        models: catalog.model_ids,
+        reason_code,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

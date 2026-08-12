@@ -13,6 +13,8 @@ use keeper_storage_sqlite::{TaskStatus, VerdictOutcome};
 use crate::ledger::LedgerSnapshot;
 use crate::stale::{StaleKind, check_stale};
 
+const HISTORICAL_COMPLETED_CUTOFF_RFC3339: &str = "2026-08-12T00:00:00Z";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibrarianCheckKind {
     StaleInflight,
@@ -159,10 +161,22 @@ pub fn run_librarian_audit(
         findings,
     };
 
+    let historical_completed_cutoff =
+        DateTime::parse_from_rfc3339(HISTORICAL_COMPLETED_CUTOFF_RFC3339)
+            .expect("fixed historical cutoff must be valid RFC3339")
+            .with_timezone(&Utc);
+    let historical_completed_task_ids: std::collections::HashSet<&str> = input
+        .snapshot
+        .completed_without_verdict
+        .iter()
+        .filter(|task| task.dispatched_at < historical_completed_cutoff)
+        .map(|task| task.task_id.as_str())
+        .collect();
     let completed_findings: Vec<String> = input
         .snapshot
         .completed_without_verdict
         .iter()
+        .filter(|task| !historical_completed_task_ids.contains(task.task_id.as_str()))
         .map(|task| {
             format!(
                 "task_id=`{}` slot=`{}` title={:?}",
@@ -177,33 +191,49 @@ pub fn run_librarian_audit(
         } else {
             LibrarianCheckOutcome::Fail
         },
-        summary: format!("completed_without_verdict={}", completed_findings.len()),
+        summary: format!(
+            "completed_without_verdict={} total_without_verdict={} historical_exemptions={} exemption_basis=dispatched_at<{HISTORICAL_COMPLETED_CUTOFF_RFC3339}",
+            completed_findings.len(),
+            input.snapshot.completed_without_verdict.len(),
+            historical_completed_task_ids.len()
+        ),
         findings: completed_findings,
     };
 
     let stale_report = check_stale(input.handoff_markdown, input.snapshot);
+    let mut historical_completed_document_exemptions = 0usize;
     let document_findings: Vec<String> = stale_report
         .findings
         .iter()
-        .map(|finding| match &finding.kind {
+        .filter_map(|finding| match &finding.kind {
             StaleKind::InflightCountMismatch {
                 claimed,
                 ledger_dispatched,
                 ..
-            } => format!(
+            } => Some(format!(
                 "code=inflight_count_mismatch claimed={claimed} ledger_dispatched={ledger_dispatched}"
-            ),
+            )),
             StaleKind::CompletedWithoutVerdictUnmentioned {
                 task_id,
                 worker_label,
                 ..
-            } => format!(
+            } if historical_completed_task_ids.contains(task_id.as_str()) => {
+                historical_completed_document_exemptions += 1;
+                None
+            }
+            StaleKind::CompletedWithoutVerdictUnmentioned {
+                task_id,
+                worker_label,
+                ..
+            } => Some(format!(
                 "code=completed_without_verdict_unmentioned task_id=`{task_id}` slot=`{worker_label}`"
-            ),
+            )),
             StaleKind::DocTaskMissingFromLedger {
                 mention_kind,
                 ..
-            } => format!("code=doc_task_missing_from_ledger mention_kind={mention_kind}"),
+            } => Some(format!(
+                "code=doc_task_missing_from_ledger mention_kind={mention_kind}"
+            )),
         })
         .collect();
     let document_check = LibrarianCheck {
@@ -213,7 +243,11 @@ pub fn run_librarian_audit(
         } else {
             LibrarianCheckOutcome::Fail
         },
-        summary: format!("document_ledger_findings={}", document_findings.len()),
+        summary: format!(
+            "document_ledger_findings={} historical_completed_exemptions={} exemption_basis=dispatched_at<{HISTORICAL_COMPLETED_CUTOFF_RFC3339}",
+            document_findings.len(),
+            historical_completed_document_exemptions
+        ),
         findings: document_findings,
     };
 

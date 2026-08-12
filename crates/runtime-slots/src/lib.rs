@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 pub use catalog::{
     ModelCatalog, ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason,
+    fetch_openai_model_catalog,
 };
 pub use secret::{DpapiFileSecretStore, SecretBytes, SecretStore};
 

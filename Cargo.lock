@@ -2702,6 +2702,7 @@ dependencies = [
  "keeper-session",
  "keeper-storage-sqlite",
  "keeper-tool-executor",
+ "pillow-cli-detect",
  "pillow-runtime-slots",
  "rfd",
  "serde",
@@ -2709,6 +2710,16 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "pillow-role-dispatch"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
  "uuid",
 ]
 

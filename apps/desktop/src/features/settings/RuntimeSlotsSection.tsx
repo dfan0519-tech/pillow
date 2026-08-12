@@ -17,7 +17,9 @@ import {
   MockRuntimeSlotsGateway,
   TauriRuntimeSlotsGateway,
   classifyExternalCliStatus,
+  formatLocalCliAuthLabel,
   mapGrokProbeFailureMessage,
+  mapModelCatalogUnsupportedReason,
   mapRuntimeSlotErrorMessage,
   truncateModelIdForDisplay,
 } from "./runtimeSlotsGateway";
@@ -32,10 +34,17 @@ import {
   GUIDANCE_NO_CONTROLLER_HEADING,
   GUIDANCE_NO_SLOTS_BODY,
   GUIDANCE_NO_SLOTS_HEADING,
+  LOCAL_CLI_DEFAULT_STATUS_ARGS,
+  LOCAL_CLI_DETECT_BUSY,
+  LOCAL_CLI_DETECT_HINT,
+  LOCAL_CLI_DETECT_NONE_FOUND,
+  MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   SECRET_CONFIGURED_LABEL,
   SECRET_NOT_CONFIGURED_LABEL,
   SLOT_AUTH_METHODS,
   SLOT_ROLE_OPTIONS,
+  type LocalCliDetectionView,
+  type ProbeModelCatalogView,
   type RuntimeSlotModelSwitchView,
   type RuntimeSlotRole,
   type RuntimeSlotView,
@@ -143,7 +152,24 @@ export function RuntimeSlotsSection({
   const [providerPresetId, setProviderPresetId] = useState<ProviderPresetId>(
     DEFAULT_PROVIDER_PRESET_ID,
   );
-  /** Draft OpenAI /models pull while form is open (create or edit). */
+  /**
+   * Draft model catalog from host `probe_model_catalog` (create/edit API-key).
+   * Renderer never opens third-party sockets; key is input-only.
+   */
+  const [draftCatalog, setDraftCatalog] = useState<ProbeModelCatalogView | null>(
+    null,
+  );
+  const [draftCatalogBusy, setDraftCatalogBusy] = useState(false);
+  const [draftCatalogError, setDraftCatalogError] = useState<string | null>(
+    null,
+  );
+  /** Local CLI detection results for create form. */
+  const [detectRows, setDetectRows] = useState<LocalCliDetectionView[]>([]);
+  const [detectBusy, setDetectBusy] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const [detectSelectedKind, setDetectSelectedKind] = useState<string | null>(
+    null,
+  );
 
   /** Inline role editor for an existing list row. */
   const [roleEditSlotId, setRoleEditSlotId] = useState<string | null>(null);
@@ -204,6 +230,13 @@ export function RuntimeSlotsSection({
     setCreateRole("controller");
     setRoleCustomName("");
     setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
+    setDraftCatalog(null);
+    setDraftCatalogBusy(false);
+    setDraftCatalogError(null);
+    setDetectRows([]);
+    setDetectBusy(false);
+    setDetectError(null);
+    setDetectSelectedKind(null);
   }
 
   /**
@@ -226,6 +259,78 @@ export function RuntimeSlotsSection({
       setModelId(preset.suggestedModelId);
     }
     // Stale catalog from a previous endpoint must not look like a success.
+    setDraftCatalog(null);
+    setDraftCatalogError(null);
+  }
+
+  async function handleDetectLocalClis(): Promise<void> {
+    if (detectBusy || busy) return;
+    setDetectBusy(true);
+    setDetectError(null);
+    setDetectSelectedKind(null);
+    try {
+      const rows = await gateway.detectLocalClis();
+      setDetectRows(rows);
+      if (!rows.some((row) => row.found)) {
+        setDetectError(LOCAL_CLI_DETECT_NONE_FOUND);
+      }
+    } catch (cause) {
+      const message =
+        cause instanceof RuntimeSlotsGatewayError
+          ? cause.message
+          : "扫描本机 CLI 失败。";
+      setDetectError(message);
+      setDetectRows([]);
+    } finally {
+      setDetectBusy(false);
+    }
+  }
+
+  function selectDetectedCli(row: LocalCliDetectionView): void {
+    if (!row.found || !row.executablePath) return;
+    setDetectSelectedKind(row.kind);
+    setExecutablePath(row.executablePath);
+    const defaults = LOCAL_CLI_DEFAULT_STATUS_ARGS[row.kind];
+    if (defaults) {
+      setStatusArgsText(defaults);
+    }
+    if (!displayName.trim()) {
+      setDisplayName(row.kind);
+    }
+  }
+
+  async function handleProbeDraftCatalog(): Promise<void> {
+    if (draftCatalogBusy || busy) return;
+    const url = baseUrl.trim();
+    const key = apiKeyDraft.trim();
+    if (!url || !key) {
+      setDraftCatalogError("请先填写端点 base_url 与 API key，再拉取模型列表。");
+      setDraftCatalog(null);
+      return;
+    }
+    setDraftCatalogBusy(true);
+    setDraftCatalogError(null);
+    setDraftCatalog(null);
+    try {
+      // Key stays in draft input only; host never returns it. Do not clear
+      // the draft on probe — user still needs it for create/save.
+      const catalog = await gateway.probeModelCatalog(url, key);
+      setDraftCatalog(catalog);
+      if (catalog.status === "unsupported") {
+        // Honest unsupported — do not invent a model id.
+        setDraftCatalogError(null);
+      }
+    } catch (cause) {
+      const message =
+        cause instanceof RuntimeSlotsGatewayError
+          ? cause.message
+          : mapRuntimeSlotErrorMessage("runtime_slot_model_catalog_unavailable");
+      setDraftCatalogError(message);
+      setDraftCatalog(null);
+      // Never auto-fill a model on failure.
+    } finally {
+      setDraftCatalogBusy(false);
+    }
   }
 
   function openCreate(): void {
@@ -1076,6 +1181,84 @@ export function RuntimeSlotsSection({
                 />
               </label>
 
+              <div
+                className="runtime-slots-form__draft-catalog"
+                data-testid="runtime-slots-draft-catalog"
+              >
+                <button
+                  data-testid="runtime-slots-draft-catalog-pull"
+                  disabled={
+                    busy
+                    || draftCatalogBusy
+                    || !baseUrl.trim()
+                    || !apiKeyDraft.trim()
+                  }
+                  onClick={() => void handleProbeDraftCatalog()}
+                  type="button"
+                >
+                  {draftCatalogBusy ? "拉取中…" : "拉取模型列表"}
+                </button>
+                <p className="runtime-slots__hint" role="note">
+                  由宿主请求端点的 /models；密钥不进入目录结果。
+                </p>
+                {draftCatalogBusy ? (
+                  <p
+                    className="runtime-slots__hint"
+                    data-testid="runtime-slots-draft-models-loading"
+                    role="status"
+                  >
+                    正在拉取模型目录…
+                  </p>
+                ) : null}
+                {draftCatalog?.status === "available"
+                  && draftCatalog.models.length > 0 ? (
+                  <label className="settings-field">
+                    <span className="settings-field__label">从目录选择</span>
+                    <select
+                      aria-label="草稿模型目录"
+                      className="settings-field__control"
+                      data-testid="runtime-slots-draft-models-select"
+                      disabled={busy}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value) setModelId(value);
+                      }}
+                      value={
+                        draftCatalog.models.includes(modelId) ? modelId : ""
+                      }
+                    >
+                      <option disabled value="">
+                        选择模型…
+                      </option>
+                      {draftCatalog.models.map((model) => (
+                        <option key={model} title={model} value={model}>
+                          {truncateModelIdForDisplay(model)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {draftCatalog?.status === "unsupported" ? (
+                  <p
+                    className="runtime-slots__hint"
+                    data-testid="runtime-slots-draft-models-unsupported"
+                    role="status"
+                  >
+                    {mapModelCatalogUnsupportedReason(draftCatalog.reasonCode)
+                      || MODEL_CATALOG_UNSUPPORTED_ENDPOINT}
+                  </p>
+                ) : null}
+                {draftCatalogError ? (
+                  <p
+                    className="runtime-slots__error"
+                    data-testid="runtime-slots-draft-models-error"
+                    role="alert"
+                  >
+                    {draftCatalogError}
+                  </p>
+                ) : null}
+              </div>
+
               <label className="settings-field">
                 <span className="settings-field__label">模型 id</span>
                 <input
@@ -1096,6 +1279,83 @@ export function RuntimeSlotsSection({
 
           {formMode === "create" && createAuthKind === "local_cli" ? (
             <>
+              <div
+                className="runtime-slots-form__detect"
+                data-testid="runtime-slots-detect"
+              >
+                <p className="runtime-slots__hint" role="note">
+                  {LOCAL_CLI_DETECT_HINT}
+                </p>
+                <button
+                  data-testid="runtime-slots-detect-scan"
+                  disabled={busy || detectBusy}
+                  onClick={() => void handleDetectLocalClis()}
+                  type="button"
+                >
+                  {detectBusy ? LOCAL_CLI_DETECT_BUSY : "扫描本机 CLI"}
+                </button>
+                {detectError ? (
+                  <p
+                    className="runtime-slots__hint"
+                    data-testid="runtime-slots-detect-error"
+                    role="status"
+                  >
+                    {detectError}
+                  </p>
+                ) : null}
+                {detectRows.length > 0 ? (
+                  <ul
+                    className="runtime-slots-detect-list"
+                    data-testid="runtime-slots-detect-list"
+                  >
+                    {detectRows.map((row) => {
+                      const authText = formatLocalCliAuthLabel(row);
+                      const selectable = row.found && Boolean(row.executablePath);
+                      return (
+                        <li
+                          data-testid={`runtime-slots-detect-row-${row.kind}`}
+                          key={row.kind}
+                        >
+                          <button
+                            aria-pressed={detectSelectedKind === row.kind}
+                            data-testid={`runtime-slots-detect-select-${row.kind}`}
+                            disabled={!selectable || busy}
+                            onClick={() => selectDetectedCli(row)}
+                            title={
+                              selectable
+                                ? `填入 ${row.executablePath}`
+                                : "未安装，请手填路径"
+                            }
+                            type="button"
+                          >
+                            <span data-testid={`runtime-slots-detect-kind-${row.kind}`}>
+                              {row.kind}
+                            </span>
+                            {row.found ? (
+                              <span data-testid={`runtime-slots-detect-path-${row.kind}`}>
+                                {row.executablePath}
+                              </span>
+                            ) : (
+                              <span>未安装</span>
+                            )}
+                            {row.version ? (
+                              <span data-testid={`runtime-slots-detect-version-${row.kind}`}>
+                                {row.version}
+                              </span>
+                            ) : null}
+                            <span
+                              data-auth-status={row.authStatus}
+                              data-testid={`runtime-slots-detect-auth-${row.kind}`}
+                            >
+                              {authText}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+              </div>
               <label className="settings-field">
                 <span className="settings-field__label">可执行文件路径</span>
                 <input

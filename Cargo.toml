@@ -13,6 +13,7 @@ members = [
   "crates/kernel-session",
   "crates/knowledge-indexer",
   "crates/process-executor",
+  "crates/role-dispatch",
   "crates/runtime-host",
   "crates/runtime-slots",
   "crates/storage-sqlite",

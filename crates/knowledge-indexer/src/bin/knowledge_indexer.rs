@@ -9,7 +9,7 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -34,6 +34,7 @@ fn main() -> ExitCode {
     match sub.as_deref() {
         None | Some("scan") => run_scan(&args),
         Some("audit") => run_audit(&args),
+        Some("doctor") => run_doctor(&args),
         Some("task") => run_task(&args),
         Some("verdict") => run_verdict(&args),
         Some("ledger") => run_ledger(&args),
@@ -142,6 +143,123 @@ fn run_audit(args: &[String]) -> ExitCode {
         ExitCode::from(3)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn run_doctor(args: &[String]) -> ExitCode {
+    let repo_root = match flag_value(args, "--repo") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        Some(_) => {
+            eprintln!("invalid --repo: expected a non-empty path");
+            return ExitCode::from(1);
+        }
+        None => match env::current_dir() {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("doctor failed: current directory unavailable");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let db_path = flag_value(args, "--db")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join(".superpowers/ledger/pillow.db"));
+    let project_name = flag_value(args, "--project")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "pillow".to_owned());
+    let handoff_label = match flag_value(args, "--doc") {
+        Some(value) if !value.is_empty() => value,
+        Some(_) => {
+            eprintln!("invalid --doc: expected a portable project-relative path");
+            return ExitCode::from(1);
+        }
+        None => match latest_controller_handoff(&repo_root) {
+            Ok(value) => value,
+            Err(code) => return code,
+        },
+    };
+    let (now, now_source) = match flag_value(args, "--now") {
+        Some(raw) => match parse_now(&raw) {
+            Ok(value) => (value, "--now"),
+            Err(code) => return code,
+        },
+        None => (Utc::now(), "system_clock_default"),
+    };
+    let stale_after_hours = flag_value(args, "--stale-after-hours")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "24".to_owned());
+    let now_rfc3339 = now.to_rfc3339();
+
+    println!(
+        "invocation: mode=`doctor` now=`{now_rfc3339}` now_source=`{now_source}` stale_after_hours={stale_after_hours}"
+    );
+
+    let resolved = vec![
+        args.first()
+            .cloned()
+            .unwrap_or_else(|| "knowledge-indexer".to_owned()),
+        "audit".to_owned(),
+        "--db".to_owned(),
+        db_path.to_string_lossy().into_owned(),
+        "--project".to_owned(),
+        project_name,
+        "--repo".to_owned(),
+        repo_root.to_string_lossy().into_owned(),
+        "--doc".to_owned(),
+        handoff_label,
+        "--now".to_owned(),
+        now_rfc3339,
+        "--stale-after-hours".to_owned(),
+        stale_after_hours,
+    ];
+    run_audit(&resolved)
+}
+
+fn latest_controller_handoff(repo_root: &Path) -> Result<String, ExitCode> {
+    let handoff_dir = repo_root.join("docs/handoff");
+    let entries = match fs::read_dir(&handoff_dir) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("doctor failed: could not read `docs/handoff`");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let is_file = entry
+            .file_type()
+            .map(|file_type| file_type.is_file())
+            .unwrap_or(false);
+        if !is_file {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.ends_with("-pillow-controller-handoff.md") {
+            candidates.push(format!("docs/handoff/{name}"));
+        }
+    }
+    candidates.sort();
+    match candidates.pop() {
+        Some(value) if validate_portable_path(&value).is_ok() => Ok(value),
+        _ => {
+            eprintln!(
+                "doctor failed: no portable `docs/handoff/*-pillow-controller-handoff.md` found"
+            );
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+fn parse_now(raw: &str) -> Result<DateTime<Utc>, ExitCode> {
+    match DateTime::parse_from_rfc3339(raw) {
+        Ok(value) => Ok(value.with_timezone(&Utc)),
+        Err(_) => {
+            eprintln!("invalid --now: expected RFC3339 with an explicit offset");
+            Err(ExitCode::from(1))
+        }
     }
 }
 
@@ -418,6 +536,16 @@ fn verdict_record(args: &[String]) -> ExitCode {
         Ok(v) => v,
         Err(code) => return code,
     };
+    let summary = match flag_value(args, "--commit") {
+        Some(commit) => match normalize_commit_id(&commit) {
+            Some(commit) => format!("{} commit={commit}", summary.trim_end()),
+            None => {
+                eprintln!("invalid --commit: expected 7..64 hexadecimal characters");
+                return ExitCode::from(1);
+            }
+        },
+        None => summary,
+    };
     let task_id = flag_value(args, "--task-id");
     let gate_result = flag_value(args, "--gate");
     let e2e_result = flag_value(args, "--e2e");
@@ -597,19 +725,29 @@ fn require_flag(args: &[String], name: &str) -> Result<String, ExitCode> {
     }
 }
 
+fn normalize_commit_id(value: &str) -> Option<String> {
+    if (7..=64).contains(&value.len()) && value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        Some(value.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 fn print_help() {
     eprintln!(
         "usage:\n\
          knowledge-indexer [scan] [--repo DIR] [--db PATH] [--report PATH] [--handoff PATH] [--project NAME]\n\
          knowledge-indexer audit --db PATH --project NAME --repo DIR --doc PORTABLE_PATH --now RFC3339 --stale-after-hours N\n\
+         knowledge-indexer doctor [--db PATH] [--project NAME] [--repo DIR] [--doc PORTABLE_PATH] [--now RFC3339] [--stale-after-hours N]\n\
          knowledge-indexer task dispatch --db PATH --project NAME --title TITLE --slot LABEL [--brief PATH] [--repo DIR]\n\
          knowledge-indexer task complete --db PATH --task-id ID [--status completed|blocked|abandoned] [--signal TEXT]\n\
-         knowledge-indexer verdict record --db PATH --project NAME --outcome accepted|rejected|partial --summary TEXT [--task-id ID] [--gate TEXT] [--e2e TEXT] [--residuals TEXT]\n\
+         knowledge-indexer verdict record --db PATH --project NAME --outcome accepted|rejected|partial --summary TEXT [--commit GIT_ID] [--task-id ID] [--gate TEXT] [--e2e TEXT] [--residuals TEXT]\n\
          knowledge-indexer ledger status --db PATH --project NAME\n\
          knowledge-indexer ledger stale --db PATH --project NAME --doc PATH\n\
          \n\
          All subcommands are non-interactive (no stdin). Slot labels only — never lease/session/host paths.\n\
          audit exit: 0=all PASS, 3=one or more FAIL, 1=tool error. Read-only; --now is required and never inferred.\n\
+         doctor: one-command audit with portable Pillow defaults; resolved now/source are always printed. Same 0/3/1 exit contract.\n\
          ledger stale exit: 0=fresh, 3=stale findings, 1=error. Never rewrites documents.\n\
          scan: never modifies docs/ except explicit --report/--handoff output paths."
     );

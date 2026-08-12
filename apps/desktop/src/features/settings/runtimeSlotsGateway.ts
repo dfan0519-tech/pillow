@@ -13,10 +13,17 @@ import {
   DEFAULT_CUSTOM_ROLE_NAME,
   type ExternalCliStatusView,
   type GrokSlotAuthMode,
+  LOCAL_CLI_AUTH_AUTHENTICATED_LABEL,
+  LOCAL_CLI_AUTH_NOT_AUTHENTICATED_LABEL,
+  LOCAL_CLI_AUTH_UNKNOWN_LABEL,
+  type LocalCliAuthStatus,
+  type LocalCliDetectionView,
+  type LocalCliKind,
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   MODEL_CATALOG_UNSUPPORTED_EXTERNAL_CLI,
   MODEL_SWITCH_RESTARTED_MESSAGE,
   MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
+  type ProbeModelCatalogView,
   type RuntimeSlotGovernance,
   type RuntimeSlotKind,
   type RuntimeSlotModelCatalogReasonCode,
@@ -116,6 +123,25 @@ export const RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS = [
   "sessionRestore",
 ] as const;
 
+/** Exact closed allowlist for `LocalCliDetectionDto` (host detect_local_clis). */
+export const LOCAL_CLI_DETECTION_DTO_KEYS = [
+  "kind",
+  "found",
+  "executablePath",
+  "version",
+  "authStatus",
+  "accountLabel",
+  "authReason",
+] as const;
+
+/** Exact closed allowlist for `ProbeModelCatalogDto` (host probe_model_catalog). */
+export const PROBE_MODEL_CATALOG_DTO_KEYS = [
+  "status",
+  "source",
+  "models",
+  "reasonCode",
+] as const;
+
 const KINDS: readonly RuntimeSlotKind[] = ["governed_grok", "external_cli"];
 const GOVERNANCE: readonly RuntimeSlotGovernance[] = ["full", "none"];
 const AUTH_MODES: readonly GrokSlotAuthMode[] = ["login", "api_key"];
@@ -136,6 +162,18 @@ const CATALOG_REASON_CODES: readonly RuntimeSlotModelCatalogReasonCode[] = [
 const SESSION_RESTORES: readonly RuntimeSlotModelSessionRestore[] = [
   "not_applicable",
   "unavailable",
+];
+const LOCAL_CLI_KINDS: readonly LocalCliKind[] = [
+  "grok",
+  "claude",
+  "codex",
+  "opencode",
+  "gemini",
+];
+const LOCAL_CLI_AUTH_STATUSES: readonly LocalCliAuthStatus[] = [
+  "authenticated",
+  "not_authenticated",
+  "unknown",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -571,6 +609,128 @@ export function mapModelCatalogUnsupportedReason(
   }
 }
 
+/**
+ * Format host auth three-state for UI.
+ *
+ * Critical: `unknown` must render as 未确定 (+ optional reason), never 未登录.
+ * Absence of evidence is not negative evidence.
+ */
+export function formatLocalCliAuthLabel(
+  view: Pick<LocalCliDetectionView, "authStatus" | "accountLabel" | "authReason">,
+): string {
+  if (view.authStatus === "authenticated") {
+    const label = view.accountLabel?.trim();
+    return label
+      ? `${LOCAL_CLI_AUTH_AUTHENTICATED_LABEL}（${label}）`
+      : LOCAL_CLI_AUTH_AUTHENTICATED_LABEL;
+  }
+  if (view.authStatus === "not_authenticated") {
+    return LOCAL_CLI_AUTH_NOT_AUTHENTICATED_LABEL;
+  }
+  // unknown — and any unexpected value fail-closed to 未确定, never 未登录.
+  const reason = view.authReason?.trim();
+  return reason
+    ? `${LOCAL_CLI_AUTH_UNKNOWN_LABEL}（${reason}）`
+    : LOCAL_CLI_AUTH_UNKNOWN_LABEL;
+}
+
+/** Closed parse for one local CLI detection row. */
+export function parseLocalCliDetectionView(
+  value: unknown,
+): LocalCliDetectionView {
+  assertNoSecretPayloadFields(value);
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, LOCAL_CLI_DETECTION_DTO_KEYS)
+  ) {
+    throw invalidResponse();
+  }
+  if (
+    typeof value.kind !== "string"
+    || !(LOCAL_CLI_KINDS as string[]).includes(value.kind)
+    || typeof value.found !== "boolean"
+    || !isOptionalBoundedString(value.executablePath, MAX_PATH_CHARS)
+    || !isOptionalBoundedString(value.version, 128)
+    || typeof value.authStatus !== "string"
+    || !(LOCAL_CLI_AUTH_STATUSES as string[]).includes(value.authStatus)
+    || !isOptionalBoundedString(value.accountLabel, 256)
+    || !isOptionalBoundedString(value.authReason, 256)
+  ) {
+    throw invalidResponse();
+  }
+  // Host invariants mirrored fail-closed.
+  if (value.authStatus === "authenticated") {
+    // accountLabel may be a generic "authenticated" string; reason must be null.
+    if (value.authReason != null) {
+      throw invalidResponse();
+    }
+  } else if (value.accountLabel != null) {
+    throw invalidResponse();
+  }
+  if (value.authStatus === "not_authenticated" && value.authReason != null) {
+    throw invalidResponse();
+  }
+
+  return {
+    kind: value.kind as LocalCliKind,
+    found: value.found,
+    executablePath: value.executablePath ?? null,
+    version: value.version ?? null,
+    authStatus: value.authStatus as LocalCliAuthStatus,
+    accountLabel: value.accountLabel ?? null,
+    authReason: value.authReason ?? null,
+  };
+}
+
+/** Closed parse for draft model catalog probe result. */
+export function parseProbeModelCatalogView(
+  value: unknown,
+): ProbeModelCatalogView {
+  assertNoSecretPayloadFields(value);
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, PROBE_MODEL_CATALOG_DTO_KEYS)
+  ) {
+    throw invalidResponse();
+  }
+  if (
+    !isCatalogStatus(value.status)
+    || !isCatalogSource(value.source)
+    || !(
+      value.reasonCode === null
+      || value.reasonCode === undefined
+      || isCatalogReasonCode(value.reasonCode)
+    )
+    || !Array.isArray(value.models)
+    || value.models.length > MAX_CATALOG_MODELS
+    || !value.models.every(
+      (item) =>
+        typeof item === "string"
+        && item.length > 0
+        && item.length <= MAX_CATALOG_MODEL_CHARS,
+    )
+  ) {
+    throw invalidResponse();
+  }
+  if (value.status === "available" && value.reasonCode != null) {
+    throw invalidResponse();
+  }
+  if (value.status === "unsupported") {
+    if (value.reasonCode == null) {
+      throw invalidResponse();
+    }
+    if (value.models.length > 0) {
+      throw invalidResponse();
+    }
+  }
+  return {
+    status: value.status,
+    source: value.source,
+    models: value.models.slice(),
+    reasonCode: value.reasonCode ?? null,
+  };
+}
+
 /** Honest switch outcome copy — never invent "already applied to session". */
 export function mapModelSwitchResultMessage(
   result: RuntimeSlotModelSwitchView,
@@ -945,6 +1105,31 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
       parseRuntimeSlotModelSwitchView,
     );
   }
+
+  detectLocalClis(): Promise<LocalCliDetectionView[]> {
+    return invokeSlotCommand(
+      "detect_local_clis",
+      {},
+      (payload) => {
+        if (!Array.isArray(payload) || payload.length > 32) {
+          throw invalidResponse();
+        }
+        return payload.map(parseLocalCliDetectionView);
+      },
+    );
+  }
+
+  probeModelCatalog(
+    baseUrl: string,
+    apiKey: string,
+  ): Promise<ProbeModelCatalogView> {
+    // apiKey is input-only; parseProbeModelCatalogView rejects secret keys.
+    return invokeSlotCommand(
+      "probe_model_catalog",
+      { baseUrl, apiKey },
+      parseProbeModelCatalogView,
+    );
+  }
 }
 
 /** In-memory mock for unit tests and non-desktop shells. */
@@ -981,6 +1166,21 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
   private catalogFailCode = "runtime_slot_model_catalog_unavailable";
   /** When true, setRuntimeSlotModel reports runtimeRestarted. */
   private modelSwitchRestarted = false;
+  /** Draft probe modes (probeModelCatalog). */
+  private draftProbeMode:
+    | "available"
+    | "unsupported_endpoint"
+    | "fail" = "available";
+  private draftProbeModels: string[] = ["draft-model-a", "draft-model-b"];
+  private draftProbeFailCode = "runtime_slot_model_catalog_unavailable";
+  /** detectLocalClis mock rows (empty until seedDetectResults). */
+  private detectResults: LocalCliDetectionView[] = [];
+  private detectFailCode: string | null = null;
+  /** Last probeModelCatalog apiKey lengths only — never store the key text. */
+  readonly lastProbeModelCatalogCalls: Array<{
+    baseUrl: string;
+    apiKeyLength: number;
+  }> = [];
 
   constructor(initial: RuntimeSlotView[] = []) {
     this.slots = initial.map((slot) => ({ ...slot }));
@@ -1023,6 +1223,28 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
 
   setModelSwitchRestarted(restarted: boolean): void {
     this.modelSwitchRestarted = restarted;
+  }
+
+  seedDetectResults(rows: LocalCliDetectionView[]): void {
+    this.detectResults = rows.map((row) => ({ ...row }));
+    this.detectFailCode = null;
+  }
+
+  setDetectFail(code: string): void {
+    this.detectFailCode = code;
+  }
+
+  setDraftProbeMode(
+    mode: "available" | "unsupported_endpoint" | "fail",
+    options?: { models?: string[]; failCode?: string },
+  ): void {
+    this.draftProbeMode = mode;
+    if (options?.models) {
+      this.draftProbeModels = [...options.models];
+    }
+    if (options?.failCode) {
+      this.draftProbeFailCode = options.failCode;
+    }
   }
 
   getSlotsSnapshot(): RuntimeSlotView[] {
@@ -1475,6 +1697,53 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       modelId: trimmed,
       runtimeRestarted: restarted,
       sessionRestore: restarted ? "unavailable" : "not_applicable",
+    };
+  }
+
+  async detectLocalClis(): Promise<LocalCliDetectionView[]> {
+    if (this.detectFailCode) {
+      throw new RuntimeSlotsGatewayError(
+        this.detectFailCode,
+        mapRuntimeSlotErrorMessage(this.detectFailCode),
+      );
+    }
+    return this.detectResults.map((row) => ({ ...row }));
+  }
+
+  async probeModelCatalog(
+    baseUrl: string,
+    apiKey: string,
+  ): Promise<ProbeModelCatalogView> {
+    // Record length only — never retain key material in mock state.
+    this.lastProbeModelCatalogCalls.push({
+      baseUrl,
+      apiKeyLength: apiKey.length,
+    });
+    if (!baseUrl.trim() || !apiKey.trim()) {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_input_invalid",
+        mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+      );
+    }
+    if (this.draftProbeMode === "fail") {
+      throw new RuntimeSlotsGatewayError(
+        this.draftProbeFailCode,
+        mapRuntimeSlotErrorMessage(this.draftProbeFailCode),
+      );
+    }
+    if (this.draftProbeMode === "unsupported_endpoint") {
+      return {
+        status: "unsupported",
+        source: "openai_models",
+        models: [],
+        reasonCode: "endpoint_not_supported",
+      };
+    }
+    return {
+      status: "available",
+      source: "openai_models",
+      models: [...this.draftProbeModels],
+      reasonCode: null,
     };
   }
 }

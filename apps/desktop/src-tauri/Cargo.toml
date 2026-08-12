@@ -27,6 +27,7 @@ keeper-project = { path = "../../../crates/kernel-project" }
 keeper-resource = { path = "../../../crates/kernel-resource" }
 keeper-runtime-host = { path = "../../../crates/runtime-host" }
 pillow-runtime-slots = { path = "../../../crates/runtime-slots" }
+pillow-cli-detect = { path = "../../../crates/cli-detect" }
 keeper-session = { path = "../../../crates/kernel-session" }
 keeper-storage-sqlite = { path = "../../../crates/storage-sqlite" }
 keeper-tool-executor = { path = "../../../crates/tool-executor" }

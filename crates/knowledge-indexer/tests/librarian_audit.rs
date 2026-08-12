@@ -36,7 +36,7 @@ fn completed_task() -> KnowledgeTask {
         title: "Delivered task".into(),
         brief_path: Some("docs/execution/delivered-task.md".into()),
         worker_label: "codex2".into(),
-        dispatched_at: utc("2026-08-11T12:00:00Z"),
+        dispatched_at: utc("2026-08-12T00:00:00Z"),
         status: TaskStatus::Completed,
         completion_signal: Some("DELIVERED".into()),
     }
@@ -194,6 +194,93 @@ fn completed_without_verdict_has_explicit_pass_and_fail_states() {
     );
     assert!(
         format_librarian_audit_report(&pending).contains("`completed_without_verdict` | **FAIL**")
+    );
+}
+
+#[test]
+fn historical_completed_without_verdict_is_visibly_exempt_before_fixed_cutoff_only() {
+    let mut historical_task = completed_task();
+    historical_task.task_id = "task-historical-debt".into();
+    historical_task.dispatched_at = utc("2026-08-11T23:59:59Z");
+    let historical_snapshot = keeper_knowledge_indexer::LedgerSnapshot {
+        project_id: "project-1".into(),
+        project_name: "pillow".into(),
+        tasks: vec![historical_task.clone()],
+        verdicts: Vec::new(),
+        completed_without_verdict: vec![historical_task],
+    };
+    let git_commits: Vec<String> = Vec::new();
+    let historical = run_librarian_audit(LibrarianAuditInput {
+        snapshot: &historical_snapshot,
+        handoff_markdown: "In-flight workers: 0\n",
+        handoff_label: "docs/handoff/controller.md",
+        now: utc("2026-08-12T12:00:00Z"),
+        stale_after: TimeDelta::hours(24),
+        git_commit_ids: &git_commits,
+    })
+    .unwrap();
+    let completed = historical
+        .check(LibrarianCheckKind::CompletedWithoutVerdict)
+        .unwrap();
+    assert_eq!(completed.outcome, LibrarianCheckOutcome::Pass);
+    assert!(completed.findings.is_empty());
+    assert!(
+        completed.summary.contains(
+            "completed_without_verdict=0 total_without_verdict=1 historical_exemptions=1"
+        )
+    );
+    assert!(
+        completed
+            .summary
+            .contains("exemption_basis=dispatched_at<2026-08-12T00:00:00Z")
+    );
+    let document = historical
+        .check(LibrarianCheckKind::DocumentLedgerConsistency)
+        .unwrap();
+    assert_eq!(document.outcome, LibrarianCheckOutcome::Pass);
+    assert!(document.findings.is_empty());
+    assert!(
+        document
+            .summary
+            .contains("historical_completed_exemptions=1")
+    );
+    assert!(
+        format_librarian_audit_report(&historical)
+            .contains("historical_exemptions=1 exemption_basis=dispatched_at<2026-08-12")
+    );
+
+    let current_task = completed_task();
+    let current_snapshot = keeper_knowledge_indexer::LedgerSnapshot {
+        project_id: "project-1".into(),
+        project_name: "pillow".into(),
+        tasks: vec![current_task.clone()],
+        verdicts: Vec::new(),
+        completed_without_verdict: vec![current_task],
+    };
+    let current = run_librarian_audit(LibrarianAuditInput {
+        snapshot: &current_snapshot,
+        handoff_markdown: "In-flight workers: 0\n",
+        handoff_label: "docs/handoff/controller.md",
+        now: utc("2026-08-12T12:00:00Z"),
+        stale_after: TimeDelta::hours(24),
+        git_commit_ids: &git_commits,
+    })
+    .unwrap();
+    assert_eq!(
+        current
+            .check(LibrarianCheckKind::CompletedWithoutVerdict)
+            .unwrap()
+            .outcome,
+        LibrarianCheckOutcome::Fail,
+        "the fixed cutoff is exclusive"
+    );
+    assert_eq!(
+        current
+            .check(LibrarianCheckKind::DocumentLedgerConsistency)
+            .unwrap()
+            .outcome,
+        LibrarianCheckOutcome::Fail,
+        "current missing verdicts must remain visible in document consistency"
     );
 }
 
@@ -420,6 +507,240 @@ fn accepted_verdict_commit_has_explicit_pass_and_fail_states() {
         "near-miss grammar must not count as a recorded link: {}",
         embedded_check.summary
     );
+}
+
+#[test]
+fn verdict_record_commit_flag_is_strict_and_increases_verified_count() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("verdict-commit-")
+        .tempdir_in(repo_root.join("target"))
+        .unwrap();
+    let db_path = temp.path().join("ledger.db");
+    let handoff_path = temp.path().join("handoff.md");
+    let handoff_label = handoff_path
+        .strip_prefix(&repo_root)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    fs::write(&handoff_path, "In-flight workers: 0\n").unwrap();
+
+    let head = Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "rev-parse", "HEAD"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+    let bin = env!("CARGO_BIN_EXE_knowledge-indexer");
+
+    let recorded = Command::new(bin)
+        .args([
+            "verdict",
+            "record",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--project",
+            "pillow",
+            "--repo",
+            repo_root.to_str().unwrap(),
+            "--outcome",
+            "accepted",
+            "--summary",
+            "Accepted through the commit flag",
+            "--commit",
+            &head,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        recorded.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let opts = LedgerDbOptions {
+        db_path: db_path.clone(),
+        project_name: "pillow".into(),
+        project_root: Some(repo_root.clone()),
+    };
+    let snapshot = load_snapshot(&opts).unwrap();
+    assert_eq!(snapshot.verdicts.len(), 1);
+    assert_eq!(
+        snapshot.verdicts[0].summary,
+        format!("Accepted through the commit flag commit={head}")
+    );
+    let commits = vec![head];
+    let report = run_librarian_audit(LibrarianAuditInput {
+        snapshot: &snapshot,
+        handoff_markdown: "In-flight workers: 0\n",
+        handoff_label: &handoff_label,
+        now: utc("2026-08-12T00:00:00Z"),
+        stale_after: TimeDelta::hours(24),
+        git_commit_ids: &commits,
+    })
+    .unwrap();
+    let commit_check = report
+        .check(LibrarianCheckKind::AcceptedVerdictCommit)
+        .unwrap();
+    assert_eq!(commit_check.outcome, LibrarianCheckOutcome::Pass);
+    assert!(
+        commit_check
+            .summary
+            .contains("accepted_verdicts=1 verified=1 unrecorded=0 commit_findings=0")
+    );
+
+    for malformed in ["abcdef".to_owned(), "123456g".to_owned(), "a".repeat(65)] {
+        let rejected = Command::new(bin)
+            .args([
+                "verdict",
+                "record",
+                "--db",
+                db_path.to_str().unwrap(),
+                "--project",
+                "pillow",
+                "--outcome",
+                "accepted",
+                "--summary",
+                "Must not be recorded",
+                "--commit",
+                &malformed,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            rejected.status.code(),
+            Some(1),
+            "malformed={malformed} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("invalid --commit: expected 7..64 hexadecimal characters")
+        );
+    }
+    assert_eq!(load_snapshot(&opts).unwrap().verdicts.len(), 1);
+}
+
+#[test]
+fn doctor_runs_with_defaults_records_effective_now_and_preserves_exit_codes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("doctor-defaults-")
+        .tempdir_in(repo_root.join("target"))
+        .unwrap();
+    let ledger_dir = temp.path().join(".superpowers/ledger");
+    let handoff_dir = temp.path().join("docs/handoff");
+    fs::create_dir_all(&ledger_dir).unwrap();
+    fs::create_dir_all(&handoff_dir).unwrap();
+    fs::write(
+        handoff_dir.join("2026-08-10-pillow-controller-handoff.md"),
+        "In-flight workers: 9\n",
+    )
+    .unwrap();
+    fs::write(
+        handoff_dir.join("2026-08-12-pillow-controller-handoff.md"),
+        "In-flight workers: 0\n",
+    )
+    .unwrap();
+
+    let opts = LedgerDbOptions {
+        db_path: ledger_dir.join("pillow.db"),
+        project_name: "pillow".into(),
+        project_root: Some(temp.path().to_path_buf()),
+    };
+    record_verdict(
+        &opts,
+        VerdictInput {
+            task_id: None,
+            outcome: VerdictOutcome::Rejected,
+            gate_result: None,
+            e2e_result: None,
+            summary: "Rejected seed verdict".into(),
+            residuals: None,
+        },
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_knowledge-indexer");
+    let defaults = Command::new(bin)
+        .arg("doctor")
+        .current_dir(temp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        defaults.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&defaults.stdout),
+        String::from_utf8_lossy(&defaults.stderr)
+    );
+    let defaults_stdout = String::from_utf8(defaults.stdout).unwrap();
+    let invocation = defaults_stdout
+        .lines()
+        .find(|line| line.starts_with("invocation:"))
+        .expect("doctor must print its resolved invocation");
+    assert!(invocation.contains("mode=`doctor`"));
+    assert!(invocation.contains("now_source=`system_clock_default`"));
+    assert!(invocation.contains("stale_after_hours=24"));
+    let effective_now = invocation
+        .split_ascii_whitespace()
+        .find_map(|token| token.strip_prefix("now=`"))
+        .and_then(|token| token.strip_suffix('`'))
+        .expect("doctor must print the effective now value");
+    DateTime::parse_from_rfc3339(effective_now).expect("effective now must be RFC3339");
+    assert!(
+        defaults_stdout.contains("handoff=`docs/handoff/2026-08-12-pillow-controller-handoff.md`")
+    );
+
+    let injected = Command::new(bin)
+        .args(["doctor", "--now", "2026-08-12T00:00:00Z"])
+        .current_dir(temp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(injected.status.code(), Some(0));
+    let injected_stdout = String::from_utf8(injected.stdout).unwrap();
+    assert!(
+        injected_stdout.contains(
+            "invocation: mode=`doctor` now=`2026-08-12T00:00:00+00:00` now_source=`--now`"
+        )
+    );
+
+    let finding = Command::new(bin)
+        .args([
+            "doctor",
+            "--doc",
+            "docs/handoff/2026-08-10-pillow-controller-handoff.md",
+            "--now",
+            "2026-08-12T00:00:00Z",
+        ])
+        .current_dir(temp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(finding.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&finding.stdout).contains("result: **FAIL**"));
+
+    let tool_error = Command::new(bin)
+        .args(["doctor", "--now", "not-rfc3339"])
+        .current_dir(temp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(tool_error.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&tool_error.stderr).contains("invalid --now"));
 }
 
 #[test]

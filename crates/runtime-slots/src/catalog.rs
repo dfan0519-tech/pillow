@@ -73,7 +73,12 @@ struct OpenAiModel {
     id: String,
 }
 
-pub(crate) fn fetch_openai_model_catalog(
+/// Fetch an OpenAI-compatible `/models` catalog using a one-shot API key.
+///
+/// Host draft probe (`probe_model_catalog`) and persisted-slot catalog share this
+/// path so the renderer never holds Bearer material or opens third-party sockets.
+/// The key is never returned on the catalog value.
+pub fn fetch_openai_model_catalog(
     base_url: &str,
     api_key: &SecretBytes,
 ) -> Result<ModelCatalog, RuntimeSlotError> {
