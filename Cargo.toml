@@ -4,6 +4,7 @@ members = [
   "apps/desktop/src-tauri",
   "crates/adapter-grok-acp",
   "crates/agent-protocol",
+  "crates/cli-detect",
   "crates/git-executor",
   "crates/governance-port",
   "crates/kernel-policy",

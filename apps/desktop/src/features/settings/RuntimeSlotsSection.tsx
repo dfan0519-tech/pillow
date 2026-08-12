@@ -6,6 +6,12 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  DEFAULT_PROVIDER_PRESET_ID,
+  PROVIDER_PRESETS,
+  getProviderPreset,
+  type ProviderPresetId,
+} from "./providerPresets";
 import { RuntimeSlotModelPicker } from "./RuntimeSlotModelPicker";
 import {
   MockRuntimeSlotsGateway,
@@ -13,6 +19,7 @@ import {
   classifyExternalCliStatus,
   mapGrokProbeFailureMessage,
   mapRuntimeSlotErrorMessage,
+  truncateModelIdForDisplay,
 } from "./runtimeSlotsGateway";
 import {
   CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT,
@@ -128,11 +135,25 @@ export function RuntimeSlotsSection({
   const [executablePath, setExecutablePath] = useState("");
   const [launchArgsText, setLaunchArgsText] = useState("");
   const [statusArgsText, setStatusArgsText] = useState("");
+  /**
+   * API-key create: selected provider preset. Changing the preset fills
+   * `baseUrl` (and optional suggested model). User edits to baseUrl stick
+   * until the user picks a *different* preset — never re-applied on render.
+   */
+  const [providerPresetId, setProviderPresetId] = useState<ProviderPresetId>(
+    DEFAULT_PROVIDER_PRESET_ID,
+  );
+  /** Draft OpenAI /models pull while form is open (create or edit). */
 
   /** Inline role editor for an existing list row. */
   const [roleEditSlotId, setRoleEditSlotId] = useState<string | null>(null);
   const [roleEditRole, setRoleEditRole] = useState<RuntimeSlotRole>("custom");
   const [roleEditCustomName, setRoleEditCustomName] = useState("");
+
+  const selectedProvider = useMemo(
+    () => getProviderPreset(providerPresetId),
+    [providerPresetId],
+  );
 
   const hasController = useMemo(
     () => slots.some((slot) => slot.role === "controller"),
@@ -182,6 +203,29 @@ export function RuntimeSlotsSection({
     setCreateAuthKind("api_key");
     setCreateRole("controller");
     setRoleCustomName("");
+    setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
+  }
+
+  /**
+   * Apply a provider preset: sets baseUrl from catalog and optional suggested
+   * model. Only runs on explicit user selection (not on re-render).
+   * Selecting the same id again re-applies defaults (intentional "reset to
+   * preset"); switching away after a manual baseUrl edit is the only way a
+   * different preset overwrites — user edits are never auto-clobbered.
+   */
+  function selectProviderPreset(nextId: ProviderPresetId): void {
+    const preset = getProviderPreset(nextId);
+    if (!preset) return;
+    setProviderPresetId(nextId);
+    // Preset fills baseUrl only when this selection changes the id OR user
+    // explicitly re-picks. Callers pass nextId from the select onChange, which
+    // fires when the value changes — so user-edited baseUrl is safe until
+    // they choose another preset.
+    setBaseUrl(preset.baseUrl);
+    if (preset.suggestedModelId) {
+      setModelId(preset.suggestedModelId);
+    }
+    // Stale catalog from a previous endpoint must not look like a success.
   }
 
   function openCreate(): void {
@@ -209,6 +253,8 @@ export function RuntimeSlotsSection({
     setModelId(slot.modelId ?? "");
     // Leave secret field blank = keep stored value.
     setApiKeyDraft("");
+    // Edit keeps the stored baseUrl; do not re-apply a preset over it.
+    setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
     setRoleEditSlotId(null);
     setNotice(null);
     setError(null);
@@ -922,40 +968,87 @@ export function RuntimeSlotsSection({
           {(formMode === "edit"
             || (formMode === "create" && createAuthKind === "api_key")) ? (
             <>
+              {formMode === "create" ? (
+                <div className="settings-field" data-testid="runtime-slots-provider-field">
+                  <label className="settings-field" htmlFor="runtime-slots-provider">
+                    <span className="settings-field__label">
+                      供应商预设
+                      <span className="runtime-slots-badge">
+                        只预填端点；不改变治理
+                      </span>
+                    </span>
+                    <select
+                      aria-label="供应商预设"
+                      className="settings-field__control"
+                      data-testid="runtime-slots-provider"
+                      disabled={busy}
+                      id="runtime-slots-provider"
+                      onChange={(event) => {
+                        selectProviderPreset(
+                          event.target.value as ProviderPresetId,
+                        );
+                      }}
+                      value={providerPresetId}
+                    >
+                      {PROVIDER_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedProvider ? (
+                    <p
+                      className="runtime-slots__hint"
+                      data-testid="runtime-slots-provider-notes"
+                      role="note"
+                    >
+                      {selectedProvider.notes}
+                      {selectedProvider.docsUrl ? (
+                        <>
+                          {" "}
+                          <a
+                            data-testid="runtime-slots-provider-docs"
+                            href={selectedProvider.docsUrl}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            获取 API key / 文档
+                          </a>
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
               <label className="settings-field">
-                <span className="settings-field__label">端点 base_url</span>
+                <span className="settings-field__label">
+                  端点 base_url
+                  {formMode === "create" ? (
+                    <span className="runtime-slots-badge">
+                      可选预设预填，仍可手改
+                    </span>
+                  ) : null}
+                </span>
                 <input
                   aria-label="端点 base_url"
                   autoComplete="off"
                   className="settings-field__control"
                   data-testid="runtime-slots-base-url"
                   disabled={busy}
-                  onChange={(event) => setBaseUrl(event.target.value)}
+                  onChange={(event) => {
+                    // User edit wins; preset is not re-applied until they
+                    // pick a different provider in the select above.
+                    setBaseUrl(event.target.value);
+                  }}
                   placeholder="https://…"
                   spellCheck={false}
                   type="text"
                   value={baseUrl}
                 />
               </label>
-              <label className="settings-field">
-                <span className="settings-field__label">
-                  模型 id
-                  <span className="runtime-slots-badge">
-                    创建/编辑表单手输；已有槽位可在列表中快速切换
-                  </span>
-                </span>
-                <input
-                  aria-label="模型 id"
-                  autoComplete="off"
-                  className="settings-field__control"
-                  data-testid="runtime-slots-model-id"
-                  disabled={busy}
-                  onChange={(event) => setModelId(event.target.value)}
-                  spellCheck={false}
-                  type="text"
-                  value={modelId}
-                />
-              </label>
+
               <label className="settings-field">
                 <span className="settings-field__label">
                   API key
@@ -980,6 +1073,22 @@ export function RuntimeSlotsSection({
                   spellCheck={false}
                   type="password"
                   value={apiKeyDraft}
+                />
+              </label>
+
+              <label className="settings-field">
+                <span className="settings-field__label">模型 id</span>
+                <input
+                  aria-label="模型 id"
+                  autoComplete="off"
+                  className="settings-field__control"
+                  data-testid="runtime-slots-model-id"
+                  disabled={busy}
+                  onChange={(event) => setModelId(event.target.value)}
+                  placeholder="例如 deepseek-chat"
+                  spellCheck={false}
+                  type="text"
+                  value={modelId}
                 />
               </label>
             </>

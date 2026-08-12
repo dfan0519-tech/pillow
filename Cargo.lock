@@ -2678,6 +2678,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pillow-cli-detect"
+version = "0.1.0"
+dependencies = [
+ "keeper-process-executor",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "pillow-desktop"
 version = "0.1.0"
 dependencies = [

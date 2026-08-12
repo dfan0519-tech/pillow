@@ -1,0 +1,13 @@
+[package]
+name = "pillow-cli-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure discovery and read-only auth-status probing for local agent CLIs"
+
+[dependencies]
+keeper-process-executor = { path = "../process-executor" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -12,11 +12,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use keeper_knowledge_indexer::{
-    CompleteInput, DispatchInput, LedgerDbOptions, ScanOptions, VerdictInput, check_stale,
-    dispatch_task, format_ledger_status, format_stale_report, format_task_recorded,
-    format_verdict_recorded, load_snapshot, record_verdict, scan_and_register, set_task_status,
+    CompleteInput, DispatchInput, LedgerDbOptions, LibrarianAuditInput, ScanOptions, VerdictInput,
+    check_stale, dispatch_task, format_ledger_status, format_librarian_audit_report,
+    format_stale_report, format_task_recorded, format_verdict_recorded, load_git_commit_ids,
+    load_snapshot, record_verdict, run_librarian_audit, scan_and_register, set_task_status,
 };
+use keeper_project::validate_portable_path;
 use keeper_storage_sqlite::{RegisteredBy, TaskStatus, VerdictOutcome};
 
 fn main() -> ExitCode {
@@ -30,6 +33,7 @@ fn main() -> ExitCode {
     let sub = first_subcommand(&args);
     match sub.as_deref() {
         None | Some("scan") => run_scan(&args),
+        Some("audit") => run_audit(&args),
         Some("task") => run_task(&args),
         Some("verdict") => run_verdict(&args),
         Some("ledger") => run_ledger(&args),
@@ -38,6 +42,106 @@ fn main() -> ExitCode {
             eprintln!("try: knowledge-indexer --help");
             ExitCode::from(1)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// audit (deterministic librarian checks; report-only)
+// ---------------------------------------------------------------------------
+
+fn run_audit(args: &[String]) -> ExitCode {
+    let opts = match ledger_opts(args, false) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    if !opts.db_path.is_file() {
+        eprintln!("audit failed: ledger database does not exist");
+        return ExitCode::from(1);
+    }
+
+    let repo_root = match require_flag(args, "--repo") {
+        Ok(value) => PathBuf::from(value),
+        Err(code) => return code,
+    };
+    let handoff_label = match require_flag(args, "--doc") {
+        Ok(value) if validate_portable_path(&value).is_ok() => value,
+        Ok(_) => {
+            eprintln!("invalid --doc: expected a portable project-relative path");
+            return ExitCode::from(1);
+        }
+        Err(code) => return code,
+    };
+    let now_raw = match require_flag(args, "--now") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let now = match DateTime::parse_from_rfc3339(&now_raw) {
+        Ok(value) => value.with_timezone(&Utc),
+        Err(_) => {
+            eprintln!("invalid --now: expected RFC3339 with an explicit offset");
+            return ExitCode::from(1);
+        }
+    };
+    let threshold_raw = match require_flag(args, "--stale-after-hours") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let threshold_hours = match threshold_raw.parse::<i64>() {
+        Ok(value) if value >= 0 => value,
+        _ => {
+            eprintln!("invalid --stale-after-hours: expected a non-negative integer");
+            return ExitCode::from(1);
+        }
+    };
+    let stale_after = match TimeDelta::try_hours(threshold_hours) {
+        Some(value) => value,
+        None => {
+            eprintln!("invalid --stale-after-hours: value is too large");
+            return ExitCode::from(1);
+        }
+    };
+
+    let handoff_markdown = match fs::read_to_string(repo_root.join(&handoff_label)) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("audit failed: could not read handoff `{handoff_label}`");
+            return ExitCode::from(1);
+        }
+    };
+    let snapshot = match load_snapshot(&opts) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("audit failed: ledger snapshot unavailable");
+            return ExitCode::from(1);
+        }
+    };
+    let git_commit_ids = match load_git_commit_ids(&repo_root) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("audit failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let report = match run_librarian_audit(LibrarianAuditInput {
+        snapshot: &snapshot,
+        handoff_markdown: &handoff_markdown,
+        handoff_label: &handoff_label,
+        now,
+        stale_after,
+        git_commit_ids: &git_commit_ids,
+    }) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("audit failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    print!("{}", format_librarian_audit_report(&report));
+    if report.has_failures() {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -497,6 +601,7 @@ fn print_help() {
     eprintln!(
         "usage:\n\
          knowledge-indexer [scan] [--repo DIR] [--db PATH] [--report PATH] [--handoff PATH] [--project NAME]\n\
+         knowledge-indexer audit --db PATH --project NAME --repo DIR --doc PORTABLE_PATH --now RFC3339 --stale-after-hours N\n\
          knowledge-indexer task dispatch --db PATH --project NAME --title TITLE --slot LABEL [--brief PATH] [--repo DIR]\n\
          knowledge-indexer task complete --db PATH --task-id ID [--status completed|blocked|abandoned] [--signal TEXT]\n\
          knowledge-indexer verdict record --db PATH --project NAME --outcome accepted|rejected|partial --summary TEXT [--task-id ID] [--gate TEXT] [--e2e TEXT] [--residuals TEXT]\n\
@@ -504,6 +609,7 @@ fn print_help() {
          knowledge-indexer ledger stale --db PATH --project NAME --doc PATH\n\
          \n\
          All subcommands are non-interactive (no stdin). Slot labels only — never lease/session/host paths.\n\
+         audit exit: 0=all PASS, 3=one or more FAIL, 1=tool error. Read-only; --now is required and never inferred.\n\
          ledger stale exit: 0=fresh, 3=stale findings, 1=error. Never rewrites documents.\n\
          scan: never modifies docs/ except explicit --report/--handoff output paths."
     );

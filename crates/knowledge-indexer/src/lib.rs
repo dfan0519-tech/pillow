@@ -26,6 +26,7 @@ pub mod audit;
 pub mod classify;
 pub mod digest;
 pub mod ledger;
+pub mod librarian_audit;
 pub mod render;
 pub mod scan;
 pub mod stale;
@@ -43,6 +44,11 @@ pub use ledger::{
     dispatch_task, ensure_project_id, format_ledger_status, format_task_recorded,
     format_verdict_recorded, load_snapshot, open_knowledge, record_verdict, resolve_project_id,
     set_task_status,
+};
+pub use librarian_audit::{
+    GitLogError, LibrarianAuditError, LibrarianAuditInput, LibrarianAuditReport, LibrarianCheck,
+    LibrarianCheckKind, LibrarianCheckOutcome, format_librarian_audit_report, load_git_commit_ids,
+    run_librarian_audit,
 };
 pub use render::{RenderInput, render_handoff_view, render_status_view};
 pub use scan::{ScanOptions, ScanResult, ScanSummary, scan_and_register, validate_path_ssot};
