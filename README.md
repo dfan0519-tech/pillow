@@ -31,17 +31,22 @@ Details: `docs/verification/worker-gate-entry.md`, root `AGENTS.md`.
 ## Current status (Stage 1)
 
 Stage 1 focuses on a governed local IDE: conversation kernel, real provider
-adapters behind a strict protocol boundary, project-scoped read tools, a
-read-only workbench, governed write/diff/approval, bounded process execution,
-and read-only Git inspection.
+adapters behind a strict protocol boundary, project-scoped tools, a workbench,
+governed write/diff/approval, bounded process and interactive shell execution,
+Git inspection plus structured mutation backends, and project-scoped runtime
+slots (`auth` + `role`; governance and execution path derived from auth).
 
 High-level acceptance evidence lives under `docs/verification/`. Design
 authority and ADRs live under `docs/superpowers/specs/` and
 `docs/decisions/`. A short map of the docs tree is in `docs/README.md`.
+Latest controller handoff: `docs/handoff/2026-08-11-pillow-controller-handoff.md`.
 
-**C4 is checkpointed** through D3B4 (governed process + read-only Git Changes).
-Interactive shell and Git mutation have not been started. See
-`docs/verification/2026-08-07-wave-c4-checkpoint.md`.
+**C4 was checkpointed** (2026-08-07) through D3B4 (governed process + read-only
+Git Changes): `docs/verification/2026-08-07-wave-c4-checkpoint.md`. After that
+checkpoint the real-agent tool boundary was rebuilt (2026-08-11), governed
+shell and Git mutation backends landed, and runtime slots / OAuth / role
+dispatch continued. Some older roadmap rows still lag the 2026-08-12 slot
+model; trust code + latest handoff over historical checkpoint prose.
 
 ## Design authority
 

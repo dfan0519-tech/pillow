@@ -1,20 +1,25 @@
 # Pillow 总控交接手册(2026-08-11)
 
-工作目录:`<repo>`
-分支 / HEAD:`main` / `963dcbb`(**本地 = 远程**,工作树干净)
+分支 / HEAD(撰写时):`main` / `963dcbb`
 远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
 
 > 取代 `docs/handoff/2026-08-10-*.md`。那份写于边界尚未成立时,
 > **§3「真实代理没有手」已被推翻**,不得作为真相源。
-> 运维细节在 **`.superpowers/RUNBOOK.md`**(gitignored)。开工前先读。
+> 本机运维(多 Worker 槽位农场、claim/release、私有 runbook)不在公开产品
+> 契约内;见根 `AGENTS.md` 的 multi-runtime isolation 原则。
+>
+> **2026-08-12 外审前清扫补丁**:§3「槽位」段已按当前代码重写(统一记录 /
+> 角色 / 执行路径 / OAuth / 派单)。§7 本机路径与凭据位置已脱敏。已知缺口
+> (§8)未删。更细的执行报告在 `docs/execution/2026-08-12-*.md`。
 
 ---
 
 ## 1. 一句话状态
 
-**代理有两只受管的手(写文件、跑命令),槽位可配自有 key 并按端点选模型。**
+**代理有两只受管的手(写文件、跑命令);槽位是统一记录(`auth`+`role`),
+可配 key / 登录 / OAuth / 本地 CLI,并按 auth 推导治理与执行路径。**
 
-自 `9b2abba` 起 **34 个提交**。门 OK,E2E 10/10,**在途 Worker:0**。
+自 `9b2abba` 起持续合入。撰写时门与 E2E 曾绿;以当前工作树重新跑门为准。
 
 🔴 **用户仍未真正跑过一轮任务。这是项目现在最大的未知。**
 
@@ -65,10 +70,34 @@ mcpServers:         []
 坏枚举值 fail-closed 回 `default`,项目目录不能选模式。
 🔴 **批准权绝不交给 provider**(`methods.rs` 有禁令测试)。
 
-**槽位**:`governed_grok`(受治理)/ `external_cli`(**登记用,不治理**,模型里是显式属性)。
-API key 走 **DPAPI 加密**,Debug 脱敏、drop 清零、不进 DTO;非 Windows fail-closed。
-每槽位可拉模型目录;**端点不支持 `/models` 时返回明确 unsupported 而非错误**,
-渲染层据此回落手敲。🔴 **换模型必须重启活跃 runtime**(模型是 `-m` 启动参数)。
+**槽位**(统一记录,不是两种独立 kind):
+- **一条记录** = `auth` 字段 + `role` 字段。**治理从 auth 推导**,不单独存、
+  不可与 auth 矛盾(`governance_from_auth`;迁移 0017 起无独立 governance 列)。
+- **auth**:`ApiKey` / `GrokLogin` / `LocalCli` / `Oauth`
+  (`crates/storage-sqlite/src/runtime_slot.rs` `SlotAuth`)。
+- **role**:`Controller` / `Librarian` / `Custom(name)`。
+  Controller **项目内唯一**(部分唯一索引)且 **必须受治理**
+  (`LocalCli`+`Controller` 拒绝)。
+- **执行路径**(由 auth + provider request shape **推导**,不是 UI 开关):
+  `GrokShell` / `NativeAdapter` / `NotRunnable`
+  (`crates/runtime-slots/src/execution_path.rs`)。
+  - `GrokLogin` / shell-expressible `ApiKey`/`Oauth` → GrokShell + Full
+  - 不可用 `base_url`+`env_key` 表达的 OAuth(如 `chatgpt-codex`) →
+    NativeAdapter + Full(Pillow 自为 harness;**禁止**塞进 grok 壳)
+  - `LocalCli` → NotRunnable + Incomplete(仅登记/状态,不能起对话)
+  - 🔴 **NativeAdapter 启动目前只到 `native_adapter_prepared`**,
+    **不会** `activate_grok`;完整对话 runtime 仍主要走 GrokShell。
+- 渲染层 wire label 仍可能是 `governed_grok` / `external_cli`
+  (兼容封闭白名单的**派生标签**,不是存储层的两种 kind)。
+- 相关 crate:`pillow-provider-adapters`(纯请求形状)、
+  `pillow-role-dispatch`(派单 → 结构化进程提案)、
+  `pillow-cli-detect`(本地 CLI 发现/只读探针)。
+- **派单** = 普通的受治理进程提案链(proposal → 一次性人批 → 宿主执行 → 收据),
+  **不是**第二套审批机制。
+API key / OAuth token 走 **DPAPI 加密**,Debug 脱敏、drop 清零、不进 DTO;
+非 Windows fail-closed。每槽位可拉模型目录;**端点不支持 `/models` 时返回明确
+unsupported 而非错误**,渲染层据此回落手敲。
+🔴 **换模型必须重启活跃 runtime**(GrokShell 路径下模型是 `-m` 启动参数)。
 
 ---
 
@@ -124,13 +153,16 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ## 7. 用户上手所需(**下一步就是这个**)
 
-- **启动**:桌面 / 开始菜单的 **Pillow** 快捷方式 → `target\release\pillow.exe`
-- **试用项目**:`<repo>-tryout`(10 通过 / 3 失败,README 有六步试用顺序)
-- **Grok 已登录**(2026-08-12 复验:`grok models` 报 logged in with grok.com,
-  默认 `grok-4.5`)。**本手册早前写的"未登录"已作废** —— 那条会把你导向
-  错误的第一步。登录型槽位与 API key 槽位现在都可用。
-- API key 槽位备选:端点 `https://opencode.ai/zen/v1`,key 在桌面
-  `opencode key.txt`,**实测可用,61 个模型**(建议先用 `claude-haiku-4-5`)。
+- **启动**:桌面 / 开始菜单的 **Pillow** 快捷方式,或本仓库 release 构建产物
+  `target/release/pillow.exe`(相对仓库根)。
+- **试用项目**:维护者本机另有 tryout 目录(不进本仓库);其 README 有六步试用
+  顺序。产品内任意项目根亦可。
+- **Grok 登录状态依本机 profile 而定**(不要把某一 worker 的
+  `grok models` 结果当成全机真相)。登录型槽位、API key 槽位、OAuth 槽位
+  在代码路径上均可用;LocalCli 仅登记/状态。
+- API key 槽位:任意 OpenAI-compatible `base_url` + DPAPI 保管的 key;
+  端点是否暴露 `/models` 与否见上文(unsupported → 手敲模型 id)。
+  具体第三方端点与密钥文件**不要写进公开交接**;只在本机私有笔记里。
 
 ### 图标与快捷方式的三个坑(都已修,别再踩)
 
@@ -196,8 +228,10 @@ PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
 
 ## 11. 环境
 
-- 门:`node scripts/run-worker-gate.mjs`(唯一合规入口)
+- 门:`node scripts/run-worker-gate.mjs`(唯一合规入口;见
+  `docs/verification/worker-gate-entry.md`)
 - E2E:`pnpm desktop:test:e2e`,约 25 分钟,**总控独占**
-- 并行:多写码单各自 `CARGO_TARGET_DIR`;门是 workspace 级,
+- 并行:多写码单各自隔离 `CARGO_TARGET_DIR`;门是 workspace 级,
   邻居半成品让 Worker 报 `BLOCKED-BY-CONCURRENT`
-- 台账:`node scripts/run-cargo.mjs run -q -p keeper-knowledge-indexer --bin knowledge-indexer -- ledger status --db .superpowers/ledger/pillow.db --project pillow`
+- 知识台账:通过 `knowledge-indexer` 的 `ledger status` / `ledger stale`
+  (库路径由维护者本地配置;不在公开文档写死私有路径)

@@ -54,9 +54,10 @@ environment variable. Verify the resolved config source before treating a
 session as authenticated. Never print raw authentication files or
 token-bearing fields.
 
-Maintainer-only slot pools, claim/release flows, and local session bridges are
-**not** part of the public product contract. See `.superpowers/RUNBOOK.md` on
-machines that use them.
+Maintainer-only worker farms, claim/release flows, and local session bridges
+are **not** part of the public product contract. Product **runtime slots** are
+project-scoped domain objects (`auth` + `role`; governance derived from auth)
+and are unrelated to those maintainer ops.
 
 ## Required Gates
 

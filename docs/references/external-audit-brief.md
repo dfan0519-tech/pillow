@@ -1,278 +1,341 @@
 # Pillow — External Code Audit Brief
 
-You are auditing a codebase you did not write. Report problems; do not fix them.
-Findings may be written in Chinese or English.
+You are auditing a codebase you did not write. **Report problems; do not fix
+them.** Findings may be written in Chinese or English.
+
+Repository snapshot: `ce017a5` · 182 commits · Windows 11 · Rust workspace
+(17 crates) + Tauri/WebView2 + React renderer.
+
+This brief is self-contained. You should not need to ask us anything to start.
 
 ---
 
-## 1. What this is
+## 0. What we are asking for
 
-Pillow is a local-first desktop AI coding IDE: a Tauri + WebView2 + React shell
-over a Rust workspace. An AI agent (currently Grok, over the Agent Client
-Protocol) runs inside it and can read files, write files, run processes, and read
-Git state — but **only through a governance layer**.
+**Find what we did not.** We have 641 renderer tests, a workspace gate, and a
+10-scenario E2E suite, all green. That is exactly why we need you: everything
+we thought to check, we checked. The interesting failures are in what we did
+not think to check.
 
-The governance primitive is:
+Two requests that matter more than coverage:
+
+1. **Attack the governance boundary, not the test suite.** If you can make the
+   agent write a file, run a process, or reach the network without a human
+   decision reaching the host first, that is the finding we want.
+2. **Distrust this document.** Every claim below names a file. If a claim and
+   the code disagree, **the code is the truth and the disagreement is a
+   finding.**
+
+§7 lists what we already know is missing — 13 items, several of them load-
+bearing. Reporting those back is not useful; **finding something not on that
+list is.**
+
+---
+
+## 1. The one-sentence architecture
+
+Pillow is a local-first AI IDE. An agent runs as a child process; every side
+effect it wants must become a **proposal** a human approves **once**, which the
+**host** then executes, leaving a **durable receipt**.
 
 ```
 proposal → one-shot human approval → host execution → durable receipt
          → project isolation → invalidation on restart
 ```
 
-The product's entire value proposition rests on that layer being correct. A
-convenience bug is a nuisance; a governance bug means the agent did something
-nobody authorised, or the record of what it did is wrong. **Weight your attention
-accordingly.**
+Ordering invariant: `validate → persist → commit → emit`. Nothing reaches the
+UI before it is durable.
 
-Rough shape:
+**The renderer is a view.** It never executes, never holds authority, and in
+this snapshot makes no outbound network requests at all.
 
-- `crates/` — Rust workspace (13 crates): policy state machines, SQLite
-  storage, runtime host, tool executors, the Grok ACP adapter, a governance port,
-  runtime slots (credential storage + per-slot agent config)
-- `apps/desktop/src-tauri/` — Tauri host (Rust): commands, composition root
-- `apps/desktop/src/` — React renderer (TypeScript)
-- `scripts/` — gate entry (`run-worker-gate.mjs`) and acceptance harnesses
-- `docs/` — design records, acceptance evidence, execution reports
+A convenience bug is a nuisance. A governance bug means the agent did something
+nobody authorised, or the record of what it did is wrong. **Weight accordingly.**
 
 ---
 
-## 1b. Read this before anything else: the boundary
+## 2. The boundary — read this before anything else
 
-The governance layer above only means something if the agent **cannot act
-outside it**. That containment is not a sandbox. It is a negotiated contract
-with a third-party CLI (Grok Build) over ACP, and it consists of exactly three
-things:
+The agent is `grok` (Grok Build) speaking **ACP** (Agent Client Protocol) over
+NDJSON JSON-RPC on stdio. We do not control its source. We control what we
+declare at session start.
 
 ```jsonc
 // crates/adapter-grok-acp/src/rpc/methods.rs
-tools:              ["ask_user_question", "write", "run_terminal_cmd"]  // allowlist
-disallowedTools:    ["search_tool", "use_tool"]                        // MCP meta-tools only
+tools:              ["ask_user_question", "write", "run_terminal_cmd"]
+disallowedTools:    ["search_tool", "use_tool"]   // the two MCP meta-tools
 clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true }
+mcpServers:         []
 ```
 
-Native `write` reaches us as ACP `fs/write_text_file`; native `run_terminal_cmd`
-reaches us as `terminal/*`. Both then enter the same proposal chain. Nothing
-else is supposed to be reachable.
+| Surface | Mechanism |
+| --- | --- |
+| **Write** | native `write` → ACP `fs/write_text_file` → host governs |
+| **Process** | native `run_terminal_cmd` → ACP `terminal/*` → same chain |
+| **MCP** | **cut** — ambient MCP cannot be disabled from our side, so denying the two meta-tools is the only lever |
 
-**We already got this catastrophically wrong once, and the code looked correct
-the whole time.** Three failures stacked:
+**The allowlist governs native tools and is fail-closed. The denylist closes
+one door; it is not an enumeration of rooms.** A test fails if a third name
+appears in the denylist.
 
-1. the profile omitted upstream's required `name` / `description`, so parsing
-   failed, was logged on one line, and **silently fell back to the full default
-   toolset**;
-2. `tools: []` means *inherit everything* upstream, not "none";
-3. several disallowed tool names were simply wrong.
+### 2a. Three half-open traps (all silent)
 
-For months the governance chain was exercised only by the fixture agent. A real
-agent could read and write freely without ever raising a proposal. It was found
-by a live probe, not by review — reading configuration code produced three
-confident, wrong conclusions in a row.
-
-So: **treat any claim about containment as unproven until it is observed at
-runtime.** `scripts/probe-mcp-tool-exposure.mjs` (opt-in, never in the gate) is
-how we check it now. Its `acp-fs-localfs-trap` and `shell-no-handler` variants
-are deliberate sentinels: they assert *provider* behaviour, not ours, and are
-expected to keep reproducing.
-
-Three "half-open" shapes are known, all silent, all identical in form — grant a
-hand without opening the line to the host and the agent acts locally with no
-error:
+This is the failure shape that has actually bitten us three times: **a hand is
+granted but the line back to the host is not opened.** The agent then does the
+thing itself, the host never sees it, and nothing errors.
 
 | Trap | Condition |
 | --- | --- |
-| LocalFs | `write` allowlisted while `fs.writeTextFile` is false |
-| LocalTerminal | shell tool allowlisted while `terminal` is false |
-| ambient MCP | the two MCP meta-tools not denied |
+| LocalFs | allowlist contains `write` ∧ `writeTextFile = false` |
+| LocalTerminal | allowlist contains a shell tool ∧ `terminal = false` |
+| Ambient MCP | meta-tools not denied |
 
-Note the asymmetry, which is easy to misread: the filesystem backend is chosen
-by `read && write` (**both**), the terminal backend by a **single** bool.
+🔴 **The predicate is asymmetric, which is easy to get wrong:** fs requires
+**both** `readTextFile` ∧ `writeTextFile`; terminal is a **single** bool. Two
+coupling tests in `methods.rs` pin the first two.
 
-Two coupling tests pin the first two. **Check that they actually bite**, and
-that nothing else can reintroduce a hand without its line.
+🔴 **A high-value attack: find a fourth trap of this shape.**
 
-Also worth challenging: `mcpServers: []` does **not** mean "no MCP" — sessions
-merge servers from user config, plugins and an account gateway, and denying the
-two meta-tools is the only lever a client has. If you can find a path that
-reaches an MCP tool without those meta-tools, that is a serious finding.
+### 2b. History you should know
 
----
+For months we believed this boundary held. It did not. Three independent
+failures stacked:
 
-## 2. Invariants that must hold
+1. `_meta.agentProfile` was missing required `name` / `description`, so upstream
+   failed to parse it, logged one line, and **silently fell back to the full
+   tool set**
+2. `tools: []` means **inherit all** upstream, not "none"
+3. the disabled names were wrong (real short ids are `write`,
+   `run_terminal_cmd`)
 
-These are claimed by the design. **Your job includes checking whether the code
-actually enforces them**, not assuming it does.
-
-1. **Never fabricate a terminal state.** If a write/process cannot be durably
-   resolved, the caller gets an opaque error — never a synthesised "success" or
-   "cancelled".
-2. **No silent fallback to the fake runtime.** If the real agent runtime is
-   missing or misconfigured, the app fails closed or degrades visibly. It must
-   never quietly substitute the deterministic fake.
-3. **Approval is one-shot and scoped.** A grant authorises exactly one operation.
-   Reuse, replay, or cross-scope use must be rejected.
-4. **Secrets stay host-side.** Sealed file contents and raw approval grants live
-   only in host memory. SQLite stores digests and metadata. The renderer never
-   receives grant material.
-5. **Project isolation.** Operations bound to project A must not observe or
-   affect project B — including after restart.
-6. **Restart invalidates live authority.** In-memory grants do not survive a
-   restart; interrupted runs recover to an explicit `Interrupted` state.
-7. **Ordering:** `validate → persist → commit → emit`. An event must never be
-   emitted for something that was not durably committed first.
-8. **Lifecycle callbacks fire after durable commit, never under a lock, never on
-   replay.** Cancellation is level-triggered — a single snapshot at entry is
-   considered fail-open.
-9. **Paths from the agent are project-relative and portable.** No absolute paths,
-   no traversal, no Windows device names.
-10. **Native tool restriction is an allowlist, never an enumeration.** A denylist
-    lost once already: the agent left through `workflow` / `monitor`, which no
-    list had thought to name. The one denylist that remains covers exactly two
-    MCP meta-tools and is a door, not a room inventory.
-11. **Rule allow is conjunctive.** A shell command is split conservatively and
-    *every* segment must match an allow rule; any deny wins; an unsplittable
-    command asks. `Bash(cargo*)` must never authorise `cargo test; rm -rf x`.
-    The splitter is deliberately incomplete — it only has to be right about *when
-    it does not know*.
-12. **A permission mode turns asking off, not governance off.** Even in bypass,
-    the proposal, execution and durable receipt still happen, deny rules still
-    win, and the receipt records which mode allowed it. A corrupt stored mode
-    falls back to `default`, never to `bypass`. A project directory can never
-    select a mode.
-13. **Approval authority is never delegated to the provider.** Pillow must not
-    send `yolomode` / `automode` / `always-approve` in session params. If the
-    agent decides, our receipts are fiction.
-14. **Slot secrets are user-encrypted at rest and never leave the host.** Keys
-    live in DPAPI-protected files, are redacted from `Debug`, zeroed on drop, and
-    absent from every DTO. Non-Windows fails closed rather than storing plaintext.
-15. **Structured Git operations construct their own argv.** `git` is an execution
-    engine (`-c core.pager=…`, `--upload-pack`, aliases). No caller-supplied flag
-    or config may reach it, or the whole command-approval story is void.
+**Every layer reported success.** It was found by a live probe — not by review,
+not by tests. That is why §6 exists.
 
 ---
 
-## 3. Where to look first
+## 3. Permission model
 
-Ordered by where a defect would hurt most.
+**Modes:** `default` / `accept_edits` / `bypass`.
 
-1. **`crates/adapter-grok-acp/src/rpc/methods.rs` + `provider_writes.rs` +
-   `provider_terminals.rs`** — the boundary and the two reverse-RPC entries
-   (§1b). A defect here is not a bug, it is the absence of the product.
-2. **`crates/runtime-host/src/`** — the coordinators. `governed_write.rs`,
-   `governed_read.rs`, `host/process.rs`, `governed_tool_service.rs`.
-   These hold live authority in memory with `Mutex` + `Condvar`, and deliberately
-   perform some work *off-lock*. Two real races have already been found and fixed
-   here; assume more exist.
-3. **`crates/kernel-policy/`** — the write/exec state machines, plus the
-   command segmenter and conjunctive rule evaluation (`permission_rules.rs`). Check that no
-   illegal transition is reachable, and that terminal states are truly terminal.
-4. **`crates/storage-sqlite/`** — persistence and migrations (`migrations/*.sql`).
-   Check transaction boundaries, whether "commit" really committed, and whether
-   any query can be influenced by agent-supplied strings.
-5. **`crates/tool-executor/` and `crates/process-executor/`** — actual file
-   writes and child processes. Windows job objects are used for process-tree
-   cleanup. Check for orphaned children, unbounded output, and whether the
-   working directory / environment can be escaped.
-6. **`apps/desktop/src-tauri/src/`** — every `#[tauri::command]` is an entry point
-   the renderer can call. Check argument validation and scope enforcement at that
-   boundary specifically.
-7. **`crates/runtime-slots/`** — credential storage and per-slot agent config.
-   Check that a key cannot reach a DTO, a log, an error, or a config file.
-8. **`crates/git-executor/`** — structured mutation (invariant 15).
-9. **The rest of `crates/adapter-grok-acp/`** — the wire protocol is **hand-written**, not
-   generated from a schema, so there is no compile-time signal if it drifts.
-   Check parsing robustness against malformed or hostile agent output.
+🔴 **`bypass` disables the asking, not the governing.** Proposal, host
+execution and durable receipt all still happen; deny rules still win; an unknown
+enum value fails closed to `default`; the project directory itself cannot be
+mode-selected.
+
+🔴 **Approval authority is never delegated to the provider.** `methods.rs`
+carries a test forbidding `yolomode` / `automode` / `always-approve` in session
+params.
+
+**Shell rules:** commands are conservatively segmented; an allow rule must match
+**every** segment (conjunctive); any denied segment rejects; a command that
+cannot be segmented reliably fails closed to asking. `Bash(cargo*)` does **not**
+authorise `cargo test; rm -rf x`. Rules save **per segment**; an unsplittable
+command offers no rule entry point rather than offering the whole string.
+
+File: `crates/kernel-policy/src/permission_rules.rs`.
 
 ---
 
-## 4. Where I am least confident
+## 4. Slots, roles, execution paths
 
-I am the controller who accepted most of this work. These are the places my own
-review is weakest, so external eyes are worth the most here. Please do not treat
-this list as exhaustive — blind spots are by definition not on it.
+**One slot record. Auth and role are fields of it, not separate kinds.**
 
-- **Concurrency in the coordinators.** Every race found so far was found by
-  deliberate barrier-based experiments, not by reading. Reading alone has a poor
-  track record here.
-- **The decoupling refactor.** Six sequential steps landed in roughly one day,
-  moving governance execution behind a port trait and cutting the adapter's
-  dependency on the host. Each step was verified individually. **The composition
-  of all six was never audited as a whole.**
-- **Error mapping.** Errors are converted across several layers. Check whether
-  any conversion loses a distinction that mattered — particularly whether
-  anything that should be fail-closed can arrive as a benign variant.
-- **Test quality, not just presence.** Many tests assert on strings or shapes.
-  Where a test claims to prove an invariant, check that it would actually fail if
-  the invariant were violated. Vacuous tests are worse than missing ones, because
-  they buy false confidence.
-- **The renderer/host boundary.** Redaction is asserted in tests. Check whether
-  anything sensitive can still reach the renderer by a path those tests miss.
-- **Windows-specific behaviour.** Path handling, device names, job objects,
-  file locking. This code has only ever run on Windows.
-- **The boundary contract with the provider.** It is upstream behaviour, not our
-  code, and it can change under us without notice. Our evidence is a live probe
-  run at a point in time, nothing stronger.
-- **Everything added on 2026-08-11.** Governed write over ACP, governed shell,
-  permission rules, permission modes, slots and credential storage, and Git
-  mutation all landed inside one day. Each passed its own gate; **the composition
-  was never reviewed as a whole.** The same warning as the decoupling refactor
-  above, with less settling time.
+```rust
+// crates/storage-sqlite/src/runtime_slot.rs
+SlotAuth = ApiKey | GrokLogin | LocalCli | Oauth
+SlotRole = Controller | Librarian | Custom(String)
+```
 
----
+🔴 **Governance is derived from auth, never stored beside it.** As two
+independent fields they could disagree; derived, the disagreement is
+unrepresentable. `governance_from_auth()` has its three mappings pinned.
 
-## 5. Known issues — do not re-report
+**Controller** — the slot you converse with — is at most one per project and
+**must be a governed auth**. A `LocalCli` in Pillow's own conversation would be
+exactly the §2a trap, so it is refused.
 
-- An intermittent E2E failure under heavy machine load. Contributing causes have
-  been found and fixed (a harness that crashed on control characters in its own
-  captured output; a process-wide probe counter shared by tests that did not take
-  the lock). A residue may remain under contention. **A proven root cause is very
-  valuable** — the symptom alone is not a new finding.
-- Known and accepted limits, do not re-report as discoveries: the interpreter
-  confirmation table is finite, so a broad rule over an unrecognised wrapper is
-  the most plausible wrong-allow; a rule like `node*` legitimately authorises
-  `node any-script.js`; the event payload carries one representative rule while
-  the durable receipt holds the full per-segment set; restart-recovered rows
-  cannot reconstruct segments and are therefore not decision-capable.
-- **Not claimed:** this is not an OS sandbox. Containment is over a verified
-  provider tool path (§1b). Anything that bypasses the Grok tool layer entirely
-  is out of scope for the current design — but if you find such a path *through*
-  it, that is exactly what we want to know.
-- Governance decoupling is incomplete by design. Steps 7–11 of the plan (state
-  migration, single bind, run lease, removal of the free-function compatibility
-  layer) are outstanding and known.
-- Documentation under `docs/` contains machine-specific operational notes. A
-  cleanup pass is in progress separately.
+**Execution paths** (`crates/runtime-slots/src/execution_path.rs`):
 
----
-
-## 6. What NOT to do
-
-- **Do not modify any code.** Report only. Other work is in flight; edits would
-  collide.
-- **Do not run the desktop E2E suite** (`test:e2e`, `scripts/wave-*-acceptance.mjs`).
-  It drives a real desktop app, takes ~25 minutes, and is run exclusively by the
-  controller.
-- Building and running unit tests is fine if useful.
-- **Do not weaken any assertion** to make something pass.
-- Do not read or print credential/auth files.
-
----
-
-## 7. How to report
-
-For each finding:
-
-| Field | Content |
+| Path | Meaning |
 | --- | --- |
-| **Location** | `path/to/file.rs:LINE` |
-| **Severity** | governance / correctness / robustness / quality |
-| **Claim** | one sentence: what is wrong |
-| **Why it matters** | concrete failure: what input or interleaving produces what wrong outcome |
-| **Confidence** | verified by reading the code path / plausible but unconfirmed |
+| `GrokShell` | Grok ACP child; private config `base_url` + bearer `env_key` |
+| `NativeAdapter` | **Pillow is the harness**; model HTTP via `pillow-provider-adapters` |
+| `NotRunnable` | status-only registration (LocalCli) |
 
-**Ranking matters more than volume.** A short list of confirmed governance
-defects is far more useful than a long list of style observations. If you find
-nothing serious in an area, say so explicitly — "I checked X and found nothing"
-is real information.
+The path is **derived** from auth + provider profile, not chosen by the user. A
+provider whose request shape `GrokShell` cannot express is **refused at
+startup** rather than stuffed into it — otherwise it fails later looking like a
+bad key.
 
-Please state clearly which areas you actually covered and which you did not.
-An audit that quietly skips an area is worse than one that admits the gap.
+🔴 **Audit target:** `NativeAdapter` is newer and far less exercised than
+`GrokShell`. We assert Pillow-as-harness preserves the §2 properties on that
+path. **Verify that claim rather than accepting it.**
+
+**Secrets:** API keys and OAuth tokens are stored under **DPAPI**
+(`CryptProtectData` + `CRYPTPROTECT_UI_FORBIDDEN`), Debug-redacted, zeroed on
+drop, never placed on a DTO. Non-Windows fails closed. The **refresh token
+never reaches the agent process** — only a live access token is injected.
+
+---
+
+## 5. Role dispatch — deliberately not a second authority
+
+"The controller calls another role" is mechanically **running a process**, and
+processes are already governed. So dispatch builds an ordinary governed process
+proposal and travels the same approval chain, rules and receipts. **There is no
+second approval UI and no separate executor.**
+
+- `crates/role-dispatch` — pure domain; builds a structured `ProposedCommand`
+- `crates/runtime-host/src/dispatch.rs` — hands it to the existing chain
+
+Pinned both directions: a rejected dispatch reports **no** start; an approved
+one reports a start — so the zero-start assertion cannot pass vacuously.
+`argv` is a structured array never joined into a shell string; task text can
+never occupy the program or cwd position; self-dispatch is refused; a `LocalCli`
+target cannot have its governance label upgraded in transit.
+
+🔴 **Audit target:** get task text into `program`/`cwd`, or make a dispatch
+execute without an approval.
+
+---
+
+## 6. Live probes are the only trustworthy boundary evidence
+
+```bash
+PILLOW_MCP_PROBE=1 node scripts/probe-mcp-tool-exposure.mjs
+# narrow with PILLOW_MCP_PROBE_ONLY=<id>;  "not run" never counts as pass
+```
+
+| id | Expectation |
+| --- | --- |
+| `shipped-profile-write` | write **reaches the client** and never touches disk |
+| `shipped-profile-mcp` | **zero** tool calls; agent answers `NO_MCP` |
+| `acp-fs-localfs-trap` | **must still write to disk** — known negative, a sentinel |
+| `shell-no-handler` | `terminal/create` reaches the client, no local process |
+
+🔴 **The criterion is conjunctive: "reached the client" AND "not executed by the
+agent".** Checking only "not executed" reads a *broken feature* as *working
+governance*.
+
+🔴 The two sentinels verify **the provider's behaviour, not our code**. If
+upstream changes, they can go quiet without our code changing.
+
+---
+
+## 7. What we know we have not done
+
+These are known. Finding something NOT on this list is worth far more than
+confirming anything on it.
+
+1. 🔴 **Nobody has run a real task.** Slot equality, roles, dispatch, OAuth,
+   provider adapters, CLI detection and the librarian audit all have unit and
+   E2E evidence and **zero live evidence**. A green gate is not a working
+   product.
+2. **5 provider login profiles carry `ClientIdSource::Unknown`.** We refused to
+   invent client ids — embedding another product's would mean impersonating its
+   official client. Those need user-supplied values and are incomplete by
+   design.
+3. **Consumer-subscription OAuth is described but not reachable end to end.**
+   A `chatgpt-codex` adapter **does** ship
+   (`crates/provider-adapters/src/adapters.rs`) with the vendor endpoint,
+   rewritten authorization header and restricted model list. What does not
+   exist is a path from it to a working conversation — see 4. Treat any claim
+   elsewhere in this repo that "no such adapter ships" as stale; this line is
+   the correct one.
+4. 🔴 **`NativeAdapter` never activates a conversation.** Starting such a slot
+   reaches `status = "native_adapter_prepared"` and stops
+   (`apps/desktop/src-tauri/src/runtime_slot_commands.rs`). It deliberately
+   does **not** call `activate_grok`. So the adapter path is: request shaping
+   proven by unit tests, credential injection wired, **and no runtime behind
+   it.** Every live conversation today is `GrokShell`.
+5. 🔴 **`NativeAdapter`'s "Full" governance label is by construction, not by
+   probe.** For `GrokShell` we have live probes (§6) showing the agent cannot
+   act unilaterally. For `NativeAdapter` we have an argument — Pillow is the
+   harness, therefore it governs — and no equivalent probe. **This is the
+   weakest load-bearing claim in the system.**
+6. **OAuth slots cannot be dispatch targets.** `role-dispatch` refuses them
+   with `role_dispatch_unsupported_auth`.
+7. **The wire label `governed_grok` now covers OAuth and `NativeAdapter`
+   slots too.** It is a compatibility label kept for the renderer's closed key
+   allowlist, not a statement that the slot runs the Grok shell. It is
+   misleading and we have not renamed it.
+8. **The dispatch ledger is in-memory.** Its durability across restart is not
+   established.
+9. **Interpreter confirmation is a finite table.** An unrecognised wrapper plus
+   an over-broad rule is our most likely mis-allow path. A rule like `node*`
+   legitimately authorises `node any-script.js`.
+10. **Event payloads carry only a representative rule**; the durable receipt is
+   authoritative. **Audit receipts, not events.**
+11. **Restart-recovered rows cannot recover their segments**, so they are never
+   auto-decided.
+12. **This is not an OS sandbox.** We govern the provider's verified tool paths.
+   An agent that finds an unverified path is outside this model — and that is
+   exactly the finding we want.
+13. **`search_replace` is deliberately unexposed.**
+
+---
+
+## 8. Where the seams are — where we have broken it before
+
+**The renderer validates host DTOs against a closed key allowlist.** Three
+separate times the host added a field, the renderer rejected the whole payload,
+and a UI surface vanished silently **with the gate green**.
+
+If you want a bug class with history here: **any host DTO change not matched in
+the same change by `apps/desktop/src/features/**/…Gateway.ts`.** Allowlist
+lengths are pinned so an emptied validator cannot pass silently.
+
+Related: **a test that only asserts rejection is false green.** We try to pin
+both directions everywhere; where we did not, that is a finding.
+
+---
+
+## 9. How to run it
+
+```bash
+node scripts/run-worker-gate.mjs               # fmt, clippy -D warnings, workspace tests, secret scan, ACP drift
+corepack pnpm typecheck
+corepack pnpm --filter @pillow/desktop test    # 641 tests
+corepack pnpm desktop:test:e2e                 # 10 scenarios, ~25 min, real WebView2
+```
+
+The gate is the acceptance authority. It has produced false reds twice — a
+process-wide static polluted by tests not holding a shared lock, and a 5s
+renderer timeout that load could exceed. Both fixed; noted so a red you see is
+judged on evidence rather than assumed environmental.
+
+---
+
+## 10. Our own failure log — for calibration
+
+Included so you can see the shape of mistakes this codebase attracts.
+
+1. **Concluding from a suppressed signal.** `cmd | tail` reported a red suite as
+   green. A sandbox-denied probe was read as "signed out" and reported as fact.
+   A missing commit marker was read as a mismatch, failing 22 of 22 records
+   while its pass state was unreachable. **Absence of evidence became negative
+   evidence, repeatedly.**
+2. **Exit code is not outcome.** Icon generation exited 0 with the artwork
+   broken; a build exited 0 without embedding the new icon.
+3. **A controlled experiment must differ by one variable.** We compared two
+   agent profiles; neither had parsed.
+4. **`cargo check` does not compile `#[cfg(test)]`** — and neither does clippy,
+   so an import it calls unused may be exactly what the tests need.
+5. **Filtering keys is not vetting values.** A redactor passed a `slot=` token
+   through intact, carrying a host path into a renderer-bound DTO.
+6. **A worker's own gate result is not evidence.** Sandboxes hide failures;
+   scoped runs hide crates.
+
+---
+
+## 11. What a maximally useful report looks like
+
+- **Ranked by exploitability**, not by count.
+- Each finding: the file, the precondition, and **the concrete sequence** that
+  produces the effect.
+- Explicitly separate **"the code permits this"** from **"we observed this"**.
+  We over-trusted the former for months — see §2b.
+- If you conclude a property **holds**, name the mechanism that enforces it.
+  "Looks fine" and "is enforced by X" are different findings to us.
+
+**If you only have time for one thing: §2 and §2a.**
