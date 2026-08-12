@@ -766,3 +766,279 @@ fn refresh_decision_helpers_exported_for_callers() {
         skew
     ));
 }
+
+// --- T1 path selection + T2 governance + T3 credential wiring ---
+
+#[test]
+fn path_matrix_auth_x_provider() {
+    use pillow_runtime_slots::{
+        PathGovernance, PathIncompleteReason, SlotExecutionPath, resolve_execution_path,
+    };
+
+    // GrokLogin → GrokShell / Full
+    let d = resolve_execution_path(&SlotAuth::GrokLogin { model_id: None }).unwrap();
+    assert_eq!(d.path, SlotExecutionPath::GrokShell);
+    assert_eq!(d.governance, PathGovernance::Full);
+
+    // ApiKey → GrokShell / Full
+    let d = resolve_execution_path(&SlotAuth::ApiKey {
+        base_url: "https://api.example.invalid/v1".into(),
+        model_id: "m".into(),
+        secret_ref: "00000000-0000-0000-0000-000000000010".into(),
+    })
+    .unwrap();
+    assert_eq!(d.path, SlotExecutionPath::GrokShell);
+    assert_eq!(d.governance, PathGovernance::Full);
+
+    // OAuth standard OIDC → GrokShell / Full
+    let d = resolve_execution_path(&SlotAuth::Oauth {
+        provider_id: "example-oidc".into(),
+        issuer: "https://issuer.example.invalid".into(),
+        client_id: "c".into(),
+        scopes: vec!["openid".into()],
+        token_endpoint: "https://issuer.example.invalid/token".into(),
+        account_label: None,
+        base_url: "https://api.example.invalid/v1".into(),
+        model_id: "m".into(),
+        access_secret_ref: "00000000-0000-0000-0000-000000000011".into(),
+        refresh_secret_ref: "00000000-0000-0000-0000-000000000012".into(),
+        access_expires_at: Utc::now() + Duration::hours(1),
+    })
+    .unwrap();
+    assert_eq!(d.path, SlotExecutionPath::GrokShell);
+    assert_eq!(d.governance, PathGovernance::Full);
+
+    // OAuth chatgpt-codex (rewrite headers) → NativeAdapter / Full (host harness)
+    let d = resolve_execution_path(&SlotAuth::Oauth {
+        provider_id: "chatgpt-codex".into(),
+        issuer: "https://auth.openai.com".into(),
+        client_id: "c".into(),
+        scopes: vec!["openid".into()],
+        token_endpoint: "https://auth.openai.com/oauth/token".into(),
+        account_label: Some("acct".into()),
+        base_url: "https://api.example.invalid/v1".into(),
+        model_id: "gpt-5.4".into(),
+        access_secret_ref: "00000000-0000-0000-0000-000000000013".into(),
+        refresh_secret_ref: "00000000-0000-0000-0000-000000000014".into(),
+        access_expires_at: Utc::now() + Duration::hours(1),
+    })
+    .unwrap();
+    assert_eq!(d.path, SlotExecutionPath::NativeAdapter);
+    assert_eq!(d.governance, PathGovernance::Full);
+    assert!(d.governance.may_be_controller());
+
+    // LocalCli → NotRunnable / Incomplete (cannot be controller)
+    let d = resolve_execution_path(&SlotAuth::LocalCli {
+        executable_path: "C:\\tools\\x.exe".into(),
+        launch_args: vec![],
+        status_args: vec!["--version".into()],
+    })
+    .unwrap();
+    assert_eq!(d.path, SlotExecutionPath::NotRunnable);
+    assert!(!d.governance.may_be_controller());
+    assert!(matches!(
+        d.governance,
+        PathGovernance::Incomplete {
+            reason: PathIncompleteReason::LocalCliUngoverned
+        }
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_grok_rejects_codex_rewrite_provider_not_stuffed_into_shell() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+
+    let access = runtime_token("codex-acc-", "ess-no-shell");
+    let refresh = runtime_token("codex-ref-", "resh-no-shell");
+    let created = service
+        .create_slot(
+            project.id,
+            "Codex OAuth".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "chatgpt-codex".into(),
+                issuer: "https://auth.openai.com".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://auth.openai.com/oauth/token".into(),
+                account_label: Some("acct-1".into()),
+                // base_url present but cannot express rewrite shape
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "gpt-5.4".into(),
+                access_token: SecretBytes::new(access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() + Duration::hours(2),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+
+    // Path decision is NativeAdapter.
+    let path = service.resolve_path(project.id, created.slot.id).unwrap();
+    assert_eq!(path.path.as_str(), "native_adapter");
+    assert!(path.governance.is_full());
+
+    // prepare_grok must refuse (no silent grok shell stuffing).
+    match service.prepare_grok(project.id, created.slot.id) {
+        Ok(_) => panic!("codex must not prepare_grok into shell"),
+        Err(err) => {
+            assert_eq!(err.code(), "runtime_slot_path_not_grok_shell_expressible");
+            let text = format!("{err}");
+            assert!(!text.contains(&access));
+            assert!(!text.contains(&refresh));
+            assert!(
+                text.contains("chatgpt-codex")
+                    || text.contains("NativeAdapter")
+                    || text.contains("not expressible")
+                    || text.contains("not_grok")
+                    || text.contains("base_url")
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_slot_native_injects_access_never_refresh_and_keeps_full_governance() {
+    use pillow_runtime_slots::{
+        NATIVE_ADAPTER_GOVERNANCE_MECHANISM, PreparedSlot, SlotExecutionPath,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+
+    let access = runtime_token("native-acc-", "ess-prepare-slot");
+    let refresh = runtime_token("native-ref-", "resh-must-stay");
+    let created = service
+        .create_slot(
+            project.id,
+            "Native Codex".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "chatgpt-codex".into(),
+                issuer: "https://auth.openai.com".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://auth.openai.com/oauth/token".into(),
+                account_label: Some("acct-native".into()),
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "gpt-5.4".into(),
+                access_token: SecretBytes::new(access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() + Duration::hours(2),
+            },
+            SlotRole::Controller,
+        )
+        .unwrap();
+    assert_eq!(created.slot.governance(), RuntimeSlotGovernance::Full);
+    assert!(matches!(created.slot.role, SlotRole::Controller));
+
+    let prepared = service.prepare_slot(project.id, created.slot.id).unwrap();
+    match prepared {
+        PreparedSlot::GrokShell(_) => panic!("expected NativeAdapter package"),
+        PreparedSlot::NativeAdapter(native) => {
+            assert_eq!(native.path, SlotExecutionPath::NativeAdapter);
+            assert!(native.governance.is_full());
+            assert!(native.governance.may_be_controller());
+            assert_eq!(
+                native.governance_mechanism,
+                NATIVE_ADAPTER_GOVERNANCE_MECHANISM
+            );
+            assert_eq!(native.provider_id, "chatgpt-codex");
+            assert_eq!(native.model_id, "gpt-5.4");
+            // Access injected into Authorization; refresh never present.
+            assert_eq!(
+                native.request.headers.get("Authorization"),
+                Some(format!("Bearer {access}").as_str())
+            );
+            assert_eq!(
+                native.request.headers.get("ChatGPT-Account-Id"),
+                Some("acct-native")
+            );
+            // Codex endpoint — not the grok shell base_url chat completions path.
+            assert!(native.request.url.contains("codex/responses"));
+
+            let debug = format!("{native:?}");
+            assert!(!debug.contains(&access), "access leaked: {debug}");
+            assert!(!debug.contains(&refresh), "refresh leaked: {debug}");
+
+            // Private grok home must NOT have been written for native path.
+            let private_home = app_data
+                .join("runtime-slots")
+                .join(project.id.0.to_string())
+                .join(created.slot.id.0.to_string());
+            assert!(
+                !private_home.join(".grok").join("config.toml").exists(),
+                "native path must not write grok shell config"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_slot_standard_oauth_still_uses_grok_shell() {
+    use pillow_runtime_slots::PreparedSlot;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("keeper.db");
+    let app_data = temp.path().join("app-data");
+    let project = seed_project(&db, &temp, "alpha");
+    let service = RuntimeSlotService::open(&db, &app_data).unwrap();
+
+    let access = runtime_token("std-acc-", "ess-shell");
+    let refresh = runtime_token("std-ref-", "resh-shell");
+    let created = service
+        .create_slot(
+            project.id,
+            "Standard OAuth".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "example-oidc".into(),
+                issuer: "https://issuer.example.invalid".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://issuer.example.invalid/token".into(),
+                account_label: None,
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "model-oauth".into(),
+                access_token: SecretBytes::new(access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() + Duration::hours(2),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+
+    match service.prepare_slot(project.id, created.slot.id).unwrap() {
+        PreparedSlot::NativeAdapter(_) => panic!("standard oauth must stay on grok shell"),
+        PreparedSlot::GrokShell(PreparedGrokSlot::ApiKey { api_key, .. }) => {
+            assert_eq!(api_key.as_bytes(), access.as_bytes());
+            assert_ne!(api_key.as_bytes(), refresh.as_bytes());
+        }
+        PreparedSlot::GrokShell(PreparedGrokSlot::Login { .. }) => {
+            panic!("expected api-key shaped oauth prepare")
+        }
+    }
+}
+
+#[test]
+fn native_adapter_governance_mechanism_is_host_harness() {
+    // T2 mechanism pin: NativeAdapter keeps tools/write/process on the host.
+    assert_eq!(
+        pillow_runtime_slots::NATIVE_ADAPTER_GOVERNANCE_MECHANISM,
+        "host_harness_tools_write_process"
+    );
+    // Incomplete paths cannot be controller.
+    use pillow_runtime_slots::{PathGovernance, PathIncompleteReason};
+    let incomplete = PathGovernance::Incomplete {
+        reason: PathIncompleteReason::LocalCliUngoverned,
+    };
+    assert!(!incomplete.may_be_controller());
+    assert!(PathGovernance::Full.may_be_controller());
+}

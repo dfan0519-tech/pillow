@@ -6,6 +6,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import {
+  defaultMockProviderLoginCatalog,
+  mapOauthLoginErrorMessage,
+} from "./oauthLoginUi";
+import {
+  type AccountIdentifierWire,
   type CreateExternalCliSlotInput,
   type CreateGrokApiKeySlotInput,
   type CreateGrokLoginSlotInput,
@@ -24,6 +29,9 @@ import {
   MODEL_SWITCH_RESTARTED_MESSAGE,
   MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
   type ProbeModelCatalogView,
+  type ProfileFieldWire,
+  type ProviderLoginCatalogEntry,
+  type ProviderLoginMethodWire,
   type RuntimeSlotGovernance,
   type RuntimeSlotKind,
   type RuntimeSlotModelCatalogReasonCode,
@@ -81,6 +89,30 @@ export const RUNTIME_SLOT_DTO_KEYS = [
   "roleCustomName",
   "createdAt",
   "updatedAt",
+  /** OAuth non-secret account label; null for non-OAuth. */
+  "accountLabel",
+  /** OAuth access-token expiry (RFC3339); null for non-OAuth. Never token text. */
+  "accessExpiresAt",
+] as const;
+
+/** Exact closed allowlist for `ProviderLoginCatalogEntryDto`. */
+export const PROVIDER_LOGIN_CATALOG_DTO_KEYS = [
+  "providerId",
+  "displayName",
+  "loginMethod",
+  "issuer",
+  "authorizeEndpoint",
+  "deviceAuthorizationEndpoint",
+  "tokenEndpoint",
+  "scopes",
+  "clientId",
+  "knownIssuer",
+  "knownAuthorizeEndpoint",
+  "knownDeviceAuthorizationEndpoint",
+  "knownTokenEndpoint",
+  "knownScopes",
+  "knownClientId",
+  "accountIdentifier",
 ] as const;
 
 /** Exact closed allowlist for `ExternalCliStatusDto`. */
@@ -144,8 +176,25 @@ export const PROBE_MODEL_CATALOG_DTO_KEYS = [
 
 const KINDS: readonly RuntimeSlotKind[] = ["governed_grok", "external_cli"];
 const GOVERNANCE: readonly RuntimeSlotGovernance[] = ["full", "none"];
-const AUTH_MODES: readonly GrokSlotAuthMode[] = ["login", "api_key"];
+const AUTH_MODES: readonly GrokSlotAuthMode[] = ["login", "api_key", "oauth"];
 const ROLES: readonly RuntimeSlotRole[] = ["controller", "librarian", "custom"];
+const PROFILE_FIELD_WIRES: readonly ProfileFieldWire[] = [
+  "known",
+  "user_supplied",
+  "unknown",
+  "not_applicable",
+];
+const LOGIN_METHODS: readonly ProviderLoginMethodWire[] = [
+  "pkce",
+  "device_code",
+  "api_key_only",
+];
+const ACCOUNT_IDENTIFIERS: readonly AccountIdentifierWire[] = [
+  "token_claims",
+  "user_supplied",
+  "unknown",
+  "not_applicable",
+];
 const CATALOG_STATUSES: readonly RuntimeSlotModelCatalogStatus[] = [
   "available",
   "unsupported",
@@ -264,7 +313,7 @@ function invalidResponse(): RuntimeSlotsGatewayError {
 /**
  * Reject response payloads that smuggle secret-shaped keys beyond the
  * host-approved status fields (`secretRef`, `secretConfigured`).
- * `apiKey` / token / password etc. are never valid on slot DTOs.
+ * `apiKey` / tokens / codes / password etc. are never valid on slot DTOs.
  */
 export function assertNoSecretPayloadFields(
   value: unknown,
@@ -279,17 +328,23 @@ export function assertNoSecretPayloadFields(
   if (!isRecord(value)) return;
 
   for (const [key, child] of Object.entries(value)) {
-    const lower = key.toLowerCase();
+    const lower = key.toLowerCase().replace(/[_-]/gu, "");
     if (
       lower === "apikey"
-      || lower === "api_key"
       || lower === "password"
       || lower === "token"
       || lower === "bearer"
       || lower === "authorization"
       || lower === "credential"
       || lower === "privatekey"
-      || lower === "private_key"
+      || lower === "accesstoken"
+      || lower === "refreshtoken"
+      || lower === "idtoken"
+      || lower === "authorizationcode"
+      || lower === "authcode"
+      || lower === "codeverifier"
+      || lower === "clientsecret"
+      || lower === "devicecode"
     ) {
       throw new RuntimeSlotsGatewayError(
         "invalid_runtime_slot_response",
@@ -334,6 +389,12 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
     )
     || !isFiniteTimestamp(value.createdAt)
     || !isFiniteTimestamp(value.updatedAt)
+    || !isOptionalBoundedString(value.accountLabel, 256)
+    || !(
+      value.accessExpiresAt === null
+      || value.accessExpiresAt === undefined
+      || isFiniteTimestamp(value.accessExpiresAt)
+    )
   ) {
     throw invalidResponse();
   }
@@ -377,6 +438,10 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
     roleCustomName: value.roleCustomName ?? null,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
+    accountLabel:
+      value.accountLabel === undefined ? null : value.accountLabel,
+    accessExpiresAt:
+      value.accessExpiresAt === undefined ? null : value.accessExpiresAt,
   };
 }
 
@@ -682,6 +747,96 @@ export function parseLocalCliDetectionView(
   };
 }
 
+function isProfileFieldWire(value: unknown): value is ProfileFieldWire {
+  return typeof value === "string"
+    && (PROFILE_FIELD_WIRES as string[]).includes(value);
+}
+
+function isLoginMethodWire(value: unknown): value is ProviderLoginMethodWire {
+  return typeof value === "string"
+    && (LOGIN_METHODS as string[]).includes(value);
+}
+
+function isAccountIdentifierWire(
+  value: unknown,
+): value is AccountIdentifierWire {
+  return typeof value === "string"
+    && (ACCOUNT_IDENTIFIERS as string[]).includes(value);
+}
+
+/**
+ * Closed parse for one provider login catalog row.
+ * Rejects smuggled secret keys and unknown keys; never invents client_id.
+ */
+export function parseProviderLoginCatalogEntry(
+  value: unknown,
+): ProviderLoginCatalogEntry {
+  assertNoSecretPayloadFields(value);
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, PROVIDER_LOGIN_CATALOG_DTO_KEYS)
+  ) {
+    throw invalidResponse();
+  }
+  if (
+    !isNonEmptyString(value.providerId)
+    || value.providerId.length > MAX_ID_CHARS
+    || !isBoundedString(value.displayName, MAX_NAME_CHARS)
+    || !isLoginMethodWire(value.loginMethod)
+    || !isProfileFieldWire(value.issuer)
+    || !isProfileFieldWire(value.authorizeEndpoint)
+    || !isProfileFieldWire(value.deviceAuthorizationEndpoint)
+    || !isProfileFieldWire(value.tokenEndpoint)
+    || !isProfileFieldWire(value.scopes)
+    || !isProfileFieldWire(value.clientId)
+    || !isOptionalBoundedString(value.knownIssuer, MAX_URL_CHARS)
+    || !isOptionalBoundedString(value.knownAuthorizeEndpoint, MAX_URL_CHARS)
+    || !isOptionalBoundedString(
+      value.knownDeviceAuthorizationEndpoint,
+      MAX_URL_CHARS,
+    )
+    || !isOptionalBoundedString(value.knownTokenEndpoint, MAX_URL_CHARS)
+    || !isOptionalBoundedString(value.knownClientId, MAX_ID_CHARS)
+    || !isAccountIdentifierWire(value.accountIdentifier)
+    || !(
+      value.knownScopes === null
+      || value.knownScopes === undefined
+      || isStringArray(value.knownScopes, 64, 128)
+    )
+  ) {
+    throw invalidResponse();
+  }
+
+  // Fail closed: unknown client_id must not smuggle a knownClientId guess.
+  if (value.clientId === "unknown" && value.knownClientId != null) {
+    throw invalidResponse();
+  }
+  // api_key_only must not advertise OAuth endpoints as known for login.
+  if (value.loginMethod === "api_key_only" && value.knownClientId != null) {
+    throw invalidResponse();
+  }
+
+  return {
+    providerId: value.providerId,
+    displayName: value.displayName,
+    loginMethod: value.loginMethod,
+    issuer: value.issuer,
+    authorizeEndpoint: value.authorizeEndpoint,
+    deviceAuthorizationEndpoint: value.deviceAuthorizationEndpoint,
+    tokenEndpoint: value.tokenEndpoint,
+    scopes: value.scopes,
+    clientId: value.clientId,
+    knownIssuer: value.knownIssuer ?? null,
+    knownAuthorizeEndpoint: value.knownAuthorizeEndpoint ?? null,
+    knownDeviceAuthorizationEndpoint:
+      value.knownDeviceAuthorizationEndpoint ?? null,
+    knownTokenEndpoint: value.knownTokenEndpoint ?? null,
+    knownScopes: value.knownScopes ? value.knownScopes.slice() : null,
+    knownClientId: value.knownClientId ?? null,
+    accountIdentifier: value.accountIdentifier,
+  };
+}
+
 /** Closed parse for draft model catalog probe result. */
 export function parseProbeModelCatalogView(
   value: unknown,
@@ -844,7 +999,19 @@ export function mapRuntimeSlotErrorMessage(code: string): string {
     case "runtime_slot_controller_already_exists":
       return "该项目已有总控槽位，请先降级或删除现有总控后再指定。";
     case "runtime_slot_controller_requires_governed_auth":
-      return "总控角色必须使用受治理认证（API key 或 Grok 登录），不能使用本地 CLI。";
+      return "总控角色必须使用受治理认证（API key、Grok 登录或 OAuth），不能使用本地 CLI。";
+    case "runtime_slot_oauth_login_timeout":
+    case "runtime_slot_oauth_loopback_timeout":
+    case "runtime_slot_oauth_http_timeout":
+    case "runtime_slot_oauth_device_expired":
+    case "runtime_slot_oauth_login_denied":
+    case "runtime_slot_oauth_loopback_denied":
+    case "runtime_slot_oauth_device_denied":
+    case "runtime_slot_oauth_login_state_mismatch":
+    case "runtime_slot_oauth_loopback_state_mismatch":
+      return mapOauthLoginErrorMessage(code);
+    case "runtime_slot_provider_login_catalog_unavailable":
+      return "无法加载 OAuth 提供方目录，请稍后重试。";
     case "invalid_runtime_slot_response":
       return INVALID_RESPONSE;
     default:
@@ -965,6 +1132,11 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
     }
     if (input.launchArgs !== undefined) args.launchArgs = input.launchArgs;
     if (input.statusArgs !== undefined) args.statusArgs = input.statusArgs;
+    if (input.providerId !== undefined) args.providerId = input.providerId;
+    if (input.oauthSupplement !== undefined) {
+      // Public metadata only — never tokens/codes.
+      args.oauthSupplement = { ...input.oauthSupplement };
+    }
     return invokeSlotCommand("create_slot", args, parseRuntimeSlotView);
   }
 
@@ -1130,6 +1302,19 @@ export class TauriRuntimeSlotsGateway implements RuntimeSlotsGateway {
       parseProbeModelCatalogView,
     );
   }
+
+  listProviderLoginCatalog(): Promise<ProviderLoginCatalogEntry[]> {
+    return invokeSlotCommand(
+      "list_provider_login_catalog",
+      {},
+      (payload) => {
+        if (!Array.isArray(payload) || payload.length > 64) {
+          throw invalidResponse();
+        }
+        return payload.map(parseProviderLoginCatalogEntry);
+      },
+    );
+  }
 }
 
 /** In-memory mock for unit tests and non-desktop shells. */
@@ -1181,9 +1366,58 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
     baseUrl: string;
     apiKeyLength: number;
   }> = [];
+  /** Mock provider login catalog (includes api_key_only for filter tests). */
+  private providerCatalog: ProviderLoginCatalogEntry[] =
+    defaultMockProviderLoginCatalog();
+  private providerCatalogFailCode: string | null = null;
+  /**
+   * OAuth create failure injection. When set, createSlot(oauth) throws and
+   * never appends a slot (no optimistic success).
+   */
+  private oauthLoginFailCode: string | null = null;
+  /** Non-secret account label returned on successful mock OAuth create. */
+  private oauthSuccessAccountLabel: string | null = "user@example.test";
+  private oauthSuccessExpiresAt: string =
+    "2026-09-01T00:00:00.000Z";
 
   constructor(initial: RuntimeSlotView[] = []) {
-    this.slots = initial.map((slot) => ({ ...slot }));
+    this.slots = initial.map((slot) => ({
+      ...slot,
+      accountLabel: slot.accountLabel ?? null,
+      accessExpiresAt: slot.accessExpiresAt ?? null,
+    }));
+  }
+
+  seedProviderLoginCatalog(rows: ProviderLoginCatalogEntry[]): void {
+    this.providerCatalog = rows.map((row) => ({
+      ...row,
+      knownScopes: row.knownScopes ? [...row.knownScopes] : null,
+    }));
+    this.providerCatalogFailCode = null;
+  }
+
+  setProviderCatalogFail(code: string): void {
+    this.providerCatalogFailCode = code;
+  }
+
+  /**
+   * Inject OAuth login failure. Failure never creates a slot.
+   * Codes: timeout / denied / state_mismatch families.
+   */
+  setOauthLoginFail(code: string | null): void {
+    this.oauthLoginFailCode = code;
+  }
+
+  setOauthLoginSuccessMeta(options: {
+    accountLabel?: string | null;
+    accessExpiresAt?: string;
+  }): void {
+    if (options.accountLabel !== undefined) {
+      this.oauthSuccessAccountLabel = options.accountLabel;
+    }
+    if (options.accessExpiresAt !== undefined) {
+      this.oauthSuccessExpiresAt = options.accessExpiresAt;
+    }
   }
 
   /** Test helper: place a secret under an opaque ref without exposing it on views. */
@@ -1307,6 +1541,8 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         roleCustomName,
         createdAt: now,
         updatedAt: now,
+        accountLabel: null,
+        accessExpiresAt: null,
       };
       this.slots.push(slot);
       return { ...slot };
@@ -1346,9 +1582,69 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         roleCustomName,
         createdAt: now,
         updatedAt: now,
+        accountLabel: null,
+        accessExpiresAt: null,
       };
       this.slots.push(slot);
       return { ...slot };
+    }
+    if (input.authKind === "oauth") {
+      // Fail closed first — never append a slot on injected failure.
+      if (this.oauthLoginFailCode) {
+        const code = this.oauthLoginFailCode;
+        throw new RuntimeSlotsGatewayError(
+          code,
+          mapRuntimeSlotErrorMessage(code),
+        );
+      }
+      if (!input.providerId?.trim()) {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_input_invalid",
+          mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+        );
+      }
+      if (!input.baseUrl?.trim() || !input.modelId?.trim()) {
+        throw new RuntimeSlotsGatewayError(
+          "runtime_slot_input_invalid",
+          mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+        );
+      }
+      // Tokens stay only in mock secret map under opaque refs — never on view.
+      const accessRef = cryptoRandomId();
+      const refreshRef = cryptoRandomId();
+      this.secrets.set(accessRef, "mock-access-never-on-view");
+      this.secrets.set(refreshRef, "mock-refresh-never-on-view");
+      const accountFromUser = input.oauthSupplement?.accountLabel?.trim();
+      const slot: RuntimeSlotView = {
+        slotId: cryptoRandomId(),
+        projectId: input.projectId,
+        displayName: input.displayName,
+        kind: "governed_grok",
+        governance: "full",
+        authMode: "oauth",
+        baseUrl: input.baseUrl.trim(),
+        modelId: input.modelId.trim(),
+        // Host never surfaces OAuth DPAPI refs on the slot DTO.
+        secretRef: null,
+        secretConfigured: true,
+        executablePath: null,
+        launchArgs: null,
+        statusArgs: null,
+        role,
+        roleCustomName,
+        createdAt: now,
+        updatedAt: now,
+        accountLabel: accountFromUser || this.oauthSuccessAccountLabel,
+        accessExpiresAt: this.oauthSuccessExpiresAt,
+      };
+      this.slots.push(slot);
+      return { ...slot };
+    }
+    if (input.authKind !== "local_cli") {
+      throw new RuntimeSlotsGatewayError(
+        "runtime_slot_input_invalid",
+        mapRuntimeSlotErrorMessage("runtime_slot_input_invalid"),
+      );
     }
     const slot: RuntimeSlotView = {
       slotId: cryptoRandomId(),
@@ -1368,6 +1664,8 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       roleCustomName,
       createdAt: now,
       updatedAt: now,
+      accountLabel: null,
+      accessExpiresAt: null,
     };
     this.slots.push(slot);
     return { ...slot };
@@ -1745,6 +2043,19 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       models: [...this.draftProbeModels],
       reasonCode: null,
     };
+  }
+
+  async listProviderLoginCatalog(): Promise<ProviderLoginCatalogEntry[]> {
+    if (this.providerCatalogFailCode) {
+      throw new RuntimeSlotsGatewayError(
+        this.providerCatalogFailCode,
+        mapRuntimeSlotErrorMessage(this.providerCatalogFailCode),
+      );
+    }
+    return this.providerCatalog.map((row) => ({
+      ...row,
+      knownScopes: row.knownScopes ? [...row.knownScopes] : null,
+    }));
   }
 }
 

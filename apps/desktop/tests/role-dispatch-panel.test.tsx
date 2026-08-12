@@ -63,6 +63,8 @@ function slot(
     roleCustomName: overrides.roleCustomName ?? null,
     createdAt: "2026-08-12T00:00:00.000Z",
     updatedAt: "2026-08-12T00:00:00.000Z",
+    accountLabel: null,
+    accessExpiresAt: null,
     ...overrides,
   };
 }

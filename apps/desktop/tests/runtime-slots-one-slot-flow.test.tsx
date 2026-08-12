@@ -50,6 +50,8 @@ function fixtureApiKeySlot(
     statusArgs: null,
     createdAt: NOW,
     updatedAt: NOW,
+    accountLabel: null,
+    accessExpiresAt: null,
     ...overrides,
   };
 }
@@ -75,6 +77,8 @@ function fixtureExternalSlot(
     statusArgs: ["login", "status"],
     createdAt: NOW,
     updatedAt: NOW,
+    accountLabel: null,
+    accessExpiresAt: null,
     ...overrides,
   };
 }

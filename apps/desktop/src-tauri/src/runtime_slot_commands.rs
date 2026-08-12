@@ -13,9 +13,10 @@ use keeper_storage_sqlite::{
 };
 use pillow_cli_detect::{AuthState, CliDetection};
 use pillow_runtime_slots::{
-    CreateSlotAuth, ExternalCliStatus, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
-    ModelCatalogUnsupportedReason, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView,
-    SecretBytes, UpdateSlotAuthInput, fetch_openai_model_catalog,
+    AccountIdentifierStrategy, ClientIdSource, CreateSlotAuth, ExternalCliStatus, ModelCatalog,
+    ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason, ProfileField,
+    ProviderLoginMethod, RuntimeSlotError, RuntimeSlotService, RuntimeSlotView, SecretBytes,
+    UpdateSlotAuthInput, fetch_openai_model_catalog, provider_login_profiles,
 };
 use serde::Serialize;
 use tauri::State;
@@ -118,6 +119,34 @@ pub struct LocalCliDetectionDto {
     pub account_label: Option<String>,
     /// Present when `auth_status == "unknown"` (or optional detail); never secret.
     pub auth_reason: Option<String>,
+}
+
+/// Closed host DTO for one provider login catalog row.
+///
+/// Public OIDC/OAuth metadata only — never tokens, codes, or client secrets.
+/// `known_client_id` is only set when the host has a PublicDocumented id.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderLoginCatalogEntryDto {
+    pub provider_id: String,
+    pub display_name: String,
+    /// `pkce` | `device_code` | `api_key_only`
+    pub login_method: String,
+    /// `known` | `user_supplied` | `unknown` | `not_applicable`
+    pub issuer: String,
+    pub authorize_endpoint: String,
+    pub device_authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub scopes: String,
+    pub client_id: String,
+    pub known_issuer: Option<String>,
+    pub known_authorize_endpoint: Option<String>,
+    pub known_device_authorization_endpoint: Option<String>,
+    pub known_token_endpoint: Option<String>,
+    pub known_scopes: Option<Vec<String>>,
+    pub known_client_id: Option<String>,
+    /// `token_claims` | `user_supplied` | `unknown` | `not_applicable`
+    pub account_identifier: String,
 }
 
 /// Draft-state model catalog probe (no persisted slot). Closed, secret-free.
@@ -273,6 +302,92 @@ pub fn probe_model_catalog(
     api_key: String,
 ) -> Result<ProbeModelCatalogDto, CommandError> {
     probe_model_catalog_impl(base_url, api_key)
+}
+
+/// Public provider-login catalog (OIDC/OAuth metadata only).
+///
+/// Never returns tokens, client secrets, or guessed Unknown client ids.
+#[tauri::command]
+pub fn list_provider_login_catalog() -> Result<Vec<ProviderLoginCatalogEntryDto>, CommandError> {
+    list_provider_login_catalog_impl()
+}
+
+pub(crate) fn list_provider_login_catalog_impl()
+-> Result<Vec<ProviderLoginCatalogEntryDto>, CommandError> {
+    Ok(provider_login_profiles()
+        .iter()
+        .map(provider_login_profile_to_dto)
+        .collect())
+}
+
+fn provider_login_profile_to_dto(
+    profile: &pillow_runtime_slots::ProviderLoginProfile,
+) -> ProviderLoginCatalogEntryDto {
+    let (client_id_field, known_client_id) = match profile.client_id.source {
+        ClientIdSource::PublicDocumented => match profile.client_id.value {
+            ProfileField::Known(id) => (String::from("known"), Some(id.to_owned())),
+            ProfileField::UserSupplied => (String::from("user_supplied"), None),
+            ProfileField::Unknown => (String::from("unknown"), None),
+            ProfileField::NotApplicable => (String::from("not_applicable"), None),
+        },
+        // Unknown provenance must never smuggle a knownClientId guess.
+        ClientIdSource::Unknown => (profile_field_wire(&profile.client_id.value), None),
+        ClientIdSource::UserSupplied => (String::from("user_supplied"), None),
+    };
+
+    ProviderLoginCatalogEntryDto {
+        provider_id: profile.provider_id.to_owned(),
+        display_name: profile.display_name.to_owned(),
+        login_method: match profile.login_method {
+            ProviderLoginMethod::Pkce => "pkce",
+            ProviderLoginMethod::DeviceCode => "device_code",
+            ProviderLoginMethod::ApiKeyOnly => "api_key_only",
+        }
+        .to_owned(),
+        issuer: profile_field_wire(&profile.issuer),
+        authorize_endpoint: profile_field_wire(&profile.authorize_endpoint),
+        device_authorization_endpoint: profile_field_wire(&profile.device_authorization_endpoint),
+        token_endpoint: profile_field_wire(&profile.token_endpoint),
+        scopes: profile_field_wire(&profile.scopes),
+        client_id: client_id_field,
+        known_issuer: known_string(&profile.issuer),
+        known_authorize_endpoint: known_string(&profile.authorize_endpoint),
+        known_device_authorization_endpoint: known_string(&profile.device_authorization_endpoint),
+        known_token_endpoint: known_string(&profile.token_endpoint),
+        known_scopes: known_scopes(&profile.scopes),
+        known_client_id,
+        account_identifier: match profile.account_identifier {
+            AccountIdentifierStrategy::TokenClaims { .. } => "token_claims",
+            AccountIdentifierStrategy::UserSupplied => "user_supplied",
+            AccountIdentifierStrategy::Unknown => "unknown",
+            AccountIdentifierStrategy::NotApplicable => "not_applicable",
+        }
+        .to_owned(),
+    }
+}
+
+fn profile_field_wire<T>(field: &ProfileField<T>) -> String {
+    match field {
+        ProfileField::Known(_) => "known",
+        ProfileField::UserSupplied => "user_supplied",
+        ProfileField::Unknown => "unknown",
+        ProfileField::NotApplicable => "not_applicable",
+    }
+    .to_owned()
+}
+
+fn known_string(field: &ProfileField<&'static str>) -> Option<String> {
+    match field {
+        ProfileField::Known(value) => Some((*value).to_owned()),
+        _ => None,
+    }
+}
+
+fn known_scopes(field: &ProfileField<&'static [&'static str]>) -> Option<Vec<String>> {
+    match field {
+        ProfileField::Known(scopes) => Some(scopes.iter().map(|s| (*s).to_owned()).collect()),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -906,27 +1021,78 @@ fn start_runtime_slot_impl_locked(
             "Local CLI slots are status-only and cannot be launched by Pillow.",
         ));
     }
-    let resolved = settings
-        .resolve_runtime(Some(&project_id), &process_env_map())
-        .map_err(|error| command_error(error.code(), &error.to_string()))?;
-    let executable =
-        discover_grok_executable_with_override(resolved.grok_executable.value.as_deref())
-            .map_err(|error| command_error(error.code, &error.message))?;
-    let prepared = slots
-        .prepare_grok(project_id_value, slot_id_value)
+
+    // Path is derived from auth + provider profile — not a user toggle.
+    let path = slots
+        .resolve_path(project_id_value, slot_id_value)
         .map_err(map_slot_error)?;
-    let config = build_slot_grok_config(executable, prepared)
-        .map_err(|error| command_error(error.code, &error.message))?;
-    runtime
-        .activate_grok(project_id.clone(), slot_id.clone(), config)
-        .map_err(|error| command_error(error.code, &error.message))?;
-    Ok(RuntimeSlotStartDto {
-        slot_id,
-        project_id,
-        kind: "governed_grok".into(),
-        governance: "full".into(),
-        status: "active".into(),
-    })
+    match path.path {
+        pillow_runtime_slots::SlotExecutionPath::NotRunnable => Err(command_error(
+            "external_cli_launch_unsupported",
+            "This slot is not a conversation runtime.",
+        )),
+        pillow_runtime_slots::SlotExecutionPath::NativeAdapter => {
+            // NativeAdapter: Pillow is the harness (full governance). Refuse
+            // stuffing into the Grok shell. Prepare validates access-only
+            // credential injection + request shape via provider-adapters.
+            if !path.governance.is_full() {
+                return Err(command_error(
+                    "runtime_slot_controller_requires_governed_auth",
+                    "NativeAdapter path is marked incomplete governance and cannot start.",
+                ));
+            }
+            let prepared = slots
+                .prepare_slot(project_id_value, slot_id_value)
+                .map_err(map_slot_error)?;
+            match prepared {
+                pillow_runtime_slots::PreparedSlot::NativeAdapter(native) => {
+                    // Do not call prepare_grok / activate_grok — that would
+                    // silently send a wrong request shape.
+                    //
+                    // Wire `kind` stays `governed_grok` (closed renderer allowlist
+                    // + Oauth list DTO already use that label). Path is signalled
+                    // via `status = native_adapter_prepared` and by never
+                    // activating the Grok ACP child.
+                    let _ = (native.provider_id.as_str(), native.governance_mechanism);
+                    Ok(RuntimeSlotStartDto {
+                        slot_id,
+                        project_id,
+                        kind: "governed_grok".into(),
+                        governance: "full".into(),
+                        status: "native_adapter_prepared".into(),
+                    })
+                }
+                pillow_runtime_slots::PreparedSlot::GrokShell(_) => Err(command_error(
+                    "runtime_slot_path_not_grok_shell_expressible",
+                    "Path resolution selected NativeAdapter but prepare returned GrokShell.",
+                )),
+            }
+        }
+        pillow_runtime_slots::SlotExecutionPath::GrokShell => {
+            let resolved = settings
+                .resolve_runtime(Some(&project_id), &process_env_map())
+                .map_err(|error| command_error(error.code(), &error.to_string()))?;
+            let executable =
+                discover_grok_executable_with_override(resolved.grok_executable.value.as_deref())
+                    .map_err(|error| command_error(error.code, &error.message))?;
+            // prepare_grok fails closed if the slot actually requires NativeAdapter.
+            let prepared = slots
+                .prepare_grok(project_id_value, slot_id_value)
+                .map_err(map_slot_error)?;
+            let config = build_slot_grok_config(executable, prepared)
+                .map_err(|error| command_error(error.code, &error.message))?;
+            runtime
+                .activate_grok(project_id.clone(), slot_id.clone(), config)
+                .map_err(|error| command_error(error.code, &error.message))?;
+            Ok(RuntimeSlotStartDto {
+                slot_id,
+                project_id,
+                kind: "governed_grok".into(),
+                governance: "full".into(),
+                status: "active".into(),
+            })
+        }
+    }
 }
 
 pub(crate) fn set_runtime_slot_model_impl(

@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EXTERNAL_CLI_STATUS_DTO_KEYS,
   MockRuntimeSlotsGateway,
+  PROVIDER_LOGIN_CATALOG_DTO_KEYS,
   RUNTIME_SLOT_DTO_KEYS,
   RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS,
   RUNTIME_SLOT_MODEL_SWITCH_DTO_KEYS,
@@ -21,6 +22,7 @@ import {
   mapModelSwitchResultMessage,
   mapRuntimeSlotErrorMessage,
   parseExternalCliStatusView,
+  parseProviderLoginCatalogEntry,
   parseRuntimeSlotModelCatalogView,
   parseRuntimeSlotModelSwitchView,
   parseRuntimeSlotStartView,
@@ -31,8 +33,13 @@ import {
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   MODEL_SWITCH_RESTARTED_MESSAGE,
   MODEL_SWITCH_SAVED_INACTIVE_MESSAGE,
+  OAUTH_LOGIN_DENIED_MESSAGE,
+  OAUTH_LOGIN_STATE_MISMATCH_MESSAGE,
+  OAUTH_LOGIN_TIMEOUT_MESSAGE,
+  type ProviderLoginCatalogEntry,
   type RuntimeSlotView,
 } from "../src/features/settings/runtimeSlotsTypes";
+import { defaultMockProviderLoginCatalog } from "../src/features/settings/oauthLoginUi";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -64,6 +71,8 @@ function apiKeySlot(
     statusArgs: null,
     createdAt: NOW,
     updatedAt: NOW,
+    accountLabel: null,
+    accessExpiresAt: null,
     ...overrides,
   };
 }
@@ -89,6 +98,8 @@ function externalSlot(
     statusArgs: ["login", "status"],
     createdAt: NOW,
     updatedAt: NOW,
+    accountLabel: null,
+    accessExpiresAt: null,
     ...overrides,
   };
 }
@@ -125,6 +136,16 @@ describe("runtime slot DTO parsers", () => {
       assertNoSecretPayloadFields({ token: "abc" })
     ).toThrow(/secret field/i);
 
+    expect(() =>
+      assertNoSecretPayloadFields({ access_token: "atk" })
+    ).toThrow(/secret field/i);
+    expect(() =>
+      assertNoSecretPayloadFields({ refreshToken: "rtk" })
+    ).toThrow(/secret field/i);
+    expect(() =>
+      assertNoSecretPayloadFields({ authorization_code: "code" })
+    ).toThrow(/secret field/i);
+
     // Status fields are allowed by name; values must not look like free-form secrets
     // (opaque ref is fine).
     expect(() =>
@@ -133,6 +154,84 @@ describe("runtime slot DTO parsers", () => {
         secretConfigured: true,
       })
     ).not.toThrow();
+  });
+
+  it("accepts oauth RuntimeSlotDto with accountLabel + accessExpiresAt", () => {
+    const oauth = apiKeySlot({
+      authMode: "oauth",
+      secretRef: null,
+      secretConfigured: true,
+      accountLabel: "user@example.test",
+      accessExpiresAt: "2026-09-01T00:00:00.000Z",
+    });
+    expect(parseRuntimeSlotView(oauth)).toEqual(oauth);
+    expect(RUNTIME_SLOT_DTO_KEYS).toContain("accountLabel");
+    expect(RUNTIME_SLOT_DTO_KEYS).toContain("accessExpiresAt");
+  });
+
+  it("rejects oauth slot smuggling accessToken / code keys", () => {
+    const oauth = apiKeySlot({
+      authMode: "oauth",
+      secretRef: null,
+      accountLabel: "user@example.test",
+      accessExpiresAt: "2026-09-01T00:00:00.000Z",
+    });
+    expect(() =>
+      parseRuntimeSlotView({
+        ...oauth,
+        accessToken: "must-not-appear",
+      })
+    ).toThrow();
+    expect(() =>
+      parseRuntimeSlotView({
+        ...oauth,
+        refresh_token: "must-not-appear",
+      })
+    ).toThrow();
+  });
+
+  it("accepts provider login catalog entry and rejects unknown / secret keys", () => {
+    const good: ProviderLoginCatalogEntry =
+      defaultMockProviderLoginCatalog().find(
+        (row) => row.providerId === "openai",
+      )!;
+    expect(parseProviderLoginCatalogEntry(good)).toEqual(good);
+    expect(PROVIDER_LOGIN_CATALOG_DTO_KEYS).toContain("providerId");
+
+    expect(() =>
+      parseProviderLoginCatalogEntry({
+        ...good,
+        smuggledPath: "C:\\x",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+
+    expect(() =>
+      parseProviderLoginCatalogEntry({
+        ...good,
+        access_token: "nope",
+      })
+    ).toThrow(/secret field/i);
+
+    // Unknown client_id must not carry a guessed knownClientId.
+    expect(() =>
+      parseProviderLoginCatalogEntry({
+        ...good,
+        clientId: "unknown",
+        knownClientId: "guessed-client",
+      })
+    ).toThrow(/invalid runtime slot response/i);
+  });
+
+  it("maps oauth login error codes to distinct copy", () => {
+    expect(
+      mapRuntimeSlotErrorMessage("runtime_slot_oauth_login_timeout"),
+    ).toBe(OAUTH_LOGIN_TIMEOUT_MESSAGE);
+    expect(
+      mapRuntimeSlotErrorMessage("runtime_slot_oauth_login_denied"),
+    ).toBe(OAUTH_LOGIN_DENIED_MESSAGE);
+    expect(
+      mapRuntimeSlotErrorMessage("runtime_slot_oauth_login_state_mismatch"),
+    ).toBe(OAUTH_LOGIN_STATE_MISMATCH_MESSAGE);
   });
 
   it("rejects governance/kind mismatches (host field is explicit)", () => {
@@ -201,7 +300,8 @@ describe("runtime slot DTO parsers", () => {
 
     // Pin allowlist lengths so silently empty validators cannot go green.
     // 15 -> 17 when the uniform slot model added `role` + `roleCustomName`.
-    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(17);
+    // 17 -> 19 when OAuth login UI added `accountLabel` + `accessExpiresAt`.
+    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(19);
     expect(EXTERNAL_CLI_STATUS_DTO_KEYS).toHaveLength(8);
     expect(RUNTIME_SLOT_START_DTO_KEYS).toHaveLength(5);
     expect(RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS).toHaveLength(6);
@@ -393,6 +493,51 @@ describe("update/create apiKey arg builders", () => {
       apiKey: "  sk-new  ",
     });
     expect(args.apiKey).toBe("sk-new");
+  });
+});
+
+describe("MockRuntimeSlotsGateway oauth create", () => {
+  it("createSlot oauth never returns tokens and fails closed on inject", async () => {
+    const gateway = new MockRuntimeSlotsGateway();
+    gateway.setOauthLoginFail("runtime_slot_oauth_login_timeout");
+    await expect(
+      gateway.createSlot({
+        projectId: PROJECT,
+        displayName: "O",
+        authKind: "oauth",
+        providerId: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        modelId: "gpt-4o",
+        oauthSupplement: { clientId: "cid" },
+      }),
+    ).rejects.toMatchObject({ code: "runtime_slot_oauth_login_timeout" });
+    expect(gateway.getSlotsSnapshot()).toHaveLength(0);
+
+    gateway.setOauthLoginFail(null);
+    const slot = await gateway.createSlot({
+      projectId: PROJECT,
+      displayName: "O",
+      authKind: "oauth",
+      providerId: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "gpt-4o",
+      oauthSupplement: { clientId: "cid" },
+    });
+    expect(slot.authMode).toBe("oauth");
+    expect(slot.accountLabel).toBeTruthy();
+    expect(slot.accessExpiresAt).toBeTruthy();
+    expect(JSON.stringify(slot)).not.toMatch(/access_token|refresh_token/iu);
+    expect(slot.secretRef).toBeNull();
+  });
+
+  it("listProviderLoginCatalog returns closed public rows", async () => {
+    const gateway = new MockRuntimeSlotsGateway();
+    const rows = await gateway.listProviderLoginCatalog();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((row) => row.loginMethod === "api_key_only")).toBe(true);
+    for (const row of rows) {
+      expect(parseProviderLoginCatalogEntry(row)).toEqual(row);
+    }
   });
 });
 

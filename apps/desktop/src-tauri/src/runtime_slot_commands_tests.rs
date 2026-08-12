@@ -1471,3 +1471,78 @@ fn probe_model_catalog_rejects_blank_key_without_network_and_without_echo() {
     assert_eq!(err.code, "runtime_slot_input_invalid");
     assert!(!err.message.contains(marker));
 }
+
+/// NativeAdapter path must not activate the Grok shell (no base_url+env_key stuffing).
+#[cfg(windows)]
+#[test]
+fn start_native_adapter_codex_slot_prepares_without_grok_shell() {
+    use chrono::{Duration, Utc};
+    use keeper_project::ProjectId;
+    use keeper_storage_sqlite::{RuntimeSlotId, SlotRole};
+    use pillow_runtime_slots::{CreateSlotAuth, SecretBytes};
+    use uuid::Uuid;
+
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let project_uuid = Uuid::parse_str(&harness.project_id).unwrap();
+    let project_id = ProjectId(project_uuid);
+
+    let access = format!("{}{}", "desk-acc-", "ess-native-01");
+    let refresh = format!("{}{}", "desk-ref-", "resh-native-01");
+    let created = harness
+        .slots
+        .create_slot(
+            project_id,
+            "Codex native".into(),
+            CreateSlotAuth::Oauth {
+                provider_id: "chatgpt-codex".into(),
+                issuer: "https://auth.openai.com".into(),
+                client_id: "client-1".into(),
+                scopes: vec!["openid".into()],
+                token_endpoint: "https://auth.openai.com/oauth/token".into(),
+                account_label: Some("acct-desk".into()),
+                base_url: "https://api.example.invalid/v1".into(),
+                model_id: "gpt-5.4".into(),
+                access_token: SecretBytes::new(access.clone()),
+                refresh_token: SecretBytes::new(refresh.clone()),
+                access_expires_at: Utc::now() + Duration::hours(2),
+            },
+            SlotRole::default_unassigned(),
+        )
+        .unwrap();
+
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+    let started = start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        created.slot.id.0.to_string(),
+    )
+    .unwrap();
+
+    // Closed wire kind remains governed_grok; path is status + no grok activate.
+    assert_eq!(started.kind, "governed_grok");
+    assert_eq!(started.governance, "full");
+    assert_eq!(started.status, "native_adapter_prepared");
+    // Must not have activated a grok conversation runtime.
+    assert!(
+        !runtime
+            .is_active_slot(&harness.project_id, &created.slot.id.0.to_string())
+            .unwrap()
+    );
+
+    // prepare_grok remains refused for this slot (cannot stuff into shell).
+    let slot_id = RuntimeSlotId(created.slot.id.0);
+    match harness.slots.prepare_grok(project_id, slot_id) {
+        Ok(_) => panic!("codex must not prepare_grok"),
+        Err(err) => {
+            assert_eq!(err.code(), "runtime_slot_path_not_grok_shell_expressible");
+            let text = format!("{err}");
+            assert!(!text.contains(&access));
+            assert!(!text.contains(&refresh));
+        }
+    }
+}

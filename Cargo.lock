@@ -2747,6 +2747,7 @@ dependencies = [
  "keeper-process-executor",
  "keeper-project",
  "keeper-storage-sqlite",
+ "pillow-provider-adapters",
  "serde",
  "serde_json",
  "sha2",

@@ -45,3 +45,4 @@ Thumbs.db
 
 # Stray cargo target dirs created by workers/gates (e.g. target-step1c-gate/)
 /target-*/
+.superpowers/logs/

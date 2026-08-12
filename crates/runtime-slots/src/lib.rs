@@ -1,6 +1,7 @@
 //! Host-side runtime-slot foundation.
 
 mod catalog;
+mod execution_path;
 mod grok_config;
 mod oauth;
 mod oauth_transport;
@@ -26,6 +27,12 @@ use uuid::Uuid;
 pub use catalog::{
     ModelCatalog, ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason,
     fetch_openai_model_catalog,
+};
+pub use execution_path::{
+    ExecutionPathDecision, ExecutionPathError, NATIVE_ADAPTER_GOVERNANCE_MECHANISM, PathGovernance,
+    PathIncompleteReason, PreparedNativeAdapter, SlotExecutionPath, api_key_credential,
+    oauth_access_credential, prepare_native_request, reject_if_not_shell_expressible,
+    resolve_execution_path, shell_inexpressible_detail,
 };
 pub use oauth::{
     ACCESS_TOKEN_REFRESH_SKEW, PkceCodes, TokenResponse, access_token_needs_refresh,
@@ -133,6 +140,10 @@ pub enum RuntimeSlotError {
     OauthDeviceExpired,
     #[error("oauth device authorization was denied")]
     OauthDeviceDenied,
+    /// Provider request shape cannot ride the Grok shell (`base_url`+`env_key`).
+    /// Use the NativeAdapter path instead — never silently stuff into grok shell.
+    #[error("{0}")]
+    ExecutionPath(#[from] ExecutionPathError),
 }
 
 impl RuntimeSlotError {
@@ -173,6 +184,7 @@ impl RuntimeSlotError {
             Self::OauthBrowserOpenFailed => "runtime_slot_oauth_browser_open_failed",
             Self::OauthDeviceExpired => "runtime_slot_oauth_device_expired",
             Self::OauthDeviceDenied => "runtime_slot_oauth_device_denied",
+            Self::ExecutionPath(inner) => inner.code(),
         }
     }
 }
@@ -240,6 +252,44 @@ pub enum PreparedGrokSlot {
         model_id: String,
         api_key: SecretBytes,
     },
+}
+
+impl std::fmt::Debug for PreparedGrokSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Login { model_id } => {
+                f.debug_struct("Login").field("model_id", model_id).finish()
+            }
+            Self::ApiKey {
+                private_home,
+                model_id,
+                api_key,
+            } => f
+                .debug_struct("ApiKey")
+                .field("private_home", private_home)
+                .field("model_id", model_id)
+                .field("api_key", api_key) // SecretBytes Debug is redacted
+                .finish(),
+        }
+    }
+}
+
+/// Unified prepare result after path selection.
+///
+/// - [`Self::GrokShell`] — existing ACP child launch package.
+/// - [`Self::NativeAdapter`] — host harness + prepared model HTTP request.
+pub enum PreparedSlot {
+    GrokShell(PreparedGrokSlot),
+    NativeAdapter(PreparedNativeAdapter),
+}
+
+impl std::fmt::Debug for PreparedSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GrokShell(inner) => f.debug_tuple("GrokShell").field(inner).finish(),
+            Self::NativeAdapter(inner) => f.debug_tuple("NativeAdapter").field(inner).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -888,31 +938,107 @@ impl RuntimeSlotService {
             .collect()
     }
 
+    /// Resolve the execution path for a project-scoped slot (no secret I/O).
+    pub fn resolve_path(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+    ) -> Result<ExecutionPathDecision, RuntimeSlotError> {
+        let slot = self.get(project_id, slot_id)?;
+        resolve_execution_path(&slot.auth).map_err(RuntimeSlotError::from)
+    }
+
+    /// Prepare a slot after path selection.
+    ///
+    /// - GrokShell → existing private home + env_key injection.
+    /// - NativeAdapter → access-token credential into provider-adapters
+    ///   `prepare_request` (refresh never leaves this service).
+    /// - LocalCli / incomplete → explicit reject.
+    pub fn prepare_slot(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+    ) -> Result<PreparedSlot, RuntimeSlotError> {
+        let slot = self.get(project_id, slot_id)?;
+        let decision = resolve_execution_path(&slot.auth)?;
+        match decision.path {
+            SlotExecutionPath::NotRunnable => Err(RuntimeSlotError::from(
+                ExecutionPathError::LocalCliNotRunnable,
+            )),
+            SlotExecutionPath::GrokShell => self
+                .prepare_grok_shell_inner(project_id, slot_id, &slot)
+                .map(PreparedSlot::GrokShell),
+            SlotExecutionPath::NativeAdapter => self
+                .prepare_native_adapter_inner(project_id, slot_id, &slot, &decision)
+                .map(PreparedSlot::NativeAdapter),
+        }
+    }
+
+    /// Grok-shell prepare only. Refuses providers that require NativeAdapter
+    /// (no silent `base_url`+`env_key` stuffing).
     pub fn prepare_grok(
         &self,
         project_id: ProjectId,
         slot_id: RuntimeSlotId,
     ) -> Result<PreparedGrokSlot, RuntimeSlotError> {
         let slot = self.get(project_id, slot_id)?;
-        match slot.auth {
-            SlotAuth::GrokLogin { model_id } => Ok(PreparedGrokSlot::Login { model_id }),
+        let decision = resolve_execution_path(&slot.auth)?;
+        match decision.path {
+            SlotExecutionPath::GrokShell => {
+                self.prepare_grok_shell_inner(project_id, slot_id, &slot)
+            }
+            SlotExecutionPath::NativeAdapter => {
+                let adapter = decision.adapter.as_ref().ok_or_else(|| {
+                    RuntimeSlotError::from(ExecutionPathError::NotGrokShellExpressible {
+                        provider_id: decision
+                            .provider_id
+                            .clone()
+                            .unwrap_or_else(|| String::from("unknown")),
+                        detail: String::from(
+                            "native adapter path required; prepare_grok refuses grok shell stuffing",
+                        ),
+                    })
+                })?;
+                Err(RuntimeSlotError::from(
+                    reject_if_not_shell_expressible(adapter)
+                        .err()
+                        .unwrap_or_else(|| ExecutionPathError::NotGrokShellExpressible {
+                            provider_id: adapter.provider_id.clone(),
+                            detail: shell_inexpressible_detail(adapter),
+                        }),
+                ))
+            }
+            SlotExecutionPath::NotRunnable => Err(RuntimeSlotError::NotGovernedGrok),
+        }
+    }
+
+    fn prepare_grok_shell_inner(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        slot: &RuntimeSlot,
+    ) -> Result<PreparedGrokSlot, RuntimeSlotError> {
+        match &slot.auth {
+            SlotAuth::GrokLogin { model_id } => Ok(PreparedGrokSlot::Login {
+                model_id: model_id.clone(),
+            }),
             SlotAuth::ApiKey {
                 base_url,
                 model_id,
                 secret_ref,
             } => {
-                let api_key = self.secrets.get(&secret_ref)?;
+                let api_key = self.secrets.get(secret_ref)?;
                 let private_home = grok_config::write_private_grok_config(
                     &self.private_homes,
                     project_id,
                     slot_id,
                     &slot.display_name,
-                    &base_url,
-                    &model_id,
+                    base_url,
+                    model_id,
                 )?;
                 Ok(PreparedGrokSlot::ApiKey {
                     private_home,
-                    model_id,
+                    model_id: model_id.clone(),
                     api_key,
                 })
             }
@@ -928,19 +1054,81 @@ impl RuntimeSlotService {
                 issuer: _,
                 scopes: _,
                 account_label: _,
-            } => self.prepare_oauth_slot(
+            } => self.prepare_oauth_grok_shell(
                 project_id,
                 slot_id,
                 &slot.display_name,
-                &client_id,
-                &token_endpoint,
-                &base_url,
-                &model_id,
-                &access_secret_ref,
-                &refresh_secret_ref,
-                access_expires_at,
+                client_id,
+                token_endpoint,
+                base_url,
+                model_id,
+                access_secret_ref,
+                refresh_secret_ref,
+                *access_expires_at,
             ),
             SlotAuth::LocalCli { .. } => Err(RuntimeSlotError::NotGovernedGrok),
+        }
+    }
+
+    fn prepare_native_adapter_inner(
+        &self,
+        project_id: ProjectId,
+        slot_id: RuntimeSlotId,
+        slot: &RuntimeSlot,
+        decision: &ExecutionPathDecision,
+    ) -> Result<PreparedNativeAdapter, RuntimeSlotError> {
+        let adapter = decision.adapter.clone().ok_or_else(|| {
+            RuntimeSlotError::from(ExecutionPathError::AdapterLookup {
+                provider_id: decision
+                    .provider_id
+                    .clone()
+                    .unwrap_or_else(|| String::from("unknown")),
+                detail: String::from("path decision missing adapter descriptor"),
+            })
+        })?;
+
+        match &slot.auth {
+            SlotAuth::Oauth {
+                client_id,
+                token_endpoint,
+                model_id,
+                access_secret_ref,
+                refresh_secret_ref,
+                access_expires_at,
+                account_label,
+                ..
+            } => {
+                // Access only — resolve_oauth_access_token never returns refresh.
+                let access = self.resolve_oauth_access_token(
+                    project_id,
+                    slot_id,
+                    client_id,
+                    token_endpoint,
+                    access_secret_ref,
+                    refresh_secret_ref,
+                    *access_expires_at,
+                )?;
+                let access_str = std::str::from_utf8(access.as_bytes())
+                    .map_err(|_| RuntimeSlotError::InvalidInput)?
+                    .to_owned();
+                // Drop SecretBytes before building credential strings for prepare.
+                drop(access);
+
+                let credential = oauth_access_credential(access_str, account_label.clone());
+                // Minimal body for prepare-time shape validation; host fills
+                // turn payloads when a full native runtime turn is wired.
+                let body = serde_json::json!({ "input": [] });
+                prepare_native_request(&adapter, &credential, model_id, body)
+                    .map_err(RuntimeSlotError::from)
+            }
+            SlotAuth::ApiKey { .. } | SlotAuth::GrokLogin { .. } | SlotAuth::LocalCli { .. } => {
+                // Path resolution should never route these to NativeAdapter today.
+                Err(RuntimeSlotError::from(ExecutionPathError::NativePrepare {
+                    detail: String::from(
+                        "native prepare only supported for OAuth rewrite providers in this ticket",
+                    ),
+                }))
+            }
         }
     }
 
@@ -1058,8 +1246,10 @@ impl RuntimeSlotService {
         }
     }
 
+    /// OAuth → Grok shell: inject **access token only** as env_key material.
+    /// Refresh stays in DPAPI and is never returned.
     #[allow(clippy::too_many_arguments)]
-    fn prepare_oauth_slot(
+    fn prepare_oauth_grok_shell(
         &self,
         project_id: ProjectId,
         slot_id: RuntimeSlotId,

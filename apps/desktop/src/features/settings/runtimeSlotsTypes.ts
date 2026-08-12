@@ -15,7 +15,7 @@ export type RuntimeSlotKind = "governed_grok" | "external_cli";
 export type RuntimeSlotGovernance = "full" | "none";
 
 /** Present only on governed auth (`governed_grok` wire kind). */
-export type GrokSlotAuthMode = "login" | "api_key";
+export type GrokSlotAuthMode = "login" | "api_key" | "oauth";
 
 /** Slot role within a project. Controller is at most one and must be governed. */
 export type RuntimeSlotRole = "controller" | "librarian" | "custom";
@@ -25,6 +25,7 @@ export type RuntimeSlotRole = "controller" | "librarian" | "custom";
  * `secretRef` is an opaque host reference (not key material); UI must not
  * present it as a credential. Prefer `secretConfigured` for status copy.
  * There is never an `apiKey` field on this type.
+ * OAuth tokens never appear here — only non-sensitive accountLabel + expiry.
  */
 export type RuntimeSlotView = {
   slotId: string;
@@ -44,6 +45,17 @@ export type RuntimeSlotView = {
   roleCustomName: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Non-sensitive OAuth account label (email / display name). Null for
+   * non-OAuth slots or when the provider does not yield a label.
+   * Never token material.
+   */
+  accountLabel: string | null;
+  /**
+   * Access-token expiry (RFC3339) for OAuth slots. Null otherwise.
+   * Access/refresh token strings are never on this DTO.
+   */
+  accessExpiresAt: string | null;
 };
 
 /** External CLI account-status command result (host may return raw stdout). */
@@ -111,11 +123,11 @@ export type RuntimeSlotModelSwitchView = {
 };
 
 /** Auth kind for unified create_slot (host `auth_kind`). */
-export type SlotAuthKind = "api_key" | "grok_login" | "local_cli";
+export type SlotAuthKind = "api_key" | "grok_login" | "local_cli" | "oauth";
 
 /**
  * Data-driven auth method catalog for the create form.
- * Adding OAuth later is one more row here — not a new UI branch tree.
+ * OAuth is one more row here — not a new UI branch tree.
  */
 export type SlotAuthMethodOption = {
   id: SlotAuthKind;
@@ -137,6 +149,13 @@ export const SLOT_AUTH_METHODS: readonly SlotAuthMethodOption[] = [
     id: "grok_login",
     label: "已登录的 Grok",
     description: "使用本机默认 Grok 登录 profile；受 Pillow 完整治理。",
+    allowsController: true,
+  },
+  {
+    id: "oauth",
+    label: "OAuth 登录",
+    description:
+      "通过浏览器完成 OIDC/OAuth 授权；受 Pillow 完整治理，可担任总控。",
     allowsController: true,
   },
   {
@@ -172,6 +191,21 @@ export const SLOT_ROLE_OPTIONS: readonly SlotRoleOption[] = [
   },
 ];
 
+/**
+ * Public OAuth metadata the user may supply to complete an incomplete
+ * provider profile. Never carries tokens, codes, or client secrets.
+ */
+export type OauthLoginSupplementInput = {
+  clientId?: string;
+  issuer?: string;
+  authorizeEndpoint?: string;
+  deviceAuthorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  scopes?: string[];
+  /** When the catalog marks account id as user-supplied. */
+  accountLabel?: string;
+};
+
 /** Unified create input — one command for all auth variants. */
 export type CreateSlotInput = {
   projectId: string;
@@ -186,6 +220,10 @@ export type CreateSlotInput = {
   executablePath?: string;
   launchArgs?: string[];
   statusArgs?: string[];
+  /** OAuth: catalog provider id (e.g. `openai`, `xai`, `custom-oidc`). */
+  providerId?: string;
+  /** OAuth: user-supplied public fields for Unknown / UserSupplied catalog rows. */
+  oauthSupplement?: OauthLoginSupplementInput;
 };
 
 /**
@@ -267,7 +305,17 @@ export type RuntimeSlotsGatewayErrorCode =
   | "runtime_slot_project_mismatch"
   | "runtime_slot_update_unavailable"
   | "runtime_slot_controller_already_exists"
-  | "runtime_slot_controller_requires_governed_auth";
+  | "runtime_slot_controller_requires_governed_auth"
+  | "runtime_slot_oauth_login_timeout"
+  | "runtime_slot_oauth_login_denied"
+  | "runtime_slot_oauth_login_state_mismatch"
+  | "runtime_slot_oauth_loopback_timeout"
+  | "runtime_slot_oauth_loopback_denied"
+  | "runtime_slot_oauth_loopback_state_mismatch"
+  | "runtime_slot_oauth_device_expired"
+  | "runtime_slot_oauth_device_denied"
+  | "runtime_slot_oauth_http_timeout"
+  | "runtime_slot_provider_login_catalog_unavailable";
 
 export class RuntimeSlotsGatewayError extends Error {
   readonly code: string;
@@ -344,6 +392,11 @@ export interface RuntimeSlotsGateway {
     baseUrl: string,
     apiKey: string,
   ): Promise<ProbeModelCatalogView>;
+  /**
+   * Public provider login catalog (no tokens, no client secrets).
+   * Host command: `list_provider_login_catalog`.
+   */
+  listProviderLoginCatalog(): Promise<ProviderLoginCatalogEntry[]>;
 }
 
 /**
@@ -372,7 +425,7 @@ export const DEFAULT_CUSTOM_ROLE_NAME = "未分配";
 export const GUIDANCE_NO_SLOTS_HEADING = "还没有槽位";
 
 export const GUIDANCE_NO_SLOTS_BODY =
-  "请先新建一个槽位。没有总控时无法在 Pillow 里对话；建议将第一个受治理槽位（API key 或已登录的 Grok）设为总控。也可稍后指定信息管理员（不强制）。";
+  "请先新建一个槽位。没有总控时无法在 Pillow 里对话；建议将第一个受治理槽位（API key、已登录的 Grok 或 OAuth）设为总控。也可稍后指定信息管理员（不强制）。";
 
 /**
  * Guidance when slots exist but none is controller.
@@ -381,7 +434,7 @@ export const GUIDANCE_NO_SLOTS_BODY =
 export const GUIDANCE_NO_CONTROLLER_HEADING = "尚未指定总控";
 
 export const GUIDANCE_NO_CONTROLLER_BODY =
-  "当前已有槽位，但没有总控。没有总控就无法在 Pillow 里对话。请将某个受治理槽位（API key 或已登录的 Grok）的角色改为总控，或新建一个总控槽位。建议再设一位信息管理员（不强制）。";
+  "当前已有槽位，但没有总控。没有总控就无法在 Pillow 里对话。请将某个受治理槽位（API key、已登录的 Grok 或 OAuth）的角色改为总控，或新建一个总控槽位。建议再设一位信息管理员（不强制）。";
 
 /** Soft suggestion when controller exists but no librarian. */
 export const GUIDANCE_LIBRARIAN_SUGGESTION =
@@ -389,7 +442,7 @@ export const GUIDANCE_LIBRARIAN_SUGGESTION =
 
 /** Why controller is disabled when local CLI auth is selected. */
 export const CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT =
-  "总控必须使用受治理认证（API key 或已登录的 Grok）。本机 CLI 不受治理，不能担任总控。";
+  "总控必须使用受治理认证（API key、已登录的 Grok 或 OAuth）。本机 CLI 不受治理，不能担任总控。";
 
 /** Saved API-key slot shows status only — never ciphertext or plaintext. */
 export const SECRET_CONFIGURED_LABEL = "已配置";
@@ -479,3 +532,125 @@ export const LOCAL_CLI_DEFAULT_STATUS_ARGS: Readonly<
   opencode: "auth list",
   gemini: "",
 };
+
+// ---------------------------------------------------------------------------
+// Provider login catalog (list_provider_login_catalog) + OAuth create UX
+// ---------------------------------------------------------------------------
+
+/** Host wire: login mechanism for one provider profile. */
+export type ProviderLoginMethodWire = "pkce" | "device_code" | "api_key_only";
+
+/**
+ * Host wire: whether a catalog field is fixed, must be user-filled, unknown,
+ * or unused for this login method.
+ */
+export type ProfileFieldWire =
+  | "known"
+  | "user_supplied"
+  | "unknown"
+  | "not_applicable";
+
+/** How a successful login associates a non-secret account label. */
+export type AccountIdentifierWire =
+  | "token_claims"
+  | "user_supplied"
+  | "unknown"
+  | "not_applicable";
+
+/**
+ * Closed host DTO for one provider login catalog row.
+ * Public OIDC/OAuth metadata only — never tokens, codes, or client secrets.
+ * `knownClientId` is only set when the host has a PublicDocumented id;
+ * Unknown client ids must be null so the UI cannot auto-fill a guess.
+ */
+export type ProviderLoginCatalogEntry = {
+  providerId: string;
+  displayName: string;
+  loginMethod: ProviderLoginMethodWire;
+  issuer: ProfileFieldWire;
+  authorizeEndpoint: ProfileFieldWire;
+  deviceAuthorizationEndpoint: ProfileFieldWire;
+  tokenEndpoint: ProfileFieldWire;
+  scopes: ProfileFieldWire;
+  clientId: ProfileFieldWire;
+  knownIssuer: string | null;
+  knownAuthorizeEndpoint: string | null;
+  knownDeviceAuthorizationEndpoint: string | null;
+  knownTokenEndpoint: string | null;
+  knownScopes: string[] | null;
+  knownClientId: string | null;
+  accountIdentifier: AccountIdentifierWire;
+};
+
+/** User-fillable OAuth profile fields (public metadata only). */
+export type OauthUserFieldId =
+  | "clientId"
+  | "issuer"
+  | "authorizeEndpoint"
+  | "deviceAuthorizationEndpoint"
+  | "tokenEndpoint"
+  | "scopes"
+  | "accountLabel";
+
+export type OauthUserFieldRequirement = {
+  fieldId: OauthUserFieldId;
+  /** Short field label for the form. */
+  label: string;
+  /**
+   * Why the user must type this value (especially for Unknown — never guess).
+   */
+  reason: string;
+};
+
+/** In-progress copy while host opens the browser / waits for callback. */
+export const OAUTH_LOGIN_IN_PROGRESS =
+  "正在登录…请在浏览器中完成授权，完成后将自动返回。切勿关闭此窗口。";
+
+/** Distinct failure copy — never imply success. */
+export const OAUTH_LOGIN_TIMEOUT_MESSAGE =
+  "登录超时：在限定时间内未完成浏览器授权。请重试。";
+
+export const OAUTH_LOGIN_DENIED_MESSAGE =
+  "登录被拒绝：您在授权页面取消了授权，或提供方拒绝了本次请求。";
+
+export const OAUTH_LOGIN_STATE_MISMATCH_MESSAGE =
+  "登录失败：授权回调校验未通过（state 不匹配），可能存在干扰。请重新登录。";
+
+export const OAUTH_LOGIN_GENERIC_FAILURE =
+  "OAuth 登录失败。请检查提供方配置后重试。";
+
+export const OAUTH_CATALOG_LOAD_BUSY = "正在加载可登录的提供方…";
+
+export const OAUTH_CATALOG_EMPTY =
+  "当前没有可用的 OAuth 提供方（仅 API key 的提供方不会出现在此列表）。";
+
+export const OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON =
+  "该提供方的 client_id 未取得可复用的第三方出处证明，Pillow 不会自动填写或猜测。请填写您自己注册的应用 client_id。";
+
+export const OAUTH_FIELD_CLIENT_ID_USER_SUPPLIED_REASON =
+  "请填写您在该提供方注册的应用 client_id（Pillow 不会预填）。";
+
+export const OAUTH_FIELD_ISSUER_REASON =
+  "目录将该字段标为需用户提供或未知；请填写您的 OIDC issuer URL，勿使用猜测值。";
+
+export const OAUTH_FIELD_AUTHORIZE_REASON =
+  "目录将该字段标为需用户提供或未知；请填写授权端点 URL。";
+
+export const OAUTH_FIELD_DEVICE_REASON =
+  "目录将该字段标为需用户提供或未知；请填写设备授权端点 URL。";
+
+export const OAUTH_FIELD_TOKEN_REASON =
+  "目录将该字段标为需用户提供或未知；请填写 token 端点 URL。";
+
+export const OAUTH_FIELD_SCOPES_REASON =
+  "目录将该字段标为需用户提供或未知；请填写空格分隔的 scopes。";
+
+export const OAUTH_FIELD_ACCOUNT_LABEL_REASON =
+  "该提供方不会从 token 自动提取账号标识；请填写便于识别的非敏感账号标签（如邮箱）。";
+
+/** List-row badge for OAuth auth mode. */
+export const OAUTH_AUTH_BADGE = "OAuth";
+
+/** Soft note under OAuth form. */
+export const OAUTH_LOGIN_FORM_HINT =
+  "登录由宿主打开浏览器并等待回调；界面不发起对外网络请求，也不接收 token 明文。";

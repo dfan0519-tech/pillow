@@ -7,6 +7,13 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  formatOauthExpiryForDisplay,
+  isOauthLoginFailureCode,
+  mapOauthLoginErrorMessage,
+  oauthCapableProviders,
+  oauthFieldsRequiringUserInput,
+} from "./oauthLoginUi";
+import {
   DEFAULT_PROVIDER_PRESET_ID,
   PROVIDER_PRESETS,
   getProviderPreset,
@@ -39,12 +46,20 @@ import {
   LOCAL_CLI_DETECT_HINT,
   LOCAL_CLI_DETECT_NONE_FOUND,
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
+  OAUTH_AUTH_BADGE,
+  OAUTH_CATALOG_EMPTY,
+  OAUTH_CATALOG_LOAD_BUSY,
+  OAUTH_LOGIN_FORM_HINT,
+  OAUTH_LOGIN_IN_PROGRESS,
   SECRET_CONFIGURED_LABEL,
   SECRET_NOT_CONFIGURED_LABEL,
   SLOT_AUTH_METHODS,
   SLOT_ROLE_OPTIONS,
   type LocalCliDetectionView,
+  type OauthLoginSupplementInput,
+  type OauthUserFieldId,
   type ProbeModelCatalogView,
+  type ProviderLoginCatalogEntry,
   type RuntimeSlotModelSwitchView,
   type RuntimeSlotRole,
   type RuntimeSlotView,
@@ -102,12 +117,36 @@ function slotAllowsController(slot: RuntimeSlotView): boolean {
 
 function mapSaveError(cause: unknown): string {
   if (cause instanceof RuntimeSlotsGatewayError) {
+    if (isOauthLoginFailureCode(cause.code)) {
+      return mapOauthLoginErrorMessage(cause.code);
+    }
     return mapRuntimeSlotErrorMessage(cause.code);
   }
   if (cause instanceof Error && cause.message.trim()) {
     return cause.message;
   }
   return "保存槽位失败。";
+}
+
+function authModeBadge(slot: RuntimeSlotView): string {
+  if (slot.kind !== "governed_grok") return "本机 CLI";
+  if (slot.authMode === "login") return "Grok · 登录";
+  if (slot.authMode === "oauth") return OAUTH_AUTH_BADGE;
+  return "Grok · API key";
+}
+
+type OauthDraftFields = Record<OauthUserFieldId, string>;
+
+function emptyOauthDraftFields(): OauthDraftFields {
+  return {
+    clientId: "",
+    issuer: "",
+    authorizeEndpoint: "",
+    deviceAuthorizationEndpoint: "",
+    tokenEndpoint: "",
+    scopes: "",
+    accountLabel: "",
+  };
 }
 
 export function RuntimeSlotsSection({
@@ -171,6 +210,21 @@ export function RuntimeSlotsSection({
     null,
   );
 
+  /** OAuth create: provider catalog + user-supplied public fields. */
+  const [oauthCatalog, setOauthCatalog] = useState<ProviderLoginCatalogEntry[]>(
+    [],
+  );
+  const [oauthCatalogBusy, setOauthCatalogBusy] = useState(false);
+  const [oauthCatalogError, setOauthCatalogError] = useState<string | null>(
+    null,
+  );
+  const [oauthProviderId, setOauthProviderId] = useState<string>("");
+  const [oauthDraftFields, setOauthDraftFields] = useState<OauthDraftFields>(
+    emptyOauthDraftFields,
+  );
+  /** True while host is performing browser OAuth (no optimistic slot). */
+  const [oauthLoginBusy, setOauthLoginBusy] = useState(false);
+
   /** Inline role editor for an existing list row. */
   const [roleEditSlotId, setRoleEditSlotId] = useState<string | null>(null);
   const [roleEditRole, setRoleEditRole] = useState<RuntimeSlotRole>("custom");
@@ -190,6 +244,24 @@ export function RuntimeSlotsSection({
     [slots],
   );
   const controllerAllowedForCreate = authAllowsController(createAuthKind);
+
+  const oauthProviders = useMemo(
+    () => oauthCapableProviders(oauthCatalog),
+    [oauthCatalog],
+  );
+  const selectedOauthProvider = useMemo(
+    () =>
+      oauthProviders.find((entry) => entry.providerId === oauthProviderId)
+      ?? null,
+    [oauthProviders, oauthProviderId],
+  );
+  const oauthRequiredFields = useMemo(
+    () =>
+      selectedOauthProvider
+        ? oauthFieldsRequiringUserInput(selectedOauthProvider)
+        : [],
+    [selectedOauthProvider],
+  );
 
   const reload = useCallback(async () => {
     if (!projectId) {
@@ -237,6 +309,40 @@ export function RuntimeSlotsSection({
     setDetectBusy(false);
     setDetectError(null);
     setDetectSelectedKind(null);
+    setOauthCatalog([]);
+    setOauthCatalogBusy(false);
+    setOauthCatalogError(null);
+    setOauthProviderId("");
+    setOauthDraftFields(emptyOauthDraftFields());
+    setOauthLoginBusy(false);
+  }
+
+  async function loadOauthCatalog(): Promise<void> {
+    setOauthCatalogBusy(true);
+    setOauthCatalogError(null);
+    try {
+      const rows = await gateway.listProviderLoginCatalog();
+      setOauthCatalog(rows);
+      const capable = oauthCapableProviders(rows);
+      if (capable.length === 0) {
+        setOauthCatalogError(OAUTH_CATALOG_EMPTY);
+        setOauthProviderId("");
+      } else if (
+        !capable.some((entry) => entry.providerId === oauthProviderId)
+      ) {
+        setOauthProviderId(capable[0]!.providerId);
+      }
+    } catch (cause) {
+      const message =
+        cause instanceof RuntimeSlotsGatewayError
+          ? cause.message
+          : "无法加载 OAuth 提供方目录。";
+      setOauthCatalogError(message);
+      setOauthCatalog([]);
+      setOauthProviderId("");
+    } finally {
+      setOauthCatalogBusy(false);
+    }
   }
 
   /**
@@ -376,6 +482,38 @@ export function RuntimeSlotsSection({
     if (!authAllowsController(kind) && createRole === "controller") {
       setCreateRole("custom");
     }
+    if (kind === "oauth") {
+      // Load catalog on demand; never invent providers client-side beyond mock.
+      void loadOauthCatalog();
+    }
+  }
+
+  function setOauthField(fieldId: OauthUserFieldId, value: string): void {
+    setOauthDraftFields((prev) => ({ ...prev, [fieldId]: value }));
+  }
+
+  function buildOauthSupplement(): OauthLoginSupplementInput {
+    const supplement: OauthLoginSupplementInput = {};
+    const clientId = oauthDraftFields.clientId.trim();
+    const issuer = oauthDraftFields.issuer.trim();
+    const authorizeEndpoint = oauthDraftFields.authorizeEndpoint.trim();
+    const deviceAuthorizationEndpoint =
+      oauthDraftFields.deviceAuthorizationEndpoint.trim();
+    const tokenEndpoint = oauthDraftFields.tokenEndpoint.trim();
+    const scopesText = oauthDraftFields.scopes.trim();
+    const accountLabel = oauthDraftFields.accountLabel.trim();
+    if (clientId) supplement.clientId = clientId;
+    if (issuer) supplement.issuer = issuer;
+    if (authorizeEndpoint) supplement.authorizeEndpoint = authorizeEndpoint;
+    if (deviceAuthorizationEndpoint) {
+      supplement.deviceAuthorizationEndpoint = deviceAuthorizationEndpoint;
+    }
+    if (tokenEndpoint) supplement.tokenEndpoint = tokenEndpoint;
+    if (scopesText) {
+      supplement.scopes = scopesText.split(/\s+/u).filter(Boolean);
+    }
+    if (accountLabel) supplement.accountLabel = accountLabel;
+    return supplement;
   }
 
   function openRoleEdit(slot: RuntimeSlotView): void {
@@ -501,6 +639,43 @@ export function RuntimeSlotsSection({
               createRole === "custom" ? roleCustomName.trim() : undefined,
           });
           setNotice("已创建槽位（使用本机默认 Grok 登录 profile）。");
+        } else if (createAuthKind === "oauth") {
+          if (!selectedOauthProvider) {
+            setError("请选择 OAuth 提供方。");
+            setBusy(false);
+            return;
+          }
+          if (!baseUrl.trim() || !modelId.trim()) {
+            setError("请填写端点 base_url 与模型 id。");
+            setBusy(false);
+            return;
+          }
+          for (const field of oauthRequiredFields) {
+            if (!oauthDraftFields[field.fieldId].trim()) {
+              setError(`请填写 ${field.label}：${field.reason}`);
+              setBusy(false);
+              return;
+            }
+          }
+          // In-progress only — never optimistically add a slot before host OK.
+          setOauthLoginBusy(true);
+          try {
+            await gateway.createSlot({
+              projectId,
+              displayName: name,
+              authKind: "oauth",
+              role: createRole,
+              roleCustomName:
+                createRole === "custom" ? roleCustomName.trim() : undefined,
+              baseUrl: baseUrl.trim(),
+              modelId: modelId.trim(),
+              providerId: selectedOauthProvider.providerId,
+              oauthSupplement: buildOauthSupplement(),
+            });
+          } finally {
+            setOauthLoginBusy(false);
+          }
+          setNotice("已通过 OAuth 创建槽位。令牌由宿主保管，界面仅显示账号标识与过期时间。");
         } else {
           const statusArgs = parseArgvField(statusArgsText);
           if (!executablePath.trim()) {
@@ -530,9 +705,12 @@ export function RuntimeSlotsSection({
       closeForm();
       await reload();
     } catch (cause) {
+      // Failure: form stays open only if we did not close; ensure no slot paint.
+      setOauthLoginBusy(false);
       setError(mapSaveError(cause));
     } finally {
       setBusy(false);
+      setOauthLoginBusy(false);
     }
   }
 
@@ -756,11 +934,7 @@ export function RuntimeSlotsSection({
                     </span>
                   )}
                   <span className="runtime-slots-badge">
-                    {slot.kind === "governed_grok"
-                      ? slot.authMode === "login"
-                        ? "Grok · 登录"
-                        : "Grok · API key"
-                      : "本机 CLI"}
+                    {authModeBadge(slot)}
                   </span>
                   <span
                     className="runtime-slots-badge"
@@ -943,6 +1117,25 @@ export function RuntimeSlotsSection({
                     {slot.secretConfigured
                       ? SECRET_CONFIGURED_LABEL
                       : SECRET_NOT_CONFIGURED_LABEL}
+                  </span>
+                </p>
+              ) : null}
+
+              {slot.kind === "governed_grok" && slot.authMode === "oauth" ? (
+                <p
+                  className="runtime-slots-list__detail"
+                  data-testid={`runtime-slot-oauth-status-${slot.slotId}`}
+                >
+                  端点：{slot.baseUrl ?? "—"}
+                  {" · "}
+                  账号：
+                  <span data-testid={`runtime-slot-oauth-account-${slot.slotId}`}>
+                    {slot.accountLabel?.trim() || "—"}
+                  </span>
+                  {" · "}
+                  过期：
+                  <span data-testid={`runtime-slot-oauth-expiry-${slot.slotId}`}>
+                    {formatOauthExpiryForDisplay(slot.accessExpiresAt)}
                   </span>
                 </p>
               ) : null}
@@ -1418,6 +1611,143 @@ export function RuntimeSlotsSection({
             </p>
           ) : null}
 
+          {formMode === "create" && createAuthKind === "oauth" ? (
+            <div
+              className="runtime-slots-form__oauth"
+              data-testid="runtime-slots-oauth-form"
+            >
+              <p className="runtime-slots__hint" role="note">
+                {OAUTH_LOGIN_FORM_HINT}
+              </p>
+              {oauthCatalogBusy ? (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-oauth-catalog-loading"
+                  role="status"
+                >
+                  {OAUTH_CATALOG_LOAD_BUSY}
+                </p>
+              ) : null}
+              {oauthCatalogError ? (
+                <p
+                  className="runtime-slots__error"
+                  data-testid="runtime-slots-oauth-catalog-error"
+                  role="alert"
+                >
+                  {oauthCatalogError}
+                </p>
+              ) : null}
+              {oauthProviders.length > 0 ? (
+                <label className="settings-field">
+                  <span className="settings-field__label">OAuth 提供方</span>
+                  <select
+                    aria-label="OAuth 提供方"
+                    className="settings-field__control"
+                    data-testid="runtime-slots-oauth-provider"
+                    disabled={busy || oauthLoginBusy}
+                    onChange={(event) => {
+                      setOauthProviderId(event.target.value);
+                      setOauthDraftFields(emptyOauthDraftFields());
+                    }}
+                    value={oauthProviderId}
+                  >
+                    {oauthProviders.map((entry) => (
+                      <option key={entry.providerId} value={entry.providerId}>
+                        {entry.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {/* api_key_only must never appear — list is filtered above. */}
+              <span hidden data-testid="runtime-slots-oauth-provider-ids">
+                {oauthProviders.map((entry) => entry.providerId).join(",")}
+              </span>
+
+              {selectedOauthProvider ? (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-oauth-method"
+                  role="note"
+                >
+                  登录方式：
+                  {selectedOauthProvider.loginMethod === "pkce"
+                    ? "Authorization Code + PKCE"
+                    : "Device Code"}
+                </p>
+              ) : null}
+
+              {oauthRequiredFields.map((field) => (
+                <label className="settings-field" key={field.fieldId}>
+                  <span className="settings-field__label">
+                    {field.label}
+                    <span className="runtime-slots-badge">必填</span>
+                  </span>
+                  <input
+                    aria-label={field.label}
+                    autoComplete="off"
+                    className="settings-field__control"
+                    data-testid={`runtime-slots-oauth-field-${field.fieldId}`}
+                    disabled={busy || oauthLoginBusy}
+                    onChange={(event) =>
+                      setOauthField(field.fieldId, event.target.value)}
+                    spellCheck={false}
+                    type="text"
+                    value={oauthDraftFields[field.fieldId]}
+                  />
+                  <span
+                    className="runtime-slots__hint"
+                    data-testid={`runtime-slots-oauth-field-reason-${field.fieldId}`}
+                    role="note"
+                  >
+                    {field.reason}
+                  </span>
+                </label>
+              ))}
+
+              <label className="settings-field">
+                <span className="settings-field__label">端点 base_url</span>
+                <input
+                  aria-label="OAuth 端点 base_url"
+                  autoComplete="off"
+                  className="settings-field__control"
+                  data-testid="runtime-slots-oauth-base-url"
+                  disabled={busy || oauthLoginBusy}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  placeholder="https://…（OpenAI 兼容）"
+                  spellCheck={false}
+                  type="text"
+                  value={baseUrl}
+                />
+              </label>
+              <label className="settings-field">
+                <span className="settings-field__label">模型 id</span>
+                <input
+                  aria-label="OAuth 模型 id"
+                  autoComplete="off"
+                  className="settings-field__control"
+                  data-testid="runtime-slots-oauth-model-id"
+                  disabled={busy || oauthLoginBusy}
+                  onChange={(event) => setModelId(event.target.value)}
+                  placeholder="例如 gpt-4o"
+                  spellCheck={false}
+                  type="text"
+                  value={modelId}
+                />
+              </label>
+
+              {oauthLoginBusy ? (
+                <p
+                  className="runtime-slots__notice"
+                  data-testid="runtime-slots-oauth-in-progress"
+                  role="status"
+                >
+                  {OAUTH_LOGIN_IN_PROGRESS}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
           <div
             className="runtime-slots-form__kind"
             role="group"
@@ -1490,10 +1820,16 @@ export function RuntimeSlotsSection({
             </button>
             <button
               data-testid="runtime-slots-form-save"
-              disabled={busy}
+              disabled={busy || oauthLoginBusy}
               type="submit"
             >
-              {busy ? "保存中…" : "保存"}
+              {oauthLoginBusy
+                ? "登录中…"
+                : busy
+                ? "保存中…"
+                : createAuthKind === "oauth" && formMode === "create"
+                ? "开始 OAuth 登录"
+                : "保存"}
             </button>
           </div>
         </form>
