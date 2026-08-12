@@ -179,14 +179,17 @@ pub fn build_refresh_token_form(
 }
 
 /// Parse a token endpoint JSON body. Rejects missing access_token.
+///
+/// Bad JSON → [`RuntimeSlotError::OauthTokenBadJson`].
+/// Missing/empty `access_token` → [`RuntimeSlotError::OauthTokenMissingField`].
 pub fn parse_token_response(body: &str) -> Result<TokenResponse, RuntimeSlotError> {
     let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| RuntimeSlotError::OauthTokenResponseInvalid)?;
+        serde_json::from_str(body).map_err(|_| RuntimeSlotError::OauthTokenBadJson)?;
     let access = value
         .get("access_token")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or(RuntimeSlotError::OauthTokenResponseInvalid)?;
+        .ok_or(RuntimeSlotError::OauthTokenMissingField)?;
     let refresh = value
         .get("refresh_token")
         .and_then(|v| v.as_str())
@@ -343,15 +346,15 @@ mod tests {
 
         assert!(matches!(
             parse_token_response(r#"{"expires_in":1}"#),
-            Err(RuntimeSlotError::OauthTokenResponseInvalid)
+            Err(RuntimeSlotError::OauthTokenMissingField)
         ));
         assert!(matches!(
             parse_token_response("not-json"),
-            Err(RuntimeSlotError::OauthTokenResponseInvalid)
+            Err(RuntimeSlotError::OauthTokenBadJson)
         ));
         assert!(matches!(
             parse_token_response(r#"{"access_token":""}"#),
-            Err(RuntimeSlotError::OauthTokenResponseInvalid)
+            Err(RuntimeSlotError::OauthTokenMissingField)
         ));
     }
 

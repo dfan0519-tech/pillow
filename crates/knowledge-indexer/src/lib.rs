@@ -27,6 +27,7 @@ pub mod classify;
 pub mod digest;
 pub mod ledger;
 pub mod librarian_audit;
+pub mod read_only_ledger;
 pub mod render;
 pub mod scan;
 pub mod stale;
@@ -50,6 +51,7 @@ pub use librarian_audit::{
     LibrarianCheckKind, LibrarianCheckOutcome, format_librarian_audit_report, load_git_commit_ids,
     run_librarian_audit,
 };
+pub use read_only_ledger::{ReadOnlyLedgerError, load_snapshot_read_only};
 pub use render::{RenderInput, render_handoff_view, render_status_view};
 pub use scan::{ScanOptions, ScanResult, ScanSummary, scan_and_register, validate_path_ssot};
 pub use stale::{

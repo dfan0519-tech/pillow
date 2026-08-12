@@ -6,6 +6,7 @@ pub mod desktop_lifecycle;
 pub mod directory_ops;
 mod exec_commands;
 mod git_commands;
+mod librarian_audit_commands;
 pub mod path_scope;
 mod permission_rule_commands;
 mod project_commands;
@@ -21,6 +22,8 @@ mod write_commands;
 mod exec_commands_tests;
 #[cfg(test)]
 mod git_commands_tests;
+#[cfg(test)]
+mod librarian_audit_commands_tests;
 #[cfg(test)]
 mod permission_rule_commands_tests;
 #[cfg(test)]
@@ -54,6 +57,7 @@ use git_commands::{
 };
 use keeper_storage_sqlite::SqlitePermissionRuleRepository;
 use keeper_storage_sqlite::SqliteSettingsRepository;
+use librarian_audit_commands::run_librarian_audit;
 use permission_rule_commands::{
     add_permission_rule, delete_permission_rule, list_permission_rules,
 };
@@ -151,7 +155,8 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         set_runtime_slot_model,
         start_runtime_slot,
         detect_local_clis,
-        probe_model_catalog
+        probe_model_catalog,
+        run_librarian_audit
     ])
 }
 

@@ -22,6 +22,7 @@ chrono.workspace = true
 keeper-adapter-grok-acp = { path = "../../../crates/adapter-grok-acp" }
 keeper-agent-protocol = { path = "../../../crates/agent-protocol" }
 keeper-git-executor = { path = "../../../crates/git-executor" }
+keeper-knowledge-indexer = { path = "../../../crates/knowledge-indexer" }
 keeper-policy = { path = "../../../crates/kernel-policy" }
 keeper-project = { path = "../../../crates/kernel-project" }
 keeper-resource = { path = "../../../crates/kernel-resource" }

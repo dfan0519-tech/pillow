@@ -3,8 +3,10 @@
 mod catalog;
 mod grok_config;
 mod oauth;
+mod oauth_transport;
 mod secret;
 mod status;
+mod win_http;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +32,19 @@ pub use oauth::{
     build_refresh_token_form, expiry_from_expires_in, generate_pkce, parse_token_response,
     s256_challenge, verify_s256_challenge,
 };
+pub use oauth_transport::{
+    AuthorizationCode, AuthorizeUrlPolicy, BrowserOpener, DEFAULT_DEVICE_POLL_INTERVAL,
+    DEFAULT_LOOPBACK_TIMEOUT, DEVICE_SLOW_DOWN_INCREMENT, DeviceAuthorization, DevicePollOutcome,
+    DeviceTokenTransport, LoopbackListener, OAUTH_TOKEN_RESPONSE_BYTE_CAP, PollClock,
+    RecordingBrowser, SystemBrowser, SystemClock, TokenEndpointPolicy, VirtualClock,
+    WinHttpOauthTokenClient, build_device_authorization_form, build_device_token_poll_form,
+    exchange_authorization_code, open_authorize_in_browser, open_authorize_with,
+    open_system_browser, parse_device_authorization, parse_device_poll_response, poll_device_token,
+    poll_device_token_with_transport, refresh_tokens, request_device_authorization,
+    validate_authorize_url, validate_token_endpoint,
+};
 pub use secret::{DpapiFileSecretStore, SecretBytes, SecretStore};
+pub use win_http::HttpTimeouts;
 
 pub const GROK_API_KEY_ENV: &str = "PILLOW_GROK_SLOT_API_KEY";
 
@@ -82,6 +96,36 @@ pub enum RuntimeSlotError {
     OauthRefreshFailed,
     #[error("oauth token response is invalid")]
     OauthTokenResponseInvalid,
+    #[error("oauth token response is not valid JSON")]
+    OauthTokenBadJson,
+    #[error("oauth token response is missing a required field")]
+    OauthTokenMissingField,
+    #[error("oauth HTTP request timed out")]
+    OauthHttpTimeout,
+    #[error("oauth HTTP request failed")]
+    OauthHttpUnavailable,
+    #[error("oauth HTTP response status is not successful")]
+    OauthHttpNonSuccess,
+    #[error("oauth loopback listener could not bind")]
+    OauthLoopbackBindFailed,
+    #[error("oauth loopback callback timed out")]
+    OauthLoopbackTimeout,
+    #[error("oauth loopback callback state mismatch")]
+    OauthLoopbackStateMismatch,
+    #[error("oauth loopback callback already consumed")]
+    OauthLoopbackAlreadyConsumed,
+    #[error("oauth loopback callback request is invalid")]
+    OauthLoopbackInvalidRequest,
+    #[error("oauth loopback authorization was denied")]
+    OauthLoopbackDenied,
+    #[error("oauth authorize URL is invalid or does not match issuer")]
+    OauthAuthorizeUrlInvalid,
+    #[error("oauth system browser could not be opened")]
+    OauthBrowserOpenFailed,
+    #[error("oauth device code expired")]
+    OauthDeviceExpired,
+    #[error("oauth device authorization was denied")]
+    OauthDeviceDenied,
 }
 
 impl RuntimeSlotError {
@@ -107,6 +151,21 @@ impl RuntimeSlotError {
             }
             Self::OauthRefreshFailed => "runtime_slot_oauth_refresh_failed",
             Self::OauthTokenResponseInvalid => "runtime_slot_oauth_token_response_invalid",
+            Self::OauthTokenBadJson => "runtime_slot_oauth_token_bad_json",
+            Self::OauthTokenMissingField => "runtime_slot_oauth_token_missing_field",
+            Self::OauthHttpTimeout => "runtime_slot_oauth_http_timeout",
+            Self::OauthHttpUnavailable => "runtime_slot_oauth_http_unavailable",
+            Self::OauthHttpNonSuccess => "runtime_slot_oauth_http_non_success",
+            Self::OauthLoopbackBindFailed => "runtime_slot_oauth_loopback_bind_failed",
+            Self::OauthLoopbackTimeout => "runtime_slot_oauth_loopback_timeout",
+            Self::OauthLoopbackStateMismatch => "runtime_slot_oauth_loopback_state_mismatch",
+            Self::OauthLoopbackAlreadyConsumed => "runtime_slot_oauth_loopback_already_consumed",
+            Self::OauthLoopbackInvalidRequest => "runtime_slot_oauth_loopback_invalid_request",
+            Self::OauthLoopbackDenied => "runtime_slot_oauth_loopback_denied",
+            Self::OauthAuthorizeUrlInvalid => "runtime_slot_oauth_authorize_url_invalid",
+            Self::OauthBrowserOpenFailed => "runtime_slot_oauth_browser_open_failed",
+            Self::OauthDeviceExpired => "runtime_slot_oauth_device_expired",
+            Self::OauthDeviceDenied => "runtime_slot_oauth_device_denied",
         }
     }
 }
