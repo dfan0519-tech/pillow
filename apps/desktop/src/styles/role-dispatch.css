@@ -1,0 +1,203 @@
+/**
+ * Conversation role-dispatch panel (propose entry + outcome list).
+ * No second approval chrome — approve/reject stays on command-approval-bar.
+ */
+
+.role-dispatch-panel {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-md, 10px);
+  background: var(--bg-elevated, #1c1c20);
+  margin: 0 0 8px;
+  overflow: hidden;
+}
+
+.role-dispatch-panel__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.role-dispatch-panel__summary::-webkit-details-marker {
+  display: none;
+}
+
+.role-dispatch-panel__summary::before {
+  content: "▸";
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.role-dispatch-panel[open] > .role-dispatch-panel__summary::before {
+  content: "▾";
+}
+
+.role-dispatch-panel__body {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.role-dispatch-panel__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.52));
+}
+
+.role-dispatch-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.role-dispatch-panel__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.role-dispatch-panel__select,
+.role-dispatch-panel__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-input, #121216);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+.role-dispatch-panel__textarea {
+  min-height: 72px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.role-dispatch-panel__select:disabled,
+.role-dispatch-panel__textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.role-dispatch-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.role-dispatch-panel__submit {
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--accent, #dccbff);
+  color: #121216;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
+.role-dispatch-panel__submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.role-dispatch-panel__status {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+}
+
+.role-dispatch-panel__status--error {
+  color: var(--warning, #f0993d);
+}
+
+.role-dispatch-panel__status--pending {
+  color: var(--accent, #dccbff);
+}
+
+.role-dispatch-panel__target-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.52));
+}
+
+.role-dispatch-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.role-dispatch-badge--governed {
+  background: rgba(120, 200, 160, 0.14);
+  color: rgba(160, 230, 190, 0.95);
+}
+
+.role-dispatch-badge--ungoverned {
+  background: rgba(240, 153, 61, 0.16);
+  color: rgba(255, 190, 120, 0.96);
+}
+
+.role-dispatch-panel__ungoverned-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 190, 120, 0.92);
+}
+
+.role-dispatch-panel__results {
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.role-dispatch-panel__results-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.role-dispatch-result {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+}
+
+.role-dispatch-result__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.role-dispatch-result__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.48));
+}

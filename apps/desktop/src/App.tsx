@@ -55,6 +55,8 @@ import type { GitChangesPaneModel } from "./features/workbench/ResourcePane";
 import { Workbench } from "./features/workbench/Workbench";
 import type { ConversationGateway } from "./lib/conversationGateway";
 import type { ExecGateway } from "./lib/execGateway";
+import type { RoleDispatchGateway } from "./lib/roleDispatchGateway";
+import { TauriRoleDispatchGateway } from "./lib/tauriRoleDispatchGateway";
 import {
   GIT_ERROR_MESSAGES,
   normalizeGitError,
@@ -95,6 +97,12 @@ type AppProps = {
    * Defaults to Tauri when the IPC bridge is present; otherwise in-memory mock.
    */
   runtimeSlotsGateway?: RuntimeSlotsGateway;
+  /**
+   * Optional role-dispatch gateway (conversation propose entry).
+   * Defaults to Tauri when the IPC bridge is present; omitted in pure mocks
+   * so unit tests stay free of host IPC.
+   */
+  roleDispatchGateway?: RoleDispatchGateway;
   /** Kept for desktop smoke readiness; fires after the shell project list loads. */
   onProjectLauncherReady?: () => Promise<void>;
   /** Optional project id to select after the initial list loads (screenshot harness). */
@@ -157,6 +165,7 @@ export function App({
   gitGateway,
   settingsGateway: settingsGatewayProp,
   runtimeSlotsGateway: runtimeSlotsGatewayProp,
+  roleDispatchGateway: roleDispatchGatewayProp,
   onProjectLauncherReady,
   defaultSelectedProjectId,
 }: AppProps) {
@@ -186,6 +195,16 @@ export function App({
     }
     return new MockRuntimeSlotsGateway();
   }, [runtimeSlotsGatewayProp]);
+  const roleDispatchGateway = useMemo(() => {
+    if (roleDispatchGatewayProp) return roleDispatchGatewayProp;
+    if (
+      typeof window !== "undefined"
+      && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      return new TauriRoleDispatchGateway();
+    }
+    return undefined;
+  }, [roleDispatchGatewayProp]);
   const isMockRuntime = conversationGateway instanceof MockConversationGateway;
 
   const [projects, setProjects] = useState<ProjectDto[]>([]);
@@ -1555,6 +1574,8 @@ export function App({
           onGitChangesActive={setGitChangesRequestProjectId}
           permissionMode={permissionMode}
           onResetPermissionMode={() => void resetPermissionMode()}
+          roleDispatchGateway={roleDispatchGateway}
+          runtimeSlotsGateway={runtimeSlotsGateway}
         />
       </div>
       {settingsOpen ? (

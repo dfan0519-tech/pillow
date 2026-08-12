@@ -4,6 +4,7 @@ mod catalog;
 mod grok_config;
 mod oauth;
 mod oauth_transport;
+mod provider_login;
 mod secret;
 mod status;
 mod win_http;
@@ -42,6 +43,12 @@ pub use oauth_transport::{
     open_system_browser, parse_device_authorization, parse_device_poll_response, poll_device_token,
     poll_device_token_with_transport, refresh_tokens, request_device_authorization,
     validate_authorize_url, validate_token_endpoint,
+};
+pub use provider_login::{
+    AccountIdentifierStrategy, AccountTokenSource, ClientIdProfile, ClientIdSource,
+    OauthTransportParameters, ProfileField, ProviderLoginConversionError, ProviderLoginEvidence,
+    ProviderLoginField, ProviderLoginMethod, ProviderLoginProfile, ProviderLoginSupplement,
+    provider_login_profile, provider_login_profiles, resolve_oauth_transport_parameters,
 };
 pub use secret::{DpapiFileSecretStore, SecretBytes, SecretStore};
 pub use win_http::HttpTimeouts;

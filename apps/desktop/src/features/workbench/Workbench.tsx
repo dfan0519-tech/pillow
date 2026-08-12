@@ -29,6 +29,7 @@ import type {
   ExecGateway,
   ExecProposalView,
 } from "../../lib/execGateway";
+import type { RoleDispatchGateway } from "../../lib/roleDispatchGateway";
 import {
   MockPermissionRulesGateway,
   TauriPermissionRulesGateway,
@@ -40,9 +41,11 @@ import type {
   CommandProposalView,
 } from "../execution/executionTypes";
 import { CommandApprovalBar } from "../execution/CommandApprovalBar";
+import { RoleDispatchPanel } from "../conversations/RoleDispatchPanel";
 import { isPortableRelativePath } from "../resources/resourcePaneState";
 import { IconPanelRight } from "../../components/icons";
 import type { PermissionModeLabel } from "../settings/settingsTypes";
+import type { RuntimeSlotsGateway } from "../settings/runtimeSlotsTypes";
 import { Composer } from "./Composer";
 import {
   ResourcePane,
@@ -125,6 +128,13 @@ type WorkbenchProps = {
   permissionMode?: PermissionModeLabel;
   /** One-click safety escape hatch back to default confirmation behavior. */
   onResetPermissionMode?: () => void;
+  /**
+   * Role-dispatch gateway (controller → other role). Propose only; approval
+   * still uses `execGateway` + CommandApprovalBar — never a second bar.
+   */
+  roleDispatchGateway?: RoleDispatchGateway;
+  /** Project slots for dispatch target picker (controller excluded as target). */
+  runtimeSlotsGateway?: RuntimeSlotsGateway;
 };
 
 function toCommandProposal(proposal: ExecProposalView): CommandProposalView {
@@ -179,6 +189,8 @@ export function Workbench({
   onGitChangesActive,
   permissionMode = "default",
   onResetPermissionMode,
+  roleDispatchGateway,
+  runtimeSlotsGateway,
 }: WorkbenchProps) {
   const projectId = project?.id ?? null;
   const permissionRulesGateway = useMemo(() => {
@@ -735,6 +747,20 @@ export function Workbench({
     }
   }, [relistApprovals]);
 
+  /**
+   * After role-dispatch propose: re-list process proposals so the **existing**
+   * CommandApprovalBar appears. Never invent a second approve surface.
+   */
+  const handleRoleDispatchProposed = useCallback(() => {
+    const scope = scopeRef.current;
+    if (!scope.projectId || !scope.conversationId) return;
+    void relistApprovals(
+      scope.generation,
+      scope.projectId,
+      scope.conversationId,
+    );
+  }, [relistApprovals]);
+
   const grantForBar =
     pendingWriteProposal
       ? grantByProposalRef.current.get(pendingWriteProposal.proposalId) ?? null
@@ -927,6 +953,17 @@ export function Workbench({
               proposal={toCommandProposal(pendingProcessProposal)}
               ruleSegments={pendingProcessProposal.ruleSegments}
               ruleSubject={readRuleSubject(pendingProcessProposal)}
+            />
+          ) : null}
+          {roleDispatchGateway && project && conversationId ? (
+            <RoleDispatchPanel
+              conversationId={conversationId}
+              disabled={busy || sending || decisionBusy}
+              onProposed={handleRoleDispatchProposed}
+              projectId={projectId}
+              refreshToken={execProposalRefreshToken}
+              roleDispatchGateway={roleDispatchGateway}
+              runtimeSlotsGateway={runtimeSlotsGateway}
             />
           ) : null}
           <Composer

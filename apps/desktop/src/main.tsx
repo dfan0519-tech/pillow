@@ -10,6 +10,7 @@ import { TauriExecGateway } from "./lib/tauriExecGateway";
 import { TauriProjectGateway } from "./lib/tauriProjectGateway";
 import { TauriResourceGateway } from "./lib/tauriResourceGateway";
 import { TauriWriteApprovalGateway } from "./lib/tauriWriteApprovalGateway";
+import { TauriRoleDispatchGateway } from "./lib/tauriRoleDispatchGateway";
 import { TauriGitGateway } from "./lib/tauriGitGateway";
 import type { ConversationGateway } from "./lib/conversationGateway";
 import type { ProjectGateway } from "./lib/projectGateway";
@@ -17,6 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./styles/tokens.css";
 import "./styles/workbench.css";
 import "./styles/write-approval.css";
+import "./styles/role-dispatch.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing renderer root");
@@ -26,6 +28,7 @@ const conversationGateway = new TauriConversationGateway();
 const resourceGateway = new TauriResourceGateway();
 const writeApprovalGateway = new TauriWriteApprovalGateway();
 const execGateway = new TauriExecGateway();
+const roleDispatchGateway = new TauriRoleDispatchGateway();
 /** Single read-only Git gateway instance for the desktop shell. */
 const gitGateway = new TauriGitGateway();
 const desktopLifecycle = new TauriDesktopLifecycle();
@@ -38,6 +41,7 @@ createRoot(root).render(
       resourceGateway={resourceGateway}
       writeApprovalGateway={writeApprovalGateway}
       execGateway={execGateway}
+      roleDispatchGateway={roleDispatchGateway}
       gitGateway={gitGateway}
       onProjectLauncherReady={() => desktopLifecycle.markProjectLauncherReady()}
     />
