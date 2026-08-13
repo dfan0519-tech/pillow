@@ -34,8 +34,28 @@ grep -ac "<!doctype html>" target/release/pillow.exe
 ```
 
 **1 = 嵌进去了,0 = 没有。** 🔴 界面里的中文字符串搜不到是正常的
-(JS 包被压缩了),但 `index.html` 搜得到 —— 别拿"资源被压缩了"
-去解释 0,那次我就是这么把证据解释掉的。
+(JS 包被压缩了,只有 `index.html` 是明文),但 `index.html` 搜得到 ——
+别拿"资源被压缩了"去解释 0,那次我就是这么把证据解释掉的。
+
+🔴 **但这条只证明「有一份 index.html」,不证明是刚才那次构建的。**
+上一次构建的 exe 也含 doctype。要把二进制和这次前端产物绑定,查带哈希的资源名:
+
+```bash
+ls apps/desktop/dist/assets/
+```
+
+把列出来的 `index-XXXXXXXX.js` 拿去搜:
+
+```bash
+grep -ac "index-XXXXXXXX.js" target/release/pillow.exe
+```
+
+**1 = 这个 exe 装的就是这次构建的前端。** 哈希每次构建都变,所以它区分得了
+"嵌了旧的"和"嵌了新的",doctype 那条区分不了。
+
+🔴 **别拿 `127.0.0.1:1420` 当坏二进制的判据。** Tauri 会把整份配置(devUrl 在内)
+编进 release 二进制,**好的 exe 里也搜得到这个串**(2026-08-13 实测确认)。
+它的存在什么都不说明。
 
 ---
 
