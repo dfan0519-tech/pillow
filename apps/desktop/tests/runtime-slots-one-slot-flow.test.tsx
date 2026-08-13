@@ -107,20 +107,24 @@ describe("One-slot flow — unified create entry", () => {
 
     await user.click(addButtons[0]!);
 
-    // Positive: every catalog auth method is rendered.
-    for (const method of SLOT_AUTH_METHODS) {
-      expect(
-        screen.getByTestId(`runtime-slots-auth-${method.id}`),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByTestId(`runtime-slots-auth-${method.id}`),
-      ).toHaveTextContent(method.label);
-    }
+    // Step 1: provider picker, not the old four global auth tabs.
+    expect(screen.getByTestId("runtime-slots-provider-step")).toBeInTheDocument();
+    expect(screen.queryByTestId("runtime-slots-auth-api_key")).toBeNull();
+    expect(screen.queryByTestId("runtime-slots-auth-oauth")).toBeNull();
+    expect(screen.queryByTestId("runtime-slots-auth-local_cli")).toBeNull();
+
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
+    expect(screen.getByTestId("runtime-slots-auth-api_key")).toHaveTextContent(
+      "API key",
+    );
+    expect(screen.queryByTestId("runtime-slots-auth-oauth")).toBeNull();
+    expect(screen.queryByTestId("runtime-slots-auth-local_cli")).toBeNull();
 
     // Negative: legacy kind forks must not appear.
     expect(screen.queryByTestId("runtime-slots-kind-grok")).toBeNull();
     expect(screen.queryByTestId("runtime-slots-kind-external")).toBeNull();
     expect(screen.queryByTestId("runtime-slots-auth-login")).toBeNull();
+    expect(SLOT_AUTH_METHODS.length).toBeGreaterThan(0);
   });
 
   it("creates via createSlot once with name, auth, and role (API key)", async () => {
@@ -137,6 +141,7 @@ describe("One-slot flow — unified create entry", () => {
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
     await user.type(screen.getByTestId("runtime-slots-display-name"), "My Grok");
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
@@ -186,6 +191,7 @@ describe("One-slot flow — unified create entry", () => {
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
     await user.type(screen.getByTestId("runtime-slots-display-name"), "Broken");
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
@@ -276,7 +282,7 @@ describe("One-slot flow — CLI cannot be controller (+/−)", () => {
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-local_cli"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-local_cli"));
 
     const controllerBtn = screen.getByTestId("runtime-slots-role-controller");
     expect(controllerBtn).toBeDisabled();
@@ -297,6 +303,7 @@ describe("One-slot flow — CLI cannot be controller (+/−)", () => {
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
 
     const controllerBtn = screen.getByTestId("runtime-slots-role-controller");
@@ -318,13 +325,15 @@ describe("One-slot flow — CLI cannot be controller (+/−)", () => {
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.click(screen.getByTestId("runtime-slots-role-controller"));
     expect(
       screen.getByTestId("runtime-slots-role-controller"),
     ).toHaveAttribute("aria-pressed", "true");
 
-    await user.click(screen.getByTestId("runtime-slots-auth-local_cli"));
+    await user.click(screen.getByTestId("runtime-slots-form-back"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-local_cli"));
     expect(
       screen.getByTestId("runtime-slots-role-controller"),
     ).toBeDisabled();
@@ -426,6 +435,7 @@ describe("One-slot flow — dual controller human error", () => {
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
     await user.type(screen.getByTestId("runtime-slots-display-name"), "Second");
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),

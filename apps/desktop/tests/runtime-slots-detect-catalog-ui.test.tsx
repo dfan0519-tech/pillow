@@ -80,7 +80,7 @@ describe("RuntimeSlotsSection — local CLI detect", () => {
 
     await screen.findByTestId("runtime-slots-add");
     await user.click(screen.getByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-local_cli"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-local_cli"));
     await user.click(screen.getByTestId("runtime-slots-detect-scan"));
 
     await waitFor(() => {
@@ -121,6 +121,7 @@ describe("RuntimeSlotsSection — draft host model catalog", () => {
 
     await screen.findByTestId("runtime-slots-add");
     await user.click(screen.getByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
@@ -158,6 +159,7 @@ describe("RuntimeSlotsSection — draft host model catalog", () => {
 
     await screen.findByTestId("runtime-slots-add");
     await user.click(screen.getByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
@@ -191,6 +193,7 @@ describe("RuntimeSlotsSection — draft host model catalog", () => {
 
     await screen.findByTestId("runtime-slots-add");
     await user.click(screen.getByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     await user.type(
       screen.getByTestId("runtime-slots-base-url"),
@@ -216,6 +219,7 @@ describe("RuntimeSlotsSection — draft host model catalog", () => {
     );
     await screen.findByTestId("runtime-slots-add");
     await user.click(screen.getByTestId("runtime-slots-add"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
 
     expect(

@@ -74,7 +74,7 @@ function assertMaterialAbsentFromDom(...materials: string[]): void {
 }
 
 describe("OAuth auth method — data-driven SLOT_AUTH_METHODS", () => {
-  it("includes oauth as a fourth equal method with controller allowed", () => {
+  it("includes oauth as a method with controller allowed", () => {
     const oauth = SLOT_AUTH_METHODS.find((method) => method.id === "oauth");
     expect(oauth).toBeDefined();
     expect(oauth?.allowsController).toBe(true);
@@ -85,7 +85,7 @@ describe("OAuth auth method — data-driven SLOT_AUTH_METHODS", () => {
     expect(cli?.allowsController).toBe(false);
   });
 
-  it("renders oauth auth button from the catalog (no separate branch control)", async () => {
+  it("renders oauth only after selecting 自定义 OIDC", async () => {
     const user = userEvent.setup();
     const gateway = new MockRuntimeSlotsGateway();
     render(
@@ -93,9 +93,12 @@ describe("OAuth auth method — data-driven SLOT_AUTH_METHODS", () => {
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
+    expect(screen.queryByTestId("runtime-slots-auth-oauth")).toBeNull();
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
     const oauthBtn = screen.getByTestId("runtime-slots-auth-oauth");
     expect(oauthBtn).toHaveTextContent("OAuth 登录");
-    await user.click(oauthBtn);
     expect(oauthBtn).toHaveAttribute("aria-pressed", "true");
     expect(
       screen.getByTestId("runtime-slots-auth-description"),
@@ -104,7 +107,7 @@ describe("OAuth auth method — data-driven SLOT_AUTH_METHODS", () => {
 });
 
 describe("OAuth provider list — api_key_only excluded; Unknown fields required", () => {
-  it("lists oauth-capable providers and never anthropic (api_key_only)", async () => {
+  it("custom-oidc is the only OAuth path; anthropic / openai never appear", async () => {
     const user = userEvent.setup();
     const gateway = new MockRuntimeSlotsGateway();
     render(
@@ -112,7 +115,9 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
 
     await waitFor(() => {
       expect(
@@ -122,19 +127,13 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
 
     const ids = screen.getByTestId("runtime-slots-oauth-provider-ids")
       .textContent ?? "";
-    expect(ids).toContain("openai");
-    expect(ids).toContain("xai");
     expect(ids).toContain("custom-oidc");
+    expect(ids).not.toContain("openai");
+    expect(ids).not.toContain("xai");
     expect(ids).not.toContain("anthropic");
-
-    const select = screen.getByTestId(
-      "runtime-slots-oauth-provider",
-    ) as HTMLSelectElement;
-    const optionValues = Array.from(select.options).map((opt) => opt.value);
-    expect(optionValues).not.toContain("anthropic");
   });
 
-  it("positive: Unknown client_id shows required input + reason (openai)", async () => {
+  it("selecting OpenAI does not show OAuth client_id (Unknown is not a prompt)", async () => {
     const user = userEvent.setup();
     const gateway = new MockRuntimeSlotsGateway();
     render(
@@ -142,31 +141,17 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("runtime-slots-oauth-provider"),
-      ).toBeInTheDocument();
-    });
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-oauth-provider"),
-      "openai",
-    );
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-openai"));
 
+    expect(screen.queryByTestId("runtime-slots-auth-oauth")).toBeNull();
     expect(
-      screen.getByTestId("runtime-slots-oauth-field-clientId"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("runtime-slots-oauth-field-reason-clientId"),
-    ).toHaveTextContent(OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON);
-    // No auto-filled guessed client_id
-    expect(
-      (screen.getByTestId("runtime-slots-oauth-field-clientId") as HTMLInputElement)
-        .value,
-    ).toBe("");
+      screen.queryByTestId("runtime-slots-oauth-field-clientId"),
+    ).toBeNull();
+    expect(screen.queryByText(OAUTH_FIELD_CLIENT_ID_UNKNOWN_REASON)).toBeNull();
+    expect(screen.getByTestId("runtime-slots-auth-api_key")).toBeInTheDocument();
   });
 
-  it("negative: Known fields (issuer etc.) are not shown as required for openai", async () => {
+  it("negative: OpenAI API-key path does not dump OIDC authorize fields", async () => {
     const user = userEvent.setup();
     const gateway = new MockRuntimeSlotsGateway();
     render(
@@ -174,16 +159,7 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("runtime-slots-oauth-provider"),
-      ).toBeInTheDocument();
-    });
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-oauth-provider"),
-      "openai",
-    );
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-openai"));
 
     expect(
       screen.queryByTestId("runtime-slots-oauth-field-issuer"),
@@ -207,16 +183,14 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
     await waitFor(() => {
       expect(
-        screen.getByTestId("runtime-slots-oauth-provider"),
+        screen.getByTestId("runtime-slots-oauth-field-clientId"),
       ).toBeInTheDocument();
     });
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-oauth-provider"),
-      "custom-oidc",
-    );
 
     for (const field of [
       "clientId",
@@ -237,31 +211,49 @@ describe("OAuth provider list — api_key_only excluded; Unknown fields required
 });
 
 describe("OAuth login failures — timeout / denied / state mismatch", () => {
-  async function fillOpenaiOauthForm(
+  async function fillCustomOidcOauthForm(
     user: ReturnType<typeof userEvent.setup>,
   ): Promise<void> {
     await user.click(await screen.findByTestId("runtime-slots-add"));
     await user.type(screen.getByTestId("runtime-slots-display-name"), "OA Slot");
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
     await waitFor(() => {
       expect(
-        screen.getByTestId("runtime-slots-oauth-provider"),
+        screen.getByTestId("runtime-slots-oauth-field-clientId"),
       ).toBeInTheDocument();
     });
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-oauth-provider"),
-      "openai",
-    );
     await user.type(
       screen.getByTestId("runtime-slots-oauth-field-clientId"),
       "user-owned-client-id",
     );
     await user.type(
-      screen.getByTestId("runtime-slots-oauth-base-url"),
+      screen.getByTestId("runtime-slots-oauth-field-issuer"),
+      "https://issuer.example.test",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-authorizeEndpoint"),
+      "https://issuer.example.test/authorize",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-tokenEndpoint"),
+      "https://issuer.example.test/token",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-scopes"),
+      "openid",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-accountLabel"),
+      "dev@example.test",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-base-url"),
       "https://api.openai.com/v1",
     );
     await user.type(
-      screen.getByTestId("runtime-slots-oauth-model-id"),
+      screen.getByTestId("runtime-slots-model-id"),
       "gpt-4o",
     );
     await user.click(screen.getByTestId("runtime-slots-role-custom"));
@@ -280,7 +272,7 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
 
-    await fillOpenaiOauthForm(user);
+    await fillCustomOidcOauthForm(user);
     await user.click(screen.getByTestId("runtime-slots-form-save"));
 
     await waitFor(() => {
@@ -303,7 +295,7 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
 
-    await fillOpenaiOauthForm(user);
+    await fillCustomOidcOauthForm(user);
     await user.click(screen.getByTestId("runtime-slots-form-save"));
 
     await waitFor(() => {
@@ -322,7 +314,7 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
 
-    await fillOpenaiOauthForm(user);
+    await fillCustomOidcOauthForm(user);
     await user.click(screen.getByTestId("runtime-slots-form-save"));
 
     await waitFor(() => {
@@ -346,7 +338,7 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
 
-    await fillOpenaiOauthForm(user);
+    await fillCustomOidcOauthForm(user);
     await user.click(screen.getByTestId("runtime-slots-form-save"));
 
     await waitFor(() => {
@@ -382,7 +374,7 @@ describe("OAuth login failures — timeout / denied / state mismatch", () => {
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
 
-    await fillOpenaiOauthForm(user);
+    await fillCustomOidcOauthForm(user);
     await user.click(screen.getByTestId("runtime-slots-form-save"));
 
     await waitFor(() => {
@@ -433,26 +425,44 @@ describe("OAuth success display — account + expiry; tokens never in DOM", () =
       screen.getByTestId("runtime-slots-display-name"),
       "OA Success",
     );
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
     await waitFor(() => {
       expect(
-        screen.getByTestId("runtime-slots-oauth-provider"),
+        screen.getByTestId("runtime-slots-oauth-field-clientId"),
       ).toBeInTheDocument();
     });
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-oauth-provider"),
-      "openai",
-    );
     await user.type(
       screen.getByTestId("runtime-slots-oauth-field-clientId"),
       "user-owned-client-id",
     );
     await user.type(
-      screen.getByTestId("runtime-slots-oauth-base-url"),
+      screen.getByTestId("runtime-slots-oauth-field-issuer"),
+      "https://issuer.example.test",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-authorizeEndpoint"),
+      "https://issuer.example.test/authorize",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-tokenEndpoint"),
+      "https://issuer.example.test/token",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-scopes"),
+      "openid",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-oauth-field-accountLabel"),
+      "dev@example.test",
+    );
+    await user.type(
+      screen.getByTestId("runtime-slots-base-url"),
       "https://api.openai.com/v1",
     );
     await user.type(
-      screen.getByTestId("runtime-slots-oauth-model-id"),
+      screen.getByTestId("runtime-slots-model-id"),
       "gpt-4o",
     );
     await user.click(screen.getByTestId("runtime-slots-role-controller"));
@@ -465,7 +475,7 @@ describe("OAuth success display — account + expiry; tokens never in DOM", () =
     expect(createSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         authKind: "oauth",
-        providerId: "openai",
+        providerId: "custom-oidc",
         oauthSupplement: expect.objectContaining({
           clientId: "user-owned-client-id",
         }),
@@ -531,7 +541,9 @@ describe("OAuth controller vs local CLI (existing rule not weakened)", () => {
     );
 
     await user.click(await screen.findByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-oauth"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-custom-oidc"),
+    );
 
     const controllerBtn = screen.getByTestId("runtime-slots-role-controller");
     expect(controllerBtn).not.toBeDisabled();

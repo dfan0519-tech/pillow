@@ -27,13 +27,16 @@ function assertSecretAbsentFromDom(secret: string): void {
   }
 }
 
-async function openApiKeyCreateForm(
+async function openCreateAndPick(
   user: ReturnType<typeof userEvent.setup>,
+  providerId: string,
 ): Promise<void> {
   await screen.findByTestId("runtime-slots-add");
   await user.click(screen.getByTestId("runtime-slots-add"));
-  await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
-  await screen.findByTestId("runtime-slots-provider");
+  await user.click(
+    screen.getByTestId(`runtime-slots-provider-pick-${providerId}`),
+  );
+  await screen.findByTestId("runtime-slots-base-url");
 }
 
 describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
@@ -43,16 +46,17 @@ describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
     render(
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
-    await openApiKeyCreateForm(user);
+    await openCreateAndPick(user, "custom");
 
-    const baseUrl = screen.getByTestId("runtime-slots-base-url");
-    // Default is custom → empty.
-    expect(baseUrl).toHaveValue("");
+    expect(screen.getByTestId("runtime-slots-base-url")).toHaveValue("");
 
-    const provider = screen.getByTestId("runtime-slots-provider");
-    await user.selectOptions(provider, "siliconflow");
+    await user.click(screen.getByTestId("runtime-slots-form-back"));
+    await user.click(
+      screen.getByTestId("runtime-slots-provider-pick-siliconflow"),
+    );
 
     const expected = getProviderPreset("siliconflow")!.baseUrl;
+    const baseUrl = screen.getByTestId("runtime-slots-base-url");
     expect(baseUrl).toHaveValue(expected);
     // Positive: not merely "select rendered" — value matches catalog.
     expect(expected).toBe("https://api.siliconflow.cn/v1");
@@ -69,12 +73,7 @@ describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
     render(
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
-    await openApiKeyCreateForm(user);
-
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-provider"),
-      "deepseek",
-    );
+    await openCreateAndPick(user, "deepseek");
 
     expect(screen.getByTestId("runtime-slots-base-url")).toHaveValue(
       "https://api.deepseek.com",
@@ -90,12 +89,7 @@ describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
     render(
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
-    await openApiKeyCreateForm(user);
-
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-provider"),
-      "openrouter",
-    );
+    await openCreateAndPick(user, "openrouter");
     const baseUrl = screen.getByTestId("runtime-slots-base-url");
     expect(baseUrl).toHaveValue("https://openrouter.ai/api/v1");
 
@@ -117,9 +111,8 @@ describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
 
     // Negative pin: preset must not clobber the hand edit.
     expect(baseUrl).toHaveValue("https://user-edited.example.test/openai/v1");
-    // Provider select still shows openrouter (user did not re-pick).
-    expect(screen.getByTestId("runtime-slots-provider")).toHaveValue(
-      "openrouter",
+    expect(screen.getByTestId("runtime-slots-connect-provider")).toHaveTextContent(
+      /OpenRouter/u,
     );
   });
 
@@ -129,20 +122,13 @@ describe("RuntimeSlotsSection — provider preset fills baseUrl", () => {
     render(
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
-    await openApiKeyCreateForm(user);
-
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-provider"),
-      "groq",
-    );
+    await openCreateAndPick(user, "groq");
     expect(screen.getByTestId("runtime-slots-base-url")).toHaveValue(
       "https://api.groq.com/openai/v1",
     );
 
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-provider"),
-      "custom",
-    );
+    await user.click(screen.getByTestId("runtime-slots-form-back"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     expect(screen.getByTestId("runtime-slots-base-url")).toHaveValue("");
   });
 });
@@ -155,13 +141,9 @@ describe("RuntimeSlotsSection — create with preset still keeps secret out of D
     render(
       <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
     );
-    await openApiKeyCreateForm(user);
+    await openCreateAndPick(user, "siliconflow");
 
     await user.type(screen.getByTestId("runtime-slots-display-name"), "SF Slot");
-    await user.selectOptions(
-      screen.getByTestId("runtime-slots-provider"),
-      "siliconflow",
-    );
     await user.click(screen.getByTestId("runtime-slots-role-custom"));
     await user.type(screen.getByTestId("runtime-slots-role-custom-name"), "写码");
     await user.type(screen.getByTestId("runtime-slots-model-id"), "Qwen/Qwen-test");

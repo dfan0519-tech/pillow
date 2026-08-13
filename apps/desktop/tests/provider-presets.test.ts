@@ -5,9 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  CATALOG_API_DEFAULTS,
   DEFAULT_PROVIDER_PRESET_ID,
   PROVIDER_PRESETS,
+  SLOT_CONNECT_PROVIDERS,
   getProviderPreset,
+  getSlotConnectProvider,
+  inferConnectProviderId,
   type ProviderPresetId,
 } from "../src/features/settings/providerPresets";
 
@@ -86,5 +90,66 @@ describe("PROVIDER_PRESETS catalog", () => {
 
   it("returns undefined for unknown ids", () => {
     expect(getProviderPreset("not-a-real-vendor")).toBeUndefined();
+  });
+});
+
+describe("SLOT_CONNECT_PROVIDERS — first-step picker", () => {
+  it("includes named catalog, presets, custom endpoint, custom OIDC, local CLI", () => {
+    const ids = SLOT_CONNECT_PROVIDERS.map((row) => row.id);
+    expect(ids).toContain("xai");
+    expect(ids).toContain("openai");
+    expect(ids).toContain("anthropic");
+    expect(ids).toContain("siliconflow");
+    expect(ids).toContain("custom");
+    expect(ids).toContain("custom-oidc");
+    expect(ids).toContain("local_cli");
+  });
+
+  it("never lists oauth as an inherent method (catalog must admit it)", () => {
+    for (const row of SLOT_CONNECT_PROVIDERS) {
+      expect(row.inherentMethods).not.toContain("oauth");
+    }
+    expect(getSlotConnectProvider("custom-oidc")?.inherentMethods).toEqual([]);
+    expect(getSlotConnectProvider("local_cli")?.inherentMethods).toEqual([
+      "local_cli",
+    ]);
+  });
+
+  it("infers edit provider from stored baseUrl / auth", () => {
+    expect(
+      inferConnectProviderId({
+        kind: "governed_grok",
+        authMode: "api_key",
+        baseUrl: CATALOG_API_DEFAULTS.openai!.baseUrl,
+      }),
+    ).toBe("openai");
+    expect(
+      inferConnectProviderId({
+        kind: "governed_grok",
+        authMode: "api_key",
+        baseUrl: "https://api.siliconflow.cn/v1",
+      }),
+    ).toBe("siliconflow");
+    expect(
+      inferConnectProviderId({
+        kind: "governed_grok",
+        authMode: "login",
+        baseUrl: null,
+      }),
+    ).toBe("xai");
+    expect(
+      inferConnectProviderId({
+        kind: "external_cli",
+        authMode: null,
+        baseUrl: null,
+      }),
+    ).toBe("local_cli");
+    expect(
+      inferConnectProviderId({
+        kind: "governed_grok",
+        authMode: "api_key",
+        baseUrl: "https://unknown.example.test/v1",
+      }),
+    ).toBe("custom");
   });
 });

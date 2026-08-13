@@ -261,6 +261,7 @@ const CUSTOM_EVIDENCE: &[ProviderLoginEvidence] = &[
 ];
 
 const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
+    // Offered slot auth: api_key, grok_login. OAuth withheld (ClientIdSource::Unknown).
     ProviderLoginProfile {
         provider_id: "xai",
         display_name: "xAI",
@@ -277,6 +278,7 @@ const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
         account_identifier: AccountIdentifierStrategy::Unknown,
         evidence: XAI_EVIDENCE,
     },
+    // Offered slot auth: api_key. OAuth withheld (ClientIdSource::Unknown).
     ProviderLoginProfile {
         provider_id: "github-copilot",
         display_name: "GitHub Copilot",
@@ -293,6 +295,7 @@ const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
         account_identifier: AccountIdentifierStrategy::Unknown,
         evidence: GITHUB_EVIDENCE,
     },
+    // Offered slot auth: api_key. login_method is ApiKeyOnly — no OAuth.
     ProviderLoginProfile {
         provider_id: "anthropic",
         display_name: "Anthropic",
@@ -309,6 +312,7 @@ const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
         account_identifier: AccountIdentifierStrategy::Unknown,
         evidence: ANTHROPIC_EVIDENCE,
     },
+    // Offered slot auth: api_key. OAuth withheld (ClientIdSource::Unknown).
     ProviderLoginProfile {
         provider_id: "openai",
         display_name: "OpenAI",
@@ -328,6 +332,7 @@ const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
         },
         evidence: OPENAI_EVIDENCE,
     },
+    // Offered slot auth: oauth (ClientIdSource::UserSupplied — user provides client_id).
     ProviderLoginProfile {
         provider_id: "custom-oidc",
         display_name: "Custom OIDC",
@@ -354,6 +359,44 @@ pub fn provider_login_profile(provider_id: &str) -> Option<&'static ProviderLogi
     PROVIDER_LOGIN_PROFILES
         .iter()
         .find(|profile| profile.provider_id == provider_id)
+}
+
+/// Whether the product connect flow may offer OAuth for this profile.
+///
+/// - `PublicDocumented` / `UserSupplied` → OAuth is a real method
+/// - `Unknown` → do **not** show OAuth; Pillow will not invent a client_id
+///
+/// The host catalog DTO already carries this as `clientId` (`known` /
+/// `user_supplied` / `unknown`). Do not add a parallel DTO key for it.
+#[allow(dead_code)] // Renderer derives the same rule from the closed DTO `clientId`.
+pub fn profile_offers_oauth(profile: &ProviderLoginProfile) -> bool {
+    if profile.login_method == ProviderLoginMethod::ApiKeyOnly {
+        return false;
+    }
+    matches!(
+        profile.client_id.source,
+        ClientIdSource::PublicDocumented | ClientIdSource::UserSupplied
+    )
+}
+
+/// Host `create_slot` `auth_kind` values this catalog profile may present.
+///
+/// Derived from existing catalog fields (login method + client_id source +
+/// provider id). Not a new wire key — renderer applies the same rule to the
+/// closed `ProviderLoginCatalogEntryDto`.
+#[allow(dead_code)] // Same derivation lives in renderer `supportedAuthKindsForCatalogEntry`.
+pub fn profile_supported_auth_kinds(profile: &ProviderLoginProfile) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    if profile.provider_id != "custom-oidc" {
+        kinds.push("api_key");
+    }
+    if profile.provider_id == "xai" {
+        kinds.push("grok_login");
+    }
+    if profile_offers_oauth(profile) {
+        kinds.push("oauth");
+    }
+    kinds
 }
 
 /// Resolve a provider profile into the exact public parameters needed by the
@@ -452,4 +495,49 @@ fn normalize_scopes<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<Vec
         .map(normalized_non_empty)
         .collect::<Option<Vec<_>>>()?;
     (!values.is_empty()).then_some(values)
+}
+
+#[cfg(test)]
+mod supported_auth_kind_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_client_id_does_not_offer_oauth() {
+        for id in ["xai", "github-copilot", "openai"] {
+            let profile = provider_login_profile(id).expect(id);
+            assert_eq!(profile.client_id.source, ClientIdSource::Unknown);
+            assert!(
+                !profile_offers_oauth(profile),
+                "{id} must not offer OAuth while client_id source is Unknown"
+            );
+            assert!(
+                !profile_supported_auth_kinds(profile).contains(&"oauth"),
+                "{id} supported kinds must omit oauth"
+            );
+        }
+    }
+
+    #[test]
+    fn user_supplied_custom_oidc_offers_oauth_only() {
+        let profile = provider_login_profile("custom-oidc").expect("custom-oidc");
+        assert_eq!(profile.client_id.source, ClientIdSource::UserSupplied);
+        assert!(profile_offers_oauth(profile));
+        assert_eq!(profile_supported_auth_kinds(profile), vec!["oauth"]);
+    }
+
+    #[test]
+    fn anthropic_is_api_key_only() {
+        let profile = provider_login_profile("anthropic").expect("anthropic");
+        assert!(!profile_offers_oauth(profile));
+        assert_eq!(profile_supported_auth_kinds(profile), vec!["api_key"]);
+    }
+
+    #[test]
+    fn xai_offers_api_key_and_grok_login() {
+        let profile = provider_login_profile("xai").expect("xai");
+        assert_eq!(
+            profile_supported_auth_kinds(profile),
+            vec!["api_key", "grok_login"]
+        );
+    }
 }

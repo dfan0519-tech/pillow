@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  catalogEntryOffersOauth,
   defaultMockProviderLoginCatalog,
   isOauthLoginFailureCode,
   looksLikePublicAuthorizeUrl,
@@ -11,6 +12,7 @@ import {
   oauthCapableProviders,
   oauthFieldRequiresUserInput,
   oauthFieldsRequiringUserInput,
+  supportedAuthKindsForCatalogEntry,
 } from "../src/features/settings/oauthLoginUi";
 import {
   OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
@@ -29,40 +31,66 @@ function byId(id: string): ProviderLoginCatalogEntry {
   return row;
 }
 
-describe("oauthCapableProviders — exclude api_key_only", () => {
-  it("positive: pkce and device_code providers remain", () => {
+describe("oauthCapableProviders — Unknown client_id is not OAuth", () => {
+  it("only UserSupplied / PublicDocumented client_id remain", () => {
     const capable = oauthCapableProviders(defaultMockProviderLoginCatalog());
     const ids = capable.map((entry) => entry.providerId);
-    expect(ids).toContain("openai");
-    expect(ids).toContain("xai");
-    expect(ids).toContain("github-copilot");
-    expect(ids).toContain("custom-oidc");
-    expect(capable.every((entry) => entry.loginMethod !== "api_key_only")).toBe(
-      true,
-    );
+    expect(ids).toEqual(["custom-oidc"]);
+    expect(capable.every((entry) => catalogEntryOffersOauth(entry))).toBe(true);
   });
 
-  it("negative: api_key_only anthropic is not listed", () => {
+  it("Unknown client_id named providers are not listed (old contract was wrong)", () => {
     const capable = oauthCapableProviders(defaultMockProviderLoginCatalog());
-    expect(capable.some((entry) => entry.providerId === "anthropic")).toBe(
-      false,
-    );
-    expect(
-      defaultMockProviderLoginCatalog().some(
-        (entry) =>
-          entry.providerId === "anthropic"
-          && entry.loginMethod === "api_key_only",
-      ),
-    ).toBe(true);
+    for (const id of ["openai", "xai", "github-copilot", "anthropic"]) {
+      expect(capable.some((entry) => entry.providerId === id)).toBe(false);
+      expect(catalogEntryOffersOauth(byId(id))).toBe(false);
+    }
+  });
+
+  it("does not invent a DTO key for oauth offer — uses clientId", () => {
+    const keys = Object.keys(byId("openai"));
+    expect(keys).not.toContain("offersOauth");
+    expect(keys).not.toContain("supportedAuthKinds");
+    expect(keys).toContain("clientId");
+    expect(byId("openai").clientId).toBe("unknown");
+  });
+});
+
+describe("supportedAuthKindsForCatalogEntry — derived from catalog", () => {
+  it("xai: api_key + grok_login, no oauth", () => {
+    expect(supportedAuthKindsForCatalogEntry(byId("xai"))).toEqual([
+      "api_key",
+      "grok_login",
+    ]);
+  });
+
+  it("openai / github-copilot / anthropic: api_key only", () => {
+    expect(supportedAuthKindsForCatalogEntry(byId("openai"))).toEqual([
+      "api_key",
+    ]);
+    expect(supportedAuthKindsForCatalogEntry(byId("github-copilot"))).toEqual([
+      "api_key",
+    ]);
+    expect(supportedAuthKindsForCatalogEntry(byId("anthropic"))).toEqual([
+      "api_key",
+    ]);
+  });
+
+  it("custom-oidc: oauth only", () => {
+    expect(supportedAuthKindsForCatalogEntry(byId("custom-oidc"))).toEqual([
+      "oauth",
+    ]);
   });
 });
 
 describe("oauthFieldsRequiringUserInput — Unknown / Known (+/−)", () => {
-  it("positive: Unknown client_id requires user fill with reason (openai, xai)", () => {
+  it("Unknown client_id providers do not offer OAuth (field helper is unused)", () => {
     for (const id of ["openai", "xai", "github-copilot"] as const) {
       const entry = byId(id);
       expect(entry.clientId).toBe("unknown");
       expect(entry.knownClientId).toBeNull();
+      expect(catalogEntryOffersOauth(entry)).toBe(false);
+      // Helper may still list the field, but the connect UI must not show OAuth.
       expect(oauthFieldRequiresUserInput(entry, "clientId")).toBe(true);
       const req = oauthFieldsRequiringUserInput(entry).find(
         (field) => field.fieldId === "clientId",

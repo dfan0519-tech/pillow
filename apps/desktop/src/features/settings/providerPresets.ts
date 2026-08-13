@@ -1,5 +1,6 @@
 /**
- * Pure data module: OpenAI-compatible provider presets for API-key slots.
+ * Pure data module: OpenAI-compatible provider presets for API-key slots,
+ * plus the first-step connect-provider catalog (OpenCode-shaped picker).
  *
  * Presets only supply a default `baseUrl` (and optional suggested model / docs).
  * They never change governance, auth kind, or host secret handling.
@@ -7,6 +8,8 @@
  * Each non-custom entry documents an authoritative source URL for `baseUrl`
  * in a line comment. Prefer omitting an entry over guessing an endpoint.
  */
+
+import type { SlotAuthKind } from "./runtimeSlotsTypes";
 
 export type ProviderPresetId =
   | "siliconflow"
@@ -181,3 +184,182 @@ export function getProviderPreset(
 
 /** Default selection when opening the API-key create form. */
 export const DEFAULT_PROVIDER_PRESET_ID: ProviderPresetId = "custom";
+
+/**
+ * Documented API-key defaults for host catalog providers.
+ * Not mixed into `PROVIDER_PRESETS` (those stay OpenAI-compatible presets).
+ * Omitted when there is no authoritative OpenAI-compatible base_url.
+ */
+export const CATALOG_API_DEFAULTS: Readonly<
+  Record<
+    string,
+    {
+      baseUrl: string;
+      suggestedModelId: string;
+      docsUrl: string;
+      notes: string;
+    }
+  >
+> = {
+  // Source: https://docs.x.ai/docs/guides/chat-completions (base URL https://api.x.ai/v1)
+  xai: {
+    baseUrl: "https://api.x.ai/v1",
+    suggestedModelId: "",
+    docsUrl: "https://console.x.ai/",
+    notes: "xAI OpenAI 兼容端点。模型 id 以控制台 /models 为准。",
+  },
+  // Source: https://platform.openai.com/docs/api-reference/authentication
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    suggestedModelId: "",
+    docsUrl: "https://platform.openai.com/api-keys",
+    notes: "官方 OpenAI API。模型 id 以账号可见目录为准。",
+  },
+  // Source: https://docs.anthropic.com/en/api/getting-started (https://api.anthropic.com)
+  anthropic: {
+    baseUrl: "https://api.anthropic.com/v1",
+    suggestedModelId: "",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    notes: "官方 Anthropic API 主机；若端点不提供 /models，请手输模型 id。",
+  },
+};
+
+export type SlotConnectProviderGroup = "catalog" | "preset" | "other";
+
+/**
+ * First-step connect provider. Auth methods are not a global tab list —
+ * they come from `inherentMethods` plus catalog OAuth (when offered).
+ */
+export type SlotConnectProvider = {
+  id: string;
+  label: string;
+  description: string;
+  group: SlotConnectProviderGroup;
+  /** When set, selecting this row fills API-key defaults from `PROVIDER_PRESETS`. */
+  presetId?: ProviderPresetId;
+  /** Host login-catalog id (`xai`, `openai`, `custom-oidc`, …). */
+  catalogProviderId?: string;
+  /**
+   * Methods this row always offers. Never includes `oauth` —
+   * OAuth is admitted only when the catalog client_id source allows it.
+   */
+  inherentMethods: readonly SlotAuthKind[];
+};
+
+const CATALOG_CONNECT_PROVIDERS: readonly SlotConnectProvider[] = [
+  {
+    id: "xai",
+    label: "xAI",
+    description: "Grok API key，或使用本机已登录的 Grok。",
+    group: "catalog",
+    catalogProviderId: "xai",
+    inherentMethods: ["api_key", "grok_login"],
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    description: "官方 OpenAI 兼容端点；用 API key 连接。",
+    group: "catalog",
+    catalogProviderId: "openai",
+    inherentMethods: ["api_key"],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    description: "Anthropic API key。",
+    group: "catalog",
+    catalogProviderId: "anthropic",
+    inherentMethods: ["api_key"],
+  },
+  {
+    id: "github-copilot",
+    label: "GitHub Copilot",
+    description: "OAuth 暂不可用（client_id 未公开登记）。仍可按 API key 端点登记。",
+    group: "catalog",
+    catalogProviderId: "github-copilot",
+    inherentMethods: ["api_key"],
+  },
+];
+
+const PRESET_CONNECT_PROVIDERS: readonly SlotConnectProvider[] =
+  PROVIDER_PRESETS.filter((preset) => preset.id !== "custom").map((preset) => ({
+    id: preset.id,
+    label: preset.label,
+    description: preset.notes,
+    group: "preset" as const,
+    presetId: preset.id,
+    inherentMethods: ["api_key"] as const,
+  }));
+
+const OTHER_CONNECT_PROVIDERS: readonly SlotConnectProvider[] = [
+  {
+    id: "custom",
+    label: "自定义 OpenAI 兼容端点",
+    description: "自行填写 base_url、模型 id 与 API key。",
+    group: "other",
+    presetId: "custom",
+    inherentMethods: ["api_key"],
+  },
+  {
+    id: "custom-oidc",
+    label: "自定义 OIDC",
+    description: "用户自有应用的 OAuth/OIDC 登录（需自行提供 client_id）。",
+    group: "other",
+    catalogProviderId: "custom-oidc",
+    inherentMethods: [],
+  },
+  {
+    id: "local_cli",
+    label: "本机 CLI",
+    description: "登记本机可执行文件；不受治理，不能担任总控。",
+    group: "other",
+    inherentMethods: ["local_cli"],
+  },
+];
+
+/** Ordered first-step picker. Custom endpoint is an item, not an OAuth field. */
+export const SLOT_CONNECT_PROVIDERS: readonly SlotConnectProvider[] = [
+  ...CATALOG_CONNECT_PROVIDERS,
+  ...PRESET_CONNECT_PROVIDERS,
+  ...OTHER_CONNECT_PROVIDERS,
+];
+
+export function getSlotConnectProvider(
+  id: string,
+): SlotConnectProvider | undefined {
+  return SLOT_CONNECT_PROVIDERS.find((provider) => provider.id === id);
+}
+
+export const SLOT_CONNECT_PROVIDER_GROUPS: readonly {
+  id: SlotConnectProviderGroup;
+  label: string;
+}[] = [
+  { id: "catalog", label: "具名供应商" },
+  { id: "preset", label: "OpenAI 兼容端点" },
+  { id: "other", label: "其他" },
+];
+
+/**
+ * Infer which first-step provider an existing API-key (or other) slot used.
+ * Edit reuses the same connect form; provider is locked.
+ */
+export function inferConnectProviderId(input: {
+  kind: "governed_grok" | "external_cli";
+  authMode: "login" | "api_key" | "oauth" | null;
+  baseUrl: string | null;
+}): string {
+  if (input.kind === "external_cli") return "local_cli";
+  if (input.authMode === "login") return "xai";
+  if (input.authMode === "oauth") return "custom-oidc";
+  const url = (input.baseUrl ?? "").trim();
+  if (url) {
+    for (const [id, defaults] of Object.entries(CATALOG_API_DEFAULTS)) {
+      if (defaults.baseUrl === url) return id;
+    }
+    const preset = PROVIDER_PRESETS.find(
+      (entry) => entry.baseUrl.length > 0 && entry.baseUrl === url,
+    );
+    if (preset) return preset.id;
+  }
+  return "custom";
+}

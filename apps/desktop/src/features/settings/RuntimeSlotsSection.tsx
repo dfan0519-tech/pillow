@@ -7,17 +7,22 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  connectProviderMethods,
   formatOauthExpiryForDisplay,
   isOauthLoginFailureCode,
   mapOauthLoginErrorMessage,
-  oauthCapableProviders,
   oauthFieldsRequiringUserInput,
 } from "./oauthLoginUi";
 import {
+  CATALOG_API_DEFAULTS,
   DEFAULT_PROVIDER_PRESET_ID,
-  PROVIDER_PRESETS,
+  SLOT_CONNECT_PROVIDER_GROUPS,
+  SLOT_CONNECT_PROVIDERS,
   getProviderPreset,
+  getSlotConnectProvider,
+  inferConnectProviderId,
   type ProviderPresetId,
+  type SlotConnectProvider,
 } from "./providerPresets";
 import { RuntimeSlotModelPicker } from "./RuntimeSlotModelPicker";
 import {
@@ -48,7 +53,6 @@ import {
   MODEL_CATALOG_UNSUPPORTED_ENDPOINT,
   OAUTH_AUTH_BADGE,
   OAUTH_BROWSER_OPEN_FAILED_MESSAGE,
-  OAUTH_CATALOG_EMPTY,
   OAUTH_CATALOG_LOAD_BUSY,
   OAUTH_LOGIN_FORM_HINT,
   OAUTH_LOGIN_IN_PROGRESS,
@@ -67,6 +71,7 @@ import {
   type RuntimeSlotView,
   type RuntimeSlotsGateway,
   type SlotAuthKind,
+  type SlotFormStep,
   RuntimeSlotsGatewayError,
 } from "./runtimeSlotsTypes";
 import "../../styles/runtime-slots.css";
@@ -211,7 +216,12 @@ export function RuntimeSlotsSection({
 
   const [formMode, setFormMode] = useState<FormMode>("closed");
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
-  /** Unified create auth — data-driven from SLOT_AUTH_METHODS. */
+  /** Create: provider picker first; connect step shows that provider's methods. */
+  const [formStep, setFormStep] = useState<SlotFormStep>("provider");
+  const [connectProviderId, setConnectProviderId] = useState<string | null>(
+    null,
+  );
+  /** Auth kind after a provider is chosen — never the global four-tab list. */
   const [createAuthKind, setCreateAuthKind] = useState<SlotAuthKind>("api_key");
   const [createRole, setCreateRole] = useState<RuntimeSlotRole>("controller");
   const [roleCustomName, setRoleCustomName] = useState("");
@@ -282,6 +292,15 @@ export function RuntimeSlotsSection({
     () => getProviderPreset(providerPresetId),
     [providerPresetId],
   );
+  const selectedConnectProvider = useMemo(
+    () =>
+      connectProviderId ? getSlotConnectProvider(connectProviderId) ?? null : null,
+    [connectProviderId],
+  );
+  const availableAuthMethods = useMemo(() => {
+    if (!selectedConnectProvider) return [];
+    return connectProviderMethods(selectedConnectProvider, oauthCatalog);
+  }, [oauthCatalog, selectedConnectProvider]);
 
   const hasController = useMemo(
     () => slots.some((slot) => slot.role === "controller"),
@@ -293,15 +312,11 @@ export function RuntimeSlotsSection({
   );
   const controllerAllowedForCreate = authAllowsController(createAuthKind);
 
-  const oauthProviders = useMemo(
-    () => oauthCapableProviders(oauthCatalog),
-    [oauthCatalog],
-  );
   const selectedOauthProvider = useMemo(
     () =>
-      oauthProviders.find((entry) => entry.providerId === oauthProviderId)
+      oauthCatalog.find((entry) => entry.providerId === oauthProviderId)
       ?? null,
-    [oauthProviders, oauthProviderId],
+    [oauthCatalog, oauthProviderId],
   );
   const oauthRequiredFields = useMemo(
     () =>
@@ -346,6 +361,8 @@ export function RuntimeSlotsSection({
     setLaunchArgsText("");
     setStatusArgsText("");
     setEditingSlotId(null);
+    setFormStep("provider");
+    setConnectProviderId(null);
     setCreateAuthKind("api_key");
     setCreateRole("controller");
     setRoleCustomName("");
@@ -374,14 +391,11 @@ export function RuntimeSlotsSection({
     try {
       const rows = await gateway.listProviderLoginCatalog();
       setOauthCatalog(rows);
-      const capable = oauthCapableProviders(rows);
-      if (capable.length === 0) {
-        setOauthCatalogError(OAUTH_CATALOG_EMPTY);
-        setOauthProviderId("");
-      } else if (
-        !capable.some((entry) => entry.providerId === oauthProviderId)
+      if (
+        oauthProviderId
+        && !rows.some((entry) => entry.providerId === oauthProviderId)
       ) {
-        setOauthProviderId(capable[0]!.providerId);
+        setOauthProviderId("");
       }
     } catch (cause) {
       const message =
@@ -495,18 +509,70 @@ export function RuntimeSlotsSection({
     // Suggest controller only when the project has none yet.
     setCreateRole(hasController ? "custom" : "controller");
     setFormMode("create");
+    setFormStep("provider");
     setRoleEditSlotId(null);
     setNotice(null);
     setError(null);
     setProbe(null);
+    void loadOauthCatalog();
+  }
+
+  function applyConnectProviderDefaults(provider: SlotConnectProvider): void {
+    if (provider.presetId) {
+      selectProviderPreset(provider.presetId);
+      return;
+    }
+    const catalogId = provider.catalogProviderId;
+    const defaults = catalogId ? CATALOG_API_DEFAULTS[catalogId] : undefined;
+    if (defaults) {
+      setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
+      setBaseUrl(defaults.baseUrl);
+      setModelId(defaults.suggestedModelId);
+      setDraftCatalog(null);
+      setDraftCatalogError(null);
+      return;
+    }
+    setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
+    setBaseUrl("");
+    setModelId("");
+    setDraftCatalog(null);
+    setDraftCatalogError(null);
+  }
+
+  function selectConnectProvider(providerId: string): void {
+    const provider = getSlotConnectProvider(providerId);
+    if (!provider) return;
+    setConnectProviderId(provider.id);
+    applyConnectProviderDefaults(provider);
+    if (provider.catalogProviderId) {
+      setOauthProviderId(provider.catalogProviderId);
+      setOauthDraftFields(emptyOauthDraftFields());
+    } else {
+      setOauthProviderId("");
+    }
+    const methods = connectProviderMethods(provider, oauthCatalog);
+    const nextAuth = methods[0] ?? "api_key";
+    setCreateAuthKind(nextAuth);
+    if (!authAllowsController(nextAuth) && createRole === "controller") {
+      setCreateRole("custom");
+    }
+    setFormStep("connect");
+    setError(null);
   }
 
   function openEdit(slot: RuntimeSlotView): void {
     if (slot.kind !== "governed_grok" || slot.authMode !== "api_key") {
       return;
     }
+    const providerId = inferConnectProviderId({
+      kind: slot.kind,
+      authMode: slot.authMode,
+      baseUrl: slot.baseUrl,
+    });
     setFormMode("edit");
+    setFormStep("connect");
     setEditingSlotId(slot.slotId);
+    setConnectProviderId(providerId);
     setCreateAuthKind("api_key");
     setCreateRole(slot.role);
     setRoleCustomName(slot.roleCustomName ?? "");
@@ -516,7 +582,8 @@ export function RuntimeSlotsSection({
     // Leave secret field blank = keep stored value.
     setApiKeyDraft("");
     // Edit keeps the stored baseUrl; do not re-apply a preset over it.
-    setProviderPresetId(DEFAULT_PROVIDER_PRESET_ID);
+    const inferred = getSlotConnectProvider(providerId);
+    setProviderPresetId(inferred?.presetId ?? DEFAULT_PROVIDER_PRESET_ID);
     setRoleEditSlotId(null);
     setNotice(null);
     setError(null);
@@ -529,13 +596,10 @@ export function RuntimeSlotsSection({
   }
 
   function selectCreateAuth(kind: SlotAuthKind): void {
+    if (!availableAuthMethods.includes(kind)) return;
     setCreateAuthKind(kind);
     if (!authAllowsController(kind) && createRole === "controller") {
       setCreateRole("custom");
-    }
-    if (kind === "oauth") {
-      // Load catalog on demand; never invent providers client-side beyond mock.
-      void loadOauthCatalog();
     }
   }
 
@@ -968,7 +1032,8 @@ export function RuntimeSlotsSection({
       <div className="runtime-slots__head">
         <h3>运行时槽位</h3>
         <p>
-          所有槽位平等：新建时填写名称、选择认证方式、分配角色。
+          先选供应商，再只显示该供应商真正支持的认证方式。
+          多个槽位可同时工作，各自独立运行。
           API key 仅在提交时发送给宿主，保存后界面只显示「已配置」。
         </p>
       </div>
@@ -1307,14 +1372,27 @@ export function RuntimeSlotsSection({
         <form
           className="runtime-slots-form"
           data-testid="runtime-slots-form"
-          onSubmit={(event) => void handleSave(event)}
+          onSubmit={(event) => {
+            if (formMode === "create" && formStep === "provider") {
+              event.preventDefault();
+              return;
+            }
+            void handleSave(event);
+          }}
         >
           <p className="runtime-slots-form__title">
-            {formMode === "edit" ? "编辑 API-key 槽位" : "新建槽位"}
+            {formMode === "edit"
+              ? "编辑槽位"
+              : formStep === "provider"
+              ? "新建槽位 · 选择供应商"
+              : `新建槽位 · ${selectedConnectProvider?.label ?? "连接"}`}
           </p>
+          <span hidden data-testid="runtime-slots-form-step">
+            {formMode === "edit" ? "connect" : formStep}
+          </span>
 
           <label className="settings-field">
-            <span className="settings-field__label">1. 名称</span>
+            <span className="settings-field__label">名称</span>
             <input
               aria-label="槽位显示名称"
               autoComplete="off"
@@ -1329,18 +1407,96 @@ export function RuntimeSlotsSection({
             />
           </label>
 
-          {formMode === "create" ? (
+          {formMode === "create" && formStep === "provider" ? (
+            <div
+              className="settings-provider-picker"
+              data-testid="runtime-slots-provider-step"
+            >
+              {SLOT_CONNECT_PROVIDER_GROUPS.map((group) => {
+                const rows = SLOT_CONNECT_PROVIDERS.filter(
+                  (provider) => provider.group === group.id,
+                );
+                if (rows.length === 0) return null;
+                return (
+                  <div
+                    className="settings-provider-picker__group"
+                    key={group.id}
+                  >
+                    <p className="settings-provider-picker__heading">
+                      {group.label}
+                    </p>
+                    <div
+                      className="settings-provider-picker__grid"
+                      role="list"
+                    >
+                      {rows.map((provider) => (
+                        <button
+                          data-testid={`runtime-slots-provider-pick-${provider.id}`}
+                          disabled={busy}
+                          key={provider.id}
+                          onClick={() => selectConnectProvider(provider.id)}
+                          role="listitem"
+                          title={provider.description}
+                          type="button"
+                        >
+                          <span>{provider.label}</span>
+                          <span className="settings-provider-picker__desc">
+                            {provider.description}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {formStep === "connect" || formMode === "edit" ? (
             <>
+              {formMode === "create" ? (
+                <div className="settings-provider-picker__current">
+                  <button
+                    data-testid="runtime-slots-form-back"
+                    disabled={busy || oauthLoginBusy}
+                    onClick={() => {
+                      setFormStep("provider");
+                      setError(null);
+                    }}
+                    type="button"
+                  >
+                    返回供应商
+                  </button>
+                  <span data-testid="runtime-slots-connect-provider">
+                    {selectedConnectProvider?.label ?? connectProviderId}
+                  </span>
+                </div>
+              ) : (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-connect-provider"
+                  role="note"
+                >
+                  供应商：
+                  {selectedConnectProvider?.label ?? connectProviderId ?? "自定义端点"}
+                  （编辑时不可更换供应商或认证方式）
+                </p>
+              )}
+
               <div
                 className="runtime-slots-form__kind"
                 role="group"
-                aria-label="2. 认证方式"
+                aria-label="认证方式"
+                data-testid="runtime-slots-connect-step"
               >
-                <span className="settings-field__label">2. 认证方式</span>
-                {SLOT_AUTH_METHODS.map((method) => (
+                <span className="settings-field__label">认证方式</span>
+                {SLOT_AUTH_METHODS.filter((method) =>
+                  availableAuthMethods.includes(method.id),
+                ).map((method) => (
                   <button
                     aria-pressed={createAuthKind === method.id}
                     data-testid={`runtime-slots-auth-${method.id}`}
+                    disabled={busy || formMode === "edit"}
                     key={method.id}
                     onClick={() => selectCreateAuth(method.id)}
                     title={method.description}
@@ -1355,13 +1511,13 @@ export function RuntimeSlotsSection({
                 data-testid="runtime-slots-auth-description"
                 role="note"
               >
-                {SLOT_AUTH_METHODS.find((m) => m.id === createAuthKind)
+                {SLOT_AUTH_METHODS.find((method) => method.id === createAuthKind)
                   ?.description}
               </p>
             </>
           ) : null}
 
-          {formMode === "create" && createAuthKind === "local_cli" ? (
+          {formMode === "create" && formStep === "connect" && createAuthKind === "local_cli" ? (
             <p
               className="runtime-slots-ungoverned"
               data-testid="runtime-slots-create-ungoverned-warning"
@@ -1372,60 +1528,45 @@ export function RuntimeSlotsSection({
             </p>
           ) : null}
 
-          {(formMode === "edit"
-            || (formMode === "create" && createAuthKind === "api_key")) ? (
+          {(formMode === "edit" || formStep === "connect")
+          && createAuthKind === "api_key" ? (
             <>
               {formMode === "create" ? (
                 <div className="settings-field" data-testid="runtime-slots-provider-field">
-                  <label className="settings-field" htmlFor="runtime-slots-provider">
-                    <span className="settings-field__label">
-                      供应商预设
-                      <span className="runtime-slots-badge">
-                        只预填端点；不改变治理
-                      </span>
-                    </span>
-                    <select
-                      aria-label="供应商预设"
-                      className="settings-field__control"
-                      data-testid="runtime-slots-provider"
-                      disabled={busy}
-                      id="runtime-slots-provider"
-                      onChange={(event) => {
-                        selectProviderPreset(
-                          event.target.value as ProviderPresetId,
-                        );
-                      }}
-                      value={providerPresetId}
-                    >
-                      {PROVIDER_PRESETS.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {selectedProvider ? (
-                    <p
-                      className="runtime-slots__hint"
-                      data-testid="runtime-slots-provider-notes"
-                      role="note"
-                    >
-                      {selectedProvider.notes}
-                      {selectedProvider.docsUrl ? (
+                  <p
+                    className="runtime-slots__hint"
+                    data-testid="runtime-slots-provider-notes"
+                    role="note"
+                  >
+                    {selectedConnectProvider?.description
+                      ?? selectedProvider?.notes
+                      ?? CATALOG_API_DEFAULTS[connectProviderId ?? ""]?.notes
+                      ?? ""}
+                    {selectedProvider?.docsUrl
+                      || CATALOG_API_DEFAULTS[connectProviderId ?? ""]?.docsUrl
+                      ? (
                         <>
                           {" "}
                           <a
                             data-testid="runtime-slots-provider-docs"
-                            href={selectedProvider.docsUrl}
+                            href={
+                              selectedProvider?.docsUrl
+                              || CATALOG_API_DEFAULTS[connectProviderId ?? ""]
+                                ?.docsUrl
+                              || ""
+                            }
                             rel="noreferrer"
                             target="_blank"
                           >
                             获取 API key / 文档
                           </a>
                         </>
-                      ) : null}
-                    </p>
-                  ) : null}
+                      )
+                      : null}
+                  </p>
+                  <span hidden data-testid="runtime-slots-provider">
+                    {providerPresetId}
+                  </span>
                 </div>
               ) : null}
 
@@ -1434,7 +1575,7 @@ export function RuntimeSlotsSection({
                   端点 base_url
                   {formMode === "create" ? (
                     <span className="runtime-slots-badge">
-                      可选预设预填，仍可手改
+                      可手改
                     </span>
                   ) : null}
                 </span>
@@ -1579,7 +1720,7 @@ export function RuntimeSlotsSection({
             </>
           ) : null}
 
-          {formMode === "create" && createAuthKind === "local_cli" ? (
+          {formMode === "create" && formStep === "connect" && createAuthKind === "local_cli" ? (
             <>
               <div
                 className="runtime-slots-form__detect"
@@ -1709,7 +1850,7 @@ export function RuntimeSlotsSection({
             </>
           ) : null}
 
-          {formMode === "create" && createAuthKind === "grok_login" ? (
+          {formMode === "create" && formStep === "connect" && createAuthKind === "grok_login" ? (
             <p
               className="runtime-slots__hint"
               data-testid="runtime-slots-login-hint"
@@ -1717,12 +1858,11 @@ export function RuntimeSlotsSection({
             >
               「已登录的 Grok」不会弹出浏览器。Pillow 使用本机默认 Grok CLI
               登录 profile，不存储该登录。请先在终端运行{" "}
-              <code>grok login</code>，完成后再创建槽位；需要浏览器 OAuth
-              时请改选「OAuth 登录」。
+              <code>grok login</code>，完成后再创建槽位。
             </p>
           ) : null}
 
-          {formMode === "create" && createAuthKind === "oauth" ? (
+          {formMode === "create" && formStep === "connect" && createAuthKind === "oauth" ? (
             <div
               className="runtime-slots-form__oauth"
               data-testid="runtime-slots-oauth-form"
@@ -1748,31 +1888,11 @@ export function RuntimeSlotsSection({
                   {oauthCatalogError}
                 </p>
               ) : null}
-              {oauthProviders.length > 0 ? (
-                <label className="settings-field">
-                  <span className="settings-field__label">OAuth 提供方</span>
-                  <select
-                    aria-label="OAuth 提供方"
-                    className="settings-field__control"
-                    data-testid="runtime-slots-oauth-provider"
-                    disabled={busy || oauthLoginBusy}
-                    onChange={(event) => {
-                      setOauthProviderId(event.target.value);
-                      setOauthDraftFields(emptyOauthDraftFields());
-                    }}
-                    value={oauthProviderId}
-                  >
-                    {oauthProviders.map((entry) => (
-                      <option key={entry.providerId} value={entry.providerId}>
-                        {entry.displayName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              {/* api_key_only must never appear — list is filtered above. */}
+              <span hidden data-testid="runtime-slots-oauth-provider">
+                {oauthProviderId}
+              </span>
               <span hidden data-testid="runtime-slots-oauth-provider-ids">
-                {oauthProviders.map((entry) => entry.providerId).join(",")}
+                {oauthProviderId}
               </span>
 
               {selectedOauthProvider ? (
@@ -1816,28 +1936,34 @@ export function RuntimeSlotsSection({
                 </label>
               ))}
 
+              {/*
+                Host create_slot oauth still requires a call endpoint.
+                These are slot call settings, not OAuth authorize fields.
+              */}
               <label className="settings-field">
-                <span className="settings-field__label">端点 base_url</span>
+                <span className="settings-field__label">
+                  调用端点 base_url
+                </span>
                 <input
-                  aria-label="OAuth 端点 base_url"
+                  aria-label="调用端点 base_url"
                   autoComplete="off"
                   className="settings-field__control"
-                  data-testid="runtime-slots-oauth-base-url"
+                  data-testid="runtime-slots-base-url"
                   disabled={busy || oauthLoginBusy}
                   onChange={(event) => setBaseUrl(event.target.value)}
-                  placeholder="https://…（OpenAI 兼容）"
+                  placeholder="https://…（授权完成后用此地址发请求）"
                   spellCheck={false}
                   type="text"
                   value={baseUrl}
                 />
               </label>
               <label className="settings-field">
-                <span className="settings-field__label">模型 id</span>
+                <span className="settings-field__label">调用模型 id</span>
                 <input
-                  aria-label="OAuth 模型 id"
+                  aria-label="调用模型 id"
                   autoComplete="off"
                   className="settings-field__control"
-                  data-testid="runtime-slots-oauth-model-id"
+                  data-testid="runtime-slots-model-id"
                   disabled={busy || oauthLoginBusy}
                   onChange={(event) => setModelId(event.target.value)}
                   placeholder="例如 gpt-4o"
@@ -1896,60 +2022,64 @@ export function RuntimeSlotsSection({
             </div>
           ) : null}
 
-          <div
-            className="runtime-slots-form__kind"
-            role="group"
-            aria-label="3. 角色"
-          >
-            <span className="settings-field__label">3. 角色</span>
-            {SLOT_ROLE_OPTIONS.map((option) => {
-              const disabled =
-                option.id === "controller" && !controllerAllowedForCreate
-                && formMode === "create";
-              return (
-                <button
-                  aria-pressed={createRole === option.id}
-                  data-testid={`runtime-slots-role-${option.id}`}
-                  disabled={disabled || busy}
-                  key={option.id}
-                  onClick={() => setCreateRole(option.id)}
-                  title={
-                    disabled
-                      ? CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT
-                      : option.description
-                  }
-                  type="button"
+          {formMode === "edit" || formStep === "connect" ? (
+            <>
+              <div
+                className="runtime-slots-form__kind"
+                role="group"
+                aria-label="角色"
+              >
+                <span className="settings-field__label">角色</span>
+                {SLOT_ROLE_OPTIONS.map((option) => {
+                  const disabled =
+                    option.id === "controller" && !controllerAllowedForCreate
+                    && formMode === "create";
+                  return (
+                    <button
+                      aria-pressed={createRole === option.id}
+                      data-testid={`runtime-slots-role-${option.id}`}
+                      disabled={disabled || busy}
+                      key={option.id}
+                      onClick={() => setCreateRole(option.id)}
+                      title={
+                        disabled
+                          ? CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT
+                          : option.description
+                      }
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {formMode === "create" && !controllerAllowedForCreate ? (
+                <p
+                  className="runtime-slots__hint"
+                  data-testid="runtime-slots-controller-cli-disabled"
+                  role="note"
                 >
-                  {option.label}
-                </button>
-              );
-            })}
-          </div>
-          {formMode === "create" && !controllerAllowedForCreate ? (
-            <p
-              className="runtime-slots__hint"
-              data-testid="runtime-slots-controller-cli-disabled"
-              role="note"
-            >
-              {CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT}
-            </p>
-          ) : null}
-          {createRole === "custom" ? (
-            <label className="settings-field">
-              <span className="settings-field__label">自定义角色名</span>
-              <input
-                aria-label="自定义角色名"
-                autoComplete="off"
-                className="settings-field__control"
-                data-testid="runtime-slots-role-custom-name"
-                disabled={busy}
-                onChange={(event) => setRoleCustomName(event.target.value)}
-                placeholder="例如：写码、审阅"
-                spellCheck={false}
-                type="text"
-                value={roleCustomName}
-              />
-            </label>
+                  {CONTROLLER_REQUIRES_GOVERNED_AUTH_HINT}
+                </p>
+              ) : null}
+              {createRole === "custom" ? (
+                <label className="settings-field">
+                  <span className="settings-field__label">自定义角色名</span>
+                  <input
+                    aria-label="自定义角色名"
+                    autoComplete="off"
+                    className="settings-field__control"
+                    data-testid="runtime-slots-role-custom-name"
+                    disabled={busy}
+                    onChange={(event) => setRoleCustomName(event.target.value)}
+                    placeholder="例如：写码、审阅"
+                    spellCheck={false}
+                    type="text"
+                    value={roleCustomName}
+                  />
+                </label>
+              ) : null}
+            </>
           ) : null}
 
           {/* Hidden marker for tests asserting ungoverned copy constant. */}
@@ -1966,19 +2096,21 @@ export function RuntimeSlotsSection({
             >
               取消
             </button>
-            <button
-              data-testid="runtime-slots-form-save"
-              disabled={busy || oauthLoginBusy}
-              type="submit"
-            >
-              {oauthLoginBusy
-                ? "登录中…"
-                : busy
-                ? "保存中…"
-                : createAuthKind === "oauth" && formMode === "create"
-                ? "开始 OAuth 登录"
-                : "保存"}
-            </button>
+            {formMode === "edit" || formStep === "connect" ? (
+              <button
+                data-testid="runtime-slots-form-save"
+                disabled={busy || oauthLoginBusy}
+                type="submit"
+              >
+                {oauthLoginBusy
+                  ? "登录中…"
+                  : busy
+                  ? "保存中…"
+                  : createAuthKind === "oauth" && formMode === "create"
+                  ? "开始 OAuth 登录"
+                  : "保存"}
+              </button>
+            ) : null}
           </div>
         </form>
       )}

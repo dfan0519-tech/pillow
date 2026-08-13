@@ -126,8 +126,9 @@ export type RuntimeSlotModelSwitchView = {
 export type SlotAuthKind = "api_key" | "grok_login" | "local_cli" | "oauth";
 
 /**
- * Data-driven auth method catalog for the create form.
- * OAuth is one more row here — not a new UI branch tree.
+ * Method metadata (labels / controller rule). The create form no longer
+ * renders this list as four global tabs — it filters by the selected
+ * first-step provider.
  */
 export type SlotAuthMethodOption = {
   id: SlotAuthKind;
@@ -137,7 +138,9 @@ export type SlotAuthMethodOption = {
   allowsController: boolean;
 };
 
-/** Parallel, equal auth options — none is "primary". */
+export type SlotFormStep = "provider" | "connect";
+
+/** Method catalog — filter per provider; do not show all four at once. */
 export const SLOT_AUTH_METHODS: readonly SlotAuthMethodOption[] = [
   {
     id: "api_key",

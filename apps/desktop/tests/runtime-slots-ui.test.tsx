@@ -111,6 +111,7 @@ describe("RuntimeSlotsSection — create API-key flow", () => {
     await user.click(screen.getByTestId("runtime-slots-add"));
 
     await user.type(screen.getByTestId("runtime-slots-display-name"), "My Grok");
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-custom"));
     await user.click(screen.getByTestId("runtime-slots-auth-api_key"));
     // Custom role so create does not require controller uniqueness later.
     await user.click(screen.getByTestId("runtime-slots-role-custom"));
@@ -193,7 +194,7 @@ describe("RuntimeSlotsSection — external CLI ungoverned copy", () => {
     // Create form also shows the same warning before save (local_cli auth).
     const user = userEvent.setup();
     await user.click(screen.getByTestId("runtime-slots-add"));
-    await user.click(screen.getByTestId("runtime-slots-auth-local_cli"));
+    await user.click(screen.getByTestId("runtime-slots-provider-pick-local_cli"));
     const createWarn = screen.getByTestId(
       "runtime-slots-create-ungoverned-warning",
     );

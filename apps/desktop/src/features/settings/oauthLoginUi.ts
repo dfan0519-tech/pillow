@@ -21,16 +21,82 @@ import {
   type OauthUserFieldRequirement,
   type ProfileFieldWire,
   type ProviderLoginCatalogEntry,
+  type SlotAuthKind,
 } from "./runtimeSlotsTypes";
+import type { SlotConnectProvider } from "./providerPresets";
 
 /**
- * Providers eligible for the OAuth create list.
- * `api_key_only` must never appear (positive + negative tests pin this).
+ * Whether this catalog row may be offered as an OAuth connect method.
+ *
+ * Derived from the existing closed DTO (`loginMethod` + `clientId`) — the
+ * host does not grow a new key. Matches `profile_offers_oauth` in
+ * `provider_login.rs`:
+ * - `clientId === "known"` (PublicDocumented) → OAuth available
+ * - `clientId === "user_supplied"` → OAuth available, user types client_id
+ * - `clientId === "unknown"` → **no OAuth** (do not invent a client_id)
+ * - `api_key_only` → no OAuth
+ */
+export function catalogEntryOffersOauth(
+  entry: ProviderLoginCatalogEntry,
+): boolean {
+  if (entry.loginMethod === "api_key_only") return false;
+  return entry.clientId === "known" || entry.clientId === "user_supplied";
+}
+
+/**
+ * Catalog rows that may appear as an OAuth method.
+ * Unknown client_id and api_key_only are both excluded.
  */
 export function oauthCapableProviders(
   catalog: readonly ProviderLoginCatalogEntry[],
 ): ProviderLoginCatalogEntry[] {
-  return catalog.filter((entry) => entry.loginMethod !== "api_key_only");
+  return catalog.filter(catalogEntryOffersOauth);
+}
+
+/**
+ * Host `auth_kind` values a catalog profile may present.
+ * Mirrors `profile_supported_auth_kinds` (no new DTO field).
+ */
+export function supportedAuthKindsForCatalogEntry(
+  entry: ProviderLoginCatalogEntry,
+): SlotAuthKind[] {
+  const kinds: SlotAuthKind[] = [];
+  if (entry.providerId !== "custom-oidc") {
+    kinds.push("api_key");
+  }
+  if (entry.providerId === "xai") {
+    kinds.push("grok_login");
+  }
+  if (catalogEntryOffersOauth(entry)) {
+    kinds.push("oauth");
+  }
+  return kinds;
+}
+
+/**
+ * Methods the connect form may show after the user picks this first-step
+ * provider. OAuth is admitted only when the catalog says so.
+ */
+export function connectProviderMethods(
+  provider: SlotConnectProvider,
+  catalog: readonly ProviderLoginCatalogEntry[],
+): SlotAuthKind[] {
+  const methods: SlotAuthKind[] = [...provider.inherentMethods];
+  if (!provider.catalogProviderId) return methods;
+  const entry = catalog.find(
+    (row) => row.providerId === provider.catalogProviderId,
+  );
+  if (entry) {
+    if (catalogEntryOffersOauth(entry) && !methods.includes("oauth")) {
+      methods.push("oauth");
+    }
+    return methods;
+  }
+  // Catalog not loaded yet: Custom OIDC is UserSupplied by design.
+  if (provider.catalogProviderId === "custom-oidc") {
+    methods.push("oauth");
+  }
+  return methods;
 }
 
 function needsUserInput(state: ProfileFieldWire): boolean {
