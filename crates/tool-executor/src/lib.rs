@@ -14,7 +14,10 @@ pub use write::{
     BaseSnapshot, GovernedWriteApplyOutcome, GovernedWriteError, GovernedWriteToolGateway,
     PreparedWriteProposal, SealedWriteContents, content_sha256_digest,
 };
-pub use write_diff::{BoundedDiff, DIFF_BYTE_CAP, DIFF_LINE_CAP, build_bounded_unified_diff};
+pub use write_diff::{
+    BoundedDiff, DIFF_BYTE_CAP, DIFF_LINE_CAP, ProposedContentPage, build_bounded_unified_diff,
+    page_proposed_content, proposed_content_digest,
+};
 
 use std::fs::{self, File, Metadata};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};

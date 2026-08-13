@@ -10,6 +10,7 @@ import {
   isWritePublicErrorCode,
   normalizeWriteApprovalError,
   type WriteApprovalGateway,
+  type WriteContentPageView,
   type WriteDecision,
   type WriteDiffView,
   type WriteMode,
@@ -169,6 +170,9 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
       "errorCode",
       "ruleSubject",
       "autoApprovedByRule",
+      "diffTruncated",
+      "contentDigest",
+      "contentReviewComplete",
     ])
   ) {
     throw invalidWriteResponse();
@@ -183,6 +187,10 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     || value.summary.length > MAX_SUMMARY_CHARS
     || !isFiniteTimestamp(value.expiresAt)
     || typeof value.decisionAvailable !== "boolean"
+    || (value.diffTruncated !== undefined && typeof value.diffTruncated !== "boolean")
+    || (value.contentReviewComplete !== undefined
+      && typeof value.contentReviewComplete !== "boolean")
+    || (value.contentDigest !== undefined && !isContentDigest(value.contentDigest))
     || !isRuleSubjectValue(value.ruleSubject)
     || (value.autoApprovedByRule !== undefined
       && !isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES))
@@ -229,6 +237,15 @@ function parseWriteProposalView(value: unknown): WriteProposalView {
     decisionAvailable: value.decisionAvailable,
     ruleSubject: value.ruleSubject,
   };
+  if (typeof value.diffTruncated === "boolean") {
+    view.diffTruncated = value.diffTruncated;
+  }
+  if (isContentDigest(value.contentDigest)) {
+    view.contentDigest = value.contentDigest;
+  }
+  if (typeof value.contentReviewComplete === "boolean") {
+    view.contentReviewComplete = value.contentReviewComplete;
+  }
   if (isAutoApprovedByRuleValue(value.autoApprovedByRule, WRITE_RULE_PREFIXES)) {
     view.autoApprovedByRule = {
       prefix: value.autoApprovedByRule.prefix,
@@ -253,6 +270,7 @@ function parseWriteDiffView(value: unknown): WriteDiffView {
       "truncated",
       "lineCount",
       "byteCount",
+      "contentDigest",
     ])
   ) {
     throw invalidWriteResponse();
@@ -265,6 +283,7 @@ function parseWriteDiffView(value: unknown): WriteDiffView {
     || typeof value.truncated !== "boolean"
     || !isSafeInteger(value.lineCount, 0, MAX_DIFF_LINE_COUNT)
     || !isSafeInteger(value.byteCount, 0, MAX_DIFF_UTF8_BYTES)
+    || (value.contentDigest !== undefined && !isContentDigest(value.contentDigest))
   ) {
     throw invalidWriteResponse();
   }
@@ -294,7 +313,7 @@ function parseWriteDiffView(value: unknown): WriteDiffView {
     }
   }
 
-  return {
+  const view: WriteDiffView = {
     proposalId: value.proposalId,
     path: value.path,
     mode: value.mode,
@@ -302,6 +321,88 @@ function parseWriteDiffView(value: unknown): WriteDiffView {
     truncated: value.truncated,
     lineCount: value.lineCount,
     byteCount: value.byteCount,
+  };
+  if (isContentDigest(value.contentDigest)) {
+    view.contentDigest = value.contentDigest;
+  }
+  return view;
+}
+
+function isContentDigest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function parseWriteContentPageView(value: unknown): WriteContentPageView {
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, [
+      "proposalId",
+      "path",
+      "mode",
+      "contentDigest",
+      "pageIndex",
+      "pageCount",
+      "text",
+      "lineCount",
+      "byteCount",
+      "reviewComplete",
+    ])
+  ) {
+    throw invalidWriteResponse();
+  }
+  if (
+    !isBoundedNonEmptyString(value.proposalId, MAX_ID_CHARS)
+    || !isPortableRelativePath(value.path)
+    || !isWriteMode(value.mode)
+    || !isContentDigest(value.contentDigest)
+    || !isSafeInteger(value.pageIndex, 0, 1_048_576)
+    || !isSafeInteger(value.pageCount, 1, 1_048_576)
+    || typeof value.text !== "string"
+    || !isSafeInteger(value.lineCount, 0, MAX_DIFF_LINE_COUNT)
+    || !isSafeInteger(value.byteCount, 0, MAX_DIFF_UTF8_BYTES)
+    || typeof value.reviewComplete !== "boolean"
+    || value.pageIndex >= value.pageCount
+  ) {
+    throw invalidWriteResponse();
+  }
+
+  const actualByteCount = utf8ByteLength(value.text);
+  if (actualByteCount > MAX_DIFF_UTF8_BYTES) {
+    throw invalidWriteResponse();
+  }
+  if (value.byteCount !== actualByteCount) {
+    throw invalidWriteResponse();
+  }
+  if (value.lineCount !== countDiffLines(value.text)) {
+    throw invalidWriteResponse();
+  }
+
+  for (const forbidden of [
+    "root",
+    "content",
+    "base",
+    "digest",
+    "fingerprint",
+    "approvalGrant",
+    "proposedContent",
+    "unified",
+  ]) {
+    if (forbidden in value) {
+      throw invalidWriteResponse();
+    }
+  }
+
+  return {
+    proposalId: value.proposalId,
+    path: value.path,
+    mode: value.mode,
+    contentDigest: value.contentDigest,
+    pageIndex: value.pageIndex,
+    pageCount: value.pageCount,
+    text: value.text,
+    lineCount: value.lineCount,
+    byteCount: value.byteCount,
+    reviewComplete: value.reviewComplete,
   };
 }
 
@@ -349,6 +450,23 @@ export class TauriWriteApprovalGateway implements WriteApprovalGateway {
         proposalId: input.proposalId,
       });
       return parseWriteDiffView(payload);
+    } catch (error) {
+      throw normalizeWriteApprovalError(error);
+    }
+  }
+
+  async openWriteProposalContentPage(input: {
+    conversationId: string;
+    proposalId: string;
+    pageIndex: number;
+  }): Promise<WriteContentPageView> {
+    try {
+      const payload = await invoke<unknown>("open_write_proposal_content_page", {
+        conversationId: input.conversationId,
+        proposalId: input.proposalId,
+        pageIndex: input.pageIndex,
+      });
+      return parseWriteContentPageView(payload);
     } catch (error) {
       throw normalizeWriteApprovalError(error);
     }

@@ -37,13 +37,21 @@ export function WriteDiffPreview({ diff }: WriteDiffPreviewProps) {
           </span>
           <span data-testid="write-diff-byte-count">{diff.byteCount} 字节</span>
         </p>
+        {diff.contentDigest ? (
+          <p
+            className="write-diff-preview__digest"
+            data-testid="write-diff-content-digest"
+          >
+            内容摘要 {diff.contentDigest}
+          </p>
+        ) : null}
         {diff.truncated ? (
           <p
             className="write-diff-preview__truncation"
             data-testid="write-diff-truncated"
             role="status"
           >
-            差异已截断
+            差异已截断，须在批准栏审查完整拟写入内容后才能批准
           </p>
         ) : null}
       </header>

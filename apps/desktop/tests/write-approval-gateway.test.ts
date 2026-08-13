@@ -178,6 +178,95 @@ describe("TauriWriteApprovalGateway contract", () => {
     expect(normalizedInvalid.message).not.toContain("instance-secret");
   });
 
+  it("accepts EA-04 review-binding fields and pages proposed content", async () => {
+    const digest =
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const pageText = "reviewed-page\n";
+    const pageBytes = new TextEncoder().encode(pageText).length;
+    vi.mocked(invoke)
+      .mockResolvedValueOnce([
+        pendingProposal({
+          diffTruncated: true,
+          contentDigest: digest,
+          contentReviewComplete: false,
+        }),
+      ])
+      .mockResolvedValueOnce({
+        proposalId,
+        path: "src/example.ts",
+        mode: "create",
+        unified: "ok\n",
+        truncated: true,
+        lineCount: 1,
+        byteCount: 3,
+        contentDigest: digest,
+      })
+      .mockResolvedValueOnce({
+        proposalId,
+        path: "src/example.ts",
+        mode: "create",
+        contentDigest: digest,
+        pageIndex: 0,
+        pageCount: 2,
+        text: pageText,
+        lineCount: 1,
+        byteCount: pageBytes,
+        reviewComplete: false,
+      });
+
+    const gateway = new TauriWriteApprovalGateway();
+    const list = await gateway.listWriteProposals(conversationId);
+    expect(list[0]?.diffTruncated).toBe(true);
+    expect(list[0]?.contentDigest).toBe(digest);
+    expect(list[0]?.contentReviewComplete).toBe(false);
+    const diff = await gateway.openWriteProposalDiff({ conversationId, proposalId });
+    expect(diff.contentDigest).toBe(digest);
+    expect(diff.truncated).toBe(true);
+    const page = await gateway.openWriteProposalContentPage?.({
+      conversationId,
+      proposalId,
+      pageIndex: 0,
+    });
+    expect(page).toMatchObject({
+      contentDigest: digest,
+      pageIndex: 0,
+      pageCount: 2,
+      text: pageText,
+      reviewComplete: false,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "open_write_proposal_content_page", {
+      conversationId,
+      proposalId,
+      pageIndex: 0,
+    });
+  });
+
+  it("rejects contentDigest that is not sha256 of proposed content shape", async () => {
+    const gateway = new TauriWriteApprovalGateway();
+    vi.mocked(invoke).mockResolvedValueOnce([
+      pendingProposal({
+        contentDigest: "md5:deadbeef",
+      }),
+    ]);
+    await expect(gateway.listWriteProposals(conversationId)).rejects.toMatchObject({
+      code: "invalid_write_response",
+    });
+
+    vi.mocked(invoke).mockResolvedValueOnce({
+      proposalId,
+      path: "src/example.ts",
+      mode: "create",
+      unified: "ok\n",
+      truncated: false,
+      lineCount: 1,
+      byteCount: 3,
+      digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    await expect(
+      gateway.openWriteProposalDiff({ conversationId, proposalId }),
+    ).rejects.toMatchObject({ code: "invalid_write_response" });
+  });
+
   it("accepts camelCase proposal and diff DTOs within closed bounds", async () => {
     const unified = "@@ -1 +1 @@\n-old\n+new\n";
     const byteCount = new TextEncoder().encode(unified).length;

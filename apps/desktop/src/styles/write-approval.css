@@ -60,11 +60,40 @@
 }
 
 .write-approval-bar__details,
-.write-approval-bar__summary {
+.write-approval-bar__summary,
+.write-approval-bar__digest,
+.write-approval-bar__review-meta {
   margin: 0;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.write-approval-bar__digest {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  word-break: break-all;
+}
+
+.write-approval-bar__truncation {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #f0993d);
+}
+
+.write-approval-bar__review-body {
+  margin: 0;
+  max-height: 10rem;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-code, #0a0a0a);
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-family: ui-monospace, "Cascadia Code", "Segue UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
 }
 
 .write-approval-bar__sep {
@@ -167,9 +196,19 @@
   margin: 0 6px;
 }
 
+.write-diff-preview__digest,
 .write-diff-preview__truncation {
   margin: 0;
   font-size: 12px;
+}
+
+.write-diff-preview__digest {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  word-break: break-all;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.write-diff-preview__truncation {
   color: var(--warning, #f0993d);
 }
 

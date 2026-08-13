@@ -53,11 +53,32 @@ describe("WriteDiffPreview", () => {
     expect(screen.getByTestId("write-diff-truncated")).toHaveTextContent(
       "差异已截断",
     );
+    expect(screen.queryByTestId("write-diff-content-digest")).toBeNull();
     const text = container.textContent ?? "";
     const html = container.innerHTML;
     expect(text).not.toContain(proposalId);
     expect(html).not.toContain(proposalId);
     expect(text).not.toMatch(/F:\\|C:\\|\\\\server/);
     expect(html).not.toMatch(/data-proposal|approvalGrant/i);
+  });
+
+  it("shows the proposed-content digest next to a truncated warning (EA-04)", () => {
+    render(
+      <WriteDiffPreview
+        diff={fixtureDiff({
+          truncated: true,
+          contentDigest:
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          lineCount: 4,
+          byteCount: 52,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("write-diff-content-digest")).toHaveTextContent(
+      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    );
+    expect(screen.getByTestId("write-diff-truncated")).toHaveTextContent(
+      "完整拟写入内容",
+    );
   });
 });

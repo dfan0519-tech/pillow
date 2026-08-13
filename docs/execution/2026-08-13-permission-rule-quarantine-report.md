@@ -167,8 +167,10 @@ proves nothing on its own:
 | `node scripts/run-worker-gate.mjs` | **GATE_EXIT=0** (`PILLOW_WORKER_GATE: OK`, all 8 steps) |
 | `corepack pnpm test` (inside the gate) | 0 — 54 files, 699 tests |
 
-First gate run failed at the `secrets` step on a `C:/Users/...` literal used as a
-test subject in the new policy test; replaced with a relative path. No desktop
+First gate run failed at the `secrets` step: the new policy test used an
+absolute host user-profile path as its subject. Replaced with a project-relative
+path. (Naming the literal here trips the same scanner, so it stays described
+rather than quoted.) No desktop
 E2E or screenshots (controller-owned; this change adds one conditional Settings
 block whose render is covered by vitest).
 

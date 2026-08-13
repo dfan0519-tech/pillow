@@ -33,4 +33,4 @@ pub use types::ConversationCommandError;
 pub use types::PermissionRuleAttributionDto;
 #[cfg(test)]
 pub use types::PumpRegistrationHooks;
-pub use write_service::{WriteDiffDto, WriteProposalDto};
+pub use write_service::{WriteContentPageDto, WriteDiffDto, WriteProposalDto};

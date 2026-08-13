@@ -1,7 +1,8 @@
 /**
  * Typed write-approval gateway — renderer boundary for Wave C3-E.
  * CamelCase DTOs mirror accepted C3-D native serialization exactly.
- * Never transports roots, content, digests, fingerprints, or base snapshots.
+ * Never transports roots, sealed content, fingerprints, or base snapshots.
+ * EA-04 review-binding `contentDigest` is the hash of sealed proposed content.
  */
 
 import type { AutoApprovedByRule } from "./permissionRulesGateway";
@@ -51,6 +52,18 @@ export type WriteProposalView = {
   /** Present only when a permission rule, not a human, decided this. */
   autoApprovedByRule?: AutoApprovedByRule;
   errorCode?: WritePublicErrorCode;
+  /**
+   * Host-built unified diff exceeded its display cap (EA-04).
+   * Approve stays locked until full proposed content is reviewed.
+   */
+  diffTruncated?: boolean;
+  /**
+   * SHA-256 of sealed proposed content (`sha256:` + lowercase hex).
+   * Binds the human decision to the object the executor will write.
+   */
+  contentDigest?: string;
+  /** True once every proposed-content page has been retrieved on the host. */
+  contentReviewComplete?: boolean;
 };
 
 export type WriteDiffView = {
@@ -61,6 +74,27 @@ export type WriteDiffView = {
   truncated: boolean;
   lineCount: number;
   byteCount: number;
+  /** SHA-256 of sealed proposed content; never the bounded-diff text. */
+  contentDigest?: string;
+};
+
+export type WriteContentPageView = {
+  proposalId: string;
+  path: string;
+  mode: WriteMode;
+  contentDigest: string;
+  pageIndex: number;
+  pageCount: number;
+  text: string;
+  lineCount: number;
+  byteCount: number;
+  reviewComplete: boolean;
+};
+
+export type OpenWriteProposalContentPageInput = {
+  conversationId: string;
+  proposalId: string;
+  pageIndex: number;
 };
 
 export type DecideWriteProposalInput = {
@@ -85,6 +119,8 @@ const HOST_ERROR_CODES = [
   "write_interrupted",
   "write_unavailable",
   "write_invalid_decision",
+  "write_truncated_unreviewed",
+  "write_invalid_content_page",
 ] as const;
 
 export type HostWriteApprovalErrorCode = (typeof HOST_ERROR_CODES)[number];
@@ -104,6 +140,9 @@ const HOST_ERROR_MESSAGES: Record<HostWriteApprovalErrorCode, string> = {
   write_interrupted: "Write proposal was interrupted.",
   write_unavailable: "Write proposal is unavailable.",
   write_invalid_decision: "Decision must be approve_once or reject.",
+  write_truncated_unreviewed:
+    "Truncated write content cannot be approved until the full proposed content is reviewed.",
+  write_invalid_content_page: "Write content page is not available.",
 };
 
 const FIXED_UNAVAILABLE_MESSAGE = HOST_ERROR_MESSAGES.write_unavailable;
@@ -138,6 +177,13 @@ export interface WriteApprovalGateway {
   listWriteProposals(conversationId: string): Promise<WriteProposalView[]>;
   decideWriteProposal(input: DecideWriteProposalInput): Promise<WriteProposalView>;
   openWriteProposalDiff(input: OpenWriteProposalDiffInput): Promise<WriteDiffView>;
+  /**
+   * Optional: page the sealed proposed content for informed approval (EA-04).
+   * Host marks review complete only after every page is retrieved.
+   */
+  openWriteProposalContentPage?(
+    input: OpenWriteProposalContentPageInput,
+  ): Promise<WriteContentPageView>;
 }
 
 const PENDING_STATE: WriteProposalState = "pending_approval";

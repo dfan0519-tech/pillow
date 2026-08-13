@@ -2709,6 +2709,7 @@ dependencies = [
  "pillow-role-dispatch",
  "pillow-runtime-slots",
  "rfd",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

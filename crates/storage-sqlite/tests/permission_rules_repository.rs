@@ -365,7 +365,9 @@ fn patterns(rules: &[PermissionRule]) -> Vec<&str> {
 fn stored_row_count(path: &std::path::Path) -> i64 {
     Connection::open(path)
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM permission_rules", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM permission_rules", [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
@@ -612,7 +614,10 @@ fn a_project_scoped_allow_row_is_quarantined_not_evaluated() {
         unreadable[0].reason,
         UnreadablePermissionRuleReason::ProjectAllow
     );
-    assert_eq!(unreadable[0].project_id.as_deref(), Some(project_id.as_str()));
+    assert_eq!(
+        unreadable[0].project_id.as_deref(),
+        Some(project_id.as_str())
+    );
     assert!(repo.delete_unreadable(planted).unwrap());
 }
 

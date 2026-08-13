@@ -38,9 +38,8 @@ mod permission_rule_commands;
 
 use app_state::AppState;
 use permission_rule_commands::{
-    add_permission_rule_impl, delete_permission_rule_impl,
-    delete_unreadable_permission_rule_impl, list_permission_rules_impl,
-    list_unreadable_permission_rules_impl,
+    add_permission_rule_impl, delete_permission_rule_impl, delete_unreadable_permission_rule_impl,
+    list_permission_rules_impl, list_unreadable_permission_rules_impl,
 };
 
 struct IdleAdapter;

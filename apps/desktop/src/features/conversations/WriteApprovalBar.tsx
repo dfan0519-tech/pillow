@@ -18,6 +18,7 @@ import {
   type PermissionRulesGateway,
 } from "../../lib/permissionRulesGateway";
 import type {
+  WriteApprovalGateway,
   WriteDecision,
   WriteProposalView,
 } from "../../lib/writeApprovalGateway";
@@ -49,6 +50,12 @@ export type WriteApprovalBarProps = {
   permissionRulesGateway?: PermissionRulesGateway;
   /** Active project — enables project-scoped deny rules from the dialog. */
   projectId?: string | null;
+  /**
+   * Optional write gateway used only to page sealed proposed content when
+   * the host-built diff is truncated (EA-04). Decisions still go through
+   * `onDecide`; this never carries a grant.
+   */
+  writeApprovalGateway?: WriteApprovalGateway;
 };
 
 function modeLabel(mode: WriteProposalView["mode"]): string {
@@ -75,21 +82,39 @@ export function WriteApprovalBar({
   ruleSubject: ruleSubjectProp,
   permissionRulesGateway,
   projectId = null,
+  writeApprovalGateway,
 }: WriteApprovalBarProps) {
   const headingId = useId();
   const barRef = useRef<HTMLDivElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
   const rejectRef = useRef<HTMLButtonElement>(null);
   const reviewRef = useRef<HTMLButtonElement>(null);
+  const reviewContentRef = useRef<HTMLButtonElement>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [deadlinePassed, setDeadlinePassed] = useState(false);
   const [alwaysRuleAction, setAlwaysRuleAction] = useState<
     "allow" | "deny" | null
   >(null);
+  const [reviewPageIndex, setReviewPageIndex] = useState(-1);
+  const [reviewPageText, setReviewPageText] = useState<string | null>(null);
+  const [reviewPageMeta, setReviewPageMeta] = useState<{
+    pageIndex: number;
+    pageCount: number;
+  } | null>(null);
+  const [localReviewComplete, setLocalReviewComplete] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
+
+  const contentDigest = proposal.contentDigest;
+  const hostReviewComplete = proposal.contentReviewComplete === true;
+  const diffTruncated = proposal.diffTruncated === true;
+  const reviewComplete = !diffTruncated || hostReviewComplete || localReviewComplete;
+  const truncatedUnreviewed = diffTruncated && !reviewComplete;
+
   /** Approve/Reject require host decision availability and a live deadline. */
   const decisionLocked =
     disabled || submitting || deadlinePassed || !decisionAvailable;
+  const approveLocked = decisionLocked || truncatedUnreviewed;
   /** Review diff is allowed without decision, but not after the displayed deadline. */
   const reviewLocked = disabled || submitting || deadlinePassed;
   const ruleSubject =
@@ -99,13 +124,22 @@ export function WriteApprovalBar({
   const showAlwaysRule = Boolean(permissionRulesGateway && ruleSubject);
 
   useLayoutEffect(() => {
-    approveRef.current?.focus();
-  }, [proposal.proposalId]);
+    if (truncatedUnreviewed) {
+      (reviewContentRef.current ?? rejectRef.current)?.focus();
+    } else {
+      approveRef.current?.focus();
+    }
+  }, [proposal.proposalId, truncatedUnreviewed]);
 
   useEffect(() => {
     setSubmitting(false);
     setDeadlinePassed(false);
-  }, [proposal.proposalId, proposal.expiresAt]);
+    setReviewPageIndex(-1);
+    setReviewPageText(null);
+    setReviewPageMeta(null);
+    setLocalReviewComplete(proposal.contentReviewComplete === true);
+    setReviewBusy(false);
+  }, [proposal.proposalId, proposal.expiresAt, proposal.contentReviewComplete]);
 
   useEffect(() => {
     const expiresMs = Date.parse(proposal.expiresAt);
@@ -127,7 +161,11 @@ export function WriteApprovalBar({
 
   const submit = useCallback(
     async (decision: WriteDecision) => {
-      if (decisionLocked) return;
+      if (decision === "approve_once") {
+        if (approveLocked) return;
+      } else if (decisionLocked) {
+        return;
+      }
       setSubmitting(true);
       try {
         await onDecide(decision);
@@ -135,11 +173,50 @@ export function WriteApprovalBar({
         setSubmitting(false);
       }
     },
-    [decisionLocked, onDecide],
+    [approveLocked, decisionLocked, onDecide],
   );
 
+  const loadContentPage = useCallback(async () => {
+    const openPage = writeApprovalGateway?.openWriteProposalContentPage;
+    if (!openPage || reviewBusy || reviewLocked) return;
+    const nextIndex = reviewPageIndex < 0 ? 0 : reviewPageIndex + 1;
+    setReviewBusy(true);
+    try {
+      const page = await openPage({
+        conversationId: proposal.conversationId,
+        proposalId: proposal.proposalId,
+        pageIndex: nextIndex,
+      });
+      setReviewPageIndex(page.pageIndex);
+      setReviewPageText(page.text);
+      setReviewPageMeta({
+        pageIndex: page.pageIndex,
+        pageCount: page.pageCount,
+      });
+      if (page.reviewComplete) {
+        setLocalReviewComplete(true);
+      }
+      void onReviewDiff();
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [
+    onReviewDiff,
+    proposal.conversationId,
+    proposal.proposalId,
+    reviewBusy,
+    reviewLocked,
+    reviewPageIndex,
+    writeApprovalGateway,
+  ]);
+
   function actionButtons(): HTMLButtonElement[] {
-    return [approveRef.current, rejectRef.current, reviewRef.current].filter(
+    return [
+      approveRef.current,
+      rejectRef.current,
+      reviewRef.current,
+      reviewContentRef.current,
+    ].filter(
       (node): node is HTMLButtonElement => node !== null && !node.disabled,
     );
   }
@@ -203,6 +280,37 @@ export function WriteApprovalBar({
             {proposal.summary}
           </p>
         ) : null}
+        {contentDigest ? (
+          <p
+            className="write-approval-bar__digest"
+            data-testid="write-approval-content-digest"
+          >
+            内容摘要 {contentDigest}
+          </p>
+        ) : null}
+        {truncatedUnreviewed ? (
+          <p
+            className="write-approval-bar__truncation"
+            data-testid="write-approval-truncated-locked"
+            role="status"
+          >
+            差异已截断，须审查完整拟写入内容后才能批准
+          </p>
+        ) : null}
+        {reviewPageText !== null ? (
+          <pre
+            className="write-approval-bar__review-body"
+            data-testid="write-approval-content-page"
+            tabIndex={0}
+          >
+            {reviewPageText}
+          </pre>
+        ) : null}
+        {reviewPageMeta ? (
+          <p className="write-approval-bar__review-meta" data-testid="write-approval-content-page-meta">
+            完整内容 {reviewPageMeta.pageIndex + 1}/{reviewPageMeta.pageCount}
+          </p>
+        ) : null}
       </div>
       <div
         aria-label="写入批准操作"
@@ -213,7 +321,7 @@ export function WriteApprovalBar({
           ref={approveRef}
           className="write-approval-bar__btn write-approval-bar__btn--primary"
           data-testid="write-approval-approve"
-          disabled={decisionLocked}
+          disabled={approveLocked}
           onClick={() => void submit("approve_once")}
           type="button"
         >
@@ -239,6 +347,18 @@ export function WriteApprovalBar({
         >
           查看差异
         </button>
+        {truncatedUnreviewed && writeApprovalGateway?.openWriteProposalContentPage ? (
+          <button
+            ref={reviewContentRef}
+            className="write-approval-bar__btn"
+            data-testid="write-approval-review-content"
+            disabled={reviewLocked || reviewBusy}
+            onClick={() => void loadContentPage()}
+            type="button"
+          >
+            {reviewPageIndex < 0 ? "审查完整内容" : "下一页"}
+          </button>
+        ) : null}
         {showAlwaysRule ? (
           <>
             <button

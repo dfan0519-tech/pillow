@@ -6,7 +6,10 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WriteApprovalBar } from "../src/features/conversations/WriteApprovalBar";
-import type { WriteProposalView } from "../src/lib/writeApprovalGateway";
+import type {
+  WriteApprovalGateway,
+  WriteProposalView,
+} from "../src/lib/writeApprovalGateway";
 import "../src/styles/write-approval.css";
 
 /** Forbidden secret string — must never reach DOM (privacy assertion). */
@@ -38,6 +41,7 @@ function renderBar(
     onDecide: ReturnType<typeof vi.fn>;
     onReviewDiff: ReturnType<typeof vi.fn>;
     onExpiryDeadline: ReturnType<typeof vi.fn>;
+    writeApprovalGateway: WriteApprovalGateway;
   }> = {},
 ) {
   const onDecide = props.onDecide ?? vi.fn().mockResolvedValue(undefined);
@@ -54,6 +58,7 @@ function renderBar(
       onExpiryDeadline={onExpiryDeadline}
       onReviewDiff={onReviewDiff}
       proposal={proposal}
+      writeApprovalGateway={props.writeApprovalGateway}
     />,
   );
   return { ...view, onDecide, onReviewDiff, onExpiryDeadline, proposal };
@@ -172,6 +177,99 @@ describe("WriteApprovalBar", () => {
     expect(onDecide).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("write-approval-review-diff"));
     expect(onReviewDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks Approve when the host-marked diff is truncated (EA-04 reproduction)", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    renderBar({
+      onDecide,
+      proposal: pendingProposal({
+        diffTruncated: true,
+        contentDigest:
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        contentReviewComplete: false,
+      }),
+    });
+    const approve = screen.getByTestId("write-approval-approve");
+    expect(approve).toBeDisabled();
+    expect(screen.getByTestId("write-approval-reject")).not.toBeDisabled();
+    expect(screen.getByTestId("write-approval-truncated-locked")).toHaveTextContent(
+      "完整",
+    );
+    expect(screen.getByTestId("write-approval-content-digest")).toHaveTextContent(
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    await user.click(approve);
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("restores Approve after every proposed-content page is retrieved (EA-04)", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    const digest =
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const pages = [
+      {
+        proposalId,
+        path: "src/example.ts",
+        mode: "create" as const,
+        contentDigest: digest,
+        pageIndex: 0,
+        pageCount: 2,
+        text: "page-zero\n",
+        lineCount: 1,
+        byteCount: 10,
+        reviewComplete: false,
+      },
+      {
+        proposalId,
+        path: "src/example.ts",
+        mode: "create" as const,
+        contentDigest: digest,
+        pageIndex: 1,
+        pageCount: 2,
+        text: "HIDDEN_TAIL\n",
+        lineCount: 1,
+        byteCount: 12,
+        reviewComplete: true,
+      },
+    ];
+    const writeApprovalGateway = {
+      listWriteProposals: vi.fn(),
+      decideWriteProposal: vi.fn(),
+      openWriteProposalDiff: vi.fn(),
+      openWriteProposalContentPage: vi
+        .fn()
+        .mockResolvedValueOnce(pages[0])
+        .mockResolvedValueOnce(pages[1]),
+    };
+    render(
+      <WriteApprovalBar
+        decisionAvailable
+        onDecide={onDecide}
+        onReviewDiff={vi.fn()}
+        proposal={pendingProposal({
+          diffTruncated: true,
+          contentDigest: digest,
+          contentReviewComplete: false,
+        })}
+        writeApprovalGateway={writeApprovalGateway}
+      />,
+    );
+    expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-review-content"));
+    expect(await screen.findByTestId("write-approval-content-page")).toHaveTextContent(
+      "page-zero",
+    );
+    expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-review-content"));
+    expect(await screen.findByTestId("write-approval-content-page")).toHaveTextContent(
+      "HIDDEN_TAIL",
+    );
+    expect(screen.getByTestId("write-approval-approve")).not.toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-approve"));
+    expect(onDecide).toHaveBeenCalledWith("approve_once");
   });
 
   it("disables all actions after expiry deadline", async () => {

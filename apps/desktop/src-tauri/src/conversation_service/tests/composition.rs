@@ -321,25 +321,30 @@ fn injected_adapter_routes_probe_session_turn_and_cancel() {
     let send =
         thread::spawn(move || service_send.send_turn(conversation_id, "please cancel".into()));
 
-    // Wait until the second turn is armed (cancel target exists).
+    // Wait until the second run is unfinished on the timeline *and* send_turn
+    // has entered the adapter. arm_calls increments before either is true, so
+    // it is the wrong signal. Never fall back to runs.last(): that selects
+    // the first completed run when the second is not visible yet.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while adapter.arm_calls.load(Ordering::SeqCst) < 2 {
+    let run_id = loop {
         if std::time::Instant::now() >= deadline {
-            panic!("timed out waiting for second arm_turn");
+            panic!(
+                "timed out waiting for second unfinished timeline run \
+                 after send_turn (arm_calls={}, send_calls={})",
+                adapter.arm_calls.load(Ordering::SeqCst),
+                adapter.send_calls.load(Ordering::SeqCst)
+            );
+        }
+        if adapter.send_calls.load(Ordering::SeqCst) >= 2 {
+            let pending = service.load_timeline(conversation.id.clone()).unwrap();
+            if let Some(run) = pending.runs.iter().find(|run| {
+                run.status == "running" || run.status == "pending" || run.status == "cancelling"
+            }) {
+                break run.run_id.clone();
+            }
         }
         thread::sleep(Duration::from_millis(5));
-    }
-
-    let pending = service.load_timeline(conversation.id.clone()).unwrap();
-    let run_id = pending
-        .runs
-        .iter()
-        .find(|run| {
-            run.status == "running" || run.status == "pending" || run.status == "cancelling"
-        })
-        .map(|run| run.run_id.clone())
-        .or_else(|| pending.runs.last().map(|run| run.run_id.clone()))
-        .expect("second run must exist");
+    };
 
     service.cancel_run(run_id.clone()).unwrap();
     let send_result = send.join().expect("send thread").unwrap();

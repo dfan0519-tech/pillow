@@ -88,7 +88,10 @@ use settings_commands::{
     set_ui_theme,
 };
 use tauri::Manager;
-use write_commands::{decide_write_proposal, list_write_proposals, open_write_proposal_diff};
+use write_commands::{
+    decide_write_proposal, list_write_proposals, open_write_proposal_content_page,
+    open_write_proposal_diff,
+};
 
 fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -117,6 +120,7 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         list_write_proposals,
         decide_write_proposal,
         open_write_proposal_diff,
+        open_write_proposal_content_page,
         list_exec_proposals,
         decide_exec_proposal,
         open_exec_output,

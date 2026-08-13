@@ -200,7 +200,10 @@ fn unreadable_rows_are_listed_and_removable_without_hiding_readable_rules() {
     ] {
         assert!(json.get(key).is_some(), "missing exact wire field {key}");
     }
-    assert!(json.get("pattern").is_none(), "pattern must not be exported");
+    assert!(
+        json.get("pattern").is_none(),
+        "pattern must not be exported"
+    );
     assert!(json.get("content_digest").is_none());
     assert!(json.get("ruleId").is_none());
 

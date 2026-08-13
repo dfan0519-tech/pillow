@@ -327,5 +327,3 @@ fn canonical_project_root(path: String) -> Result<String, RuntimeError> {
         .map(str::to_owned)
         .ok_or_else(|| internal("working_directory is not valid UTF-8"))
 }
-
-

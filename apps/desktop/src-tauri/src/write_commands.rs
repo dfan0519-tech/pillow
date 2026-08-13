@@ -6,7 +6,9 @@
 use tauri::{State, WebviewWindow};
 
 use crate::app_state::{AppState, CommandError};
-use crate::conversation_service::{ConversationCommandError, WriteDiffDto, WriteProposalDto};
+use crate::conversation_service::{
+    ConversationCommandError, WriteContentPageDto, WriteDiffDto, WriteProposalDto,
+};
 use crate::runtime_service_state::{RuntimeServiceState, require_project_scope};
 
 fn map_error(error: ConversationCommandError) -> CommandError {
@@ -74,6 +76,27 @@ pub fn open_write_proposal_diff<R: tauri::Runtime>(
                 .require_conversation_root_for_window(window.label(), project_id, id, &root)
                 .map_err(command_to_conversation)?;
             service.open_write_proposal_diff(conversation_id, proposal_id)
+        })
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn open_write_proposal_content_page<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    service: State<'_, RuntimeServiceState>,
+    window: WebviewWindow<R>,
+    conversation_id: String,
+    proposal_id: String,
+    page_index: u32,
+) -> Result<WriteContentPageDto, CommandError> {
+    service
+        .with_service(|service, active_project_id| {
+            let (id, project_id, root) = service.conversation_project_context(&conversation_id)?;
+            require_project_scope(active_project_id, &project_id.0.to_string())?;
+            let _ = state
+                .require_conversation_root_for_window(window.label(), project_id, id, &root)
+                .map_err(command_to_conversation)?;
+            service.open_write_proposal_content_page(conversation_id, proposal_id, page_index)
         })
         .map_err(map_error)
 }

@@ -78,7 +78,10 @@ fn bare_conversation_uuid_fails_list_before_any_grant() {
 /// EA-03 sequence A: Tauri decide command must not accept renderer grant material.
 #[test]
 fn decide_write_command_source_does_not_accept_renderer_grant() {
-    let source = include_str!("write_commands.rs");
+    // Normalise line endings: these assertions match exact byte sequences, and
+    // git checks this file out CRLF on Windows. Without it the contract holds
+    // while the test reports it broken.
+    let source = include_str!("write_commands.rs").replace("\r\n", "\n");
     assert!(
         !source.contains("approval_grant"),
         "decide_write_proposal command must not take approval_grant from the renderer"

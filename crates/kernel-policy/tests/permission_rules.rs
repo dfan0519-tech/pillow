@@ -420,7 +420,11 @@ fn an_empty_pattern_matches_every_subject_in_its_class() {
         PermissionRulePrefix::Write,
         PermissionRulePrefix::Edit,
     ] {
-        assert!(permission_rule_matches(prefix, "", &proc("rm", &["-rf", "/"])));
+        assert!(permission_rule_matches(
+            prefix,
+            "",
+            &proc("rm", &["-rf", "/"])
+        ));
         assert!(permission_rule_matches(prefix, "", "project/.ssh/id_rsa"));
         assert!(permission_rule_matches(prefix, "", ""));
     }

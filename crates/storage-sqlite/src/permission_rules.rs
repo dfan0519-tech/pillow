@@ -813,10 +813,7 @@ impl RawPermissionRuleRow {
         })
     }
 
-    fn unreadable(
-        &self,
-        reason: UnreadablePermissionRuleReason,
-    ) -> ClassifiedPermissionRule {
+    fn unreadable(&self, reason: UnreadablePermissionRuleReason) -> ClassifiedPermissionRule {
         ClassifiedPermissionRule::Unreadable(UnreadablePermissionRule {
             rule_id: self.id_text.clone().unwrap_or_default(),
             scope: self.scope.clone(),

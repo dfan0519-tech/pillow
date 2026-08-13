@@ -7,6 +7,11 @@
 //! Diffs are zero-context: header line ranges describe only the emitted
 //! deletion/insertion lines (no context lines unless a future revision
 //! adjusts both header counts and body together).
+//!
+//! EA-04: the bounded unified text is display-only. The review-binding digest
+//! and paginated review object are always the full proposed content.
+
+use sha2::{Digest, Sha256};
 
 /// Maximum bytes of unified-diff *output* retained for review display.
 pub const DIFF_BYTE_CAP: u64 = 262_144;
@@ -19,12 +24,39 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 
 /// Bounded unified-diff snapshot for UI review.
 ///
-/// Debug redacts the unified source text so distinctive content never appears
-/// in `format!("{value:?}")`. No `Serialize` impl.
+/// Debug redacts the unified source text and the sealed proposed body so
+/// distinctive content never appears in `format!("{value:?}")`. No `Serialize`
+/// impl. `content_digest` is the SHA-256 of the full proposed content — the
+/// object the executor will write — not of the bounded unified text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BoundedDiff {
     pub unified: String,
     pub truncated: bool,
+    pub line_count: u32,
+    pub byte_count: u64,
+    /// `sha256:` + lowercase hex of the full proposed UTF-8 bytes.
+    pub content_digest: String,
+    proposed_content: String,
+}
+
+impl BoundedDiff {
+    /// Full proposed body the digest names. Host-only; never a renderer field.
+    pub fn proposed_content(&self) -> &str {
+        &self.proposed_content
+    }
+
+    /// One UTF-8-safe page of the proposed body under the same display caps.
+    pub fn content_page(&self, page_index: u32) -> Option<ProposedContentPage> {
+        page_proposed_content(&self.proposed_content, page_index)
+    }
+}
+
+/// One page of sealed proposed content for informed review (EA-04).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposedContentPage {
+    pub page_index: u32,
+    pub page_count: u32,
+    pub text: String,
     pub line_count: u32,
     pub byte_count: u64,
 }
@@ -36,6 +68,8 @@ impl std::fmt::Debug for BoundedDiff {
             .field("truncated", &self.truncated)
             .field("line_count", &self.line_count)
             .field("byte_count", &self.byte_count)
+            .field("content_digest", &self.content_digest)
+            .field("proposed_content", &"<redacted>")
             .finish()
     }
 }
@@ -64,7 +98,7 @@ pub fn build_bounded_unified_diff(base: Option<&str>, proposed: &str) -> Bounded
         && base_lines.ends_with_newline == proposed_lines.ends_with_newline
     {
         // Identical: file headers only.
-        return finalize(out, false);
+        return finalize(out, false, proposed);
     }
 
     // Final-newline-only change: line bodies match but EOF newline flag differs.
@@ -78,27 +112,27 @@ pub fn build_bounded_unified_diff(base: Option<&str>, proposed: &str) -> Bounded
         let last = &base_lines.lines[n - 1];
         let header = format!("@@ -{n},1 +{n},1 @@\n");
         if !append_line(&mut out, &header, &mut truncated) {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
         let remove = format!("-{last}\n");
         if !append_line(&mut out, &remove, &mut truncated) {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
         if !base_lines.ends_with_newline
             && !append_line(&mut out, NO_NEWLINE_MARKER, &mut truncated)
         {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
         let add = format!("+{last}\n");
         if !append_line(&mut out, &add, &mut truncated) {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
         if !proposed_lines.ends_with_newline
             && !append_line(&mut out, NO_NEWLINE_MARKER, &mut truncated)
         {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
-        return finalize(out, truncated);
+        return finalize(out, truncated, proposed);
     }
 
     // Common prefix / suffix (linear in input line count).
@@ -134,14 +168,14 @@ pub fn build_bounded_unified_diff(base: Option<&str>, proposed: &str) -> Bounded
     // Zero-context: header ranges match emitted body lines exactly (no context rows).
     let header = format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@\n");
     if !append_line(&mut out, &header, &mut truncated) {
-        return finalize(out, true);
+        return finalize(out, true, proposed);
     }
 
     let old_end = base_lines.lines.len() - suffix;
     for line in &base_lines.lines[prefix..old_end] {
         let row = format!("-{line}\n");
         if !append_line(&mut out, &row, &mut truncated) {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
     }
     // Base missing final newline when the removed region includes the file's last line.
@@ -151,14 +185,14 @@ pub fn build_bounded_unified_diff(base: Option<&str>, proposed: &str) -> Bounded
         && old_count > 0
         && !append_line(&mut out, NO_NEWLINE_MARKER, &mut truncated)
     {
-        return finalize(out, true);
+        return finalize(out, true, proposed);
     }
 
     let new_end = proposed_lines.lines.len() - suffix;
     for line in &proposed_lines.lines[prefix..new_end] {
         let row = format!("+{line}\n");
         if !append_line(&mut out, &row, &mut truncated) {
-            return finalize(out, true);
+            return finalize(out, true, proposed);
         }
     }
     if !proposed_lines.ends_with_newline
@@ -167,10 +201,10 @@ pub fn build_bounded_unified_diff(base: Option<&str>, proposed: &str) -> Bounded
         && new_count > 0
         && !append_line(&mut out, NO_NEWLINE_MARKER, &mut truncated)
     {
-        return finalize(out, true);
+        return finalize(out, true, proposed);
     }
 
-    finalize(out, truncated)
+    finalize(out, truncated, proposed)
 }
 
 struct LineSplit {
@@ -295,7 +329,7 @@ fn trim_to_caps(out: &mut String) {
     }
 }
 
-fn finalize(out: String, truncated: bool) -> BoundedDiff {
+fn finalize(out: String, truncated: bool, proposed: &str) -> BoundedDiff {
     let mut out = out;
     let mut truncated = truncated;
     if count_lines(&out) > DIFF_LINE_CAP || out.len() as u64 > DIFF_BYTE_CAP {
@@ -309,7 +343,92 @@ fn finalize(out: String, truncated: bool) -> BoundedDiff {
         truncated,
         line_count,
         byte_count,
+        content_digest: proposed_content_digest(proposed),
+        proposed_content: proposed.to_owned(),
     }
+}
+
+/// Same algorithm as [`crate::content_sha256_digest`]: `sha256:` + lowercase hex.
+pub fn proposed_content_digest(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+/// Page the full proposed body under the display caps. Never splits a UTF-8
+/// scalar; a single oversize line is split only on a char boundary.
+pub fn page_proposed_content(proposed: &str, page_index: u32) -> Option<ProposedContentPage> {
+    let pages = paginate_proposed_content(proposed);
+    let page_count = pages.len().max(1) as u32;
+    if pages.is_empty() {
+        return (page_index == 0).then(|| ProposedContentPage {
+            page_index: 0,
+            page_count: 1,
+            text: String::new(),
+            line_count: 0,
+            byte_count: 0,
+        });
+    }
+    pages
+        .get(page_index as usize)
+        .map(|text| ProposedContentPage {
+            page_index,
+            page_count,
+            line_count: count_lines(text),
+            byte_count: text.len() as u64,
+            text: text.clone(),
+        })
+}
+
+fn paginate_proposed_content(proposed: &str) -> Vec<String> {
+    if proposed.is_empty() {
+        return Vec::new();
+    }
+    let mut pages = Vec::new();
+    let mut rest = proposed;
+    while !rest.is_empty() {
+        let (page, next) = next_proposed_page(rest);
+        if page.is_empty() {
+            break;
+        }
+        pages.push(page);
+        rest = next;
+    }
+    pages
+}
+
+fn next_proposed_page(rest: &str) -> (String, &str) {
+    if rest.is_empty() {
+        return (String::new(), rest);
+    }
+    let mut end = 0;
+    let mut bytes = 0_u64;
+    let mut newlines = 0_u32;
+    for (index, character) in rest.char_indices() {
+        let char_bytes = character.len_utf8() as u64;
+        if bytes + char_bytes > DIFF_BYTE_CAP {
+            break;
+        }
+        let next_newlines = newlines + u32::from(character == '\n');
+        let next_line_count = if character == '\n' {
+            next_newlines
+        } else {
+            next_newlines + 1
+        };
+        if next_line_count > DIFF_LINE_CAP {
+            break;
+        }
+        bytes += char_bytes;
+        newlines = next_newlines;
+        end = index + character.len_utf8();
+    }
+    if end == 0 {
+        end = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+    }
+    (rest[..end].to_owned(), &rest[end..])
 }
 
 #[cfg(test)]

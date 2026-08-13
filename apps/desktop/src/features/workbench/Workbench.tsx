@@ -919,6 +919,7 @@ export function Workbench({
                 readRuleSubject(pendingWriteProposal)
                 ?? pendingWriteProposal.path
               }
+              writeApprovalGateway={writeApprovalGateway}
             />
           ) : null}
           {showProcessBar && pendingProcessProposal ? (

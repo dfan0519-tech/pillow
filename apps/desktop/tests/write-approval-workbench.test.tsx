@@ -311,6 +311,70 @@ describe("write approval workbench integration", () => {
     expect(document.body.innerHTML).not.toContain(grantSecret);
   });
 
+  it("does not let Approve fire while the listed proposal is truncated (EA-04)", async () => {
+    const user = userEvent.setup();
+    const digest =
+      "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const writeGateway = createWriteGateway();
+    writeGateway.setListResult([
+      pending({
+        diffTruncated: true,
+        contentDigest: digest,
+        contentReviewComplete: false,
+      }),
+    ]);
+    writeGateway.openWriteProposalContentPage = async () => ({
+      proposalId: proposalOldId,
+      path: "src/example.ts",
+      mode: "create",
+      contentDigest: digest,
+      pageIndex: 0,
+      pageCount: 1,
+      text: "full-proposed-body\n",
+      lineCount: 1,
+      byteCount: 19,
+      reviewComplete: true,
+    });
+
+    render(
+      <Workbench
+        conversationId={convAId}
+        onCancelRun={vi.fn()}
+        onOpenProject={vi.fn()}
+        onSendTurn={vi.fn()}
+        project={fixtureProject()}
+        run={null}
+        timeline={emptyTimeline(convAId)}
+        writeApprovalGateway={writeGateway}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("write-approval-approve")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("write-approval-approve")).toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-approve"));
+    expect(writeGateway.decideCalls).toHaveLength(0);
+
+    await user.click(screen.getByTestId("write-approval-review-content"));
+    await waitFor(() => {
+      expect(screen.getByTestId("write-approval-content-page")).toHaveTextContent(
+        "full-proposed-body",
+      );
+    });
+    expect(screen.getByTestId("write-approval-approve")).not.toBeDisabled();
+    await user.click(screen.getByTestId("write-approval-approve"));
+    await waitFor(() => {
+      expect(writeGateway.decideCalls).toEqual([
+        {
+          conversationId: convAId,
+          proposalId: proposalOldId,
+          decision: "approve_once",
+        },
+      ]);
+    });
+  });
+
   it("submits exact decide payload then clears grant and re-lists", async () => {
     const user = userEvent.setup();
     const writeGateway = createWriteGateway();

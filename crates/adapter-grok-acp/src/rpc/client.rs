@@ -492,7 +492,10 @@ mod tests {
         // The recorded outcome answers every later ask, so a shutdown followed
         // by a drop cannot pay the grace a second time.
         let started = Instant::now();
-        assert_eq!(client.join_reader(Duration::from_secs(600)), ReaderExit::Blocked);
+        assert_eq!(
+            client.join_reader(Duration::from_secs(600)),
+            ReaderExit::Blocked
+        );
         let again = started.elapsed();
         assert!(again < Duration::from_secs(1), "waited again: {again:?}");
 
