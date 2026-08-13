@@ -13,14 +13,29 @@
 所以如果没重新构建,你打开的是上一次构建时的 Pillow。
 
 ```bash
-node scripts/run-cargo.mjs build --release -p pillow-desktop
+cd apps/desktop && corepack pnpm tauri build --no-bundle
 ```
+
+🔴 **必须走 Tauri CLI,不能用裸 `cargo build --release`。**
+裸 cargo 绕过 Tauri 的配置解析,产出的二进制仍然指向 `devUrl`(开发服务器),
+前端**不会被嵌进去**。这样的 exe 能开窗口,但窗口里是
+`127.0.0.1 refused to connect` —— 2026-08-13 我就是这么交出去一个坏二进制的。
 
 构建完对一下时间戳,别只看命令有没有报错:
 
 ```bash
 ls -la target/release/pillow.exe
 ```
+
+想确认前端真的嵌进去了(而不是只看命令成功):
+
+```bash
+grep -ac "<!doctype html>" target/release/pillow.exe
+```
+
+**1 = 嵌进去了,0 = 没有。** 🔴 界面里的中文字符串搜不到是正常的
+(JS 包被压缩了),但 `index.html` 搜得到 —— 别拿"资源被压缩了"
+去解释 0,那次我就是这么把证据解释掉的。
 
 ---
 
