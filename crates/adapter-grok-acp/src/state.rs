@@ -10,7 +10,7 @@ use crate::error::internal;
 use crate::health::{ProbeState, extract_agent_version};
 use crate::map::SessionMap;
 use crate::process::{ChildHandle, build_child_env, spawn_child};
-use crate::rpc::{RpcClient, initialize_params};
+use crate::rpc::{READER_EXIT_GRACE, ReaderExit, RpcClient, initialize_params};
 use crate::turn::TurnRegistry;
 
 pub(crate) struct Connection {
@@ -35,16 +35,56 @@ pub(crate) enum PromptOutcome {
     Err(RuntimeError),
 }
 
+/// Close the transport and terminate the child, reporting both proofs of
+/// cleanup. Every wait is bounded, so this always returns.
+///
+/// The reader thread is the wait that used to be unbounded, and it is the one
+/// this side cannot satisfy on its own. It blocks on the agent's stdout, and
+/// that pipe reports end-of-input only once every handle to the write end is
+/// closed. The child held one and is now gone, so a reader still parked after
+/// the grace means some process the kill did not reach inherited a copy and
+/// outlived the tree — descendants inherit the pipe whatever they do with their
+/// own stdio. Waiting it out is not an option: the wait would last as long as
+/// the leaked process does, which is what froze a desktop exit for 1045 seconds
+/// until the leak was killed by hand.
+///
+/// So a blocked reader is reported as a cleanup failure. It is genuine evidence
+/// of one, and on platforms without a job object it is the *only* evidence
+/// available: `kill_tree` there kills the direct child and proves nothing about
+/// its descendants. The tree-kill error wins when both fail — it names the
+/// process that was supposed to die.
+pub(crate) fn terminate_connection(
+    mut connection: Connection,
+    kill_wait: Duration,
+) -> Result<(), RuntimeError> {
+    connection.rpc.close();
+    let killed = connection.child.kill_tree(kill_wait);
+    let reader = connection.rpc.join_reader(READER_EXIT_GRACE);
+    cleanup_outcome(killed, reader)
+}
+
+fn cleanup_outcome(kill: Result<(), RuntimeError>, reader: ReaderExit) -> Result<(), RuntimeError> {
+    kill?;
+    match reader {
+        ReaderExit::Finished => Ok(()),
+        ReaderExit::Blocked => Err(internal(
+            "acp_reader_blocked: agent output pipe still held after process tree cleanup",
+        )),
+    }
+}
+
 pub(crate) fn ensure_connection(
     inner: &mut Inner,
     config: &GrokAcpConfig,
 ) -> Result<(), RuntimeError> {
     if let Some(conn) = inner.connection.as_mut() {
         if conn.rpc.is_closed() || conn.child.try_wait()?.is_some() {
-            let mut dead = inner.connection.take().expect("connection");
-            dead.rpc.close();
-            let _ = dead.child.kill_tree(Duration::from_millis(500));
-            dead.rpc.join_reader();
+            let dead = inner.connection.take().expect("connection");
+            // Discarded either way, so the outcome has no caller here. It still
+            // must not block: this runs on the way into a user's turn, so a
+            // pipe holder that outlived the dead child would otherwise freeze
+            // the next prompt rather than a shutdown.
+            let _ = terminate_connection(dead, Duration::from_millis(500));
             // Lost transport proof until re-initialize.
             if !matches!(inner.probe_state, ProbeState::AuthenticationFailed) {
                 inner.probe_state = ProbeState::Unavailable;
@@ -111,4 +151,35 @@ pub(crate) fn initialize_if_needed(inner: &mut Inner) -> Result<(), RuntimeError
         inner.probe_state = ProbeState::TransportReadyAuthUnverified;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finished_reader_over_a_killed_tree_is_clean_cleanup() {
+        assert!(cleanup_outcome(Ok(()), ReaderExit::Finished).is_ok());
+    }
+
+    #[test]
+    fn a_blocked_reader_fails_cleanup_even_when_the_tree_kill_was_proven() {
+        let error = cleanup_outcome(Ok(()), ReaderExit::Blocked).expect_err("blocked reader");
+        assert!(
+            error.to_string().contains("acp_reader_blocked"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn the_tree_kill_failure_is_reported_when_both_proofs_fail() {
+        let error = cleanup_outcome(
+            Err(internal("acp_process_executor: process cleanup failed")),
+            ReaderExit::Blocked,
+        )
+        .expect_err("failed kill");
+        let message = error.to_string();
+        assert!(message.contains("acp_process_executor"), "got: {message}");
+        assert!(!message.contains("acp_reader_blocked"), "got: {message}");
+    }
 }

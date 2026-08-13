@@ -44,7 +44,7 @@ use crate::provider_writes::{
     provider_write_response,
 };
 use crate::rpc::{Incoming, RpcClient, session_cancel_params, session_prompt_params};
-use crate::state::{Inner, PromptOutcome};
+use crate::state::{Inner, PromptOutcome, terminate_connection};
 use crate::turn::ProviderRequestIdentityError;
 
 #[allow(clippy::too_many_arguments)]
@@ -253,13 +253,11 @@ pub(crate) fn run_prompt_loop(
 /// A cancelled prompt without a cooperative stop must not retain the ACP slot.
 fn terminate_after_cancel(inner: &Mutex<Inner>) -> Result<(), RuntimeError> {
     let mut guard = inner.lock().expect("inner lock");
-    let kill_result = if let Some(mut conn) = guard.connection.take() {
-        conn.rpc.close();
-        let result = conn.child.kill_tree(Duration::from_secs(2));
-        conn.rpc.join_reader();
-        result
-    } else {
-        Ok(())
+    // Bounded throughout: this runs mid-turn while holding `inner`, so a hang
+    // here would take the whole adapter with it, not just an exit.
+    let kill_result = match guard.connection.take() {
+        Some(conn) => terminate_connection(conn, Duration::from_secs(2)),
+        None => Ok(()),
     };
     guard.sessions.clear();
     guard.probe_state = ProbeState::Unavailable;
