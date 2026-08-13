@@ -14,8 +14,9 @@ pub use permission_rules::{
     PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
     conservative_shell_command_segments, decode_process_subject,
     evaluate_permission_rule_conjunction, evaluate_permission_rules,
+    example_also_allowed_process_subject, is_overbroad_process_allow_pattern,
     path_deny_uses_identity_case_fold, permission_rule_matches,
-    process_subject_confirmed_for_allow,
+    process_subject_confirmed_for_allow, suggest_process_allow_pattern,
 };
 
 pub use process::{

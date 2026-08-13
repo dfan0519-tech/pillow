@@ -662,6 +662,121 @@ pub fn process_subject_confirmed_for_allow(subject: &str) -> bool {
     true
 }
 
+/// Whether a process **allow** pattern has no argument constraint.
+///
+/// Overbroad means a later, semantically different argv of the same program
+/// (or a glued program-name glob) would match. Deny patterns are out of
+/// scope: this classifier is only consulted when *producing* or *warning
+/// about* allow rules.
+///
+/// Exact v1-encoded subjects pin one argv and are never overbroad.
+pub fn is_overbroad_process_allow_pattern(pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if pattern.contains('\u{1e}') {
+        // Decodable v1 form is one argv. Undecodable junk is treated as
+        // overbroad so we never hide a warning behind a malformed pattern.
+        return decode_process_subject(pattern).is_none();
+    }
+
+    let tokens: Vec<&str> = pattern
+        .split(' ')
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return true;
+    }
+    if program_token_is_unconstrained(tokens[0]) {
+        return true;
+    }
+    !tokens
+        .iter()
+        .skip(1)
+        .any(|token| !token_is_only_wildcards(token))
+}
+
+fn program_token_is_unconstrained(program: &str) -> bool {
+    program.is_empty() || program.contains('*')
+}
+
+fn token_is_only_wildcards(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|ch| ch == '*')
+}
+
+/// Suggest a durable **allow** pattern from a process subject.
+///
+/// Unlike the historical renderer default (`program *` / `program first-arg *`),
+/// this keeps every concrete argv token so approving `node build.js` cannot
+/// casually persist a rule that auto-allows `node anything-else.js`.
+///
+/// Bare programs still produce an overbroad pattern (`node`) because prefix
+/// match has no narrower space-join form. Callers must warn; they must not
+/// rewrite already-stored rules.
+pub fn suggest_process_allow_pattern(subject: &str) -> String {
+    let Some(tokens) = decode_process_subject(subject) else {
+        return subject.to_owned();
+    };
+    if tokens.is_empty() || bijective_space_join(&tokens).is_none() {
+        return subject.to_owned();
+    }
+    tokens.join(" ")
+}
+
+/// A different, confirmable process subject that `pattern` would auto-allow,
+/// derived from `from_subject`. `None` when the pattern is not overbroad or
+/// no real auto-allow contrast can be produced.
+pub fn example_also_allowed_process_subject(pattern: &str, from_subject: &str) -> Option<String> {
+    if !is_overbroad_process_allow_pattern(pattern) {
+        return None;
+    }
+    let tokens = decode_process_subject(from_subject)?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let contrast = contrast_process_argv(&tokens);
+    let subject = canonical_process_subject(&contrast[0], &contrast[1..]);
+    if subject == from_subject {
+        return None;
+    }
+    if !process_subject_confirmed_for_allow(&subject) {
+        return None;
+    }
+    if !permission_rule_matches(PermissionRulePrefix::Process, pattern, &subject) {
+        return None;
+    }
+
+    let probe = PermissionRuleSpec {
+        rule_id: "overbroad-contrast".to_owned(),
+        scope: PermissionRuleScope::Global,
+        project_id: None,
+        prefix: PermissionRulePrefix::Process,
+        pattern: pattern.to_owned(),
+        action: PermissionRuleAction::Allow,
+        content_digest: "sha256:overbroad-contrast".to_owned(),
+    };
+    match evaluate_permission_rules(PermissionRulePrefix::Process, &subject, &[probe]) {
+        PermissionRuleEvaluation::Allow(_) => Some(subject),
+        PermissionRuleEvaluation::Deny(_) | PermissionRuleEvaluation::RequireConfirmation => None,
+    }
+}
+
+/// Derive a sibling argv from the approved tokens. The first operand is
+/// rewritten by appending `.other` so the example is mechanical, not invented.
+fn contrast_process_argv(tokens: &[String]) -> Vec<String> {
+    let mut contrast = tokens.to_vec();
+    if contrast.len() == 1 {
+        let marker = format!("{}.other", contrast[0]);
+        contrast.push(marker);
+    } else if contrast[1].starts_with('-') {
+        let marker = format!("{}.other", contrast[0]);
+        contrast.insert(1, marker);
+    } else {
+        contrast[1] = format!("{}.other", contrast[1]);
+    }
+    contrast
+}
+
 fn program_basename(program: &str) -> &str {
     let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
     if base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {

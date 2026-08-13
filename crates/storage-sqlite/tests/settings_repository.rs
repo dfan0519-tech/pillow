@@ -1076,3 +1076,222 @@ fn invalid_stored_permission_mode_fails_closed_to_default() {
     assert_ne!(resolved.value, PermissionMode::AcceptEdits);
     assert_ne!(resolved.value, PermissionMode::Bypass);
 }
+
+// ---------------------------------------------------------------------------
+// Two-tier: global Bypass capability ∧ project mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_tier_composition_table_global_and_project() {
+    let cases = [
+        (false, PermissionMode::Default, PermissionMode::Default),
+        (
+            false,
+            PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits,
+        ),
+        (false, PermissionMode::Bypass, PermissionMode::Default),
+        (true, PermissionMode::Default, PermissionMode::Default),
+        (
+            true,
+            PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits,
+        ),
+        (true, PermissionMode::Bypass, PermissionMode::Bypass),
+    ];
+
+    for (available, project_mode, expected) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = seed_project(&temp, "two-tier-compose");
+        let repo = open_settings(&temp);
+        repo.upsert_bypass_available(available, SettingsUpdatedBy::User)
+            .unwrap();
+        if project_mode != PermissionMode::Bypass || available {
+            repo.upsert_project_permission_mode(&project_id, project_mode, SettingsUpdatedBy::User)
+                .unwrap();
+        } else {
+            // Capability off rejects a typed Bypass write; plant the row so
+            // composition still fail-closes if a project row already exists.
+            repo.upsert(UpsertSetting {
+                scope: SettingScope::Project,
+                project_id: Some(project_id.clone()),
+                key: "permissions.project_mode".to_owned(),
+                value_kind: "enum".to_owned(),
+                value_json: "\"bypass\"".to_owned(),
+                updated_by: SettingsUpdatedBy::User,
+            })
+            .unwrap();
+        }
+
+        let effective = repo
+            .resolve_effective_permission_mode(Some(&project_id))
+            .unwrap();
+        assert_eq!(
+            effective.value, expected,
+            "available={available:?} project={project_mode:?}"
+        );
+    }
+}
+
+#[test]
+fn legacy_permissions_mode_is_not_discarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "legacy-mode");
+    let repo = open_settings(&temp);
+
+    repo.upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    let inferred = repo.resolve_bypass_available().unwrap();
+    assert!(inferred.value, "stored bypass must keep the capability");
+    assert_eq!(inferred.source, SettingSource::Global);
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::Bypass
+    );
+
+    repo.upsert_permission_mode(PermissionMode::AcceptEdits, SettingsUpdatedBy::User)
+        .unwrap();
+    // Explicit flag is still absent; preferred is no longer bypass, so
+    // capability fails closed. Accept-edits itself is preserved.
+    assert!(!repo.resolve_bypass_available().unwrap().value);
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::AcceptEdits
+    );
+
+    repo.upsert_permission_mode(PermissionMode::Default, SettingsUpdatedBy::User)
+        .unwrap();
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::Default
+    );
+}
+
+#[test]
+fn explicit_bypass_off_overrides_legacy_bypass_row() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "legacy-bypass-off");
+    let repo = open_settings(&temp);
+    repo.upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    repo.upsert_bypass_available(false, SettingsUpdatedBy::User)
+        .unwrap();
+
+    assert!(!repo.resolve_bypass_available().unwrap().value);
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::Default
+    );
+    assert_eq!(
+        repo.resolve_permission_mode().unwrap().value,
+        PermissionMode::Bypass,
+        "preferred mode row must remain so the setting is not discarded"
+    );
+}
+
+#[test]
+fn project_cannot_select_bypass_when_global_capability_is_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "no-self-grant");
+    let repo = open_settings(&temp);
+    repo.upsert_bypass_available(false, SettingsUpdatedBy::User)
+        .unwrap();
+
+    let error = repo
+        .upsert_project_permission_mode(
+            &project_id,
+            PermissionMode::Bypass,
+            SettingsUpdatedBy::User,
+        )
+        .expect_err("project must not enable Bypass for itself");
+    assert!(matches!(error, SettingsError::PermissionBypassNotAvailable));
+    assert_eq!(error.code(), "permission_bypass_not_available");
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::Default
+    );
+}
+
+#[test]
+fn project_write_of_bypass_capability_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "capability-project");
+    let repo = open_settings(&temp);
+    let error = repo
+        .upsert(UpsertSetting {
+            scope: SettingScope::Project,
+            project_id: Some(project_id),
+            key: "permissions.bypass_available".to_owned(),
+            value_kind: "flag".to_owned(),
+            value_json: "true".to_owned(),
+            updated_by: SettingsUpdatedBy::User,
+        })
+        .expect_err("project cannot grant Bypass capability");
+    assert!(matches!(
+        error,
+        SettingsError::PermissionBypassAvailableGlobalOnly
+    ));
+}
+
+#[test]
+fn global_write_of_project_permission_mode_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = open_settings(&temp);
+    let error = repo
+        .upsert(UpsertSetting {
+            scope: SettingScope::Global,
+            project_id: None,
+            key: "permissions.project_mode".to_owned(),
+            value_kind: "enum".to_owned(),
+            value_json: "\"bypass\"".to_owned(),
+            updated_by: SettingsUpdatedBy::User,
+        })
+        .expect_err("project mode is not an installation-wide write");
+    assert!(matches!(
+        error,
+        SettingsError::PermissionProjectModeProjectOnly
+    ));
+}
+
+#[test]
+fn malformed_bypass_flag_fails_closed_to_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = seed_project(&temp, "bad-flag");
+    let repo = open_settings(&temp);
+    drop(repo);
+
+    let connection = Connection::open(temp.path().join("keeper.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO settings_entries (
+                setting_id, scope, project_id, key, value_kind, value_json, updated_at, updated_by
+             ) VALUES (
+                'bad-bypass-flag', 'global', NULL, 'permissions.bypass_available',
+                'flag', 'maybe', '2026-08-13T00:00:00Z', 'user'
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let repo = open_settings(&temp);
+    let resolved = repo.resolve_bypass_available().unwrap();
+    assert!(!resolved.value);
+    assert_eq!(resolved.source, SettingSource::Default);
+    assert_eq!(
+        repo.resolve_effective_permission_mode(Some(&project_id))
+            .unwrap()
+            .value,
+        PermissionMode::Default
+    );
+}

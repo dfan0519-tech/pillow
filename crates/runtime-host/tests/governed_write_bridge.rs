@@ -200,6 +200,27 @@ fn set_permission_mode(fx: &Fixture, mode: PermissionMode) {
         .unwrap();
 }
 
+fn set_two_tier_project_bypass_with_global_capability_off(fx: &Fixture) {
+    let settings = SqliteSettingsRepository::open(&fx.db).unwrap();
+    // Legacy global row still says bypass — old execution only reads this.
+    settings
+        .upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_bypass_available(true, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_project_permission_mode(
+            &fx.project_id,
+            PermissionMode::Bypass,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    settings
+        .upsert_bypass_available(false, SettingsUpdatedBy::User)
+        .unwrap();
+}
+
 #[test]
 fn accept_edits_and_bypass_auto_apply_writes_with_durable_mode_receipts() {
     for (index, mode) in [PermissionMode::AcceptEdits, PermissionMode::Bypass]
@@ -260,6 +281,69 @@ fn accept_edits_and_bypass_auto_apply_writes_with_durable_mode_receipts() {
         );
         host.shutdown().unwrap();
     }
+}
+
+/// Global Bypass capability off + project selected bypass must still ask.
+/// Red on the old execution path, which only reads the global preferred mode.
+#[test]
+fn global_bypass_off_keeps_project_bypass_write_pending_human_approval() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join("src")).unwrap();
+    set_two_tier_project_bypass_with_global_capability_off(&fx);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let deciding_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let decision = thread::spawn(move || {
+        let (proposal_id, grant) = wait_live_pending(&deciding_host, &conversation_id);
+        deciding_host
+            .decide_write_proposal(
+                &conversation_id,
+                &proposal_id,
+                &grant,
+                WriteDecision::Reject,
+            )
+            .unwrap();
+    });
+    let cancel = AtomicBool::new(false);
+
+    let receipt = execute_governed_write(
+        fx.run_id,
+        provider_create(
+            "two-tier-write",
+            "src/gated.rs",
+            "pub const GATED: bool = true;\n",
+        ),
+        &cancel,
+        |requested| {
+            let live = host
+                .list_write_proposals(&fx.conversation_id)
+                .unwrap()
+                .into_iter()
+                .find(|proposal| proposal.proposal_id == requested.proposal_id)
+                .expect("gated write remains observable");
+            assert!(
+                live.approval_grant.is_some(),
+                "global Bypass off must keep a human grant; \
+                 old execution auto-approves from global permissions.mode=bypass"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    decision.join().unwrap();
+
+    assert_eq!(receipt.resolved.state, WriteProposalState::Rejected);
+    assert!(!fx.root.join("src/gated.rs").exists());
+    let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+    assert!(
+        store
+            .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .is_none(),
+        "capability-off must not mint a mode receipt"
+    );
+    host.shutdown().unwrap();
 }
 
 #[test]
@@ -2300,4 +2384,95 @@ fn governance_port_write_preserves_lifecycle_replay_and_observer_failure() {
     }
 
     host.shutdown().unwrap();
+}
+
+/// The other direction of the two-tier rule, which nothing else covers.
+///
+/// `global_bypass_off_keeps_project_bypass_write_pending_human_approval` turns
+/// the **capability** off, and a capability-only read already answers "ask" —
+/// so it passes whether or not the project tier is consulted. Verified by
+/// mutation: replacing the project argument with `None` left it green.
+///
+/// Here the capability is on and the global mode is Bypass, so reading global
+/// alone auto-applies. Only honouring the project's stricter choice can keep a
+/// human in the loop, which is the half of `global ∧ project` that carries the
+/// user's decision.
+fn set_two_tier_project_strict_with_global_bypass_on(fx: &Fixture) {
+    let settings = SqliteSettingsRepository::open(&fx.db).unwrap();
+    settings
+        .upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_bypass_available(true, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_project_permission_mode(
+            &fx.project_id,
+            PermissionMode::Default,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+}
+
+#[test]
+fn project_default_keeps_write_pending_even_when_global_bypass_is_available() {
+    let fx = fixture();
+    fs::create_dir_all(fx.root.join("src")).unwrap();
+    set_two_tier_project_strict_with_global_bypass_on(&fx);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let deciding_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let decision = thread::spawn(move || {
+        let (proposal_id, grant) = wait_live_pending(&deciding_host, &conversation_id);
+        deciding_host
+            .decide_write_proposal(
+                &conversation_id,
+                &proposal_id,
+                &grant,
+                WriteDecision::Reject,
+            )
+            .unwrap();
+    });
+    let cancel = AtomicBool::new(false);
+
+    let receipt = execute_governed_write(
+        fx.run_id,
+        provider_create(
+            "two-tier-write-strict",
+            "src/project_gated.rs",
+            "pub const GATED: bool = true;\n",
+        ),
+        &cancel,
+        |requested| {
+            let live = host
+                .list_write_proposals(&fx.conversation_id)
+                .unwrap()
+                .into_iter()
+                .find(|proposal| proposal.proposal_id == requested.proposal_id)
+                .expect("project-gated write remains observable");
+            assert!(
+                live.approval_grant.is_some(),
+                "the project chose to keep asking; a global-only read would have \
+                 auto-applied from permissions.mode=bypass"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    decision.join().unwrap();
+
+    assert_eq!(receipt.resolved.state, WriteProposalState::Rejected);
+    assert!(
+        !fx.root.join("src/project_gated.rs").exists(),
+        "a rejected write must leave nothing on disk"
+    );
+    let store = SqliteWriteProposalRepository::open(&fx.db).unwrap();
+    assert!(
+        store
+            .get_permission_mode_receipt(&receipt.resolved.proposal_id)
+            .unwrap()
+            .is_none(),
+        "the project kept asking, so no auto-apply mode receipt may exist"
+    );
 }

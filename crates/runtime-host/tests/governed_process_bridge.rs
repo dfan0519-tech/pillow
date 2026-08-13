@@ -231,6 +231,26 @@ fn set_permission_mode(fx: &Fixture, mode: PermissionMode) {
         .unwrap();
 }
 
+fn set_two_tier_project_bypass_with_global_capability_off(fx: &Fixture) {
+    let settings = SqliteSettingsRepository::open(&fx.db).unwrap();
+    settings
+        .upsert_permission_mode(PermissionMode::Bypass, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_bypass_available(true, SettingsUpdatedBy::User)
+        .unwrap();
+    settings
+        .upsert_project_permission_mode(
+            &fx.project_id,
+            PermissionMode::Bypass,
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    settings
+        .upsert_bypass_available(false, SettingsUpdatedBy::User)
+        .unwrap();
+}
+
 #[test]
 fn bypass_auto_executes_process_with_full_lifecycle_and_durable_mode_receipt() {
     let fx = fixture();
@@ -286,6 +306,68 @@ fn bypass_auto_executes_process_with_full_lifecycle_and_durable_mode_receipt() {
             .get_rule_receipt(&receipt.proposal_id)
             .unwrap()
             .is_none()
+    );
+    host.shutdown().unwrap();
+}
+
+/// Global Bypass capability off + project selected bypass must still ask.
+/// Red on the old execution path, which only reads the global preferred mode.
+#[test]
+fn global_bypass_off_keeps_project_bypass_process_pending_human_approval() {
+    let fx = fixture();
+    set_two_tier_project_bypass_with_global_capability_off(&fx);
+    let host = Arc::new(host_for(&fx));
+    register(&host, &fx);
+    let deciding_host = Arc::clone(&host);
+    let conversation_id = fx.conversation_id.clone();
+    let decision = thread::spawn(move || {
+        let proposal_id = wait_live_pending(&deciding_host, &conversation_id);
+        deciding_host
+            .decide_process_proposal(&conversation_id, &proposal_id, ExecDecision::Reject)
+            .unwrap();
+    });
+    let cancel = AtomicBool::new(false);
+    let mut lifecycle = Vec::new();
+
+    let receipt = execute_governed_process(
+        fx.run_id,
+        provider_node_version("two-tier-process"),
+        &cancel,
+        |event| {
+            lifecycle.push(match event {
+                GovernedProcessLifecycle::Requested(requested) => {
+                    let live = host
+                        .list_process_proposals(&fx.conversation_id)
+                        .unwrap()
+                        .into_iter()
+                        .find(|proposal| proposal.proposal_id == requested.proposal_id)
+                        .expect("gated process remains observable");
+                    assert!(
+                        live.decision_available,
+                        "global Bypass off must keep a human decision; \
+                         old execution auto-approves from global permissions.mode=bypass"
+                    );
+                    "requested"
+                }
+                GovernedProcessLifecycle::Decided(_) => "decided",
+                GovernedProcessLifecycle::Started(_) => "started",
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+    decision.join().unwrap();
+
+    assert_eq!(receipt.state, ExecProposalState::Rejected);
+    assert!(receipt.started.is_none());
+    assert_eq!(lifecycle, vec!["requested", "decided"]);
+    assert!(
+        SqliteExecProposalRepository::open(&fx.db)
+            .unwrap()
+            .get_permission_mode_receipt(&receipt.proposal_id)
+            .unwrap()
+            .is_none(),
+        "capability-off must not mint a mode receipt"
     );
     host.shutdown().unwrap();
 }

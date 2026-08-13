@@ -302,33 +302,6 @@ async function invokePermissionModeSettings(
   }
 }
 
-/**
- * Synthesize a two-tier policy from the legacy global-only mode DTO.
- * Used when the host has not shipped the policy commands yet.
- * Writes (setBypassAvailable / setProjectPermissionMode) still require host.
- */
-export function synthesizePolicyFromLegacy(
-  legacy: PermissionModeSettingsView,
-  projectId: string | null | undefined,
-): PermissionPolicyView {
-  // Capability: treat Bypass as available so the UI is not falsely locked
-  // until the host can express a real global off switch. Effective mode
-  // still mirrors the legacy global mode.
-  const bypassAvailable = true;
-  const projectMode = projectId ? legacy.mode : null;
-  const projectModeSource: PermissionPolicyView["projectModeSource"] = projectId
-    ? "default"
-    : null;
-  const effectiveMode = resolveEffectivePermissionMode(bypassAvailable, legacy.mode);
-  return {
-    bypassAvailable,
-    bypassAvailableSource: "default",
-    projectMode,
-    projectModeSource,
-    effectiveMode,
-  };
-}
-
 /** Tauri settings gateway — host owns storage; renderer never touches the DB. */
 export class TauriSettingsGateway implements SettingsGateway {
   getPermissionMode(): Promise<PermissionModeSettingsView> {
@@ -348,23 +321,20 @@ export class TauriSettingsGateway implements SettingsGateway {
       });
       return parsePermissionPolicy(payload);
     } catch (error) {
-      // Fall back to legacy global mode so the settings surface still loads.
       const normalized = normalizeSettingsError(error);
-      if (
-        normalized.code === "invalid_settings_response"
-        || normalized.message.includes("invalid settings")
-      ) {
+      if (normalized.code === "invalid_settings_response") {
         throw normalized;
       }
-      try {
-        const legacy = await this.getPermissionMode();
-        return synthesizePolicyFromLegacy(legacy, projectId);
-      } catch {
+      if (
+        normalized.code === "settings_command_failed"
+        || /not found|unknown command/i.test(normalized.message)
+      ) {
         throw new SettingsGatewayError(
           "permission_policy_host_missing",
           HOST_POLICY_MISSING,
         );
       }
+      throw normalized;
     }
   }
 

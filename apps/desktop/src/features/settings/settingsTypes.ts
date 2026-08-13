@@ -11,9 +11,8 @@ export type UiThemeLabel = "dark" | "light";
 export type PermissionModeLabel = "default" | "accept_edits" | "bypass";
 
 /**
- * Legacy installation-wide mode DTO (Rust `PermissionModeSettingsDto`).
- * Still used by the workbench indicator via `getPermissionMode` until the
- * host ships two-tier effective-mode resolution with a project context.
+ * Legacy installation-wide preferred-mode DTO (Rust `PermissionModeSettingsDto`).
+ * Workbench indicator still reads this. Settings uses `PermissionPolicyView`.
  */
 export type PermissionModeSettingsView = {
   mode: PermissionModeLabel;

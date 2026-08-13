@@ -9,7 +9,6 @@ import {
   MockSettingsGateway,
   parsePermissionModeSettings,
   parsePermissionPolicy,
-  synthesizePolicyFromLegacy,
 } from "../src/features/settings/settingsGateway";
 import {
   PERMISSION_DENY_RECEIPT_NOTE,
@@ -108,15 +107,6 @@ describe("SettingsPanel — DTO contracts", () => {
     ).toThrow(/invalid settings response/i);
   });
 
-  it("synthesizes policy from legacy global mode for host gap", () => {
-    const policy = synthesizePolicyFromLegacy(
-      { mode: "accept_edits", source: "global" },
-      "proj-1",
-    );
-    expect(policy.bypassAvailable).toBe(true);
-    expect(policy.projectMode).toBe("accept_edits");
-    expect(policy.effectiveMode).toBe("accept_edits");
-  });
 });
 
 describe("SettingsPanel — category IA", () => {

@@ -17,7 +17,9 @@ use crate::app_state::AppState;
 use crate::runtime_composition::{fake_adapter_selectable, tests::env_lock};
 use crate::settings_commands::{
     PermissionModeSettingsDto, RuntimeSettingsDto, RuntimeStartupState, ThemeSettingsDto,
-    permission_mode_to_dto, runtime_settings_dto_field_names, theme_to_dto, to_dto,
+    get_permission_policy_impl, permission_mode_to_dto, permission_policy_to_dto,
+    runtime_settings_dto_field_names, set_bypass_available_impl, set_permission_mode_impl,
+    set_project_permission_mode_impl, theme_to_dto, to_dto,
 };
 
 /// Owns the fixture tree; removing it is the guard's own `Drop`, never ours.
@@ -611,4 +613,140 @@ fn permission_mode_command_parser_rejects_unknown_value_without_selecting_bypass
         PermissionMode::parse("always-approve"),
         Ok(PermissionMode::Bypass)
     ));
+}
+
+#[test]
+fn permission_policy_dto_accepts_exact_keys_and_gates_project_bypass() {
+    let h = Harness::new("permission-policy-dto");
+    let default = get_permission_policy_impl(&h.settings, &h.app, Some(h.project_id.clone()))
+        .expect("default policy");
+    assert!(!default.bypass_available);
+    assert_eq!(default.bypass_available_source, "default");
+    assert_eq!(default.project_mode.as_deref(), Some("default"));
+    assert_eq!(default.project_mode_source.as_deref(), Some("default"));
+    assert_eq!(default.effective_mode, "default");
+
+    let stored = set_bypass_available_impl(&h.settings, &h.app, true, Some(h.project_id.clone()))
+        .expect("enable capability");
+    assert!(stored.bypass_available);
+    assert_eq!(stored.bypass_available_source, "global");
+
+    let project = set_project_permission_mode_impl(
+        &h.settings,
+        &h.app,
+        h.project_id.clone(),
+        "bypass".to_owned(),
+    )
+    .expect("project bypass while capability is on");
+    assert_eq!(project.project_mode.as_deref(), Some("bypass"));
+    assert_eq!(project.project_mode_source.as_deref(), Some("project"));
+    assert_eq!(project.effective_mode, "bypass");
+
+    let gated = set_bypass_available_impl(&h.settings, &h.app, false, Some(h.project_id.clone()))
+        .expect("disable capability");
+    assert!(!gated.bypass_available);
+    assert_eq!(gated.project_mode.as_deref(), Some("bypass"));
+    assert_eq!(gated.effective_mode, "default");
+
+    let json = serde_json::to_value(&gated).expect("serialize policy dto");
+    let mut keys = json
+        .as_object()
+        .expect("policy dto object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "bypassAvailable",
+            "bypassAvailableSource",
+            "effectiveMode",
+            "projectMode",
+            "projectModeSource",
+        ]
+    );
+}
+
+#[test]
+fn set_project_permission_mode_rejects_bypass_when_capability_is_off() {
+    let h = Harness::new("project-cannot-self-grant");
+    set_bypass_available_impl(&h.settings, &h.app, false, Some(h.project_id.clone()))
+        .expect("capability off");
+    let error = set_project_permission_mode_impl(
+        &h.settings,
+        &h.app,
+        h.project_id.clone(),
+        "bypass".to_owned(),
+    )
+    .expect_err("project must not enable Bypass");
+    assert_eq!(error.code, "permission_bypass_not_available");
+}
+
+#[test]
+fn set_project_permission_mode_rejects_unknown_project() {
+    let h = Harness::new("policy-unknown-project");
+    let error = set_project_permission_mode_impl(
+        &h.settings,
+        &h.app,
+        "00000000-0000-0000-0000-000000000099".to_owned(),
+        "default".to_owned(),
+    )
+    .expect_err("unknown project");
+    assert_eq!(error.code, "project_not_found");
+}
+
+#[test]
+fn legacy_set_permission_mode_bypass_enables_capability_without_project_self_grant() {
+    let h = Harness::new("legacy-bypass-write");
+    let stored = set_permission_mode_impl(&h.settings, "bypass".to_owned()).expect("legacy write");
+    assert_eq!(stored.mode, "bypass");
+    let policy = get_permission_policy_impl(&h.settings, &h.app, Some(h.project_id.clone()))
+        .expect("policy after legacy write");
+    assert!(policy.bypass_available);
+    assert_eq!(policy.effective_mode, "bypass");
+}
+
+#[test]
+fn desktop_invoke_handler_registers_two_tier_permission_commands() {
+    let source = include_str!("lib.rs");
+    let handler = source
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .expect("desktop invoke handler must exist");
+    for command in [
+        "get_permission_policy",
+        "set_bypass_available",
+        "set_project_permission_mode",
+    ] {
+        assert!(
+            handler.contains(command),
+            "missing invoke command {command}"
+        );
+    }
+}
+
+#[test]
+fn permission_policy_dto_has_no_secret_fields() {
+    let h = Harness::new("policy-dto-secrets");
+    let dto = permission_policy_to_dto(&h.settings, Some(&h.project_id)).expect("policy");
+    let json = serde_json::to_value(&dto).expect("serialize");
+    let blob = json.to_string().to_ascii_lowercase();
+    for needle in [
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "api_key",
+        "apikey",
+        "auth",
+        "private_key",
+        "bearer",
+    ] {
+        assert!(
+            !blob.contains(needle),
+            "PermissionPolicyDto must not contain secret-like substring `{needle}`: {blob}"
+        );
+    }
+    let _ = dto;
 }

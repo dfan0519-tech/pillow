@@ -434,13 +434,16 @@ describe("Permission rules — always allow from approval bar", () => {
     const dialog = await screen.findByTestId("always-rule-dialog");
     expect(dialog).toBeVisible();
 
-    const suggested = suggestPatternFromSubject("process", ruleSubject);
+    const suggested = suggestPatternFromSubject("process", ruleSubject, "allow");
     // Exact pattern must be visible — not just a vague “always allow”.
     const patternInput = within(dialog).getByTestId(
       "always-rule-pattern",
     ) as HTMLInputElement;
     expect(patternInput.value).toBe(suggested);
-    expect(suggested).toBe("cargo test *");
+    expect(suggested).toBe("cargo test -p kernel-policy");
+    expect(
+      within(dialog).queryByTestId("always-rule-overbroad-warning"),
+    ).toBeNull();
 
     const preview = within(dialog).getByTestId("always-rule-exact-preview");
     expect(preview.textContent).toContain(`allow process:${suggested}`);
@@ -453,6 +456,9 @@ describe("Permission rules — always allow from approval bar", () => {
 
     await user.clear(patternInput);
     await user.type(patternInput, "cargo *");
+    const overbroad = within(dialog).getByTestId("always-rule-overbroad-warning");
+    expect(overbroad).toBeVisible();
+    expect(overbroad.textContent).toMatch(/cargo test\.other -p kernel-policy/);
     await user.click(within(dialog).getByTestId("always-rule-submit"));
 
     await waitFor(() => {
@@ -466,6 +472,45 @@ describe("Permission rules — always allow from approval bar", () => {
       pattern: "cargo *",
       action: "allow",
     });
+  });
+
+  it("4e — always-allow of node build.js warns with a real contrast if the user widens to node*", async () => {
+    const user = userEvent.setup();
+    const rulesGateway = new MockPermissionRulesGateway();
+    const ruleSubject = encodeProcessSubject("node", ["build.js"]);
+
+    render(
+      <CommandApprovalBar
+        decisionAvailable
+        onDecide={vi.fn()}
+        onReview={vi.fn()}
+        permissionRulesGateway={rulesGateway}
+        projectId="proj-a"
+        proposal={pendingCommand({
+          programLabel: "node",
+          argv: ["build.js"],
+          summary: "run build",
+        })}
+        ruleSubject={ruleSubject}
+      />,
+    );
+
+    await user.click(screen.getByTestId("command-approval-always-allow"));
+    const dialog = await screen.findByTestId("always-rule-dialog");
+    const patternInput = within(dialog).getByTestId(
+      "always-rule-pattern",
+    ) as HTMLInputElement;
+    expect(patternInput.value).toBe("node build.js");
+    expect(
+      within(dialog).queryByTestId("always-rule-overbroad-warning"),
+    ).toBeNull();
+
+    await user.clear(patternInput);
+    await user.type(patternInput, "node*");
+    const warning = within(dialog).getByTestId("always-rule-overbroad-warning");
+    expect(warning).toBeVisible();
+    expect(warning.textContent).toContain("node build.js.other");
+    expect(warning.textContent).toMatch(/还会自动放行/);
   });
 
   it("4b — always deny can target project scope", async () => {
@@ -494,6 +539,9 @@ describe("Permission rules — always allow from approval bar", () => {
     expect(
       (within(dialog).getByTestId("always-rule-pattern") as HTMLInputElement).value,
     ).toBe("cargo *");
+    expect(
+      within(dialog).queryByTestId("always-rule-overbroad-warning"),
+    ).toBeNull();
   });
 
   it("4c — shell allow is saved one normalized segment at a time", async () => {
@@ -816,6 +864,16 @@ describe("Permission pattern helpers", () => {
       ),
     ).toBe("cargo test *");
     expect(suggestPatternFromSubject("edit", "src/lib.rs")).toBe("src/lib.rs");
+  });
+
+  it("allow suggestion from cargo test keeps every concrete argv token", () => {
+    expect(
+      suggestPatternFromSubject(
+        "process",
+        encodeProcessSubject("cargo", ["test", "-p", "kernel-policy"]),
+        "allow",
+      ),
+    ).toBe("cargo test -p kernel-policy");
   });
 
   it("does not generalize a subject whose argv boundaries are unknown", () => {

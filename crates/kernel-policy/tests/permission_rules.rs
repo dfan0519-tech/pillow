@@ -3,8 +3,9 @@ use keeper_policy::{
     PermissionRulePrefix, PermissionRuleScope, PermissionRuleSpec, canonical_process_subject,
     conservative_shell_command_segments, decode_process_subject,
     evaluate_permission_rule_conjunction, evaluate_permission_rules,
+    example_also_allowed_process_subject, is_overbroad_process_allow_pattern,
     path_deny_uses_identity_case_fold, permission_rule_matches,
-    process_subject_confirmed_for_allow,
+    process_subject_confirmed_for_allow, suggest_process_allow_pattern,
 };
 
 /// Build the v1 process subject for tests that exercise structured argv.
@@ -815,4 +816,130 @@ fn write_and_edit_allows_are_not_gated_by_process_shape() {
         }
         other => panic!("edit allow must not consult process shape, got {other:?}"),
     }
+}
+
+/// Approving `node build.js` must not casually suggest a pattern that would
+/// auto-allow a different script. This is the known mis-allow path: a one-click
+/// "always allow" that persists `node*` / `node *`.
+#[test]
+fn suggested_allow_pattern_from_node_build_js_does_not_auto_allow_a_different_script() {
+    let approved = proc("node", &["build.js"]);
+    let suggested = suggest_process_allow_pattern(&approved);
+    let other = proc("node", &["anything-else.js"]);
+
+    assert!(
+        !is_overbroad_process_allow_pattern(&suggested),
+        "suggestion must not be an overbroad allow pattern, got {suggested:?}"
+    );
+    assert_ne!(suggested, "node*");
+    assert_ne!(suggested, "node *");
+    assert_ne!(suggested, "node");
+
+    // The approved command itself must still auto-allow under the suggestion.
+    assert_process_allow(&approved, &suggested);
+
+    // A semantically different argv must still prompt — not silently match.
+    assert!(
+        process_subject_confirmed_for_allow(&other),
+        "the contrast script must be a confirmable shape so a match would auto-allow"
+    );
+    assert_process_requires_confirmation(&other, &suggested);
+}
+
+#[test]
+fn overbroad_process_allow_pattern_classification_is_a_pure_table() {
+    let overbroad = [
+        "",
+        "*",
+        "node",
+        "node*",
+        "node *",
+        "node **",
+        "no*de",
+        "*node",
+        "/usr/bin/node *",
+        "C:\\nodejs\\node.exe*",
+    ];
+    for pattern in overbroad {
+        assert!(
+            is_overbroad_process_allow_pattern(pattern),
+            "expected overbroad: {pattern:?}"
+        );
+    }
+
+    let narrow = [
+        "node build.js",
+        "node build.js *",
+        "cargo test *",
+        "cargo test -p keeper-policy",
+    ];
+    for pattern in narrow {
+        assert!(
+            !is_overbroad_process_allow_pattern(pattern),
+            "expected not overbroad: {pattern:?}"
+        );
+    }
+
+    // Exact v1 subjects pin one argv and are never classified overbroad.
+    let exact = proc("node", &["build.js"]);
+    assert!(!is_overbroad_process_allow_pattern(&exact));
+}
+
+#[test]
+fn stored_overbroad_allow_still_auto_allows_a_different_confirmed_script() {
+    // Backward compatible: already-saved wide rules keep their match surface.
+    // This ticket does not rewrite or ignore them.
+    let other = proc("node", &["anything-else.js"]);
+    assert!(process_subject_confirmed_for_allow(&other));
+    assert_process_allow(&other, "node*");
+    assert_process_allow(&other, "node *");
+    assert_process_allow(&other, "node");
+}
+
+#[test]
+fn deny_match_surface_is_not_narrowed_for_broad_process_patterns() {
+    let other = proc("node", &["anything-else.js"]);
+    let deny_star = rule(
+        "deny-node-star",
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Process,
+        "node*",
+        PermissionRuleAction::Deny,
+    );
+    let deny_space = rule(
+        "deny-node-space",
+        PermissionRuleScope::Project,
+        PermissionRulePrefix::Process,
+        "node *",
+        PermissionRuleAction::Deny,
+    );
+    for deny in [deny_star, deny_space] {
+        match evaluate_permission_rules(PermissionRulePrefix::Process, &other, &[deny.clone()]) {
+            PermissionRuleEvaluation::Deny(matched) => {
+                assert_eq!(matched.rule.pattern, deny.pattern);
+            }
+            other_eval => panic!(
+                "broad deny must still hit a different script, pattern {:?}, got {other_eval:?}",
+                deny.pattern
+            ),
+        }
+    }
+}
+
+#[test]
+fn overbroad_allow_example_is_a_real_auto_allow_derived_from_the_subject() {
+    let approved = proc("node", &["build.js"]);
+    let example = example_also_allowed_process_subject("node *", &approved)
+        .expect("overbroad pattern must yield a real contrast subject");
+    assert_ne!(example, approved);
+    let decoded = decode_process_subject(&example).expect("contrast must decode");
+    assert_eq!(decoded[0], "node");
+    assert_ne!(decoded.get(1).map(String::as_str), Some("build.js"));
+    assert!(process_subject_confirmed_for_allow(&example));
+    assert_process_allow(&example, "node *");
+    assert_process_allow(&example, "node*");
+
+    // Narrow suggestions must not invent a false "also allowed" example.
+    let suggested = suggest_process_allow_pattern(&approved);
+    assert!(example_also_allowed_process_subject(&suggested, &approved).is_none());
 }

@@ -83,9 +83,9 @@ use runtime_slot_commands::{
 };
 use settings_commands::{
     RuntimeStartupState, clear_runtime_setting, get_onboarding_settings, get_permission_mode,
-    get_runtime_settings, get_runtime_startup, get_theme_settings, set_grok_executable,
-    set_grok_profile, set_onboarding_dismissed, set_permission_mode, set_runtime_adapter,
-    set_ui_theme,
+    get_permission_policy, get_runtime_settings, get_runtime_startup, get_theme_settings,
+    set_bypass_available, set_grok_executable, set_grok_profile, set_onboarding_dismissed,
+    set_permission_mode, set_project_permission_mode, set_runtime_adapter, set_ui_theme,
 };
 use tauri::Manager;
 use write_commands::{
@@ -148,6 +148,9 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         set_ui_theme,
         get_permission_mode,
         set_permission_mode,
+        get_permission_policy,
+        set_bypass_available,
+        set_project_permission_mode,
         get_onboarding_settings,
         set_onboarding_dismissed,
         list_runtime_slots,

@@ -697,7 +697,9 @@ pub fn execute_governed_write(
                 HostPermissionRuleEvaluation::RequireConfirmation
             ) {
                 match bound.permission_settings.as_deref() {
-                    Some(settings) => match settings.resolve_permission_mode() {
+                    Some(settings) => match settings
+                        .resolve_effective_permission_mode(Some(bound.context.project_id()))
+                    {
                         Ok(resolved) => resolved.value,
                         Err(_) => {
                             fail_closed_after_reserve(&proposal_id, &bound.gateway);

@@ -1014,13 +1014,15 @@ fn execute_governed_sealed(
         HostPermissionRuleConjunctionEvaluation::RequireConfirmation
     ) {
         match bound.permission_settings.as_deref() {
-            Some(settings) => match settings.resolve_permission_mode() {
-                Ok(resolved) => resolved.value,
-                Err(_) => {
-                    fail_closed_after_reserve(&proposal_id, &bound);
-                    return Err(GovernedProcessBridgeError::Gateway);
+            Some(settings) => {
+                match settings.resolve_effective_permission_mode(Some(bound.context.project_id())) {
+                    Ok(resolved) => resolved.value,
+                    Err(_) => {
+                        fail_closed_after_reserve(&proposal_id, &bound);
+                        return Err(GovernedProcessBridgeError::Gateway);
+                    }
                 }
-            },
+            }
             None => PermissionMode::Default,
         }
     } else {

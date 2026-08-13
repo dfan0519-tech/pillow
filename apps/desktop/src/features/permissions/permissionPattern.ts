@@ -10,6 +10,7 @@ import type {
 } from "../../lib/permissionRulesGateway";
 import {
   decodeProcessSubject,
+  encodeProcessSubject,
   formatProcessSubjectForDisplay,
   spaceJoinIsBijective,
 } from "./processSubject";
@@ -55,13 +56,40 @@ export function autoRuleDecisionLabel(rule: AutoApprovedByRule): string {
 }
 
 /**
+ * Whether a process **allow** pattern has no argument constraint.
+ *
+ * Mirrors `keeper_policy::is_overbroad_process_allow_pattern`. Overbroad
+ * means a later, semantically different argv of the same program (or a glued
+ * program-name glob such as `node*`) would match. Deny is out of scope.
+ */
+export function isOverbroadProcessAllowPattern(pattern: string): boolean {
+  if (pattern.length === 0) return true;
+  if (pattern.includes(String.fromCharCode(0x1e))) {
+    return decodeProcessSubject(pattern) === null;
+  }
+  const tokens = pattern.split(" ").filter((token) => token.length > 0);
+  if (tokens.length === 0) return true;
+  const program = tokens[0];
+  if (program.length === 0 || program.includes("*")) return true;
+  return !tokens.slice(1).some((token) => !isOnlyWildcards(token));
+}
+
+function isOnlyWildcards(token: string): boolean {
+  return token.length > 0 && [...token].every((ch) => ch === "*");
+}
+
+/**
  * Suggest a durable pattern from the host `rule_subject`.
- * Process subjects prefer a word-boundary-safe `program *` / `program arg *`
- * shape rather than a bare token that over-matches.
+ *
+ * Process **deny** (and callers that omit `action`) keep the historical
+ * word-boundary-safe `program *` / `program arg *` shape. Process **allow**
+ * keeps every concrete argv token so a one-click save cannot persist `node*`
+ * / `node *` from `node build.js`.
  */
 export function suggestPatternFromSubject(
   prefix: PermissionRulePrefix,
   ruleSubject: string,
+  action?: PermissionRuleAction,
 ): string {
   if (ruleSubject.trim().length === 0) {
     return prefix === "process" ? "*" : "**/*";
@@ -72,6 +100,9 @@ export function suggestPatternFromSubject(
   const subject = prefix === "process" ? ruleSubject : ruleSubject.trim();
 
   if (prefix === "process") {
+    if (action === "allow") {
+      return suggestProcessAllowPattern(subject);
+    }
     // Already a glob-like pattern — keep it.
     if (subject.includes("*")) return subject;
 
@@ -100,6 +131,133 @@ export function suggestPatternFromSubject(
 
   // write / edit: path subject. Keep globs; exact paths stay editable.
   return subject;
+}
+
+/**
+ * Allow-side process suggestion. Mirrors
+ * `keeper_policy::suggest_process_allow_pattern`.
+ */
+export function suggestProcessAllowPattern(subject: string): string {
+  const tokens = decodeProcessSubject(subject);
+  if (!tokens || tokens.length === 0 || !spaceJoinIsBijective(tokens)) {
+    return subject;
+  }
+  return tokens.join(" ");
+}
+
+const DELEGATION_PROGRAMS = new Set([
+  "xargs",
+  "npx",
+  "pnpx",
+  "bunx",
+  "uvx",
+  "env",
+]);
+
+function programBasename(program: string): string {
+  const base = program.split(/[/\\]/).pop() ?? program;
+  return base.length > 4 && base.slice(-4).toLowerCase() === ".exe"
+    ? base.slice(0, -4)
+    : base;
+}
+
+function contrastProcessTokens(tokens: readonly string[]): string[] {
+  const contrast = [...tokens];
+  if (contrast.length === 1) {
+    contrast.push(`${contrast[0]}.other`);
+  } else if (contrast[1]!.startsWith("-")) {
+    contrast.splice(1, 0, `${contrast[0]}.other`);
+  } else {
+    contrast[1] = `${contrast[1]}.other`;
+  }
+  return contrast;
+}
+
+function wildcardStarMatch(pattern: string, subject: string): boolean {
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(subject);
+}
+
+/**
+ * Host-faithful enough for contrast examples: prefix or `*` glob against a
+ * decodable subject, then the same confirmation gate the host uses for allow.
+ */
+export function processAllowPatternWouldAutoAllow(
+  pattern: string,
+  subject: string,
+): boolean {
+  const tokens = decodeProcessSubject(subject);
+  if (!tokens || tokens.length === 0) return false;
+  if (!processSubjectLooksConfirmedForAllow(tokens)) return false;
+  if (pattern.length === 0) return true;
+  if (spaceJoinIsBijective(tokens)) {
+    const flat = tokens.join(" ");
+    return flat.startsWith(pattern) || wildcardStarMatch(pattern, flat);
+  }
+  return subject.startsWith(pattern) || wildcardStarMatch(pattern, subject);
+}
+
+function processSubjectLooksConfirmedForAllow(tokens: readonly string[]): boolean {
+  const program = programBasename(tokens[0] ?? "");
+  if (DELEGATION_PROGRAMS.has(program.toLowerCase())) return false;
+  for (const token of tokens.slice(1)) {
+    if (token === "-exec" || token === "-execdir" || token === "eval") {
+      return false;
+    }
+    if (token.startsWith("--")) {
+      const name = token.slice(2).split("=")[0] ?? "";
+      if (
+        name === "eval"
+        || name === "print"
+        || name === "command"
+        || name === "execute"
+        || name === "expression"
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Display form of a different command this overbroad allow would also
+ * auto-approve, derived from `fromSubject`. Null when the pattern is not
+ * overbroad or no real auto-allow contrast exists.
+ */
+export function contrastProcessCommandForOverbroadAllow(
+  pattern: string,
+  fromSubject: string,
+): string | null {
+  if (!isOverbroadProcessAllowPattern(pattern)) return null;
+  const tokens = decodeProcessSubject(fromSubject);
+  if (!tokens || tokens.length === 0) return null;
+  if (DELEGATION_PROGRAMS.has(programBasename(tokens[0] ?? "").toLowerCase())) {
+    return null;
+  }
+  const contrast = contrastProcessTokens(tokens);
+  const subject = encodeProcessSubject(contrast[0]!, contrast.slice(1));
+  if (subject === fromSubject) return null;
+  if (!processAllowPatternWouldAutoAllow(pattern, subject)) return null;
+  return formatProcessSubjectForDisplay(subject);
+}
+
+/** Concrete save-time warning, or null when the allow pattern is not overbroad. */
+export function overbroadProcessAllowWarning(
+  pattern: string,
+  fromSubject: string,
+): string | null {
+  if (!isOverbroadProcessAllowPattern(pattern)) return null;
+  const example = contrastProcessCommandForOverbroadAllow(pattern, fromSubject);
+  if (example) {
+    return (
+      `这条允许规则没有参数约束。保存后还会自动放行「${example}」，`
+      + "与当前审批的命令不是同一条。若只想允许本次命令，请写上具体参数。"
+    );
+  }
+  return "这条允许规则没有参数约束，会自动放行该程序的其他命令。若只想允许本次命令，请写上具体参数。";
 }
 
 /** Infer write vs edit prefix from write proposal mode when host omits it. */

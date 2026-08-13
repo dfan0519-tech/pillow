@@ -149,6 +149,23 @@ pub struct PermissionModeSettingsDto {
     pub source: String,
 }
 
+/// Two-tier permission policy. Closed-key DTO — adding a field is a breaking
+/// change for the renderer allowlist.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionPolicyDto {
+    /// Global layer: whether Bypass may be selected.
+    pub bypass_available: bool,
+    /// `global` when stored or inferred from a stored preferred Bypass, else `default`.
+    pub bypass_available_source: String,
+    /// Project selection when a project id was requested; `null` when none.
+    pub project_mode: Option<String>,
+    /// `project` | `default` | omitted-as-null when no project.
+    pub project_mode_source: Option<String>,
+    /// `bypass_available ∧ chosen`. Bypass with capability off is `default`.
+    pub effective_mode: String,
+}
+
 /// First-run onboarding dismiss flag (`ui.onboarding.dismissed`).
 ///
 /// Global install fact only — no env override, no secret fields.
@@ -315,21 +332,53 @@ pub fn get_permission_mode(
         .map_err(map_settings_error)
 }
 
-/// Set the installation-wide permission mode. No project-shaped command
-/// exists, so an opened project cannot grant authority to itself.
+/// Set the installation-wide preferred permission mode.
+///
+/// This command stays installation-wide: an opened project cannot grant
+/// Bypass capability to itself. Opening Bypass here also turns the global
+/// capability on so the legacy one-axis write still means what it used to.
 #[tauri::command]
 pub fn set_permission_mode(
     settings: State<'_, SqliteSettingsRepository>,
     mode: String,
 ) -> Result<PermissionModeSettingsDto, CommandError> {
-    let parsed = PermissionMode::parse(&mode).map_err(map_settings_error)?;
-    settings
-        .upsert_permission_mode(parsed, SettingsUpdatedBy::User)
-        .map_err(map_settings_error)?;
-    settings
-        .resolve_permission_mode()
-        .map(permission_mode_to_dto)
-        .map_err(map_settings_error)
+    set_permission_mode_impl(&settings, mode)
+}
+
+/// Resolve the two-tier policy for a project (or the install when omitted).
+#[tauri::command]
+pub fn get_permission_policy(
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<PermissionPolicyDto, CommandError> {
+    get_permission_policy_impl(&settings, &app, project_id)
+}
+
+/// Global layer: enable or disable Bypass as a selectable capability.
+/// A project cannot call this — there is no project-id argument that
+/// would let an opened project grant the capability to itself.
+#[tauri::command]
+pub fn set_bypass_available(
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    available: bool,
+    project_id: Option<String>,
+) -> Result<PermissionPolicyDto, CommandError> {
+    set_bypass_available_impl(&settings, &app, available, project_id)
+}
+
+/// Project layer: select the approval mode for one registered project.
+/// Bypass is rejected when the global capability is off — the project
+/// can only make the effective posture stricter.
+#[tauri::command]
+pub fn set_project_permission_mode(
+    settings: State<'_, SqliteSettingsRepository>,
+    app: State<'_, AppState>,
+    project_id: String,
+    mode: String,
+) -> Result<PermissionPolicyDto, CommandError> {
+    set_project_permission_mode_impl(&settings, &app, project_id, mode)
 }
 
 /// Resolve first-run onboarding dismiss flag (global install fact).
@@ -364,6 +413,66 @@ pub fn set_onboarding_dismissed(
         .resolve_onboarding_dismissed(None)
         .map_err(map_settings_error)?;
     Ok(onboarding_to_dto(resolved))
+}
+
+pub(crate) fn set_permission_mode_impl(
+    settings: &SqliteSettingsRepository,
+    mode: String,
+) -> Result<PermissionModeSettingsDto, CommandError> {
+    let parsed = PermissionMode::parse(&mode).map_err(map_settings_error)?;
+    settings
+        .upsert_permission_mode(parsed, SettingsUpdatedBy::User)
+        .map_err(map_settings_error)?;
+    if parsed == PermissionMode::Bypass {
+        settings
+            .upsert_bypass_available(true, SettingsUpdatedBy::User)
+            .map_err(map_settings_error)?;
+    }
+    settings
+        .resolve_permission_mode()
+        .map(permission_mode_to_dto)
+        .map_err(map_settings_error)
+}
+
+pub(crate) fn get_permission_policy_impl(
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    project_id: Option<String>,
+) -> Result<PermissionPolicyDto, CommandError> {
+    let project_ref = normalize_project_id(project_id.as_deref(), app)?;
+    permission_policy_to_dto(settings, project_ref)
+}
+
+pub(crate) fn set_bypass_available_impl(
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    available: bool,
+    project_id: Option<String>,
+) -> Result<PermissionPolicyDto, CommandError> {
+    let project_ref = normalize_project_id(project_id.as_deref(), app)?;
+    settings
+        .upsert_bypass_available(available, SettingsUpdatedBy::User)
+        .map_err(map_settings_error)?;
+    permission_policy_to_dto(settings, project_ref)
+}
+
+pub(crate) fn set_project_permission_mode_impl(
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    project_id: String,
+    mode: String,
+) -> Result<PermissionPolicyDto, CommandError> {
+    let project_ref = normalize_project_id(Some(project_id.as_str()), app)?.ok_or_else(|| {
+        settings_error(
+            "settings_scope_shape",
+            "Project permission mode requires a registered project id.",
+        )
+    })?;
+    let parsed = PermissionMode::parse(&mode).map_err(map_settings_error)?;
+    settings
+        .upsert_project_permission_mode(project_ref, parsed, SettingsUpdatedBy::User)
+        .map_err(map_settings_error)?;
+    permission_policy_to_dto(settings, Some(project_ref))
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +604,37 @@ pub(crate) fn permission_mode_to_dto(
         mode: resolved.value.as_str().to_owned(),
         source: source_str(resolved.source).to_owned(),
     }
+}
+
+pub(crate) fn permission_policy_to_dto(
+    settings: &SqliteSettingsRepository,
+    project_id: Option<&str>,
+) -> Result<PermissionPolicyDto, CommandError> {
+    let bypass = settings
+        .resolve_bypass_available()
+        .map_err(map_settings_error)?;
+    let (project_mode, project_mode_source) = match project_id {
+        Some(id) => {
+            let resolved = settings
+                .resolve_project_permission_mode(id)
+                .map_err(map_settings_error)?;
+            (
+                Some(resolved.value.as_str().to_owned()),
+                Some(source_str(resolved.source).to_owned()),
+            )
+        }
+        None => (None, None),
+    };
+    let effective = settings
+        .resolve_effective_permission_mode(project_id)
+        .map_err(map_settings_error)?;
+    Ok(PermissionPolicyDto {
+        bypass_available: bypass.value,
+        bypass_available_source: source_str(bypass.source).to_owned(),
+        project_mode,
+        project_mode_source,
+        effective_mode: effective.value.as_str().to_owned(),
+    })
 }
 
 pub(crate) fn onboarding_to_dto(resolved: ResolvedSetting<bool>) -> OnboardingSettingsDto {

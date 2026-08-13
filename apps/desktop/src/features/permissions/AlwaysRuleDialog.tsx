@@ -16,6 +16,7 @@ import {
 import {
   PERMISSION_WORD_BOUNDARY_NOTE,
   actionLabel,
+  overbroadProcessAllowWarning,
   prefixLabel,
   suggestPatternFromSubject,
 } from "./permissionPattern";
@@ -53,19 +54,19 @@ export function AlwaysRuleDialog({
 }: AlwaysRuleDialogProps) {
   const titleId = useId();
   const patternId = useId();
-  const suggestedPatterns = ruleSubjects.map((subject) =>
-    exactSubjectPatterns
-      ? subject
-      : suggestPatternFromSubject(prefix, subject)
-  );
-
   const [action, setAction] = useState<PermissionRuleAction>(initialAction);
   const [scope, setScope] = useState<PermissionRuleScope>(() => {
     // Always-allow is global-only; deny defaults to project when available.
     if (initialAction === "allow") return "global";
     return projectId ? "project" : "global";
   });
-  const [patterns, setPatterns] = useState(suggestedPatterns);
+  const [patterns, setPatterns] = useState(() =>
+    ruleSubjects.map((subject) =>
+      exactSubjectPatterns
+        ? subject
+        : suggestPatternFromSubject(prefix, subject, initialAction)
+    )
+  );
   const [subjectIndex, setSubjectIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +74,11 @@ export function AlwaysRuleDialog({
   const isMultiRule = patterns.length > 1;
   const isLastSubject = subjectIndex === patterns.length - 1;
 
+  const currentSubject = ruleSubjects[subjectIndex] ?? "";
+  const overbroadWarning =
+    action === "allow" && prefix === "process"
+      ? overbroadProcessAllowWarning(pattern.trim(), currentSubject)
+      : null;
   const projectAllowBlocked = isProjectAllowForbidden(scope, action);
   const canSubmit =
     !submitting
@@ -227,6 +233,16 @@ export function AlwaysRuleDialog({
         >
           {PERMISSION_WORD_BOUNDARY_NOTE}
         </p>
+
+        {overbroadWarning ? (
+          <p
+            className="permission-rule-project-allow-block"
+            data-testid="always-rule-overbroad-warning"
+            role="status"
+          >
+            {overbroadWarning}
+          </p>
+        ) : null}
 
         <div className="permission-rule-dialog__meta">
           <label className="permission-rule-field">
