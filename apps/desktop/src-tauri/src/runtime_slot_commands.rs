@@ -11,15 +11,15 @@ use keeper_storage_sqlite::{
     RuntimeSlotGovernance, RuntimeSlotId, SlotAuth, SlotRole, SqliteSettingsRepository,
     process_env_map,
 };
-use pillow_cli_detect::{AuthState, CliDetection};
+use pillow_cli_detect::{AgentCliKind, AuthState, CliDetection, parse_auth_output};
 use pillow_runtime_slots::{
     AccountIdentifierStrategy, ClientIdSource, CreateSlotAuth, ExternalCliStatus, ModelCatalog,
     ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason, OauthLoginFailure,
     OauthLoginInput, OauthLoginProgress, OauthLoginProgressEvent, ProfileField,
     ProviderLoginMethod, ProviderLoginSupplement, RuntimeSlotError, RuntimeSlotService,
     RuntimeSlotView, SecretBytes, SystemBrowser, UpdateSlotAuthInput, WinHttpOauthTokenClient,
-    fetch_openai_model_catalog, perform_oauth_login_production, provider_login_profile,
-    provider_login_profiles,
+    fetch_openai_model_catalog, parse_grok_default_model, perform_oauth_login_production,
+    provider_login_profile, provider_login_profiles, run_grok_models,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -221,6 +221,7 @@ pub fn list_runtime_slots(
 pub fn create_slot<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     slots: State<'_, RuntimeSlotService>,
+    settings: State<'_, SqliteSettingsRepository>,
     app: State<'_, AppState>,
     project_id: String,
     display_name: String,
@@ -239,6 +240,7 @@ pub fn create_slot<R: tauri::Runtime>(
     create_slot_impl(
         &app_handle,
         &slots,
+        &settings,
         &app,
         project_id,
         display_name,
@@ -574,6 +576,7 @@ pub(crate) fn list_runtime_slots_impl(
 pub(crate) fn create_slot_impl<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     slots: &RuntimeSlotService,
+    settings: &SqliteSettingsRepository,
     app: &AppState,
     project_id: String,
     display_name: String,
@@ -589,12 +592,25 @@ pub(crate) fn create_slot_impl<R: tauri::Runtime>(
     provider_id: Option<String>,
     oauth_supplement: Option<OauthLoginSupplementDto>,
 ) -> Result<RuntimeSlotDto, CommandError> {
-    let project_id = registered_project_id(app, &project_id)?;
+    let project_id_input = project_id;
+    let project_id = registered_project_id(app, &project_id_input)?;
     let role = parse_role(role, role_custom_name)?;
     let auth = match auth_kind.as_str() {
-        "grok_login" => CreateSlotAuth::GrokLogin {
-            model_id: model_id.filter(|value| !value.trim().is_empty()),
-        },
+        "grok_login" => {
+            // Creating this slot used to write a row and report success
+            // without checking anything: not that a grok CLI exists, not that
+            // it is logged in, not that a model can be resolved. The user got
+            // "已创建槽位" and a slot that could not start. A success message
+            // has to be backed by something.
+            let default_model = verify_grok_login_session(settings, app, &project_id_input)?;
+            CreateSlotAuth::GrokLogin {
+                model_id: model_id
+                    .filter(|value| !value.trim().is_empty())
+                    // Blank means unstartable, and the CLI already told us its
+                    // default — carry it rather than hand back a dead slot.
+                    .or(default_model),
+            }
+        }
         "api_key" => {
             let secret = SecretBytes::new(api_key.ok_or_else(|| {
                 command_error("runtime_slot_input_invalid", "API key is required.")
@@ -762,6 +778,69 @@ fn map_oauth_login_failure(failure: OauthLoginFailure) -> CommandError {
         };
     }
     map_slot_error(failure.error)
+}
+
+/// Prove the local Grok CLI can actually serve a login slot, before one is
+/// written. Returns the model the CLI reports as its default, when it names
+/// one.
+///
+/// 🔴 Resolves the executable through the *same* override path the slot will
+/// use (`discover_grok_executable_with_override`). Verifying whichever `grok`
+/// happens to be on PATH and then launching a different one proves nothing.
+///
+/// `grok models` is both the login banner and the model list, so one
+/// read-only call answers "is it logged in" and "what can it run". The banner
+/// is read by `pillow_cli_detect::parse_auth_output` rather than a second
+/// parser here — that string already has one owner.
+fn verify_grok_login_session(
+    settings: &SqliteSettingsRepository,
+    app: &AppState,
+    project_id: &str,
+) -> Result<Option<String>, CommandError> {
+    let project = app.get_registered_project(project_id)?;
+    let resolved = settings
+        .resolve_runtime(Some(project_id), &process_env_map())
+        .map_err(|error| command_error(error.code(), &error.to_string()))?;
+    let executable =
+        discover_grok_executable_with_override(resolved.grok_executable.value.as_deref())
+            .map_err(|error| command_error(error.code, &error.message))?;
+    let run =
+        run_grok_models(&executable, Path::new(&project.root_path)).map_err(map_slot_error)?;
+
+    grok_login_session_decision(
+        parse_auth_output(AgentCliKind::Grok, &run.stdout, &run.stderr, run.exit_code),
+        &run.stdout,
+    )
+}
+
+/// Whether an observed CLI session may back a new login slot, and which model
+/// to seed it with.
+///
+/// Split from the process-running half so all three outcomes are testable
+/// without spawning a CLI or logging anyone out. 🔴 Only `Authenticated`
+/// creates a slot: `Unknown` means we do not know, and creating on "do not
+/// know" is what produced slots that looked fine and could not start.
+pub(crate) fn grok_login_session_decision(
+    auth: AuthState,
+    stdout: &str,
+) -> Result<Option<String>, CommandError> {
+    match auth {
+        // The account label is known here but has nowhere on the closed slot
+        // DTO to live; adding a key without syncing the renderer allowlist
+        // silently blanks the row, so it stays unsurfaced for now.
+        AuthState::Authenticated { .. } => Ok(parse_grok_default_model(stdout)),
+        AuthState::NotAuthenticated => Err(command_error(
+            "runtime_slot_grok_not_logged_in",
+            "本机 Grok CLI 未登录。请先在终端运行 `grok login` 完成登录，再创建槽位。",
+        )),
+        AuthState::Unknown { reason } => Err(command_error(
+            "runtime_slot_grok_login_unverified",
+            &format!(
+                "无法确认本机 Grok 的登录状态（{reason}）。槽位未创建 —— \
+                 建一个不能用的槽位比报错更难排查。"
+            ),
+        )),
+    }
 }
 
 pub(crate) fn create_grok_login_slot_impl(

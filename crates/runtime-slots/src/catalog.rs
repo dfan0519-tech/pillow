@@ -87,10 +87,28 @@ pub fn fetch_openai_model_catalog(
     parse_openai_response(response.status, &response.body)
 }
 
-pub(crate) fn fetch_grok_model_catalog(
+/// One `grok models` run, before anything interprets it.
+///
+/// The exit code is carried, not enforced, because `grok models` is also the
+/// only read-only signal for *whether the CLI is logged in at all*. A
+/// logged-out CLI may exit non-zero, and its banner is the one thing that can
+/// tell the user to run `grok login`; folding that into "catalog unavailable"
+/// turns a fixable state into an opaque one.
+#[derive(Debug, Clone)]
+pub struct GrokModelsRun {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+/// Run `grok models` against a resolved executable inside a project root.
+///
+/// 🔴 Callers must use the *same* executable the slot will run — verifying one
+/// grok binary and then launching another proves nothing.
+pub fn run_grok_models(
     executable: &Path,
     project_root: &Path,
-) -> Result<ModelCatalog, RuntimeSlotError> {
+) -> Result<GrokModelsRun, RuntimeSlotError> {
     let mut env = BTreeMap::new();
     for (name, value) in std::env::vars_os() {
         if !sensitive_name(&name) {
@@ -110,15 +128,31 @@ pub(crate) fn fetch_grok_model_catalog(
             CancellationSignal::new(),
         )
         .map_err(|_| RuntimeSlotError::ModelCatalogUnavailable)?;
-    if receipt.exit_code != Some(0)
-        || receipt.timed_out
+    // Integrity guards only. Truncated or lossy output cannot be parsed
+    // honestly either way, so those still fail here.
+    if receipt.timed_out
         || !receipt.cleanup_proven
         || receipt.stdout.truncated
         || receipt.stdout.lossy_utf8
     {
         return Err(RuntimeSlotError::ModelCatalogUnavailable);
     }
-    parse_grok_models_output(&receipt.stdout.text)
+    Ok(GrokModelsRun {
+        stdout: receipt.stdout.text,
+        stderr: receipt.stderr.text,
+        exit_code: receipt.exit_code,
+    })
+}
+
+pub(crate) fn fetch_grok_model_catalog(
+    executable: &Path,
+    project_root: &Path,
+) -> Result<ModelCatalog, RuntimeSlotError> {
+    let run = run_grok_models(executable, project_root)?;
+    if run.exit_code != Some(0) {
+        return Err(RuntimeSlotError::ModelCatalogUnavailable);
+    }
+    parse_grok_models_output(&run.stdout)
 }
 
 fn models_url(base_url: &str) -> Result<String, RuntimeSlotError> {
@@ -155,20 +189,88 @@ fn parse_openai_response(status: u16, body: &[u8]) -> Result<ModelCatalog, Runti
     ))
 }
 
+/// Section header the model list follows in `grok models` output.
+const GROK_AVAILABLE_MODELS_HEADER: &str = "Available models:";
+/// Line that names the session default, e.g. `Default model: grok-4.6`.
+const GROK_DEFAULT_MODEL_PREFIX: &str = "Default model:";
+
+/// Parse the human-readable output of `grok models`.
+///
+/// Real shape, captured from grok CLI 4.6 on 2026-08-13:
+///
+/// ```text
+/// You are logged in with grok.com.
+///
+/// Default model: grok-4.6
+///
+/// Available models:
+///   * grok-4.6 (default)
+///   - grok-4.5
+/// ```
+///
+/// The previous version took every non-empty line as a model id. It rejected
+/// the whole catalog at the first indented bullet (`value.trim() != value`),
+/// which is the "模型目录响应无效" users saw — and had the bullets not been
+/// indented it would have stored `You are logged in with grok.com.` as a
+/// model id. It was never run against real output; its unit test fed it a
+/// bare `grok-4.5\n` list the CLI does not emit.
+///
+/// Anchoring on the header means banner text can never become a model id, and
+/// an output shape we do not recognise is an honest error rather than
+/// garbage. The manual model-id field is the escape hatch when that happens.
 fn parse_grok_models_output(output: &str) -> Result<ModelCatalog, RuntimeSlotError> {
     if output.len() > MODEL_CATALOG_RESPONSE_BYTE_CAP {
         return Err(RuntimeSlotError::ModelCatalogInvalid);
     }
-    let model_ids = validate_model_ids(
-        output
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned),
-    )?;
+    let mut lines = output.lines();
+    // `any` short-circuits on the header, leaving the iterator on the line
+    // after it — everything before is banner text and must not be parsed.
+    if !lines.any(|line| line.trim() == GROK_AVAILABLE_MODELS_HEADER) {
+        return Err(RuntimeSlotError::ModelCatalogInvalid);
+    }
+
+    let mut entries = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        // The list is contiguous; a blank line or a non-bullet ends it.
+        let Some(model_id) = grok_bullet_model_id(trimmed) else {
+            break;
+        };
+        entries.push(model_id.to_owned());
+    }
+
+    let model_ids = validate_model_ids(entries)?;
     Ok(ModelCatalog::available(
         ModelCatalogSource::GrokCli,
         model_ids,
     ))
+}
+
+/// `* grok-4.6 (default)` / `- grok-4.5` → `grok-4.6` / `grok-4.5`.
+///
+/// Takes the first whitespace-delimited token so the `(default)` annotation
+/// never lands in a model id. Already-trimmed input.
+fn grok_bullet_model_id(line: &str) -> Option<&str> {
+    let rest = line
+        .strip_prefix("* ")
+        .or_else(|| line.strip_prefix("- "))?;
+    rest.split_whitespace().next()
+}
+
+/// Model `grok models` reports as the session default, when it names one.
+///
+/// Used to give a freshly created login slot a usable model instead of
+/// leaving it blank and unstartable.
+pub fn parse_grok_default_model(output: &str) -> Option<String> {
+    let value = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(GROK_DEFAULT_MODEL_PREFIX))?
+        .trim();
+    // Same bounds the catalog enforces — a default we would reject as a model
+    // id is not a default we can store.
+    validate_model_ids([value.to_owned()])
+        .ok()
+        .and_then(|mut ids| ids.pop())
 }
 
 fn validate_model_ids(
@@ -296,12 +398,63 @@ mod tests {
         }
     }
 
+    /// Verbatim `grok models` output, grok CLI 4.6, captured 2026-08-13.
+    /// Do not tidy this string — its indentation is the thing under test.
+    const REAL_GROK_MODELS_OUTPUT: &str = "You are logged in with grok.com.\n\
+        \n\
+        Default model: grok-4.6\n\
+        \n\
+        Available models:\n\
+        \x20 * grok-4.6 (default)\n\
+        \x20 - grok-4.5\n";
+
     #[test]
-    fn normal_grok_cli_output_produces_a_real_model_list() {
-        let catalog = parse_grok_models_output("grok-4.5\n").unwrap();
+    fn real_grok_cli_output_produces_a_real_model_list() {
+        let catalog = parse_grok_models_output(REAL_GROK_MODELS_OUTPUT).unwrap();
         assert_eq!(catalog.source, ModelCatalogSource::GrokCli);
         assert_eq!(catalog.availability, ModelCatalogAvailability::Available);
-        assert_eq!(catalog.model_ids, ["grok-4.5"]);
+        assert_eq!(catalog.model_ids, ["grok-4.6", "grok-4.5"]);
+    }
+
+    #[test]
+    fn banner_text_never_becomes_a_model_id() {
+        let catalog = parse_grok_models_output(REAL_GROK_MODELS_OUTPUT).unwrap();
+        for id in &catalog.model_ids {
+            assert!(
+                !id.contains("logged in") && !id.contains("Available") && !id.contains("Default"),
+                "banner line leaked into the catalog as {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_annotation_is_not_part_of_the_model_id() {
+        let catalog = parse_grok_models_output(REAL_GROK_MODELS_OUTPUT).unwrap();
+        assert!(
+            !catalog.model_ids.iter().any(|id| id.contains("default")),
+            "the `(default)` annotation must not be stored as part of an id"
+        );
+    }
+
+    #[test]
+    fn default_model_comes_from_the_default_line() {
+        assert_eq!(
+            parse_grok_default_model(REAL_GROK_MODELS_OUTPUT).as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(parse_grok_default_model("Available models:\n * a\n"), None);
+    }
+
+    #[test]
+    fn output_without_the_header_is_an_error_not_a_guess() {
+        // A logged-out session prints a banner and no list. Treating those
+        // lines as model ids is exactly the old bug.
+        assert_eq!(
+            parse_grok_models_output("Not logged in. Run `grok login`.\n")
+                .unwrap_err()
+                .code(),
+            "runtime_slot_model_catalog_invalid"
+        );
     }
 
     #[test]

@@ -26,8 +26,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use catalog::{
-    ModelCatalog, ModelCatalogAvailability, ModelCatalogSource, ModelCatalogUnsupportedReason,
-    fetch_openai_model_catalog,
+    GrokModelsRun, ModelCatalog, ModelCatalogAvailability, ModelCatalogSource,
+    ModelCatalogUnsupportedReason, fetch_openai_model_catalog, parse_grok_default_model,
+    run_grok_models,
 };
 pub use execution_path::{
     ExecutionPathDecision, ExecutionPathError, NATIVE_ADAPTER_GOVERNANCE_MECHANISM, PathGovernance,

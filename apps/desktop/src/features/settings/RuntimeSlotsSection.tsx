@@ -746,7 +746,12 @@ export function RuntimeSlotsSection({
             roleCustomName:
               createRole === "custom" ? roleCustomName.trim() : undefined,
           });
-          setNotice("已创建槽位（使用本机默认 Grok 登录 profile）。");
+          // Say what was actually checked. The old copy claimed success for a
+          // row that had been written without verifying anything, which is
+          // how a slot with no model and a red catalog could read as "created".
+          setNotice(
+            "已创建槽位：已确认本机 Grok CLI 已登录，并填入其默认模型。可直接点「启动」。",
+          );
         } else if (createAuthKind === "oauth") {
           if (!selectedOauthProvider) {
             setError("请选择 OAuth 提供方。");

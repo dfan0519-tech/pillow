@@ -994,6 +994,13 @@ export function mapRuntimeSlotErrorMessage(code: string): string {
       return "无法拉取模型目录：端点不可达、认证失败或服务暂时不可用。请手输模型 id 或稍后刷新。";
     case "runtime_slot_model_catalog_invalid":
       return "模型目录响应无效。请手输模型 id，或检查端点返回格式后刷新。";
+    // Creating a Grok-login slot now verifies the local CLI session first.
+    // These two are the only reasons it refuses, and both are fixable by the
+    // user — so they must say what to do, not just that it failed.
+    case "runtime_slot_grok_not_logged_in":
+      return "本机 Grok CLI 未登录，槽位未创建。请在终端运行 `grok login` 完成登录后重试。";
+    case "runtime_slot_grok_login_unverified":
+      return "无法确认本机 Grok 的登录状态，槽位未创建。请确认「设置 → 运行时」里的 Grok 可执行路径正确，并能在终端运行 `grok models`。";
     case "external_cli_status_unavailable":
       return "无法查询外部 CLI 账号状态：请检查可执行路径与状态参数。";
     case "external_cli_launch_unsupported":

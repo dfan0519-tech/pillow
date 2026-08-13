@@ -1690,3 +1690,74 @@ fn start_native_adapter_codex_slot_prepares_without_grok_shell() {
         }
     }
 }
+
+/// Creating a Grok-login slot used to write a row and report success without
+/// checking anything. These pin the decision half of the fix; the
+/// process-running half is covered by `run_grok_models` in runtime-slots.
+mod grok_login_create_verification {
+    use pillow_cli_detect::AuthState;
+
+    use crate::runtime_slot_commands::grok_login_session_decision;
+
+    /// Verbatim `grok models` output, grok CLI 4.6, captured 2026-08-13.
+    const LOGGED_IN_OUTPUT: &str = "You are logged in with grok.com.\n\
+        \n\
+        Default model: grok-4.6\n\
+        \n\
+        Available models:\n\
+        \x20 * grok-4.6 (default)\n\
+        \x20 - grok-4.5\n";
+
+    #[test]
+    fn authenticated_session_seeds_the_slot_with_the_cli_default_model() {
+        let seeded = grok_login_session_decision(
+            AuthState::Authenticated {
+                account_label: "grok.com".into(),
+            },
+            LOGGED_IN_OUTPUT,
+        )
+        .expect("authenticated session must be allowed to create a slot");
+        // A blank model is what made the created slot unstartable.
+        assert_eq!(seeded.as_deref(), Some("grok-4.6"));
+    }
+
+    #[test]
+    fn not_logged_in_refuses_and_names_the_command_that_fixes_it() {
+        let error = grok_login_session_decision(AuthState::NotAuthenticated, "")
+            .expect_err("a logged-out CLI must not produce a slot");
+        assert_eq!(error.code, "runtime_slot_grok_not_logged_in");
+        assert!(
+            error.message.contains("grok login"),
+            "the refusal has to say how to fix it: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn unknown_state_refuses_rather_than_assuming_logged_in() {
+        // Absence of evidence is not evidence of a working session. Creating
+        // on Unknown is precisely how an unusable slot got reported as created.
+        let error = grok_login_session_decision(
+            AuthState::Unknown {
+                reason: "unrecognized_grok_models_output".into(),
+            },
+            LOGGED_IN_OUTPUT,
+        )
+        .expect_err("unverified session must not produce a slot");
+        assert_eq!(error.code, "runtime_slot_grok_login_unverified");
+        assert!(error.message.contains("unrecognized_grok_models_output"));
+    }
+
+    #[test]
+    fn authenticated_without_a_default_line_still_creates_a_slot() {
+        // Seeding is a courtesy, not a gate — the user can type a model id.
+        let seeded = grok_login_session_decision(
+            AuthState::Authenticated {
+                account_label: "grok.com".into(),
+            },
+            "You are logged in with grok.com.\n\nAvailable models:\n  - grok-4.5\n",
+        )
+        .expect("a missing default line must not block creation");
+        assert_eq!(seeded, None);
+    }
+}
