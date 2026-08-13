@@ -8,7 +8,8 @@ use keeper_storage_sqlite::{SqlitePermissionRuleRepository, SqliteProjectReposit
 use crate::app_state::AppState;
 use crate::permission_rule_commands::{
     add_permission_rule_impl, command_pattern_or_reject, delete_permission_rule_impl,
-    list_permission_rules_impl,
+    delete_unreadable_permission_rule_impl, list_permission_rules_impl,
+    list_unreadable_permission_rules_impl,
 };
 
 fn harness() -> (
@@ -130,6 +131,8 @@ fn desktop_invoke_handler_registers_exact_permission_rule_commands() {
         "list_permission_rules",
         "add_permission_rule",
         "delete_permission_rule",
+        "list_unreadable_permission_rules",
+        "delete_unreadable_permission_rule",
     ] {
         assert!(
             handler.contains(command),
@@ -138,8 +141,104 @@ fn desktop_invoke_handler_registers_exact_permission_rule_commands() {
     }
 }
 
-/// EA-03 sequence B: direct native invoke (bypassing TS gateway) cannot plant
-/// an empty or whitespace-only global process allow (match-all) rule.
+/// Plant a row the product would refuse to write: a rule whose digest does not
+/// describe its own content. That is the shape a rewritten row has, and one of
+/// the pre-existing reasons a whole rule set could fail to load.
+fn plant_tampered_row(db: &std::path::Path, rule_id: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO permission_rules (
+                rule_id, scope, project_id, prefix, pattern, action,
+                content_digest, created_at
+             ) VALUES (?1, 'global', NULL, 'process', 'rm -rf *', 'allow', ?2,
+                       '2026-08-12T10:00:00Z')",
+            rusqlite::params![rule_id, format!("sha256:{}", "0".repeat(64))],
+        )
+        .unwrap();
+}
+
+#[test]
+fn unreadable_rows_are_listed_and_removable_without_hiding_readable_rules() {
+    let (temp, app, rules, _project_id) = harness();
+    let readable = add_permission_rule_impl(
+        &rules,
+        &app,
+        "global".into(),
+        None,
+        "process".into(),
+        "cargo test *".into(),
+        "allow".into(),
+    )
+    .unwrap();
+    let planted = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    plant_tampered_row(&temp.path().join("pillow.db"), planted);
+
+    // The rule list still renders, and it renders the user's own rule.
+    assert_eq!(
+        list_permission_rules_impl(&rules, &app, "global".into(), None).unwrap(),
+        vec![readable.clone()]
+    );
+
+    let unreadable = list_unreadable_permission_rules_impl(&rules).unwrap();
+    assert_eq!(unreadable.len(), 1);
+    assert_eq!(unreadable[0].rule_id, planted);
+    assert_eq!(unreadable[0].reason, "content_digest");
+
+    // Recognition fields only. The stored pattern is deliberately absent: a row
+    // the host cannot vouch for must not be re-displayed as a rule the user
+    // wrote, and `rm -rf *` above is exactly why.
+    let json = serde_json::to_value(&unreadable[0]).unwrap();
+    for key in [
+        "rule_id",
+        "scope",
+        "project_id",
+        "prefix",
+        "action",
+        "created_at",
+        "reason",
+    ] {
+        assert!(json.get(key).is_some(), "missing exact wire field {key}");
+    }
+    assert!(json.get("pattern").is_none(), "pattern must not be exported");
+    assert!(json.get("content_digest").is_none());
+    assert!(json.get("ruleId").is_none());
+
+    delete_unreadable_permission_rule_impl(&rules, planted.into()).unwrap();
+    assert!(
+        list_unreadable_permission_rules_impl(&rules)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        list_permission_rules_impl(&rules, &app, "global".into(), None).unwrap(),
+        vec![readable]
+    );
+}
+
+#[test]
+fn the_repair_command_refuses_a_readable_rule() {
+    let (_temp, app, rules, _project_id) = harness();
+    let readable = add_permission_rule_impl(
+        &rules,
+        &app,
+        "global".into(),
+        None,
+        "process".into(),
+        "cargo test *".into(),
+        "allow".into(),
+    )
+    .unwrap();
+
+    let error =
+        delete_unreadable_permission_rule_impl(&rules, readable.rule_id.clone()).unwrap_err();
+    assert_eq!(error.code, "permission_rules_not_found");
+    assert_eq!(
+        list_permission_rules_impl(&rules, &app, "global".into(), None).unwrap(),
+        vec![readable]
+    );
+}
+
 #[test]
 fn direct_invoke_rejects_empty_and_whitespace_process_allow_patterns() {
     let (_temp, app, rules, _project_id) = harness();

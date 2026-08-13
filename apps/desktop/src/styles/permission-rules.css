@@ -42,6 +42,14 @@
   gap: 6px;
 }
 
+/* Quarantined rows: present only when the store holds an unreadable row. */
+.permission-rules-list-block--unreadable {
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border-subtle));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
 .permission-rules-list-block__title {
   margin: 0;
   font-size: 12px;

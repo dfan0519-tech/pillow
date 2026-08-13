@@ -30,6 +30,28 @@ export type PermissionRuleView = {
 };
 
 /**
+ * A stored row the host could not read back as a rule.
+ *
+ * The host quarantines such rows: they are skipped by `listPermissionRules` and
+ * never evaluated, so one bad row cannot disable the rule surface. They surface
+ * here only so the user can delete them without a database editor.
+ *
+ * There is no `pattern` field on purpose — an unreadable row's pattern is either
+ * not something this product wrote or carries a digest the host cannot vouch
+ * for, so it is not re-displayed as a rule the user authored.
+ */
+export type UnreadablePermissionRuleView = {
+  rule_id: string;
+  scope?: string;
+  project_id?: string;
+  prefix?: string;
+  action?: string;
+  created_at?: string;
+  /** Stable host reason code (`pattern`, `content_digest`, `rule_id`, …). */
+  reason: string;
+};
+
+/**
  * Snapshot of the rule that auto-decided a proposal (receipt / timeline).
  * Present on decided proposals / durable events when the host auto-applied.
  */
@@ -43,7 +65,8 @@ export type PermissionRulesGatewayErrorCode =
   | "permission_rules_invalid_response"
   | "permission_rules_command_failed"
   | "permission_rules_project_allow_forbidden"
-  | "permission_rules_invalid_input";
+  | "permission_rules_invalid_input"
+  | "permission_rules_not_found";
 
 export class PermissionRulesGatewayError extends Error {
   readonly code: PermissionRulesGatewayErrorCode | string;
@@ -68,6 +91,10 @@ export interface PermissionRulesGateway {
     action: PermissionRuleAction,
   ): Promise<PermissionRuleView>;
   deletePermissionRule(ruleId: string): Promise<void>;
+  /** Rows the host skipped while loading rules, across every scope. */
+  listUnreadablePermissionRules(): Promise<UnreadablePermissionRuleView[]>;
+  /** Remove one quarantined row. The host refuses readable rules here. */
+  deleteUnreadablePermissionRule(ruleId: string): Promise<void>;
 }
 
 const INVALID_RESPONSE =
@@ -165,6 +192,75 @@ export function parsePermissionRuleList(value: unknown): PermissionRuleView[] {
     );
   }
   return value.map(parsePermissionRuleView);
+}
+
+/** Optional raw column text carried for recognition only. */
+function optionalColumn(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+      && value.length <= MAX_PATTERN
+    ? value.trim()
+    : undefined;
+}
+
+/**
+ * Parse one quarantined row.
+ *
+ * `rule_id` and `reason` are required — the id is what the repair command needs
+ * and the reason is what the user is shown. Every other field is best-effort:
+ * these rows are unreadable precisely because some column is not what the
+ * product writes, so a strict parse here would re-create the failure it exists
+ * to recover from.
+ */
+export function parseUnreadablePermissionRuleView(
+  value: unknown,
+): UnreadablePermissionRuleView {
+  if (!isRecord(value)) {
+    throw new PermissionRulesGatewayError(
+      "permission_rules_invalid_response",
+      INVALID_RESPONSE,
+    );
+  }
+  const ruleId = value.rule_id ?? value.ruleId;
+  const reason = value.reason;
+  if (
+    !isNonEmptyString(ruleId)
+    || ruleId.length > MAX_ID
+    || !isNonEmptyString(reason)
+    || reason.length > MAX_ID
+  ) {
+    throw new PermissionRulesGatewayError(
+      "permission_rules_invalid_response",
+      INVALID_RESPONSE,
+    );
+  }
+
+  const view: UnreadablePermissionRuleView = {
+    rule_id: ruleId,
+    reason: reason.trim(),
+  };
+  const scope = optionalColumn(value.scope);
+  if (scope) view.scope = scope;
+  const projectId = optionalColumn(value.project_id ?? value.projectId);
+  if (projectId) view.project_id = projectId;
+  const prefix = optionalColumn(value.prefix);
+  if (prefix) view.prefix = prefix;
+  const action = optionalColumn(value.action);
+  if (action) view.action = action;
+  const createdAt = optionalColumn(value.created_at ?? value.createdAt);
+  if (createdAt) view.created_at = createdAt;
+  return view;
+}
+
+export function parseUnreadablePermissionRuleList(
+  value: unknown,
+): UnreadablePermissionRuleView[] {
+  if (!Array.isArray(value) || value.length > MAX_LIST) {
+    throw new PermissionRulesGatewayError(
+      "permission_rules_invalid_response",
+      INVALID_RESPONSE,
+    );
+  }
+  return value.map(parseUnreadablePermissionRuleView);
 }
 
 /**
@@ -352,15 +448,45 @@ export class TauriPermissionRulesGateway implements PermissionRulesGateway {
       throw normalizeGatewayError(error);
     }
   }
+
+  async listUnreadablePermissionRules(): Promise<
+    UnreadablePermissionRuleView[]
+  > {
+    try {
+      const payload = await invoke<unknown>("list_unreadable_permission_rules");
+      return parseUnreadablePermissionRuleList(payload);
+    } catch (error) {
+      throw normalizeGatewayError(error);
+    }
+  }
+
+  async deleteUnreadablePermissionRule(ruleId: string): Promise<void> {
+    if (!isNonEmptyString(ruleId) || ruleId.length > MAX_ID) {
+      throw new PermissionRulesGatewayError(
+        "permission_rules_invalid_input",
+        "Rule id is required.",
+      );
+    }
+    try {
+      await invoke<unknown>("delete_unreadable_permission_rule", { ruleId });
+    } catch (error) {
+      throw normalizeGatewayError(error);
+    }
+  }
 }
 
 /** In-memory gateway for unit tests (no Tauri). */
 export class MockPermissionRulesGateway implements PermissionRulesGateway {
   private rules: PermissionRuleView[] = [];
+  private unreadable: UnreadablePermissionRuleView[] = [];
   private seq = 0;
 
-  constructor(initial: readonly PermissionRuleView[] = []) {
+  constructor(
+    initial: readonly PermissionRuleView[] = [],
+    initialUnreadable: readonly UnreadablePermissionRuleView[] = [],
+  ) {
     this.rules = initial.map((rule) => structuredClone(rule));
+    this.unreadable = initialUnreadable.map((row) => structuredClone(row));
   }
 
   /** Test seam: replace store contents. */
@@ -368,8 +494,17 @@ export class MockPermissionRulesGateway implements PermissionRulesGateway {
     this.rules = rules.map((rule) => structuredClone(rule));
   }
 
+  /** Test seam: replace the quarantined rows the host would report. */
+  setUnreadableRules(rows: readonly UnreadablePermissionRuleView[]): void {
+    this.unreadable = rows.map((row) => structuredClone(row));
+  }
+
   getSnapshot(): PermissionRuleView[] {
     return structuredClone(this.rules);
+  }
+
+  getUnreadableSnapshot(): UnreadablePermissionRuleView[] {
+    return structuredClone(this.unreadable);
   }
 
   async listPermissionRules(
@@ -437,5 +572,23 @@ export class MockPermissionRulesGateway implements PermissionRulesGateway {
       );
     }
     this.rules = next;
+  }
+
+  async listUnreadablePermissionRules(): Promise<
+    UnreadablePermissionRuleView[]
+  > {
+    return structuredClone(this.unreadable);
+  }
+
+  async deleteUnreadablePermissionRule(ruleId: string): Promise<void> {
+    const next = this.unreadable.filter((row) => row.rule_id !== ruleId);
+    if (next.length === this.unreadable.length) {
+      // Mirrors the host: readable rules are not reachable from this path.
+      throw new PermissionRulesGatewayError(
+        "permission_rules_not_found",
+        "No unreadable permission rule carries that id.",
+      );
+    }
+    this.unreadable = next;
   }
 }

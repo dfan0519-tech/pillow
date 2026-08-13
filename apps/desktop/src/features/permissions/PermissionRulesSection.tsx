@@ -10,6 +10,7 @@ import type {
   PermissionRuleScope,
   PermissionRuleView,
   PermissionRulesGateway,
+  UnreadablePermissionRuleView,
 } from "../../lib/permissionRulesGateway";
 import { isProjectAllowForbidden } from "../../lib/permissionRulesGateway";
 import {
@@ -18,6 +19,8 @@ import {
   displayRulePattern,
   prefixLabel,
   scopeLabel,
+  unreadableRuleReasonLabel,
+  unreadableRuleShapeLabel,
 } from "./permissionPattern";
 import "../../styles/permission-rules.css";
 
@@ -35,6 +38,9 @@ export function PermissionRulesSection({
 }: PermissionRulesSectionProps) {
   const [globalRules, setGlobalRules] = useState<PermissionRuleView[]>([]);
   const [projectRules, setProjectRules] = useState<PermissionRuleView[]>([]);
+  const [unreadableRules, setUnreadableRules] = useState<
+    UnreadablePermissionRuleView[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -65,6 +71,15 @@ export function PermissionRulesSection({
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "加载权限规则失败。";
+      setError(message);
+    }
+    // Quarantined rows load separately: this list is the recovery path, so a
+    // failure here must report itself without hiding the rules that did load.
+    try {
+      setUnreadableRules(await gateway.listUnreadablePermissionRules());
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "加载无法读取的规则失败。";
       setError(message);
     } finally {
       setLoading(false);
@@ -138,6 +153,20 @@ export function PermissionRulesSection({
     }
   }
 
+  async function handleDeleteUnreadable(ruleId: string) {
+    setError(null);
+    setNotice(null);
+    try {
+      await gateway.deleteUnreadablePermissionRule(ruleId);
+      setNotice("已删除无法读取的规则行。");
+      await reload();
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "删除无法读取的规则行失败。";
+      setError(message);
+    }
+  }
+
   function handleScopeChange(next: PermissionRuleScope) {
     setFormScope(next);
     if (next === "project") {
@@ -163,6 +192,10 @@ export function PermissionRulesSection({
         <p className="permission-rules__status">正在加载权限规则…</p>
       ) : (
         <>
+          <UnreadableRuleList
+            onDelete={(id) => void handleDeleteUnreadable(id)}
+            rules={unreadableRules}
+          />
           <RuleList
             emptyLabel="尚无全局规则。"
             onDelete={(id) => void handleDelete(id)}
@@ -326,6 +359,79 @@ export function PermissionRulesSection({
         </div>
       </form>
     </section>
+  );
+}
+
+/**
+ * Rows the host could not read as rules.
+ *
+ * Renders nothing when the store is clean, so the ordinary Settings page is
+ * unchanged. When it does render, it is the only in-product way to remove such
+ * a row — the alternative used to be editing SQLite by hand.
+ */
+function UnreadableRuleList({
+  rules,
+  onDelete,
+}: {
+  rules: UnreadablePermissionRuleView[];
+  onDelete: (ruleId: string) => void;
+}) {
+  if (rules.length === 0) return null;
+
+  return (
+    <div
+      className="permission-rules-list-block permission-rules-list-block--unreadable"
+      data-testid="permission-rules-unreadable-block"
+    >
+      <h4 className="permission-rules-list-block__title">无法读取的规则</h4>
+      <p
+        className="permission-rules__status"
+        data-testid="permission-rules-unreadable-note"
+        role="alert"
+      >
+        以下 {rules.length} 行无法作为规则读取，已被忽略：它们不参与任何自动批准或拒绝。
+        产品不会写出这样的行，因此它们通常来自绕过产品的写入或改写。删除后其余规则不受影响。
+      </p>
+      <ul
+        className="permission-rules-list"
+        data-testid="permission-rules-unreadable-list"
+      >
+        {rules.map((rule) => (
+          <li
+            className="permission-rules-list__item"
+            data-testid="permission-rule-unreadable-row"
+            key={rule.rule_id}
+          >
+            <div className="permission-rules-list__body">
+              <span
+                className="permission-rules-list__badge permission-rules-list__badge--deny"
+                data-testid="permission-rule-unreadable-state"
+              >
+                已忽略
+              </span>
+              <span data-testid="permission-rule-unreadable-shape">
+                {unreadableRuleShapeLabel(rule)}
+              </span>
+              <span
+                className="permission-rules-list__scope"
+                data-testid="permission-rule-unreadable-reason"
+              >
+                {unreadableRuleReasonLabel(rule.reason)}
+              </span>
+            </div>
+            <button
+              aria-label={`删除无法读取的规则 ${rule.rule_id}`}
+              className="permission-rules-list__delete"
+              data-testid="permission-rule-unreadable-delete"
+              onClick={() => onDelete(rule.rule_id)}
+              type="button"
+            >
+              删除
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

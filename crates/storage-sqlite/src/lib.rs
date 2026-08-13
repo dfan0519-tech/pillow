@@ -27,7 +27,8 @@ pub use permission_rules::{
     PermissionRule, PermissionRuleAction, PermissionRuleError, PermissionRuleMatchSnapshot,
     PermissionRulePrefix, PermissionRuleReceiptActor, PermissionRuleReceiptDecision,
     PermissionRuleScope, PermissionRuleSegmentMatchSnapshot, SqlitePermissionRuleRepository,
-    StoredPermissionRuleReceipt, StoredPermissionRuleSegmentReceipt,
+    StoredPermissionRuleReceipt, StoredPermissionRuleSegmentReceipt, UnreadablePermissionRule,
+    UnreadablePermissionRuleReason,
 };
 pub use resource_recent::{
     MAX_RECENT_LIST, ResourceRecent, ResourceRecentError, SqliteResourceRecentRepository,
