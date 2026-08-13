@@ -1583,6 +1583,7 @@ export function App({
           gateway={settingsGateway}
           onClose={() => setSettingsOpen(false)}
           onThemeChanged={applyDocumentTheme}
+          onOpenProject={() => void openProject()}
           onPermissionModeChanged={setPermissionMode}
           projectId={activeProject?.id ?? null}
           runtimeSlotsGateway={runtimeSlotsGateway}

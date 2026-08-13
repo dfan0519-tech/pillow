@@ -43,6 +43,8 @@ export type SettingsPanelProps = {
   gateway: SettingsGateway;
   /** Active project id when a project is selected; enables project scope. */
   projectId: string | null;
+  /** Opens the project picker without leaving Settings, for sections gated on a project. */
+  onOpenProject?: () => void;
   onClose: () => void;
   /** Called after a successful theme write so the shell can re-apply. */
   onThemeChanged?: (theme: UiThemeLabel) => void;
@@ -143,6 +145,7 @@ function defaultPermissionRulesGateway(): PermissionRulesGateway {
 export function SettingsPanel({
   gateway,
   projectId,
+  onOpenProject,
   onClose,
   onThemeChanged,
   onPermissionModeChanged,
@@ -454,6 +457,7 @@ export function SettingsPanel({
                 {category === "agents" ? (
                   <RuntimeSlotsSection
                     gateway={runtimeSlotsGatewayProp}
+                    onOpenProject={onOpenProject}
                     projectId={projectId}
                   />
                 ) : null}
@@ -511,11 +515,13 @@ export function SettingsPanel({
                   </p>
                 ) : null}
 
+                {/*
+                  No per-section close button. The dialog has one close affordance
+                  in its header; repeating it at the bottom of every section makes
+                  it read as "close this section", which is not a thing.
+                */}
                 {showSave ? (
                   <div className="settings-actions modal-actions">
-                    <button onClick={onClose} type="button">
-                      关闭
-                    </button>
                     <button
                       data-testid="settings-save"
                       disabled={
@@ -538,13 +544,7 @@ export function SettingsPanel({
                       {saving ? "保存中…" : "保存"}
                     </button>
                   </div>
-                ) : (
-                  <div className="settings-actions modal-actions">
-                    <button onClick={onClose} type="button">
-                      关闭
-                    </button>
-                  </div>
-                )}
+                ) : null}
               </div>
             )}
           </div>

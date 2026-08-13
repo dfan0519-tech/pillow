@@ -632,3 +632,9 @@
   line-height: 1.45;
   flex-shrink: 0;
 }
+
+/* Escape hatch out of the project-gated slots empty state. */
+.runtime-slots__open-project {
+  align-self: flex-start;
+  margin-top: 4px;
+}

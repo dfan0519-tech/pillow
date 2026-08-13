@@ -73,6 +73,8 @@ import "../../styles/runtime-slots.css";
 
 export type RuntimeSlotsSectionProps = {
   projectId: string | null;
+  /** Opens the project picker from the gated empty state, without leaving Settings. */
+  onOpenProject?: () => void;
   gateway?: RuntimeSlotsGateway;
 };
 
@@ -188,6 +190,7 @@ function emptyOauthDraftFields(): OauthDraftFields {
 
 export function RuntimeSlotsSection({
   projectId,
+  onOpenProject,
   gateway: gatewayProp,
 }: RuntimeSlotsSectionProps) {
   const [gateway] = useState<RuntimeSlotsGateway>(
@@ -937,6 +940,22 @@ export function RuntimeSlotsSection({
         >
           需要先打开项目：槽位按项目隔离，不能跨项目复用。
         </p>
+        {/*
+          Telling someone a prerequisite without offering it is a dead end: this
+          was the first place a real session got stuck looking for "新增".
+          Settings stays open, so the section fills in as soon as a project is
+          picked.
+        */}
+        {onOpenProject ? (
+          <button
+            className="runtime-slots__open-project"
+            data-testid="runtime-slots-open-project"
+            onClick={onOpenProject}
+            type="button"
+          >
+            打开项目
+          </button>
+        ) : null}
       </section>
     );
   }
