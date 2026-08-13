@@ -135,6 +135,7 @@ export function AlwaysRuleDialog({
       aria-labelledby={titleId}
       aria-modal="true"
       className="permission-rule-dialog-backdrop"
+      data-tauri-drag-region
       data-testid="always-rule-dialog"
       role="dialog"
     >

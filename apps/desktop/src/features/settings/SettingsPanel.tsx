@@ -365,14 +365,25 @@ export function SettingsPanel({
       aria-labelledby="settings-panel-title"
       aria-modal="true"
       className="settings-backdrop"
+      data-tauri-drag-region
       data-testid="settings-panel"
       role="dialog"
     >
       <div className="settings-panel modal-card">
-        <header className="modal-card__head settings-panel__head">
-          <div>
-            <h2 id="settings-panel-title">设置</h2>
-            <p>按功能分区。非密钥运行时配置；Grok 登录由 Grok CLI 管理。</p>
+        {/*
+          The backdrop covers the window, titlebar included, so while Settings
+          is open none of the shell drag regions can be reached. This header is
+          the grab handle for that whole time — and the attribute has to be on
+          the text nodes too, since Tauri drags on the event target and the
+          heading would otherwise swallow it.
+        */}
+        <header
+          className="modal-card__head settings-panel__head"
+          data-tauri-drag-region
+        >
+          <div data-tauri-drag-region>
+            <h2 data-tauri-drag-region id="settings-panel-title">设置</h2>
+            <p data-tauri-drag-region>按功能分区。非密钥运行时配置；Grok 登录由 Grok CLI 管理。</p>
           </div>
           <button
             aria-label="关闭设置"
