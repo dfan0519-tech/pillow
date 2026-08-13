@@ -27,7 +27,9 @@ import { MockSettingsGateway } from "../src/features/settings/settingsGateway";
 import {
   MockPermissionRulesGateway,
   isProjectAllowForbidden,
+  parseUnreadablePermissionRuleView,
   type PermissionRuleView,
+  type UnreadablePermissionRuleView,
 } from "../src/lib/permissionRulesGateway";
 import type { RuntimeEventDto } from "../src/lib/conversationGateway";
 import "../src/styles/tokens.css";
@@ -91,6 +93,19 @@ const PROJECT_RULE: PermissionRuleView = {
   pattern: ".env*",
   action: "deny",
   created_at: "2026-08-10T00:01:00.000Z",
+};
+
+/**
+ * The row EA-03 sequence B plants: a blank global process allow. The host
+ * reports it instead of loading it, and reports no pattern for it.
+ */
+const UNREADABLE_ROW: UnreadablePermissionRuleView = {
+  rule_id: "11111111-1111-4111-8111-111111111111",
+  scope: "global",
+  prefix: "process",
+  action: "allow",
+  created_at: "2026-08-12T10:00:00.000Z",
+  reason: "pattern",
 };
 
 function pendingCommand(
@@ -159,6 +174,102 @@ describe("Permission rules — settings list", () => {
       .toBe(false);
     // Project rule remains.
     expect(screen.getByTestId("permission-rules-project-list")).toBeInTheDocument();
+  });
+});
+
+// —— 1b. Unreadable row recovery ————————————————————————————————————————————
+
+describe("Permission rules — unreadable row recovery", () => {
+  it("1b — shows a quarantined row with its reason and removes it in-product", async () => {
+    const user = userEvent.setup();
+    const rulesGateway = new MockPermissionRulesGateway(
+      [GLOBAL_RULE],
+      [UNREADABLE_ROW],
+    );
+    const settings = new MockSettingsGateway();
+
+    render(
+      <SettingsPanel
+        gateway={settings}
+        onClose={() => undefined}
+        permissionRulesGateway={rulesGateway}
+        projectId="proj-a"
+      />,
+    );
+
+    // One unreadable row must not blank the surface: the user's rule still shows.
+    const globalList = await screen.findByTestId("permission-rules-global-list");
+    expect(within(globalList).getByTestId("permission-rule-pattern"))
+      .toHaveTextContent("process:cargo *");
+
+    const block = screen.getByTestId("permission-rules-unreadable-block");
+    expect(within(block).getByTestId("permission-rules-unreadable-note"))
+      .toHaveTextContent("已被忽略");
+    expect(within(block).getByTestId("permission-rule-unreadable-shape"))
+      .toHaveTextContent("全局");
+    expect(
+      within(block).getByTestId("permission-rule-unreadable-reason").textContent,
+    ).toContain("空模式会被内核当作匹配全部");
+
+    await user.click(
+      within(block).getByTestId("permission-rule-unreadable-delete"),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("permission-rules-unreadable-block")).toBeNull();
+    });
+    expect(rulesGateway.getUnreadableSnapshot()).toEqual([]);
+    // The repair removed only the quarantined row.
+    expect(rulesGateway.getSnapshot().map((rule) => rule.rule_id))
+      .toEqual(["rule-global-1"]);
+    expect(screen.getByTestId("permission-rules-global-list")).toBeInTheDocument();
+  });
+
+  it("1b2 — a clean store renders no unreadable block at all", async () => {
+    const rulesGateway = new MockPermissionRulesGateway([GLOBAL_RULE]);
+
+    render(
+      <SettingsPanel
+        gateway={new MockSettingsGateway()}
+        onClose={() => undefined}
+        permissionRulesGateway={rulesGateway}
+        projectId="proj-a"
+      />,
+    );
+
+    await screen.findByTestId("permission-rules-global-list");
+    expect(screen.queryByTestId("permission-rules-unreadable-block")).toBeNull();
+  });
+
+  it("1b3 — the parser keeps recognition fields and drops an untrusted pattern", () => {
+    const parsed = parseUnreadablePermissionRuleView({
+      rule_id: "11111111-1111-4111-8111-111111111111",
+      scope: "global",
+      prefix: "process",
+      action: "allow",
+      created_at: "2026-08-12T10:00:00Z",
+      reason: "content_digest",
+      // A host must not send this, and the renderer must not carry it: the
+      // pattern of a row the host cannot vouch for is not shown as the user's.
+      pattern: "rm -rf *",
+    });
+
+    expect(Object.keys(parsed).sort()).toEqual([
+      "action",
+      "created_at",
+      "prefix",
+      "reason",
+      "rule_id",
+      "scope",
+    ]);
+    expect(parsed).not.toHaveProperty("pattern");
+
+    // A row with no reason is not a report the UI can act on.
+    expect(() =>
+      parseUnreadablePermissionRuleView({
+        rule_id: "11111111-1111-4111-8111-111111111111",
+      })
+    ).toThrow(/invalid permission rules response/i);
   });
 });
 

@@ -407,6 +407,41 @@ fn project_allow_is_never_an_authority_even_if_a_corrupt_input_reaches_policy() 
     ));
 }
 
+/// Why the SQLite authority must never load an empty-pattern row.
+///
+/// Policy is deliberately literal here: an empty pattern matches everything. A
+/// blank `global process allow` row would therefore auto-approve every command,
+/// which is what makes quarantining such a row (rather than loading it) the only
+/// safe reading of a corrupt store.
+#[test]
+fn an_empty_pattern_matches_every_subject_in_its_class() {
+    for prefix in [
+        PermissionRulePrefix::Process,
+        PermissionRulePrefix::Write,
+        PermissionRulePrefix::Edit,
+    ] {
+        assert!(permission_rule_matches(prefix, "", &proc("rm", &["-rf", "/"])));
+        assert!(permission_rule_matches(prefix, "", "project/.ssh/id_rsa"));
+        assert!(permission_rule_matches(prefix, "", ""));
+    }
+
+    let blank_allow = [rule(
+        "blank-allow",
+        PermissionRuleScope::Global,
+        PermissionRulePrefix::Process,
+        "",
+        PermissionRuleAction::Allow,
+    )];
+    assert!(matches!(
+        evaluate_permission_rules(
+            PermissionRulePrefix::Process,
+            &proc("git", &["push", "--force"]),
+            &blank_allow
+        ),
+        PermissionRuleEvaluation::Allow(_)
+    ));
+}
+
 #[test]
 fn no_matching_rule_still_requires_confirmation() {
     let rules = [rule(

@@ -49,4 +49,8 @@ test-support = []
 [dev-dependencies]
 # Enable host test seams only for desktop unit/integration tests (not release).
 keeper-runtime-host = { path = "../../../crates/runtime-host", features = ["test-support"] }
+# Tests only: plant the rows a bypassing caller can write, which is what the
+# permission-rule quarantine path has to survive. No production code here opens
+# SQLite directly — repositories own that.
+rusqlite.workspace = true
 tempfile = "3"

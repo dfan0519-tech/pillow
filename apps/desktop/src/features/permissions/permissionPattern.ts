@@ -128,3 +128,55 @@ export function actionLabel(action: PermissionRuleAction): string {
 export function scopeLabel(scope: string): string {
   return scope === "project" ? "项目" : "全局";
 }
+
+/**
+ * Why the host could not read a stored row as a rule.
+ *
+ * Codes come from the host (`UnreadablePermissionRuleReason`); an unknown code
+ * still renders something honest rather than blank.
+ */
+export function unreadableRuleReasonLabel(reason: string): string {
+  switch (reason) {
+    case "column":
+      return "存储列缺失或类型不对";
+    case "scope":
+      return "作用域无法识别";
+    case "prefix":
+      return "前缀无法识别";
+    case "action":
+      return "动作无法识别";
+    case "scope_shape":
+      return "作用域与项目归属不一致";
+    case "project_allow":
+      return "项目作用域写着「允许」，产品从不这样写入";
+    case "pattern":
+      return "模式为空、只有空白或含控制字符（空模式会被内核当作匹配全部）";
+    case "rule_id":
+      return "规则 ID 不是合法 UUID";
+    case "created_at":
+      return "创建时间不是合法时间戳";
+    case "content_digest":
+      return "内容摘要与规则内容不一致（该行在产品之外被改写过）";
+    default:
+      return "无法读取";
+  }
+}
+
+/**
+ * Scope/prefix/action of an unreadable row, for recognition only.
+ * Unreadable columns are dropped rather than guessed.
+ */
+export function unreadableRuleShapeLabel(row: {
+  scope?: string;
+  prefix?: string;
+  action?: string;
+}): string {
+  const parts = [
+    row.scope ? scopeLabel(row.scope) : null,
+    row.prefix ?? null,
+    row.action === "allow" || row.action === "deny"
+      ? actionLabel(row.action)
+      : row.action ?? null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? parts.join(" · ") : "字段不可读";
+}

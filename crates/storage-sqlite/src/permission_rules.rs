@@ -4,6 +4,23 @@
 //! a project root or an externally resolved effective policy. Global rules may
 //! allow or deny; project rules are deny-only and effective loading filters
 //! that invariant again so corrupt rows cannot widen authority.
+//!
+//! ## Unreadable rows are quarantined, not fatal
+//!
+//! Loading fails closed **per row**. A row this module cannot read back as a
+//! rule is skipped by [`SqlitePermissionRuleRepository::list`] and
+//! [`SqlitePermissionRuleRepository::list_effective`] — it is never evaluated,
+//! so a planted match-all pattern cannot grant anything — and it is reported by
+//! [`SqlitePermissionRuleRepository::list_unreadable`] so Settings can show and
+//! remove it.
+//!
+//! Rejecting the whole load instead would take out the only surface that can
+//! delete the bad row: one row would disable every rule, hide the rest of the
+//! list, and leave a database editor as the only recovery. That is the shape of
+//! the 2026-08-08 settings self-brick, and the same rule applies here.
+//!
+//! Together the two list calls cover the table: every row is either readable in
+//! its scope or reported as unreadable.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -11,13 +28,20 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use keeper_agent_protocol::canonical_arguments_digest;
-use rusqlite::types::Type;
+use rusqlite::types::{Type, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const PERMISSION_RULE_PATTERN_BYTE_CAP: usize = 4096;
 pub const PERMISSION_RULE_SUBJECT_BYTE_CAP: usize = 8192;
+
+/// Bound on an id accepted by the quarantine repair path.
+///
+/// A readable rule id is always a 36-character UUID; this larger bound exists
+/// only so an unreadable row's id can be echoed back for deletion. It matches
+/// the renderer's own id cap.
+const PERMISSION_RULE_ID_BYTE_CAP: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionRuleScope {
@@ -110,6 +134,71 @@ pub struct AddPermissionRule {
     pub prefix: PermissionRulePrefix,
     pub pattern: String,
     pub action: PermissionRuleAction,
+}
+
+/// Why a stored row could not be read back as a rule.
+///
+/// Reported in the order [`RawPermissionRuleRow::classify`] checks: the first
+/// failing check wins, so the same row always reports the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreadablePermissionRuleReason {
+    /// A required column is absent or not stored as text.
+    Column,
+    /// `scope` is not `global` / `project`.
+    Scope,
+    /// `prefix` is not `process` / `write` / `edit`.
+    Prefix,
+    /// `action` is not `allow` / `deny`.
+    Action,
+    /// Global row carries a project id, or a project row carries none.
+    ScopeShape,
+    /// Project-scoped allow: project rules may only deny.
+    ProjectAllow,
+    /// Empty, whitespace-only, oversize, or control-character pattern.
+    Pattern,
+    /// `rule_id` is not a UUID.
+    RuleId,
+    /// `created_at` is not an RFC 3339 timestamp.
+    CreatedAt,
+    /// `content_digest` does not match the row's own content.
+    ContentDigest,
+}
+
+impl UnreadablePermissionRuleReason {
+    /// Stable wire code. The renderer maps these to guidance text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Column => "column",
+            Self::Scope => "scope",
+            Self::Prefix => "prefix",
+            Self::Action => "action",
+            Self::ScopeShape => "scope_shape",
+            Self::ProjectAllow => "project_allow",
+            Self::Pattern => "pattern",
+            Self::RuleId => "rule_id",
+            Self::CreatedAt => "created_at",
+            Self::ContentDigest => "content_digest",
+        }
+    }
+}
+
+/// A stored row that is not a readable rule, reported so the user can remove it.
+///
+/// The stored `pattern` and `content_digest` are deliberately **not** carried
+/// here. An unreadable row either was never written by this product or has a
+/// digest the product cannot vouch for, so its pattern is not something to
+/// re-display as a rule the user wrote or offer back for re-adding. The
+/// remaining fields are raw column text, present only so the user can recognise
+/// the row before deleting it, and absent when the column itself is unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadablePermissionRule {
+    pub rule_id: String,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub prefix: Option<String>,
+    pub action: Option<String>,
+    pub created_at: Option<String>,
+    pub reason: UnreadablePermissionRuleReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,18 +412,77 @@ impl SqlitePermissionRuleRepository {
         let mut statement = connection.prepare(sql).map_err(map_sqlite)?;
         let rows = if let Some(project_id) = bind_project {
             statement
-                .query_map([project_id], permission_rule_from_row)
+                .query_map([project_id], classify_permission_rule_row)
                 .map_err(map_sqlite)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(map_sqlite)?
         } else {
             statement
-                .query_map([], permission_rule_from_row)
+                .query_map([], classify_permission_rule_row)
                 .map_err(map_sqlite)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(map_sqlite)?
         };
-        validate_loaded_rules(rows)
+        Ok(readable_rules(rows))
+    }
+
+    /// Every stored row that is not a readable rule, across all scopes.
+    ///
+    /// Not scope-filtered on purpose. A row whose `scope` column is itself
+    /// unreadable belongs to no scope, and the recovery surface must be able to
+    /// show every row [`Self::list`] skipped — including rows no scoped query
+    /// would return.
+    pub fn list_unreadable(&self) -> Result<Vec<UnreadablePermissionRule>, PermissionRuleError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT rule_id, scope, project_id, prefix, pattern, action,
+                        content_digest, created_at
+                 FROM permission_rules
+                 ORDER BY created_at ASC, rule_id ASC",
+            )
+            .map_err(map_sqlite)?;
+        let rows = statement
+            .query_map([], classify_permission_rule_row)
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row {
+                ClassifiedPermissionRule::Readable(_) => None,
+                ClassifiedPermissionRule::Unreadable(row) => Some(row),
+            })
+            .collect())
+    }
+
+    /// Delete one row reported by [`Self::list_unreadable`].
+    ///
+    /// Readable rules are never deleted through this path — [`Self::delete`]
+    /// owns those and keeps its UUID-shaped id requirement. This path exists
+    /// because an unreadable row's id may not be a UUID at all, which is exactly
+    /// the case `delete` refuses; the row is re-classified inside the deleting
+    /// transaction so relaxing the id shape cannot reach a readable rule.
+    ///
+    /// Returns `false` when no unreadable row carries that id.
+    pub fn delete_unreadable(&self, rule_id: &str) -> Result<bool, PermissionRuleError> {
+        if rule_id.is_empty() || rule_id.len() > PERMISSION_RULE_ID_BYTE_CAP {
+            return Err(PermissionRuleError::InvalidRuleId);
+        }
+        let connection = self.connection()?;
+        connection
+            .execute("BEGIN IMMEDIATE", [])
+            .map_err(map_sqlite)?;
+        match delete_unreadable_rows(&connection, rule_id) {
+            Ok(removed) => {
+                connection.execute("COMMIT", []).map_err(map_sqlite)?;
+                Ok(removed > 0)
+            }
+            Err(error) => {
+                let _ = connection.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
     }
 
     pub fn list_effective(
@@ -357,11 +505,11 @@ impl SqlitePermissionRuleRepository {
             )
             .map_err(map_sqlite)?;
         let rows = statement
-            .query_map([project_id], permission_rule_from_row)
+            .query_map([project_id], classify_permission_rule_row)
             .map_err(map_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_sqlite)?;
-        validate_loaded_rules(rows)
+        Ok(readable_rules(rows))
     }
 
     pub fn delete(&self, rule_id: &str) -> Result<bool, PermissionRuleError> {
@@ -480,8 +628,17 @@ fn validate_scope_shape(
     }
 }
 
+/// Reject patterns that cannot mean what a user wrote.
+///
+/// Empty and whitespace-only patterns are rejected because kernel policy reads
+/// an empty pattern as match-all: a blank `global process allow` row would
+/// silently authorise every command (external-audit EA-03 sequence B). Rejecting
+/// them here covers both directions — nothing can be inserted with such a
+/// pattern, and a row that already carries one is quarantined on load rather
+/// than evaluated.
 fn validate_pattern(pattern: &str) -> Result<(), PermissionRuleError> {
-    if pattern.len() > PERMISSION_RULE_PATTERN_BYTE_CAP
+    if pattern.trim().is_empty()
+        || pattern.len() > PERMISSION_RULE_PATTERN_BYTE_CAP
         || pattern.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n'))
     {
         return Err(PermissionRuleError::InvalidPattern);
@@ -610,39 +767,202 @@ pub(crate) fn content_digest(rule: &PermissionRule) -> String {
         .to_owned()
 }
 
-fn permission_rule_from_row(row: &Row<'_>) -> rusqlite::Result<PermissionRule> {
-    let scope: String = row.get(1)?;
-    let prefix: String = row.get(3)?;
-    let action: String = row.get(5)?;
-    let created_at: String = row.get(7)?;
-    Ok(PermissionRule {
-        rule_id: row.get(0)?,
-        scope: PermissionRuleScope::parse(&scope).map_err(|error| conversion_error(1, error))?,
-        project_id: row.get(2)?,
-        prefix: PermissionRulePrefix::parse(&prefix).map_err(|error| conversion_error(3, error))?,
-        pattern: row.get(4)?,
-        action: PermissionRuleAction::parse(&action).map_err(|error| conversion_error(5, error))?,
-        content_digest: row.get(6)?,
-        created_at: DateTime::parse_from_rfc3339(&created_at)
-            .map(|time| time.with_timezone(&Utc))
-            .map_err(|error| conversion_error(7, error))?,
-    })
+/// One stored row, after classification.
+enum ClassifiedPermissionRule {
+    Readable(PermissionRule),
+    Unreadable(UnreadablePermissionRule),
 }
 
-fn validate_loaded_rules(
-    rules: Vec<PermissionRule>,
-) -> Result<Vec<PermissionRule>, PermissionRuleError> {
-    for rule in &rules {
-        validate_scope_shape(rule.scope, rule.project_id.as_deref())?;
-        if rule.scope == PermissionRuleScope::Project && rule.action != PermissionRuleAction::Deny {
-            return Err(PermissionRuleError::InvalidStoredRule);
-        }
-        validate_pattern(&rule.pattern)?;
-        if Uuid::parse_str(&rule.rule_id).is_err() || rule.content_digest != content_digest(rule) {
-            return Err(PermissionRuleError::InvalidStoredRule);
-        }
+/// The eight `permission_rules` columns as raw text.
+///
+/// Read as raw values rather than typed ones so a row that cannot convert is
+/// classified instead of failing the load: `permission_rule_from_row`'s typed
+/// reads used to surface a single bad `created_at` as a store-wide error, which
+/// took the whole rule set (and the Settings list that deletes it) down with it.
+struct RawPermissionRuleRow {
+    rule_id: Option<String>,
+    /// The id column as addressable text, including a lossy rendering of a
+    /// non-text id. Never used to classify a row — a blob id is not a readable
+    /// id even when its bytes spell a UUID — only to report a key the repair
+    /// path can match, so such a row is still removable in-product.
+    id_text: Option<String>,
+    scope: Option<String>,
+    project_id: Option<String>,
+    prefix: Option<String>,
+    pattern: Option<String>,
+    action: Option<String>,
+    content_digest: Option<String>,
+    created_at: Option<String>,
+}
+
+impl RawPermissionRuleRow {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            rule_id: raw_column_text(row, 0)?,
+            id_text: raw_addressable_text(row, 0)?,
+            scope: raw_column_text(row, 1)?,
+            project_id: raw_column_text(row, 2)?,
+            prefix: raw_column_text(row, 3)?,
+            pattern: raw_column_text(row, 4)?,
+            action: raw_column_text(row, 5)?,
+            content_digest: raw_column_text(row, 6)?,
+            created_at: raw_column_text(row, 7)?,
+        })
     }
-    Ok(rules)
+
+    fn unreadable(
+        &self,
+        reason: UnreadablePermissionRuleReason,
+    ) -> ClassifiedPermissionRule {
+        ClassifiedPermissionRule::Unreadable(UnreadablePermissionRule {
+            rule_id: self.id_text.clone().unwrap_or_default(),
+            scope: self.scope.clone(),
+            project_id: self.project_id.clone(),
+            prefix: self.prefix.clone(),
+            action: self.action.clone(),
+            created_at: self.created_at.clone(),
+            reason,
+        })
+    }
+
+    /// Classify the row. Checks run in a fixed order so one row always reports
+    /// one reason; the pattern bound is checked before the digest so an oversize
+    /// pattern can never reach the digest helper's own bound.
+    fn classify(self) -> ClassifiedPermissionRule {
+        use UnreadablePermissionRuleReason as Reason;
+
+        let (Some(rule_id), Some(raw_scope), Some(raw_prefix), Some(pattern), Some(raw_action)) = (
+            self.rule_id.as_deref(),
+            self.scope.as_deref(),
+            self.prefix.as_deref(),
+            self.pattern.as_deref(),
+            self.action.as_deref(),
+        ) else {
+            return self.unreadable(Reason::Column);
+        };
+        let (Some(raw_content_digest), Some(raw_created_at)) =
+            (self.content_digest.as_deref(), self.created_at.as_deref())
+        else {
+            return self.unreadable(Reason::Column);
+        };
+
+        let Ok(scope) = PermissionRuleScope::parse(raw_scope) else {
+            return self.unreadable(Reason::Scope);
+        };
+        let Ok(prefix) = PermissionRulePrefix::parse(raw_prefix) else {
+            return self.unreadable(Reason::Prefix);
+        };
+        let Ok(action) = PermissionRuleAction::parse(raw_action) else {
+            return self.unreadable(Reason::Action);
+        };
+        if validate_scope_shape(scope, self.project_id.as_deref()).is_err() {
+            return self.unreadable(Reason::ScopeShape);
+        }
+        if scope == PermissionRuleScope::Project && action != PermissionRuleAction::Deny {
+            return self.unreadable(Reason::ProjectAllow);
+        }
+        if validate_pattern(pattern).is_err() {
+            return self.unreadable(Reason::Pattern);
+        }
+        if Uuid::parse_str(rule_id).is_err() {
+            return self.unreadable(Reason::RuleId);
+        }
+        let Ok(created_at) = DateTime::parse_from_rfc3339(raw_created_at) else {
+            return self.unreadable(Reason::CreatedAt);
+        };
+
+        let rule = PermissionRule {
+            rule_id: rule_id.to_owned(),
+            scope,
+            project_id: self.project_id.clone(),
+            prefix,
+            pattern: pattern.to_owned(),
+            action,
+            content_digest: raw_content_digest.to_owned(),
+            created_at: created_at.with_timezone(&Utc),
+        };
+        if rule.content_digest != content_digest(&rule) {
+            return self.unreadable(Reason::ContentDigest);
+        }
+        ClassifiedPermissionRule::Readable(rule)
+    }
+}
+
+/// Read one column as text, treating a null or non-text value as absent.
+///
+/// SQLite is dynamically typed, so a hand-edited row can hold a blob where the
+/// schema declares text. Such a column is unreadable, not a load failure.
+fn raw_column_text(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(index)? {
+        ValueRef::Text(bytes) => Ok(Some(String::from_utf8_lossy(bytes).into_owned())),
+        _ => Ok(None),
+    }
+}
+
+/// Read one column as the text `CAST(column AS TEXT)` would compare against,
+/// so a blob-typed value is still addressable by the repair path.
+fn raw_addressable_text(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(index)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn classify_permission_rule_row(row: &Row<'_>) -> rusqlite::Result<ClassifiedPermissionRule> {
+    Ok(RawPermissionRuleRow::read(row)?.classify())
+}
+
+/// Keep the rules the product can read; quarantine the rest.
+fn readable_rules(rows: Vec<ClassifiedPermissionRule>) -> Vec<PermissionRule> {
+    rows.into_iter()
+        .filter_map(|row| match row {
+            ClassifiedPermissionRule::Readable(rule) => Some(rule),
+            ClassifiedPermissionRule::Unreadable(_) => None,
+        })
+        .collect()
+}
+
+/// Delete the rows carrying `rule_id` that are still unreadable. Caller owns the
+/// surrounding transaction.
+///
+/// Matches on `CAST(rule_id AS TEXT)` so a row whose id was stored with the
+/// wrong column type is still addressable by the text the recovery list showed,
+/// and deletes by `rowid` so a readable row that merely casts to the same text
+/// is left alone.
+fn delete_unreadable_rows(
+    connection: &Connection,
+    rule_id: &str,
+) -> Result<usize, PermissionRuleError> {
+    let candidates = {
+        let mut statement = connection
+            .prepare(
+                "SELECT rule_id, scope, project_id, prefix, pattern, action,
+                        content_digest, created_at, rowid
+                 FROM permission_rules
+                 WHERE CAST(rule_id AS TEXT) = ?1",
+            )
+            .map_err(map_sqlite)?;
+        statement
+            .query_map([rule_id], |row| {
+                Ok((classify_permission_rule_row(row)?, row.get::<_, i64>(8)?))
+            })
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite)?
+    };
+
+    let mut removed = 0;
+    for (classified, rowid) in candidates {
+        if matches!(classified, ClassifiedPermissionRule::Readable(_)) {
+            continue;
+        }
+        removed += connection
+            .execute("DELETE FROM permission_rules WHERE rowid = ?1", [rowid])
+            .map_err(map_sqlite)?;
+    }
+    Ok(removed)
 }
 
 fn conversion_error(

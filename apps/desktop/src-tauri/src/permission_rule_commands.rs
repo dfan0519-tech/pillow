@@ -7,6 +7,7 @@
 use keeper_storage_sqlite::{
     AddPermissionRule, PermissionRule, PermissionRuleAction, PermissionRuleError,
     PermissionRulePrefix, PermissionRuleScope, SqlitePermissionRuleRepository,
+    UnreadablePermissionRule,
 };
 use serde::Serialize;
 use tauri::State;
@@ -34,6 +35,37 @@ impl From<PermissionRule> for PermissionRuleView {
             pattern: rule.pattern,
             action: rule.action.as_str().to_owned(),
             created_at: rule.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// A stored row the rule authority cannot read back as a rule.
+///
+/// Separate view and separate command, deliberately: `PermissionRuleView` is a
+/// key-exact renderer contract, and an unreadable row has no trustworthy
+/// pattern to put in one. It carries no `pattern` — see
+/// `UnreadablePermissionRule` for why the product does not re-display it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnreadablePermissionRuleView {
+    pub rule_id: String,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub prefix: Option<String>,
+    pub action: Option<String>,
+    pub created_at: Option<String>,
+    pub reason: String,
+}
+
+impl From<UnreadablePermissionRule> for UnreadablePermissionRuleView {
+    fn from(row: UnreadablePermissionRule) -> Self {
+        Self {
+            rule_id: row.rule_id,
+            scope: row.scope,
+            project_id: row.project_id,
+            prefix: row.prefix,
+            action: row.action,
+            created_at: row.created_at,
+            reason: row.reason.as_str().to_owned(),
         }
     }
 }
@@ -67,6 +99,25 @@ pub fn delete_permission_rule(
     rule_id: String,
 ) -> Result<(), CommandError> {
     delete_permission_rule_impl(&rules, rule_id)
+}
+
+/// Rows `list_permission_rules` skipped, so the user can remove them in-product.
+///
+/// Unscoped by design: an unreadable row may not have a readable scope, and the
+/// recovery list must be able to account for every row in the table.
+#[tauri::command]
+pub fn list_unreadable_permission_rules(
+    rules: State<'_, SqlitePermissionRuleRepository>,
+) -> Result<Vec<UnreadablePermissionRuleView>, CommandError> {
+    list_unreadable_permission_rules_impl(&rules)
+}
+
+#[tauri::command]
+pub fn delete_unreadable_permission_rule(
+    rules: State<'_, SqlitePermissionRuleRepository>,
+    rule_id: String,
+) -> Result<(), CommandError> {
+    delete_unreadable_permission_rule_impl(&rules, rule_id)
 }
 
 pub(crate) fn list_permission_rules_impl(
@@ -121,6 +172,38 @@ pub(crate) fn delete_permission_rule_impl(
         false => Err(permission_error(
             "permission_rules_not_found",
             "Permission rule not found.",
+        )),
+    }
+}
+
+pub(crate) fn list_unreadable_permission_rules_impl(
+    rules: &SqlitePermissionRuleRepository,
+) -> Result<Vec<UnreadablePermissionRuleView>, CommandError> {
+    let rows = rules.list_unreadable().map_err(map_rule_error)?;
+    if !rows.is_empty() {
+        // Quarantine is silent in the evaluation path by design, so this is the
+        // one place it gets logged: a support log should show that rules were
+        // skipped, not just that the list looked short.
+        eprintln!(
+            "Pillow permission rule store skipped {} unreadable row(s); Settings can remove them",
+            rows.len()
+        );
+    }
+    Ok(rows
+        .into_iter()
+        .map(UnreadablePermissionRuleView::from)
+        .collect())
+}
+
+pub(crate) fn delete_unreadable_permission_rule_impl(
+    rules: &SqlitePermissionRuleRepository,
+    rule_id: String,
+) -> Result<(), CommandError> {
+    match rules.delete_unreadable(&rule_id).map_err(map_rule_error)? {
+        true => Ok(()),
+        false => Err(permission_error(
+            "permission_rules_not_found",
+            "No unreadable permission rule carries that id.",
         )),
     }
 }

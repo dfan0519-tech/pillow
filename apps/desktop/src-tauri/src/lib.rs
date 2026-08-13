@@ -59,7 +59,8 @@ use keeper_storage_sqlite::SqlitePermissionRuleRepository;
 use keeper_storage_sqlite::SqliteSettingsRepository;
 use librarian_audit_commands::run_librarian_audit;
 use permission_rule_commands::{
-    add_permission_rule, delete_permission_rule, list_permission_rules,
+    add_permission_rule, delete_permission_rule, delete_unreadable_permission_rule,
+    list_permission_rules, list_unreadable_permission_rules,
 };
 use pillow_runtime_slots::RuntimeSlotService;
 use project_commands::{
@@ -124,6 +125,8 @@ fn configure_desktop_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> 
         list_permission_rules,
         add_permission_rule,
         delete_permission_rule,
+        list_unreadable_permission_rules,
+        delete_unreadable_permission_rule,
         discover_git_repositories,
         get_git_status,
         open_git_diff,
