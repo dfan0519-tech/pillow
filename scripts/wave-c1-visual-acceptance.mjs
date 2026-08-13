@@ -335,14 +335,95 @@ async function captureLightSkin(page, state, viewport, captures) {
   });
 }
 
+/** Card box + the two columns, as the browser actually laid them out. */
+async function settingsBoxes(page) {
+  return page.evaluate(() => {
+    const box = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        bottom: rect.bottom,
+        height: rect.height,
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        width: rect.width,
+      };
+    };
+    return {
+      card: box(".settings-backdrop .settings-panel"),
+      nav: box("[data-testid='settings-nav']"),
+      content: box("[data-testid='settings-content']"),
+      bodyScrolls: document.body.scrollHeight > window.innerHeight + 1
+        || document.body.scrollWidth > window.innerWidth + 1,
+    };
+  });
+}
+
 /**
  * Settings surface capture. It is reachable from the shell but no spec opened
  * it, so the whole settings screen shipped without visual evidence in either
  * skin.
+ *
+ * The screenshot alone was not evidence: this ran after `assertGeometry`, so
+ * the panel it opens had no assertion of any kind behind it. Every layout
+ * defect the product shipped here — a 420px card that squeezed the content
+ * column into a vertical ribbon, and a card that changed size as you switched
+ * sections — would have produced a PNG nobody diffs and a green spec whose
+ * name says "without geometry regressions". The three checks below are those
+ * two defects plus viewport containment.
  */
 async function captureSettings(page, viewport, captures) {
   await page.locator("[data-testid='nav-open-settings']").click();
   await page.waitForSelector("[data-testid='settings-panel']", { timeout: 10_000 });
+
+  const opened = await settingsBoxes(page);
+  assert.ok(opened.card, "Settings card is missing.");
+  assert.ok(opened.nav && opened.content, "Settings two-column layout is missing.");
+  rectInside(opened.card, viewport, "Settings card");
+  assert.equal(opened.bodyScrolls, false, "Settings pushed the document into scroll.");
+
+  // Width, not column count. The regression kept two grid columns and starved
+  // the content one, so `nav.right <= content.left` stayed true throughout.
+  const expectedCardWidth = Math.min(1080, viewport.width);
+  assert.ok(
+    opened.card.width >= expectedCardWidth - 48,
+    `Settings card is ${Math.round(opened.card.width)}px wide at ${viewport.width}px; `
+      + `expected about ${expectedCardWidth}px. A narrow card stacks the form into a ribbon.`,
+  );
+  assert.ok(
+    opened.nav.right <= opened.content.left + 1,
+    "Settings nav and content are stacked, not side by side.",
+  );
+  assert.ok(
+    opened.content.width >= 600,
+    `Settings content column is only ${Math.round(opened.content.width)}px wide.`,
+  );
+
+  // A dialog that resizes itself as you move between sections reads as a bug
+  // even when every individual section is fine.
+  for (const section of ["agents", "runtime", "appearance", "diagnostics"]) {
+    await page.locator(`[data-testid='settings-nav-${section}']`).click();
+    await page.waitForSelector(`[data-testid='settings-nav-${section}'][aria-current='page']`, {
+      timeout: 5_000,
+    });
+    const after = await settingsBoxes(page);
+    assert.ok(after.card, `Settings card vanished on section ${section}.`);
+    for (const edge of ["top", "left", "width", "height"]) {
+      assert.ok(
+        Math.abs(after.card[edge] - opened.card[edge]) <= 1,
+        `Settings card ${edge} moved from ${Math.round(opened.card[edge])} to `
+          + `${Math.round(after.card[edge])} when opening section "${section}". `
+          + "The dialog box must not depend on which section is showing.",
+      );
+    }
+  }
+  await page.locator("[data-testid='settings-nav-security']").click();
+  await page.waitForSelector("[data-testid='settings-nav-security'][aria-current='page']", {
+    timeout: 5_000,
+  });
+
   const file = `settings-${viewport.width}x${viewport.height}.png`;
   await page.screenshot({ path: path.join(outputRoot, file), fullPage: false });
   captures.push({ file, state: "settings", viewport: `${viewport.width}x${viewport.height}` });
