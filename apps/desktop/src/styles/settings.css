@@ -23,7 +23,14 @@
  */
 .settings-backdrop .settings-panel {
   width: min(1080px, 100%);
-  max-height: min(90vh, 760px);
+  /*
+   * Fixed height, not a max. With only a ceiling the frame shrank to whatever
+   * the selected section happened to need, so switching from a long section to
+   * a short one resized the dialog and — since the backdrop centres it — moved
+   * it under the pointer. A settings window's size is a property of the window,
+   * not of the page you happen to be on; the content column scrolls instead.
+   */
+  height: min(90vh, 760px);
   display: flex;
   flex-direction: column;
   gap: 0;

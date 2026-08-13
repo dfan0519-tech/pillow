@@ -779,15 +779,17 @@ export function Workbench({
           <div className="stage-top__title" data-tauri-drag-region>
             {project ? (
               <h1
+                data-tauri-drag-region
                 data-testid="active-project-name"
                 title={conversationTitle ? `${project.name} / ${conversationTitle}` : project.name}
               >
-                <span>{project.name}</span>
+                <span data-tauri-drag-region>{project.name}</span>
                 {conversationTitle ? (
                   <>
-                    <span aria-hidden="true" className="stage-top__separator">/</span>
+                    <span aria-hidden="true" className="stage-top__separator" data-tauri-drag-region>/</span>
                     <span
                       className="stage-top__conversation"
+                      data-tauri-drag-region
                       data-testid="active-conversation-title"
                     >
                       {conversationTitle}
@@ -796,10 +798,10 @@ export function Workbench({
                 ) : null}
               </h1>
             ) : (
-              <h1 data-testid="empty-workbench-title">新对话</h1>
+              <h1 data-tauri-drag-region data-testid="empty-workbench-title">新对话</h1>
             )}
           </div>
-          <div className="stage-top__actions">
+          <div className="stage-top__actions" data-tauri-drag-region>
             {permissionMode !== "default" ? (
               <div
                 className={`permission-mode-indicator permission-mode-indicator--${permissionMode}`}
