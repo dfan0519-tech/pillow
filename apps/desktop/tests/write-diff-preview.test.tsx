@@ -74,9 +74,11 @@ describe("WriteDiffPreview", () => {
         })}
       />,
     );
+    // Fingerprint only — see the same assertion in write-approval-bar.test.tsx.
     expect(screen.getByTestId("write-diff-content-digest")).toHaveTextContent(
-      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "cccccccc",
     );
+    expect(document.body.textContent ?? "").not.toContain("sha256:");
     expect(screen.getByTestId("write-diff-truncated")).toHaveTextContent(
       "完整拟写入内容",
     );

@@ -304,3 +304,26 @@ export function normalizeWriteApprovalError(
     FIXED_UNAVAILABLE_MESSAGE,
   );
 }
+
+/**
+ * Short fingerprint of the sealed content, for the approval surfaces.
+ *
+ * The full `sha256:…` digest stays in the data flow — it is what the host binds
+ * the decision to — but it is never rendered. The C3-F privacy contract forbids
+ * digest carriers in visible text and body HTML, because approval screenshots
+ * and accessibility text should not carry opaque identifiers. What the user
+ * actually needs is far smaller: enough to tell "the thing I reviewed" from
+ * "some other proposal", which a short tail gives without printing an id.
+ *
+ * External audit EA-04 asks for the decision to be bound to a digest and for
+ * the UI to show the *review object* that digest names. It asks for the
+ * content to be reviewable, not for the hash to be on screen.
+ */
+export function shortContentFingerprint(
+  digest: string | null | undefined,
+): string | null {
+  if (typeof digest !== "string") return null;
+  const hex = digest.includes(":") ? digest.slice(digest.indexOf(":") + 1) : digest;
+  const tail = hex.trim().slice(-8);
+  return tail.length === 8 ? tail : null;
+}

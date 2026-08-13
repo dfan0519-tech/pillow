@@ -4,6 +4,7 @@
  */
 
 import type { WriteDiffView } from "../../lib/writeApprovalGateway";
+import { shortContentFingerprint } from "../../lib/writeApprovalGateway";
 import "../../styles/write-approval.css";
 
 export type WriteDiffPreviewProps = {
@@ -42,7 +43,7 @@ export function WriteDiffPreview({ diff }: WriteDiffPreviewProps) {
             className="write-diff-preview__digest"
             data-testid="write-diff-content-digest"
           >
-            内容摘要 {diff.contentDigest}
+            内容指纹 ···{shortContentFingerprint(diff.contentDigest)}
           </p>
         ) : null}
         {diff.truncated ? (

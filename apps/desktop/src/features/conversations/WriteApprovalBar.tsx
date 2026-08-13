@@ -22,6 +22,7 @@ import type {
   WriteDecision,
   WriteProposalView,
 } from "../../lib/writeApprovalGateway";
+import { shortContentFingerprint } from "../../lib/writeApprovalGateway";
 import { AlwaysRuleDialog } from "../permissions/AlwaysRuleDialog";
 import {
   writePrefixFromMode,
@@ -285,7 +286,7 @@ export function WriteApprovalBar({
             className="write-approval-bar__digest"
             data-testid="write-approval-content-digest"
           >
-            内容摘要 {contentDigest}
+            内容指纹 ···{shortContentFingerprint(contentDigest)}
           </p>
         ) : null}
         {truncatedUnreviewed ? (

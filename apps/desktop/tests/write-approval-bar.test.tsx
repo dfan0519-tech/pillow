@@ -197,9 +197,14 @@ describe("WriteApprovalBar", () => {
     expect(screen.getByTestId("write-approval-truncated-locked")).toHaveTextContent(
       "完整",
     );
-    expect(screen.getByTestId("write-approval-content-digest")).toHaveTextContent(
-      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
+    // A short fingerprint, never the digest. The C3-F privacy contract bars
+    // digest carriers from approval screenshots and accessibility text, and a
+    // tail is all a user needs to tell this proposal from another one. This
+    // assertion used to demand the full `sha256:…` string, which is what put a
+    // digest on screen and turned the acceptance run red.
+    const digestNode = screen.getByTestId("write-approval-content-digest");
+    expect(digestNode).toHaveTextContent("aaaaaaaa");
+    expect(document.body.textContent ?? "").not.toContain("sha256:");
     await user.click(approve);
     expect(onDecide).not.toHaveBeenCalled();
   });
