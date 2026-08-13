@@ -7,6 +7,12 @@ import {
   autoRuleDecisionLabel,
   formatRuleSummary,
 } from "../permissions/permissionPattern";
+import {
+  ROLE_DISPATCH_GOVERNED_LABEL,
+  ROLE_DISPATCH_UNGOVERNED_LABEL,
+  type RoleDispatchProposalView,
+  type RoleDispatchRecordView,
+} from "../../lib/roleDispatchGateway";
 import type {
   AgentActivityNoticeView,
   AgentActivityProjection,
@@ -18,6 +24,10 @@ import type {
   AgentToolStepView,
   AgentWriteOutcomeView,
 } from "./agentActivityTypes";
+import type {
+  ConversationDispatchView,
+  DispatchTimelineState,
+} from "./conversationTypes";
 
 const OPAQUE_ERROR_MESSAGE = "无法完成该操作。";
 const TOOL_OUTPUT_AVAILABLE = "工具已返回输出。";
@@ -551,4 +561,228 @@ function sanitizeDisplayText(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Process-lifecycle hint joined by proposalId. Never invented by the caller. */
+export type DispatchProcessHint = {
+  state: string;
+  exitCode?: number | null;
+};
+
+export type DispatchTimelineProjection = {
+  recordKey: string;
+  initiatorLabel: string | null;
+  targetRoleLabel: string | null;
+  taskText: string | null;
+  taskPreview: string | null;
+  state: DispatchTimelineState | null;
+  stateLabel: string | null;
+  unavailableNotes: string[];
+  isLive: boolean;
+  isFailureLike: boolean;
+  governanceLabel: string | null;
+};
+
+const DISPATCH_STATE_FROM_TOKEN: Record<
+  string,
+  { state: DispatchTimelineState; label: string }
+> = {
+  proposed: { state: "proposed", label: "已提出" },
+  pending_approval: { state: "pending_approval", label: "待批准" },
+  approved: { state: "approved", label: "已批准" },
+  running: { state: "running", label: "执行中" },
+  succeeded: { state: "completed", label: "完成" },
+  completed: { state: "completed", label: "完成" },
+  failed: { state: "failed", label: "失败" },
+  rejected: { state: "rejected", label: "已拒绝" },
+  expired: { state: "expired", label: "已过期" },
+  cancelled: { state: "cancelled", label: "已取消" },
+  interrupted: { state: "interrupted", label: "已中断" },
+};
+
+const TASK_PREVIEW_MAX = 96;
+
+/**
+ * Lift a propose response into a timeline row. Slot labels stay optional —
+ * the host DTO has no display names.
+ */
+export function dispatchViewFromProposal(
+  proposal: RoleDispatchProposalView,
+  labels?: {
+    initiatorLabel?: string | null;
+    targetLabel?: string | null;
+  },
+): ConversationDispatchView {
+  return {
+    assignmentId: proposal.assignmentId,
+    initiatorSlotId: proposal.initiatorSlotId,
+    targetSlotId: proposal.targetSlotId,
+    targetRole: proposal.targetRole,
+    targetRoleCustomName: proposal.targetRoleCustomName,
+    taskText: proposal.taskText,
+    governance: proposal.governance,
+    proposalId: proposal.proposal.proposalId,
+    callId: proposal.callId,
+    claimedGovernedExecution: null,
+    exitCode: null,
+    durationMs: null,
+    initiatorLabel: labels?.initiatorLabel ?? null,
+    targetLabel: labels?.targetLabel ?? null,
+    proposalState: proposal.proposal.state,
+  };
+}
+
+/**
+ * Lift a list-record DTO. Target role and task are absent on that DTO
+ * and stay absent here — do not invent them.
+ */
+export function dispatchViewFromRecord(
+  record: RoleDispatchRecordView,
+  labels?: {
+    initiatorLabel?: string | null;
+    targetLabel?: string | null;
+  },
+): ConversationDispatchView {
+  return {
+    assignmentId: record.assignmentId,
+    initiatorSlotId: record.initiatorSlotId,
+    targetSlotId: record.targetSlotId,
+    governance: record.governance,
+    proposalId: record.proposalId,
+    callId: record.callId,
+    claimedGovernedExecution: record.claimedGovernedExecution,
+    exitCode: record.exitCode,
+    durationMs: record.durationMs,
+    initiatorLabel: labels?.initiatorLabel ?? null,
+    targetLabel: labels?.targetLabel ?? null,
+  };
+}
+
+/**
+ * Project one dispatch row to UI-safe fields.
+ * Process hint wins over propose state, which wins over exit code.
+ * Missing facts become notes — never a fake "执行中".
+ */
+export function projectDispatchTimeline(
+  view: ConversationDispatchView,
+  process?: DispatchProcessHint | null,
+): DispatchTimelineProjection {
+  const forbidden = collectDispatchForbiddenIds(view);
+  const initiatorLabel = sanitizeDisplayText(view.initiatorLabel, forbidden);
+  const targetRoleLabel = resolveTargetRoleLabel(view, forbidden);
+  const taskText = sanitizeDisplayText(view.taskText, forbidden);
+  const taskPreview = taskText ? previewTaskText(taskText) : null;
+  const resolved = resolveDispatchState(view, process);
+  const unavailableNotes: string[] = [];
+  if (!initiatorLabel) {
+    unavailableNotes.push(
+      "发起方显示名不可用（列表记录只有内部槽位标识）",
+    );
+  }
+  if (!targetRoleLabel) {
+    unavailableNotes.push("目标角色名不可用（列表记录未带角色名）");
+  }
+  if (!taskText) {
+    unavailableNotes.push("任务描述不可用（列表记录未带任务文本）");
+  }
+  if (!resolved.state) {
+    unavailableNotes.push(
+      "当前步骤不可用（没有对应的进程事件，列表记录也没有退出码）",
+    );
+  }
+
+  const recordKey =
+    firstNonEmpty(view.assignmentId, view.callId, view.proposalId)
+    ?? "dispatch-row";
+
+  return {
+    recordKey,
+    initiatorLabel,
+    targetRoleLabel,
+    taskText,
+    taskPreview,
+    state: resolved.state,
+    stateLabel: resolved.label,
+    unavailableNotes,
+    isLive:
+      resolved.state === "pending_approval"
+      || resolved.state === "approved"
+      || resolved.state === "running",
+    isFailureLike:
+      resolved.state === "failed"
+      || resolved.state === "rejected"
+      || resolved.state === "expired"
+      || resolved.state === "cancelled"
+      || resolved.state === "interrupted",
+    governanceLabel:
+      view.governance === "none"
+        ? ROLE_DISPATCH_UNGOVERNED_LABEL
+        : view.governance === "full"
+          ? ROLE_DISPATCH_GOVERNED_LABEL
+          : null,
+  };
+}
+
+function collectDispatchForbiddenIds(
+  view: ConversationDispatchView,
+): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: string | undefined | null) => {
+    const trimmed = value?.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    ids.push(trimmed);
+  };
+  push(view.assignmentId);
+  push(view.initiatorSlotId);
+  push(view.targetSlotId);
+  push(view.proposalId);
+  push(view.callId);
+  return ids;
+}
+
+function resolveTargetRoleLabel(
+  view: ConversationDispatchView,
+  forbidden: readonly string[],
+): string | null {
+  const fromLabel = sanitizeDisplayText(view.targetLabel, forbidden);
+  if (fromLabel) return fromLabel;
+  const role = normalizeToken(view.targetRole ?? undefined);
+  if (role === "librarian") return "信息管理员";
+  if (role === "controller") return "总控";
+  if (role === "custom") {
+    return sanitizeDisplayText(view.targetRoleCustomName, forbidden);
+  }
+  return sanitizeDisplayText(view.targetRole, forbidden);
+}
+
+function resolveDispatchState(
+  view: ConversationDispatchView,
+  process?: DispatchProcessHint | null,
+): { state: DispatchTimelineState | null; label: string | null } {
+  const fromProcess = mapDispatchStateToken(process?.state);
+  if (fromProcess) return fromProcess;
+  const fromProposal = mapDispatchStateToken(view.proposalState);
+  if (fromProposal) return fromProposal;
+  if (typeof view.exitCode === "number") {
+    return view.exitCode === 0
+      ? { state: "completed", label: "完成" }
+      : { state: "failed", label: "失败" };
+  }
+  return { state: null, label: null };
+}
+
+function mapDispatchStateToken(
+  token: string | null | undefined,
+): { state: DispatchTimelineState; label: string } | null {
+  const normalized = normalizeToken(token ?? undefined);
+  if (!normalized) return null;
+  return DISPATCH_STATE_FROM_TOKEN[normalized] ?? null;
+}
+
+function previewTaskText(text: string): string {
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? text;
+  if (firstLine.length <= TASK_PREVIEW_MAX) return firstLine;
+  return `${firstLine.slice(0, TASK_PREVIEW_MAX)}…`;
 }

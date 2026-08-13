@@ -339,6 +339,21 @@ describe("role-dispatch → existing CommandApprovalBar (T2)", () => {
       ROLE_DISPATCH_UNGOVERNED_LABEL,
     );
 
+    // The dispatch is visible in the conversation itself, not only in the
+    // panel. The timeline component could already render this, but nothing
+    // fed it: the wiring in Workbench is what makes another slot starting
+    // work observable where the user is actually looking.
+    const dispatchRows = await screen.findAllByTestId("dispatch-timeline-row");
+    expect(dispatchRows.length).toBeGreaterThan(0);
+    // The fixture target is a Custom role, so the row must show that name
+    // rather than a generic one — attribution is the point of the row.
+    expect(screen.getByTestId("dispatch-timeline-target")).toHaveTextContent(
+      "写码",
+    );
+    expect(screen.getByTestId("workbench").textContent ?? "").toContain(
+      "实现派单 UI",
+    );
+
     // Approve via the **existing** bar only.
     await user.click(screen.getByTestId("command-approval-approve"));
     await waitFor(() => {

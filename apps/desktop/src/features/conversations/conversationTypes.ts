@@ -99,6 +99,49 @@ export type RunView = {
   terminalKind: RuntimeEventKind | null;
 };
 
+/**
+ * Known dispatch lifecycle tokens the timeline may paint.
+ * Only emitted when a real propose state, process event, or exit code exists.
+ */
+export type DispatchTimelineState =
+  | "proposed"
+  | "pending_approval"
+  | "approved"
+  | "running"
+  | "completed"
+  | "failed"
+  | "rejected"
+  | "expired"
+  | "cancelled"
+  | "interrupted";
+
+/**
+ * Renderer-side dispatch row. Not a host DTO.
+ * List records are sparse: omit target/task/labels when the host did not
+ * supply them. Identifiers are internal keys and must never be painted.
+ */
+export type ConversationDispatchView = {
+  assignmentId: string;
+  initiatorSlotId: string;
+  targetSlotId: string;
+  /** Present on propose; absent on `list_role_dispatches`. */
+  targetRole?: string | null;
+  targetRoleCustomName?: string | null;
+  /** Present on propose; absent on `list_role_dispatches`. */
+  taskText?: string | null;
+  governance: "full" | "none";
+  proposalId: string | null;
+  callId: string;
+  claimedGovernedExecution: boolean | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  /** Parent-resolved slot catalog label. Never invented here. */
+  initiatorLabel?: string | null;
+  targetLabel?: string | null;
+  /** `proposal.state` from propose. Not inferred from list rows. */
+  proposalState?: string | null;
+};
+
 export type ConversationTimelineView = {
   conversationId: string;
   messages: TimelineMessageDto[];
@@ -117,6 +160,11 @@ export type ConversationTimelineView = {
   subagents: SubagentActivity[];
   activitiesByRunId: Record<string, RunActivityView>;
   activeRunId: string | null;
+  /**
+   * First-class dispatch rows. Optional so existing reducers stay valid.
+   * Parent overlays propose fields + slot labels; this module does not fetch.
+   */
+  dispatches?: ConversationDispatchView[];
 };
 
 export type ConversationUiState = {

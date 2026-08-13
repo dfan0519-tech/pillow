@@ -41,6 +41,9 @@ import type {
 } from "../execution/executionTypes";
 import { CommandApprovalBar } from "../execution/CommandApprovalBar";
 import { RoleDispatchPanel } from "../conversations/RoleDispatchPanel";
+import { dispatchViewFromProposal } from "../conversations/agentActivityProjection";
+import type { ConversationDispatchView } from "../conversations/conversationTypes";
+import type { RoleDispatchProposalView } from "../../lib/roleDispatchGateway";
 import { isPortableRelativePath } from "../resources/resourcePaneState";
 import { IconPanelRight } from "../../components/icons";
 import type { PermissionModeLabel } from "../settings/settingsTypes";
@@ -202,6 +205,13 @@ export function Workbench({
     }
     return new MockPermissionRulesGateway();
   }, [permissionRulesGatewayProp]);
+  /** Session-local dispatch narrative; cleared when the conversation changes. */
+  const [dispatchViews, setDispatchViews] = useState<ConversationDispatchView[]>([]);
+  useEffect(() => {
+    // Scoped to one conversation. Carrying entries across would attribute one
+    // conversation's dispatches to another, which is worse than showing none.
+    setDispatchViews([]);
+  }, [projectId, conversationId]);
   const [resourcePaneScope, setResourcePaneScope] =
     useState<{ projectId: string | null } | null>(null);
   /** Default resources — Changes is never an implicit body. */
@@ -736,7 +746,19 @@ export function Workbench({
    * After role-dispatch propose: re-list process proposals so the **existing**
    * CommandApprovalBar appears. Never invent a second approve surface.
    */
-  const handleRoleDispatchProposed = useCallback(() => {
+  /*
+   * A dispatch is the moment another slot starts working, and the conversation
+   * is where the user is looking. The list DTO cannot carry targetRole or
+   * taskText, so the proposal — the one place they exist — is captured here and
+   * kept for the session. Without this the timeline renders nothing and the
+   * dispatch looks like it never happened.
+   */
+  const handleRoleDispatchProposed = useCallback((proposal: RoleDispatchProposalView) => {
+    setDispatchViews((current) => {
+      const view = dispatchViewFromProposal(proposal);
+      const rest = current.filter((entry) => entry.assignmentId !== view.assignmentId);
+      return [...rest, view];
+    });
     const scope = scopeRef.current;
     if (!scope.projectId || !scope.conversationId) return;
     void relistApprovals(
@@ -851,6 +873,7 @@ export function Workbench({
         <div className="stage-body">
           {hasTimeline && timeline ? (
             <ConversationTimeline
+              dispatches={dispatchViews}
               onOpenProcessOutput={handleOpenProcessOutput}
               onOpenResource={(resource) => {
                 if (!project) return;

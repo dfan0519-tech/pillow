@@ -14,8 +14,15 @@ import {
   agentActivityFromRun,
   resolveResourceFromActivity,
 } from "./agentActivityFromTimeline";
+import {
+  projectDispatchTimeline,
+  type DispatchTimelineProjection,
+} from "./agentActivityProjection";
 import type {
+  ConversationDispatchView,
   ConversationTimelineView,
+} from "./conversationTypes";
+import type {
   ResourceReferenceView,
   RunActivityView,
   RunView,
@@ -34,6 +41,7 @@ import {
 } from "../permissions/permissionPattern";
 import "../../styles/execution.css";
 import "../../styles/permission-rules.css";
+import "../../styles/dispatch-timeline.css";
 
 export type OpenProcessOutputRequest = {
   /** Internal only — never painted in the timeline. */
@@ -45,6 +53,11 @@ export type OpenProcessOutputRequest = {
 type ConversationTimelineProps = {
   timeline: ConversationTimelineView;
   run: RunView | null;
+  /**
+   * Live dispatch overlay from the parent (propose + list + slot labels).
+   * When omitted, `timeline.dispatches` is used. Never fetched here.
+   */
+  dispatches?: ConversationDispatchView[];
   onOpenResource?: (resource: ResourceReferenceView) => void;
   /**
    * Opens the existing Terminal output pane for a conversation-owned process.
@@ -61,15 +74,20 @@ const VIEWPORT_HEIGHT = 480;
 
 type TimelineItem =
   | { type: "message"; message: TimelineMessageDto; sourceOrder: number }
-  | { type: "activity"; activity: RunActivityView; sourceOrder: number };
+  | { type: "activity"; activity: RunActivityView; sourceOrder: number }
+  | { type: "dispatch"; dispatch: ConversationDispatchView; sourceOrder: number };
 
 export function ConversationTimeline({
   timeline,
   run,
+  dispatches,
   onOpenResource,
   onOpenProcessOutput,
 }: ConversationTimelineProps) {
-  const items = useMemo(() => buildChronologicalItems(timeline), [timeline]);
+  const items = useMemo(
+    () => buildChronologicalItems(timeline, dispatches),
+    [timeline, dispatches],
+  );
   const streaming = isRunActive(run);
   const usePagination = items.length > TIMELINE_WINDOW_THRESHOLD;
 
@@ -93,7 +111,18 @@ export function ConversationTimeline({
   );
 }
 
-function buildChronologicalItems(timeline: ConversationTimelineView): TimelineItem[] {
+function resolveDispatches(
+  timeline: ConversationTimelineView,
+  dispatches?: ConversationDispatchView[],
+): ConversationDispatchView[] {
+  if (dispatches !== undefined) return dispatches;
+  return timeline.dispatches ?? [];
+}
+
+function buildChronologicalItems(
+  timeline: ConversationTimelineView,
+  extraDispatches?: ConversationDispatchView[],
+): TimelineItem[] {
   const messages: TimelineItem[] = timeline.messages
     .filter((message) => message.role !== "system")
     .map((message, sourceOrder) => ({ type: "message", message, sourceOrder }));
@@ -103,8 +132,17 @@ function buildChronologicalItems(timeline: ConversationTimelineView): TimelineIt
       activity,
       sourceOrder: timeline.messages.length + index,
     }));
+  const dispatchOffset = timeline.messages.length + activities.length;
+  const dispatches: TimelineItem[] = resolveDispatches(
+    timeline,
+    extraDispatches,
+  ).map((dispatch, index) => ({
+    type: "dispatch",
+    dispatch,
+    sourceOrder: dispatchOffset + index,
+  }));
 
-  return [...messages, ...activities].sort((left, right) => {
+  return [...messages, ...activities, ...dispatches].sort((left, right) => {
     const leftTime = itemTimestamp(left);
     const rightTime = itemTimestamp(right);
     if (leftTime && rightTime) {
@@ -121,17 +159,22 @@ function buildChronologicalItems(timeline: ConversationTimelineView): TimelineIt
 
 function itemKey(item: TimelineItem, index: number): string {
   if (item.type === "activity") return `activity-${item.activity.runId}`;
+  if (item.type === "dispatch") {
+    const identity = item.dispatch.assignmentId.trim();
+    return identity ? `dispatch-${identity}` : `dispatch-${index}`;
+  }
   return item.message.id;
 }
 
 function itemTimestamp(item: TimelineItem): string | null {
-  return item.type === "activity"
-    ? item.activity.startedAt
-    : item.message.createdAt;
+  if (item.type === "activity") return item.activity.startedAt;
+  if (item.type === "dispatch") return null;
+  return item.message.createdAt;
 }
 
 function itemPriority(item: TimelineItem): number {
   if (item.type === "activity") return 1;
+  if (item.type === "dispatch") return 1;
   return item.message.role === "user" ? 0 : 2;
 }
 
@@ -152,6 +195,24 @@ function TimelineItemView({
   streaming: boolean;
   timeline: ConversationTimelineView;
 }) {
+  if (item.type === "dispatch") {
+    const processModels = buildProcessActivityModels(
+      timeline.events,
+      conversationId,
+    );
+    const proposalId = item.dispatch.proposalId;
+    const process = proposalId
+      ? processModels.find((model) => model.proposalId === proposalId)
+      : undefined;
+    const model = projectDispatchTimeline(
+      item.dispatch,
+      process
+        ? { state: process.state, exitCode: process.exitCode }
+        : null,
+    );
+    return <DispatchTimelineRow model={model} />;
+  }
+
   if (item.type === "activity") {
     const record = agentActivityFromRun(
       conversationId,
@@ -244,6 +305,108 @@ type VisibleRange = {
   start: number;
   end: number;
 };
+
+/**
+ * Narrative dispatch row. Not a decision surface — no approve/reject.
+ */
+function DispatchTimelineRow({
+  model,
+}: {
+  model: DispatchTimelineProjection;
+}) {
+  const hasTask = Boolean(model.taskText);
+  return (
+    <article
+      className="dispatch-timeline-row"
+      data-status={model.state ?? "unknown"}
+      data-testid="dispatch-timeline-row"
+    >
+      <div className="dispatch-timeline-row__card">
+        <div className="dispatch-timeline-row__header">
+          <span
+            aria-hidden="true"
+            className={
+              model.isLive
+                ? "dispatch-timeline-row__dot dispatch-timeline-row__dot--live"
+                : model.isFailureLike
+                  ? "dispatch-timeline-row__dot dispatch-timeline-row__dot--risk"
+                  : "dispatch-timeline-row__dot"
+            }
+          />
+          <span
+            className="dispatch-timeline-row__kind"
+            data-testid="dispatch-timeline-kind"
+          >
+            派单
+          </span>
+          {model.initiatorLabel ? (
+            <span
+              className="dispatch-timeline-row__party"
+              data-testid="dispatch-timeline-initiator"
+            >
+              从 {model.initiatorLabel}
+            </span>
+          ) : null}
+          {model.targetRoleLabel ? (
+            <span
+              className="dispatch-timeline-row__party"
+              data-testid="dispatch-timeline-target"
+            >
+              派给 {model.targetRoleLabel}
+            </span>
+          ) : null}
+          {model.stateLabel ? (
+            <span
+              className="dispatch-timeline-row__status"
+              data-testid="dispatch-timeline-status"
+            >
+              {model.stateLabel}
+            </span>
+          ) : null}
+          {model.governanceLabel ? (
+            <span className="dispatch-timeline-row__governance">
+              {model.governanceLabel}
+            </span>
+          ) : null}
+        </div>
+        {hasTask ? (
+          <details
+            className="dispatch-timeline-row__task"
+            data-testid="dispatch-timeline-task-details"
+          >
+            <summary
+              className="dispatch-timeline-row__task-summary"
+              data-testid="dispatch-timeline-task-summary"
+            >
+              任务 {model.taskPreview}
+            </summary>
+            <p
+              className="dispatch-timeline-row__task-body"
+              data-testid="dispatch-timeline-task"
+            >
+              {model.taskText}
+            </p>
+          </details>
+        ) : null}
+        {model.unavailableNotes.map((note) => (
+          <p
+            className="dispatch-timeline-row__note"
+            data-testid="dispatch-timeline-unavailable"
+            key={note}
+            role="note"
+          >
+            {note}
+          </p>
+        ))}
+      </div>
+      <div
+        aria-hidden="true"
+        data-testid="dispatch-timeline-no-approval"
+        hidden
+      />
+    </article>
+  );
+}
 
 /**
  * Compact progressive-disclosure row for one process proposal.

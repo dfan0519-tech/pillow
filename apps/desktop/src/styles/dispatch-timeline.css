@@ -1,0 +1,101 @@
+/**
+ * First-class dispatch rows on the conversation timeline.
+ * Narrative only — no approve/reject chrome (that stays on CommandApprovalBar).
+ */
+
+.dispatch-timeline-row {
+  margin: 4px 0;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dispatch-timeline-row__card {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elevated, #1c1c20);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dispatch-timeline-row__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.dispatch-timeline-row__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary, rgba(255, 255, 255, 0.35));
+  flex-shrink: 0;
+}
+
+.dispatch-timeline-row__dot--live {
+  background: var(--accent, #dccbff);
+}
+
+.dispatch-timeline-row__dot--risk {
+  background: var(--warning, #f0993d);
+}
+
+.dispatch-timeline-row__kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.5));
+}
+
+.dispatch-timeline-row__party {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+
+.dispatch-timeline-row__status {
+  font-size: 12px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.68));
+}
+
+.dispatch-timeline-row__governance {
+  font-size: 11px;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.52));
+}
+
+.dispatch-timeline-row__task {
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  padding-top: 4px;
+}
+
+.dispatch-timeline-row__task-summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+  padding: 2px 0;
+}
+
+.dispatch-timeline-row__task-summary::-webkit-details-marker {
+  display: none;
+}
+
+.dispatch-timeline-row__task-body {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dispatch-timeline-row__note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.52));
+}

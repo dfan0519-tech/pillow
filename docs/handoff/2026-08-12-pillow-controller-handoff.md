@@ -150,11 +150,28 @@ grok --prompt-file <简报> --permission-mode bypassPermissions --cwd <repo>
 🔴 **只设 `GROK_HOME=<slot-home>` 会去找 `<slot-home>/auth.json`(空的),
 新建一份平行凭据,并把已注册槽位误报成未登录。**
 
-**当前状态**:grok2 ✅ / grok4 ✅(heavy,优先跑重活)/ grok5 ❌ 未认证 /
-grok1 与 grok3 = **默认 profile,同一个账号,已耗尽(402)**。
+🔴 **grok1 是例外:它就是默认 profile,不要设环境变量。**
+`.superpowers/RUNBOOK.md` 第 108 行早就写了这条,只有 grok2/3/4 才是
+`<槽位 home>\.grok` 语义。给 grok1 也套环境变量会指向一个空目录,
+报「未认证」——**看起来像账号坏了,其实是路由错了**。
 
-🔴 **我一整天以为 grok1 和 grok3 是两个槽位,其实两次都跑的默认 profile。**
-额度是被同一个账号连跑一天耗掉的。
+**当前状态(2026-08-13 用 `grok inspect` 逐个核过解析出的 config 路径)**:
+
+| 槽位 | 路由 | 状态 |
+| --- | --- | --- |
+| grok1 | **不设环境变量** | ✅ 已登录 |
+| grok2 / grok3 | `<槽位 home>` | ✅ 已登录 |
+| grok4 | `<槽位 home>` | ⛔ 402(8-13 跑满) |
+| grok5 / grokbot | — | ❌ 未认证 |
+
+🔴 **本文早先那句「grok1 与 grok3 是同一账号、已耗尽」是错的**,
+起因就是上面这个路由错误:两次都落到了默认 profile。grok3 有独立账号。
+**这个错误让我少算了两个可用槽位,并且传了一整天。**
+教训不是"信息不够",是**已有文档写了而我没照做**。
+
+🔴 RUNBOOK 还要求「解读登录/额度/Worker 结果之前,先通过 Keeper 运行时元数据
+验证槽位路由」。Keeper 服务不在跑时做不到,**退而求其次用 `grok inspect`
+核对实际解析到的 config 路径** —— 但要知道这只是替代证据,不是那条规则本身。
 
 ### Codex
 
