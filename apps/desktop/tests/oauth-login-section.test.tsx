@@ -55,6 +55,7 @@ function fixtureOauthSlot(
     updatedAt: NOW,
     accountLabel: "dev@example.test",
     accessExpiresAt: "2026-09-01T00:00:00.000Z",
+    isActive: false,
     ...overrides,
   };
 }

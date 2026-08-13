@@ -156,6 +156,107 @@ fn governed_api_slot_command_activates_a_project_scoped_runtime() {
     assert!(!runtime.shutdown_if_active().unwrap());
 }
 
+/// List DTO must report the process-active slot from `active_slot_id` so a
+/// remounted UI can mark the live row without session-local guesswork.
+#[cfg(windows)]
+#[test]
+fn list_runtime_slots_reports_host_active_slot_from_runtime_state() {
+    let _probe_guard = runtime_probe_guard();
+    let harness = Harness::new();
+    let first = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "First".into(),
+        "https://example.invalid/v1".into(),
+        "model-one".into(),
+        "pillow-test-canary-active-a".into(),
+    )
+    .unwrap();
+    let second = create_grok_api_key_slot_impl(
+        &harness.slots,
+        &harness.app,
+        harness.project_id.clone(),
+        "Second".into(),
+        "https://example.invalid/v1".into(),
+        "model-two".into(),
+        "pillow-test-canary-active-b".into(),
+    )
+    .unwrap();
+    let settings = SqliteSettingsRepository::open(&harness.database_path).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    settings
+        .upsert_path(
+            SettingScope::Global,
+            None,
+            KEY_GROK_EXECUTABLE,
+            &executable.to_string_lossy(),
+            SettingsUpdatedBy::User,
+        )
+        .unwrap();
+    let runtime = RuntimeServiceState::new(&harness.database_path, Arc::new(NoopEmitter), None);
+
+    // No live runtime → every row is inactive (do not invent a default).
+    let listed_idle = list_runtime_slots_impl(
+        &harness.slots,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(listed_idle.len(), 2);
+    assert!(listed_idle.iter().all(|row| !row.is_active));
+
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        first.slot_id.clone(),
+    )
+    .unwrap();
+
+    let listed_live = list_runtime_slots_impl(
+        &harness.slots,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+    )
+    .unwrap();
+    let by_id: std::collections::HashMap<_, _> = listed_live
+        .iter()
+        .map(|row| (row.slot_id.as_str(), row.is_active))
+        .collect();
+    assert_eq!(by_id.get(first.slot_id.as_str()), Some(&true));
+    assert_eq!(by_id.get(second.slot_id.as_str()), Some(&false));
+    assert_eq!(listed_live.iter().filter(|row| row.is_active).count(), 1);
+
+    // Switching the live slot moves the flag — exclusivity from host state.
+    start_runtime_slot_impl(
+        &harness.slots,
+        &settings,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+        second.slot_id.clone(),
+    )
+    .unwrap();
+    let listed_switched = list_runtime_slots_impl(
+        &harness.slots,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+    )
+    .unwrap();
+    let by_id: std::collections::HashMap<_, _> = listed_switched
+        .iter()
+        .map(|row| (row.slot_id.as_str(), row.is_active))
+        .collect();
+    assert_eq!(by_id.get(first.slot_id.as_str()), Some(&false));
+    assert_eq!(by_id.get(second.slot_id.as_str()), Some(&true));
+}
+
 #[cfg(windows)]
 #[test]
 fn serialized_slot_dto_has_an_exact_allowlist_and_never_contains_the_key() {
@@ -188,6 +289,8 @@ fn serialized_slot_dto_has_an_exact_allowlist_and_never_contains_the_key() {
             "displayName",
             "executablePath",
             "governance",
+            // Host-reported process-active conversation runtime flag.
+            "isActive",
             "kind",
             "launchArgs",
             "modelId",
@@ -211,6 +314,8 @@ fn serialized_slot_dto_has_an_exact_allowlist_and_never_contains_the_key() {
         object.get("governance").and_then(Value::as_str),
         Some("full")
     );
+    // Newly created slots are never process-active until start_runtime_slot.
+    assert_eq!(object.get("isActive"), Some(&Value::Bool(false)));
     assert!(object.get("apiKey").is_none());
 }
 
@@ -608,8 +713,12 @@ fn failed_active_model_replacement_does_not_leave_the_old_runtime_active() {
     assert_eq!(error.code, "runtime_executable_missing");
     assert!(!runtime.shutdown_if_active().unwrap());
 
-    let listed = list_runtime_slots_impl(&harness.slots, &harness.app, harness.project_id).unwrap();
+    let listed =
+        list_runtime_slots_impl(&harness.slots, &harness.app, &runtime, harness.project_id)
+            .unwrap();
     assert_eq!(listed[0].model_id.as_deref(), Some("model-new"));
+    // Replacement failed closed — no slot is process-active.
+    assert!(!listed[0].is_active);
 }
 
 #[cfg(windows)]
@@ -1156,8 +1265,13 @@ fn delete_command_removes_slot_and_destroys_secret() {
     // Active runtime bound to the deleted slot must have been stopped.
     assert!(!runtime.shutdown_if_active().unwrap());
 
-    let listed =
-        list_runtime_slots_impl(&harness.slots, &harness.app, harness.project_id.clone()).unwrap();
+    let listed = list_runtime_slots_impl(
+        &harness.slots,
+        &harness.app,
+        &runtime,
+        harness.project_id.clone(),
+    )
+    .unwrap();
     assert!(listed.is_empty());
     assert!(!secret_path.exists());
     let store = DpapiFileSecretStore::new(secrets_dir);

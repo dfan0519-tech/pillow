@@ -94,6 +94,11 @@ export const RUNTIME_SLOT_DTO_KEYS = [
   "accountLabel",
   /** OAuth access-token expiry (RFC3339); null for non-OAuth. Never token text. */
   "accessExpiresAt",
+  /**
+   * Host-reported active conversation runtime for this project
+   * (`active_slot_id`). Required boolean — absence is invalid, not false.
+   */
+  "isActive",
 ] as const;
 
 /** Exact closed allowlist for `ProviderLoginCatalogEntryDto`. */
@@ -396,6 +401,7 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
       || value.accessExpiresAt === undefined
       || isFiniteTimestamp(value.accessExpiresAt)
     )
+    || typeof value.isActive !== "boolean"
   ) {
     throw invalidResponse();
   }
@@ -443,6 +449,7 @@ export function parseRuntimeSlotView(value: unknown): RuntimeSlotView {
       value.accountLabel === undefined ? null : value.accountLabel,
     accessExpiresAt:
       value.accessExpiresAt === undefined ? null : value.accessExpiresAt,
+    isActive: value.isActive,
   };
 }
 
@@ -1401,6 +1408,8 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       ...slot,
       accountLabel: slot.accountLabel ?? null,
       accessExpiresAt: slot.accessExpiresAt ?? null,
+      // Host never invents active; missing test seed → inactive.
+      isActive: slot.isActive === true,
     }));
   }
 
@@ -1564,6 +1573,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         updatedAt: now,
         accountLabel: null,
         accessExpiresAt: null,
+        isActive: false,
       };
       this.slots.push(slot);
       return { ...slot };
@@ -1605,6 +1615,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         updatedAt: now,
         accountLabel: null,
         accessExpiresAt: null,
+        isActive: false,
       };
       this.slots.push(slot);
       return { ...slot };
@@ -1658,6 +1669,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         updatedAt: now,
         accountLabel: accountFromUser || this.oauthSuccessAccountLabel,
         accessExpiresAt: this.oauthSuccessExpiresAt,
+        isActive: false,
       };
       this.slots.push(slot);
       return { ...slot };
@@ -1688,6 +1700,7 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
       updatedAt: now,
       accountLabel: null,
       accessExpiresAt: null,
+      isActive: false,
     };
     this.slots.push(slot);
     return { ...slot };
@@ -1919,6 +1932,12 @@ export class MockRuntimeSlotsGateway implements RuntimeSlotsGateway {
         this.probeFailCode,
         mapGrokProbeFailureMessage(this.probeFailCode),
       );
+    }
+    // Host activates one slot at a time — mirror process-active exclusivity.
+    for (const row of this.slots) {
+      if (row.projectId === projectId) {
+        row.isActive = row.slotId === slotId;
+      }
     }
     return {
       slotId,

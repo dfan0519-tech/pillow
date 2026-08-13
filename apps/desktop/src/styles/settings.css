@@ -639,6 +639,23 @@
   margin-top: 4px;
 }
 
+/*
+ * Host-reported live conversation runtime (`RuntimeSlotView.isActive`).
+ * One row at a time; absence of any true isActive means none are live.
+ */
+.runtime-slots-list__item--active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 80%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
+}
+
+.runtime-slots-list__item--active .runtime-slots-badge--started {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
 /* Two-step slot connect: first-step provider picker (OpenCode-shaped). */
 .settings-provider-picker {
   display: grid;

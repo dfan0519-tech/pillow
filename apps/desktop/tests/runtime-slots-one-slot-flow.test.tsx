@@ -52,6 +52,7 @@ function fixtureApiKeySlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -79,6 +80,7 @@ function fixtureExternalSlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }

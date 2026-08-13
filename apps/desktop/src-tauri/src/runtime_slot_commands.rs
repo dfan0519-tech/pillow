@@ -64,6 +64,10 @@ pub struct RuntimeSlotDto {
     pub account_label: Option<String>,
     /// OAuth access-token expiry (RFC3339); null for non-OAuth. Never token text.
     pub access_expires_at: Option<String>,
+    /// True when this slot is the process-active conversation runtime for its
+    /// project (`RuntimeServiceState.active_slot_id`). False for every row when
+    /// none is live — never default the first slot.
+    pub is_active: bool,
 }
 
 /// Public OAuth supplement from the renderer (never tokens/codes/secrets).
@@ -198,9 +202,10 @@ pub struct ProbeModelCatalogDto {
 pub fn list_runtime_slots(
     slots: State<'_, RuntimeSlotService>,
     app: State<'_, AppState>,
+    runtime: State<'_, RuntimeServiceState>,
     project_id: String,
 ) -> Result<Vec<RuntimeSlotDto>, CommandError> {
-    list_runtime_slots_impl(&slots, &app, project_id)
+    list_runtime_slots_impl(&slots, &app, &runtime, project_id)
 }
 
 /// Unified create command. Auth kind is selected by `auth_kind`.
@@ -548,13 +553,21 @@ pub fn delete_runtime_slot(
 pub(crate) fn list_runtime_slots_impl(
     slots: &RuntimeSlotService,
     app: &AppState,
+    runtime: &RuntimeServiceState,
     project_id: String,
 ) -> Result<Vec<RuntimeSlotDto>, CommandError> {
+    let project_id_str = project_id.clone();
     let project_id = registered_project_id(app, &project_id)?;
-    slots
-        .list(project_id)
-        .map_err(map_slot_error)
-        .map(|views| views.into_iter().map(slot_to_dto).collect())
+    let views = slots.list(project_id).map_err(map_slot_error)?;
+    let mut out = Vec::with_capacity(views.len());
+    for view in views {
+        let slot_id = view.slot.id.0.to_string();
+        let is_active = runtime
+            .is_active_slot(&project_id_str, &slot_id)
+            .map_err(|error| command_error(error.code, &error.message))?;
+        out.push(slot_to_dto(view, is_active));
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,7 +640,7 @@ pub(crate) fn create_slot_impl<R: tauri::Runtime>(
     };
     slots
         .create_slot(project_id, display_name, auth, role)
-        .map(slot_to_dto)
+        .map(|view| slot_to_dto(view, false))
         .map_err(map_slot_error)
 }
 
@@ -692,7 +705,7 @@ fn create_oauth_slot_impl<R: tauri::Runtime>(
     };
     slots
         .create_slot(project_id, display_name, auth, role)
-        .map(slot_to_dto)
+        .map(|view| slot_to_dto(view, false))
         .map_err(map_slot_error)
 }
 
@@ -766,7 +779,7 @@ pub(crate) fn create_grok_login_slot_impl(
             CreateSlotAuth::GrokLogin { model_id: None },
             SlotRole::default_unassigned(),
         )
-        .map(slot_to_dto)
+        .map(|view| slot_to_dto(view, false))
         .map_err(map_slot_error)
 }
 
@@ -792,7 +805,7 @@ pub(crate) fn create_grok_api_key_slot_impl(
             },
             SlotRole::default_unassigned(),
         )
-        .map(slot_to_dto)
+        .map(|view| slot_to_dto(view, false))
         .map_err(map_slot_error)
 }
 
@@ -817,7 +830,7 @@ pub(crate) fn create_external_cli_slot_impl(
             },
             SlotRole::default_unassigned(),
         )
-        .map(slot_to_dto)
+        .map(|view| slot_to_dto(view, false))
         .map_err(map_slot_error)
 }
 
@@ -1025,7 +1038,10 @@ pub(crate) fn update_grok_api_key_slot_impl(
             error,
         ));
     }
-    Ok(slot_to_dto(updated))
+    let is_active = runtime
+        .is_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
+    Ok(slot_to_dto(updated, is_active))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1133,7 +1149,10 @@ pub(crate) fn update_slot_impl(
             error,
         ));
     }
-    Ok(slot_to_dto(updated))
+    let is_active = runtime
+        .is_active_slot(&project_id, &slot_id)
+        .map_err(|error| command_error(error.code, &error.message))?;
+    Ok(slot_to_dto(updated, is_active))
 }
 
 pub(crate) fn delete_runtime_slot_impl(
@@ -1335,7 +1354,7 @@ fn fail_closed_replacement_error(
     }
 }
 
-fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
+fn slot_to_dto(view: RuntimeSlotView, is_active: bool) -> RuntimeSlotDto {
     let slot = view.slot;
     let (
         kind,
@@ -1440,6 +1459,7 @@ fn slot_to_dto(view: RuntimeSlotView) -> RuntimeSlotDto {
         updated_at: slot.updated_at.to_rfc3339(),
         account_label,
         access_expires_at,
+        is_active,
     }
 }
 

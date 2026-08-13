@@ -56,6 +56,12 @@ export type RuntimeSlotView = {
    * Access/refresh token strings are never on this DTO.
    */
   accessExpiresAt: string | null;
+  /**
+   * Host-reported: this slot is the process-active conversation runtime
+   * (`RuntimeServiceState.active_slot_id` for the current project).
+   * False for every row when no slot is live — never invent a default.
+   */
+  isActive: boolean;
 };
 
 /** External CLI account-status command result (host may return raw stdout). */

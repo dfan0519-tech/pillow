@@ -65,6 +65,7 @@ function slot(
     updatedAt: "2026-08-12T00:00:00.000Z",
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }

@@ -105,6 +105,7 @@ describe("slot connect flow — edit reuses the same form", () => {
       updatedAt: NOW,
       accountLabel: null,
       accessExpiresAt: null,
+    isActive: false,
     };
     const gateway = new MockRuntimeSlotsGateway([slot]);
     render(

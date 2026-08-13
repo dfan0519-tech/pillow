@@ -56,6 +56,7 @@ function fixtureApiKeySlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -83,6 +84,7 @@ function fixtureExternalSlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -200,6 +202,84 @@ describe("RuntimeSlotsSection — external CLI ungoverned copy", () => {
     );
     expect(createWarn).toHaveTextContent(EXTERNAL_CLI_UNGOVERNED_HEADING);
     expect(createWarn).toHaveTextContent("不经过提案与审批");
+  });
+});
+
+describe("RuntimeSlotsSection — host-reported active slot", () => {
+  it("marks the host-reported active row on first load without a local start click", async () => {
+    // Restart / remount: session-local startedSlotId is gone; list DTO isActive
+    // is the only honest source (product: one live conversation runtime).
+    const live = fixtureApiKeySlot({
+      slotId: "slot-live",
+      displayName: "Live Grok",
+      isActive: true,
+    });
+    const idle = fixtureApiKeySlot({
+      slotId: "slot-idle",
+      displayName: "Idle Grok",
+      isActive: false,
+    });
+    const gateway = new MockRuntimeSlotsGateway([live, idle]);
+    render(
+      <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
+    );
+
+    await screen.findByTestId("runtime-slots-list");
+
+    const liveRow = screen.getByTestId("runtime-slot-slot-live");
+    const idleRow = screen.getByTestId("runtime-slot-slot-idle");
+    expect(liveRow).toHaveAttribute("data-active-runtime", "true");
+    expect(idleRow).toHaveAttribute("data-active-runtime", "false");
+    expect(
+      within(liveRow).getByTestId("runtime-slot-started-slot-live"),
+    ).toHaveTextContent("已启动");
+    expect(
+      within(liveRow).getByTestId("runtime-slot-probe-slot-live"),
+    ).toHaveTextContent("重新启动");
+    expect(
+      within(idleRow).getByTestId("runtime-slot-needs-start-slot-idle"),
+    ).toHaveTextContent(/未启动/);
+    expect(
+      within(idleRow).getByTestId("runtime-slot-probe-slot-idle"),
+    ).toHaveTextContent("启动");
+    expect(
+      within(idleRow).queryByTestId("runtime-slot-started-slot-idle"),
+    ).toBeNull();
+  });
+
+  it("does not invent an active slot when host reports none active", async () => {
+    const a = fixtureApiKeySlot({
+      slotId: "slot-a",
+      displayName: "A",
+      isActive: false,
+    });
+    const b = fixtureApiKeySlot({
+      slotId: "slot-b",
+      displayName: "B",
+      isActive: false,
+    });
+    const gateway = new MockRuntimeSlotsGateway([a, b]);
+    render(
+      <RuntimeSlotsSection gateway={gateway} projectId={PROJECT} />,
+    );
+
+    await screen.findByTestId("runtime-slots-list");
+    expect(screen.queryByTestId("runtime-slot-started-slot-a")).toBeNull();
+    expect(screen.queryByTestId("runtime-slot-started-slot-b")).toBeNull();
+    expect(screen.getByTestId("runtime-slot-probe-slot-a")).toHaveTextContent(
+      "启动",
+    );
+    expect(screen.getByTestId("runtime-slot-probe-slot-b")).toHaveTextContent(
+      "启动",
+    );
+    expect(screen.getByTestId("runtime-slot-slot-a")).toHaveAttribute(
+      "data-active-runtime",
+      "false",
+    );
+    expect(screen.getByTestId("runtime-slot-slot-b")).toHaveAttribute(
+      "data-active-runtime",
+      "false",
+    );
   });
 });
 

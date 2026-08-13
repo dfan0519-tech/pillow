@@ -75,6 +75,7 @@ function apiKeySlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -102,6 +103,7 @@ function externalSlot(
     updatedAt: NOW,
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -156,6 +158,21 @@ describe("runtime slot DTO parsers", () => {
         secretConfigured: true,
       })
     ).not.toThrow();
+  });
+
+  it("accepts isActive boolean and rejects missing or non-boolean isActive", () => {
+    const active = apiKeySlot({ isActive: true });
+    expect(parseRuntimeSlotView(active).isActive).toBe(true);
+    const idle = apiKeySlot({ isActive: false });
+    expect(parseRuntimeSlotView(idle).isActive).toBe(false);
+
+    const { isActive: _drop, ...without } = apiKeySlot();
+    expect(() => parseRuntimeSlotView(without)).toThrow(
+      /invalid runtime slot response/i,
+    );
+    expect(() =>
+      parseRuntimeSlotView({ ...apiKeySlot(), isActive: "yes" }),
+    ).toThrow(/invalid runtime slot response/i);
   });
 
   it("accepts oauth RuntimeSlotDto with accountLabel + accessExpiresAt", () => {
@@ -324,7 +341,9 @@ describe("runtime slot DTO parsers", () => {
     // Pin allowlist lengths so silently empty validators cannot go green.
     // 15 -> 17 when the uniform slot model added `role` + `roleCustomName`.
     // 17 -> 19 when OAuth login UI added `accountLabel` + `accessExpiresAt`.
-    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(19);
+    // 19 -> 20 when host-reported active slot added `isActive`.
+    expect(RUNTIME_SLOT_DTO_KEYS).toHaveLength(20);
+    expect(RUNTIME_SLOT_DTO_KEYS).toContain("isActive");
     expect(EXTERNAL_CLI_STATUS_DTO_KEYS).toHaveLength(8);
     expect(RUNTIME_SLOT_START_DTO_KEYS).toHaveLength(5);
     expect(RUNTIME_SLOT_MODEL_CATALOG_DTO_KEYS).toHaveLength(6);

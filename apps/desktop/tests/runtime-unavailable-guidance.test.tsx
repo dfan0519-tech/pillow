@@ -67,6 +67,7 @@ function fixtureGovernedSlot(
     updatedAt: "2026-08-11T00:00:00.000Z",
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
     ...overrides,
   };
 }
@@ -92,6 +93,7 @@ function fixtureExternalSlot(): RuntimeSlotView {
     updatedAt: "2026-08-11T00:00:00.000Z",
     accountLabel: null,
     accessExpiresAt: null,
+    isActive: false,
   };
 }
 

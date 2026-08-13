@@ -207,12 +207,6 @@ export function RuntimeSlotsSection({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  /**
-   * Last successfully started governed slot in this panel session.
-   * Host list DTO has no active flag — session-local only so Start stays
-   * obvious for slots that have never been started here.
-   */
-  const [startedSlotId, setStartedSlotId] = useState<string | null>(null);
 
   const [formMode, setFormMode] = useState<FormMode>("closed");
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
@@ -348,7 +342,6 @@ export function RuntimeSlotsSection({
   }, [gateway, projectId]);
 
   useEffect(() => {
-    setStartedSlotId(null);
     void reload();
   }, [reload]);
 
@@ -933,7 +926,9 @@ export function RuntimeSlotsSection({
           projectId,
           slot.slotId,
         );
-        setStartedSlotId(slot.slotId);
+        // Host is the only source of which slot is live — re-list after start.
+        const list = await gateway.listRuntimeSlots(projectId);
+        setSlots(list);
         setProbe({
           slotId: slot.slotId,
           ok: true,
@@ -1083,7 +1078,12 @@ export function RuntimeSlotsSection({
         <ul className="runtime-slots-list" data-testid="runtime-slots-list">
           {slots.map((slot) => (
             <li
-              className="runtime-slots-list__item"
+              className={
+                slot.isActive
+                  ? "runtime-slots-list__item runtime-slots-list__item--active"
+                  : "runtime-slots-list__item"
+              }
+              data-active-runtime={slot.isActive ? "true" : "false"}
               data-slot-id={slot.slotId}
               data-testid={`runtime-slot-${slot.slotId}`}
               key={slot.slotId}
@@ -1119,7 +1119,7 @@ export function RuntimeSlotsSection({
                   </span>
                   {slot.kind === "governed_grok"
                   && slot.governance === "full" ? (
-                    startedSlotId === slot.slotId ? (
+                    slot.isActive ? (
                       <span
                         className="runtime-slots-badge runtime-slots-badge--started"
                         data-testid={`runtime-slot-started-${slot.slotId}`}
@@ -1168,7 +1168,7 @@ export function RuntimeSlotsSection({
                   ) : (
                     <button
                       className={
-                        startedSlotId === slot.slotId
+                        slot.isActive
                           ? "runtime-slots-start"
                           : "runtime-slots-start runtime-slots-start--primary"
                       }
@@ -1177,7 +1177,7 @@ export function RuntimeSlotsSection({
                       onClick={() => void handleProbe(slot)}
                       type="button"
                     >
-                      {startedSlotId === slot.slotId ? "重新启动" : "启动"}
+                      {slot.isActive ? "重新启动" : "启动"}
                     </button>
                   )}
                 </div>
