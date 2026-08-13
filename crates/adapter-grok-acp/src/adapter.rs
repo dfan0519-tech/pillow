@@ -19,7 +19,7 @@ use crate::health::ProbeState;
 use crate::map::{SessionMap, map_stop_reason};
 use crate::prompt::run_prompt_loop;
 use crate::rpc::{Incoming, session_cancel_params, session_load_params, session_new_params};
-use crate::state::{Inner, ensure_connection, initialize_if_needed};
+use crate::state::{Inner, ensure_connection, initialize_if_needed, terminate_connection};
 use crate::turn::TurnRegistry;
 
 /// Grok Build ACP adapter. Provider wire state stays private to this type.
@@ -277,6 +277,15 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
         Ok(())
     }
 
+    /// Terminate the agent, and always return.
+    ///
+    /// Every wait here is bounded, including the one for the reader thread. An
+    /// unbounded reader join used to be the exception, and it could not be
+    /// satisfied by anything this side does: it ends when the agent's stdout
+    /// pipe reaches end-of-input, which needs a *third* party — a leaked
+    /// descendant holding an inherited copy of the write end — to let go first.
+    /// A desktop exit runs this on the event loop, so blocking here freezes the
+    /// window and never reaches the shell's fail-closed branch.
     fn shutdown(&self) -> Result<(), RuntimeError> {
         if self.shut_down.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -291,14 +300,10 @@ impl AgentRuntimeAdapter for GrokAcpAdapter {
                     .notify("session/cancel", session_cancel_params(&sid));
             }
         }
-        let kill_result = if let Some(mut conn) = inner.connection.take() {
-            conn.rpc.close();
-            // Shutdown fails if process-tree cleanup cannot be proved.
-            let result = conn.child.kill_tree(Duration::from_secs(2));
-            conn.rpc.join_reader();
-            result
-        } else {
-            Ok(())
+        // Shutdown fails if process-tree cleanup cannot be proved.
+        let kill_result = match inner.connection.take() {
+            Some(conn) => terminate_connection(conn, Duration::from_secs(2)),
+            None => Ok(()),
         };
         inner.sessions.clear();
         inner.turns.clear();
@@ -322,3 +327,5 @@ fn canonical_project_root(path: String) -> Result<String, RuntimeError> {
         .map(str::to_owned)
         .ok_or_else(|| internal("working_directory is not valid UTF-8"))
 }
+
+
