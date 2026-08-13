@@ -14,8 +14,15 @@
   padding: 24px;
 }
 
-.settings-panel {
-  width: min(920px, 100%);
+/*
+ * Selector carries the backdrop on purpose. This element is also a
+ * `.modal-card`, which sets `width: min(420px, 100%)` for small confirm
+ * dialogs, and two single-class rules are decided by import order — which put
+ * settings at dialog width and squeezed the content column to about 220px, so
+ * every card stacked into a ribbon. Specificity settles it instead of luck.
+ */
+.settings-backdrop .settings-panel {
+  width: min(1080px, 100%);
   max-height: min(90vh, 760px);
   display: flex;
   flex-direction: column;
@@ -58,7 +65,7 @@
 
 .settings-layout {
   display: grid;
-  grid-template-columns: minmax(148px, 200px) minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 236px) minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   border-top: 1px solid var(--border-subtle);

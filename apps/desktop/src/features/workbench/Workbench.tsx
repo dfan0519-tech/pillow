@@ -769,7 +769,13 @@ export function Workbench({
       data-testid="workbench"
     >
       <section className="conversation-surface" aria-label="对话工作台">
-        <header className="stage-top">
+        {/*
+          The whole strip drags, not just the title. Tauri drags on the event
+          target, so the buttons inside keep working without opting out — but
+          anything without the attribute is dead space, and this bar reads as a
+          titlebar across its full width.
+        */}
+        <header className="stage-top" data-tauri-drag-region>
           <div className="stage-top__title" data-tauri-drag-region>
             {project ? (
               <h1
