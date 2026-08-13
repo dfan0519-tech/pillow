@@ -576,10 +576,32 @@ describe("MockRuntimeSlotsGateway oauth create", () => {
     const gateway = new MockRuntimeSlotsGateway();
     const rows = await gateway.listProviderLoginCatalog();
     expect(rows.length).toBeGreaterThan(0);
-    expect(rows.some((row) => row.loginMethod === "api_key_only")).toBe(true);
+    // Anthropic was withdrawn 2026-08-13; nothing api_key_only ships now.
+    expect(rows.some((row) => row.providerId === "anthropic")).toBe(false);
     for (const row of rows) {
       expect(parseProviderLoginCatalogEntry(row)).toEqual(row);
     }
+  });
+
+  it("rejects an api_key_only row that advertises a known client_id", async () => {
+    // The guard has no shipped profile behind it now, so it is exercised
+    // directly: same row, only `loginMethod` differs between accept and
+    // reject.
+    const gateway = new MockRuntimeSlotsGateway();
+    const [base] = await gateway.listProviderLoginCatalog();
+    const withClientId = {
+      ...base!,
+      clientId: "known" as const,
+      knownClientId: "documented-client",
+    };
+    expect(parseProviderLoginCatalogEntry(withClientId)).toEqual(withClientId);
+
+    expect(() =>
+      parseProviderLoginCatalogEntry({
+        ...withClientId,
+        loginMethod: "api_key_only",
+      })
+    ).toThrow(/invalid runtime slot response/i);
   });
 });
 

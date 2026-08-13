@@ -43,11 +43,17 @@ Release 二进制:`target/release/pillow.exe` @ **15:31**
 | --- | --- | --- |
 | **xAI** | ✅ 已可用 | 用「已登录的 Grok」(`grok_login`,复用 grok CLI 会话)。**不要再做 OAuth,那是重复建设** |
 | **GitHub Copilot** | 🟡 可解 | 官方要求第三方自建应用,但**个人账号即可、免审核免费**。等用户注册后给 client_id → 目录改 `UserSupplied` |
-| **Anthropic** | ⛔ **官方禁止** | 条款明令禁止第三方提供 Claude.ai 登录或转发订阅凭据。**应钉死 `ApiKeyOnly`** |
+| **Anthropic** | ⛔ **整条移除** | 条款禁止第三方提供 Claude.ai 登录;用户随后把仅剩的 API key 行也撤回。**产品里已经没有这个供应商** |
 | **OpenAI** | ⛔ 无第三方路径 | 找不到"注册一个能 Sign in with ChatGPT 的客户端"的后台 |
 
-**用户拍板:Claude 和 Codex 走「本机 CLI」槽位。**
+**用户拍板:本机 CLI 这一路现阶段只做 Codex。**
 让官方客户端用它自己的登录,Pillow 不碰凭据。
+
+🔴 **8-13 晚间更新:Anthropic 被用户撤回,不再是「钉成 `ApiKeyOnly`」而是
+从目录里删掉。** 见 `docs/decisions/2026-08-13-anthropic-withdrawn.md` ——
+里面写了为什么 `CATALOG_API_DEFAULTS.anthropic` 必须一起删(存量槽位会推断出
+一个已经不存在的 provider id,编辑表单会空白),以及移除它顺手抹掉的两个分支
+覆盖是怎么补回来的。
 
 🔴 **限制要讲清楚**:本机 CLI 槽位 `SlotExecutionPath::NotRunnable`,
 **不能当活对话运行时,只能当派单目标**,而且 `governance: none`
@@ -133,9 +139,8 @@ config 路径 —— 但要知道那只是替代证据。
 
 ## 8. 🔴 下一步(按顺序)
 
-1. **把 Anthropic 钉成 `ApiKeyOnly`** —— 用户已确认。
-   一行目录数据(`crates/runtime-slots/src/provider_login.rs`)+ 一条测试。
-   **本轮没做,是因为用户要压缩上下文、我优先写这份交接。**
+1. ~~把 Anthropic 钉成 `ApiKeyOnly`~~ ✅ **已完成,但结论变了:整条删除,不是钉死。**
+   见 §3 与 `docs/decisions/2026-08-13-anthropic-withdrawn.md`。
 2. **跑一轮 E2E** —— 这几轮 UI 改动(设置页新流程、派单可见、活槽位标记、
    权限两级)**只有单测覆盖**。E2E 约 30 分钟、总控独占。
 3. **重建二进制**:`cd apps/desktop && corepack pnpm tauri build --no-bundle`

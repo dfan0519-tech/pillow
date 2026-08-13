@@ -98,11 +98,32 @@ describe("SLOT_CONNECT_PROVIDERS — first-step picker", () => {
     const ids = SLOT_CONNECT_PROVIDERS.map((row) => row.id);
     expect(ids).toContain("xai");
     expect(ids).toContain("openai");
-    expect(ids).toContain("anthropic");
     expect(ids).toContain("siliconflow");
     expect(ids).toContain("custom");
     expect(ids).toContain("custom-oidc");
     expect(ids).toContain("local_cli");
+  });
+
+  it("anthropic is withdrawn — no picker row, no api defaults, no orphan id", () => {
+    const ids = SLOT_CONNECT_PROVIDERS.map((row) => row.id);
+    expect(ids).not.toContain("anthropic");
+    expect(
+      SLOT_CONNECT_PROVIDERS.some(
+        (row) => row.catalogProviderId === "anthropic",
+      ),
+    ).toBe(false);
+    expect(CATALOG_API_DEFAULTS.anthropic).toBeUndefined();
+
+    // A slot saved before the withdrawal must still resolve to a real picker
+    // row, otherwise editing it lands on an id `getSlotConnectProvider` cannot
+    // find and the form renders blank.
+    const inferred = inferConnectProviderId({
+      kind: "governed_grok",
+      authMode: "api_key",
+      baseUrl: "https://api.anthropic.com/v1",
+    });
+    expect(inferred).toBe("custom");
+    expect(getSlotConnectProvider(inferred)).toBeDefined();
   });
 
   it("never lists oauth as an inherent method (catalog must admit it)", () => {

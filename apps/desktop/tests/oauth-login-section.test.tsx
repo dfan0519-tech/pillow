@@ -108,7 +108,7 @@ describe("OAuth auth method — data-driven SLOT_AUTH_METHODS", () => {
 });
 
 describe("OAuth provider list — api_key_only excluded; Unknown fields required", () => {
-  it("custom-oidc is the only OAuth path; anthropic / openai never appear", async () => {
+  it("custom-oidc is the only OAuth path; named providers never appear", async () => {
     const user = userEvent.setup();
     const gateway = new MockRuntimeSlotsGateway();
     render(

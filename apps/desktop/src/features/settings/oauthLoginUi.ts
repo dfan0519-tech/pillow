@@ -260,8 +260,12 @@ export function formatOauthExpiryForDisplay(
 
 /**
  * Built-in mock catalog matching host provider_login profiles (public only).
- * `api_key_only` anthropic is included so tests can assert it is filtered out.
  * No guessed client_id values for Unknown rows.
+ *
+ * The host ships no `api_key_only` profile since Anthropic was withdrawn, so
+ * this catalog has none either — tests that exercise the `api_key_only`
+ * filter build that row themselves rather than making the mock lie about the
+ * host.
  */
 export function defaultMockProviderLoginCatalog(): ProviderLoginCatalogEntry[] {
   return [
@@ -309,24 +313,6 @@ export function defaultMockProviderLoginCatalog(): ProviderLoginCatalogEntry[] {
       knownScopes: ["read:user"],
       knownClientId: null,
       accountIdentifier: "unknown",
-    },
-    {
-      providerId: "anthropic",
-      displayName: "Anthropic",
-      loginMethod: "api_key_only",
-      issuer: "not_applicable",
-      authorizeEndpoint: "not_applicable",
-      deviceAuthorizationEndpoint: "not_applicable",
-      tokenEndpoint: "not_applicable",
-      scopes: "not_applicable",
-      clientId: "not_applicable",
-      knownIssuer: null,
-      knownAuthorizeEndpoint: null,
-      knownDeviceAuthorizationEndpoint: null,
-      knownTokenEndpoint: null,
-      knownScopes: null,
-      knownClientId: null,
-      accountIdentifier: "not_applicable",
     },
     {
       providerId: "openai",

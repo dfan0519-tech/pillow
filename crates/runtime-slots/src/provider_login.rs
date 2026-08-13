@@ -3,6 +3,16 @@
 //! This module contains public OAuth/OIDC configuration only. It never carries
 //! API keys, authorization codes, access tokens, refresh tokens, or client
 //! secrets.
+//!
+//! **Anthropic is not in this catalog.** It was withdrawn from the product on
+//! 2026-08-13: Anthropic's terms prohibit a third-party client from offering
+//! Claude.ai login or forwarding subscription credentials, and the remaining
+//! API-key-only row was withdrawn too rather than shipping a provider we do
+//! not intend to support yet. Claude subscription access, if it is ever
+//! wanted, goes through the user's own CLI as a `local_cli` slot — Pillow
+//! never holds the credential. Re-adding it means adding the profile back
+//! here **and** to the renderer connect picker (`providerPresets.ts`); the two
+//! lists are asserted against each other by tests.
 
 use thiserror::Error;
 
@@ -206,16 +216,6 @@ const GITHUB_EVIDENCE: &[ProviderLoginEvidence] = &[
     },
 ];
 
-const ANTHROPIC_FIELDS: &[ProviderLoginField] = &[
-    ProviderLoginField::ProviderId,
-    ProviderLoginField::DisplayName,
-    ProviderLoginField::LoginMethod,
-];
-const ANTHROPIC_EVIDENCE: &[ProviderLoginEvidence] = &[ProviderLoginEvidence {
-    fields: ANTHROPIC_FIELDS,
-    source: "../_ref/opencode/packages/llm/src/providers/anthropic.ts:7-17",
-}];
-
 const OPENAI_PRIMARY_FIELDS: &[ProviderLoginField] = &[
     ProviderLoginField::ProviderId,
     ProviderLoginField::DisplayName,
@@ -295,23 +295,7 @@ const PROVIDER_LOGIN_PROFILES: &[ProviderLoginProfile] = &[
         account_identifier: AccountIdentifierStrategy::Unknown,
         evidence: GITHUB_EVIDENCE,
     },
-    // Offered slot auth: api_key. login_method is ApiKeyOnly — no OAuth.
-    ProviderLoginProfile {
-        provider_id: "anthropic",
-        display_name: "Anthropic",
-        login_method: ProviderLoginMethod::ApiKeyOnly,
-        issuer: ProfileField::NotApplicable,
-        authorize_endpoint: ProfileField::NotApplicable,
-        device_authorization_endpoint: ProfileField::NotApplicable,
-        token_endpoint: ProfileField::NotApplicable,
-        scopes: ProfileField::NotApplicable,
-        client_id: ClientIdProfile {
-            source: ClientIdSource::Unknown,
-            value: ProfileField::NotApplicable,
-        },
-        account_identifier: AccountIdentifierStrategy::Unknown,
-        evidence: ANTHROPIC_EVIDENCE,
-    },
+    // Anthropic is deliberately absent — see the module note above.
     // Offered slot auth: api_key. OAuth withheld (ClientIdSource::Unknown).
     ProviderLoginProfile {
         provider_id: "openai",
@@ -526,10 +510,32 @@ mod supported_auth_kind_tests {
     }
 
     #[test]
-    fn anthropic_is_api_key_only() {
-        let profile = provider_login_profile("anthropic").expect("anthropic");
-        assert!(!profile_offers_oauth(profile));
-        assert_eq!(profile_supported_auth_kinds(profile), vec!["api_key"]);
+    fn anthropic_is_not_a_provider_at_all() {
+        // Withdrawn 2026-08-13 — not "OAuth withheld", absent. Asserting a
+        // populated catalog first so an empty catalog cannot pass this.
+        assert!(provider_login_profile("xai").is_some());
+        assert!(provider_login_profile("anthropic").is_none());
+        assert!(
+            provider_login_profiles()
+                .iter()
+                .all(|profile| !profile.display_name.eq_ignore_ascii_case("anthropic")),
+            "no profile may present itself as Anthropic under another id"
+        );
+    }
+
+    #[test]
+    fn api_key_only_never_offers_oauth() {
+        // No shipped profile uses ApiKeyOnly today; the guard still has to hold.
+        let profile = ProviderLoginProfile {
+            login_method: ProviderLoginMethod::ApiKeyOnly,
+            client_id: ClientIdProfile {
+                source: ClientIdSource::PublicDocumented,
+                value: ProfileField::Known("documented-client"),
+            },
+            ..*provider_login_profile("openai").expect("openai")
+        };
+        assert!(!profile_offers_oauth(&profile));
+        assert_eq!(profile_supported_auth_kinds(&profile), vec!["api_key"]);
     }
 
     #[test]

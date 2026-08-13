@@ -13,16 +13,7 @@ fn catalog_covers_required_providers_and_login_methods() {
         .map(|profile| profile.provider_id)
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        ids,
-        [
-            "xai",
-            "github-copilot",
-            "anthropic",
-            "openai",
-            "custom-oidc",
-        ]
-    );
+    assert_eq!(ids, ["xai", "github-copilot", "openai", "custom-oidc"]);
     assert_eq!(
         provider_login_profile("xai").unwrap().login_method,
         ProviderLoginMethod::DeviceCode
@@ -32,10 +23,6 @@ fn catalog_covers_required_providers_and_login_methods() {
             .unwrap()
             .login_method,
         ProviderLoginMethod::DeviceCode
-    );
-    assert_eq!(
-        provider_login_profile("anthropic").unwrap().login_method,
-        ProviderLoginMethod::ApiKeyOnly
     );
     assert_eq!(
         provider_login_profile("openai").unwrap().login_method,
@@ -62,7 +49,7 @@ fn unverified_upstream_client_ids_are_unknown_and_not_embedded() {
 
 #[test]
 fn account_identifier_strategy_is_explicit_and_never_inferred() {
-    for provider_id in ["xai", "github-copilot", "anthropic"] {
+    for provider_id in ["xai", "github-copilot"] {
         assert_eq!(
             provider_login_profile(provider_id)
                 .unwrap()
@@ -297,16 +284,38 @@ fn conversion_rejects_missing_issuer() {
 
 #[test]
 fn conversion_rejects_api_key_only_method_before_oauth_fields() {
-    let error = resolve_oauth_transport_parameters(
-        provider_login_profile("anthropic").unwrap(),
-        &ProviderLoginSupplement::default(),
-    )
-    .unwrap_err();
+    // Every transport field is resolvable here, so the only thing that can
+    // reject this is the login method itself. A profile with NotApplicable
+    // fields would fail on a missing field even with the guard deleted.
+    let profile = ProviderLoginProfile {
+        login_method: ProviderLoginMethod::ApiKeyOnly,
+        ..*provider_login_profile("openai").unwrap()
+    };
+    let supplement = ProviderLoginSupplement {
+        client_id: Some(runtime_text(&["user-owned-", "client"])),
+        ..ProviderLoginSupplement::default()
+    };
+
+    let error = resolve_oauth_transport_parameters(&profile, &supplement).unwrap_err();
 
     assert_eq!(
         error,
         ProviderLoginConversionError::UnsupportedLoginMethod(ProviderLoginMethod::ApiKeyOnly)
     );
+}
+
+#[test]
+fn anthropic_is_not_offered_as_a_provider() {
+    assert!(!provider_login_profiles().is_empty());
+    assert!(provider_login_profile("anthropic").is_none());
+    for profile in provider_login_profiles() {
+        assert!(
+            !profile.provider_id.contains("anthropic")
+                && !profile.display_name.eq_ignore_ascii_case("anthropic"),
+            "withdrawn provider reappeared as {}",
+            profile.provider_id
+        );
+    }
 }
 
 #[test]

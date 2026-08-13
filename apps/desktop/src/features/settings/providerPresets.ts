@@ -215,13 +215,10 @@ export const CATALOG_API_DEFAULTS: Readonly<
     docsUrl: "https://platform.openai.com/api-keys",
     notes: "官方 OpenAI API。模型 id 以账号可见目录为准。",
   },
-  // Source: https://docs.anthropic.com/en/api/getting-started (https://api.anthropic.com)
-  anthropic: {
-    baseUrl: "https://api.anthropic.com/v1",
-    suggestedModelId: "",
-    docsUrl: "https://console.anthropic.com/settings/keys",
-    notes: "官方 Anthropic API 主机；若端点不提供 /models，请手输模型 id。",
-  },
+  // Anthropic withdrawn 2026-08-13 — see CATALOG_CONNECT_PROVIDERS below.
+  // Its base URL is not listed here either, so an existing slot pointing at
+  // api.anthropic.com infers `custom` rather than a provider id that no
+  // longer resolves.
 };
 
 export type SlotConnectProviderGroup = "catalog" | "preset" | "other";
@@ -263,14 +260,10 @@ const CATALOG_CONNECT_PROVIDERS: readonly SlotConnectProvider[] = [
     catalogProviderId: "openai",
     inherentMethods: ["api_key"],
   },
-  {
-    id: "anthropic",
-    label: "Anthropic",
-    description: "Anthropic API key。",
-    group: "catalog",
-    catalogProviderId: "anthropic",
-    inherentMethods: ["api_key"],
-  },
+  // Anthropic withdrawn 2026-08-13 (user decision). Not "OAuth withheld" —
+  // absent. Claude access, if wanted, is the user's own CLI via 本机 CLI;
+  // Pillow never holds an Anthropic credential. Mirrors the host catalog in
+  // `crates/runtime-slots/src/provider_login.rs`.
   {
     id: "github-copilot",
     label: "GitHub Copilot",

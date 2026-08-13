@@ -41,10 +41,16 @@ describe("oauthCapableProviders — Unknown client_id is not OAuth", () => {
 
   it("Unknown client_id named providers are not listed (old contract was wrong)", () => {
     const capable = oauthCapableProviders(defaultMockProviderLoginCatalog());
-    for (const id of ["openai", "xai", "github-copilot", "anthropic"]) {
+    for (const id of ["openai", "xai", "github-copilot"]) {
       expect(capable.some((entry) => entry.providerId === id)).toBe(false);
       expect(catalogEntryOffersOauth(byId(id))).toBe(false);
     }
+  });
+
+  it("anthropic is not in the catalog at all", () => {
+    const rows = defaultMockProviderLoginCatalog();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((entry) => entry.providerId === "anthropic")).toBe(false);
   });
 
   it("does not invent a DTO key for oauth offer — uses clientId", () => {
@@ -64,16 +70,30 @@ describe("supportedAuthKindsForCatalogEntry — derived from catalog", () => {
     ]);
   });
 
-  it("openai / github-copilot / anthropic: api_key only", () => {
+  it("openai / github-copilot: api_key only", () => {
     expect(supportedAuthKindsForCatalogEntry(byId("openai"))).toEqual([
       "api_key",
     ]);
     expect(supportedAuthKindsForCatalogEntry(byId("github-copilot"))).toEqual([
       "api_key",
     ]);
-    expect(supportedAuthKindsForCatalogEntry(byId("anthropic"))).toEqual([
-      "api_key",
-    ]);
+  });
+
+  it("api_key_only is filtered even when the row carries a real client_id", () => {
+    // No shipped provider is api_key_only since Anthropic was withdrawn, so
+    // this row is built here. `clientId: "known"` means the only thing that
+    // can exclude it is the login method.
+    const entry: ProviderLoginCatalogEntry = {
+      ...byId("openai"),
+      providerId: "test-api-key-only",
+      displayName: "Test ApiKeyOnly",
+      loginMethod: "api_key_only",
+      clientId: "known",
+      knownClientId: "documented-client",
+    };
+    expect(catalogEntryOffersOauth(entry)).toBe(false);
+    expect(supportedAuthKindsForCatalogEntry(entry)).toEqual(["api_key"]);
+    expect(oauthCapableProviders([entry])).toEqual([]);
   });
 
   it("custom-oidc: oauth only", () => {
