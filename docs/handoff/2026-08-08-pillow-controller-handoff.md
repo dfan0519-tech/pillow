@@ -2,7 +2,7 @@
 
 工作目录:`<repo>`
 分支 / HEAD:`main` / `8f563db6cedb34eb336c4e76229b24eb7f3c47bd`(本地 = 远程)
-远程:`https://github.com/dfan0519-tech/pillow.git`(**private**,账号 `dfan0519-tech`)
+远程:`https://github.com/dfan0519-tech/pillow.git`
 
 > 本文件取代 `docs/handoff/2026-08-07-pillow-controller-handoff.md` 与
 > `docs/handoff/2026-08-08-round5-tech-debt-status.md`。旧文件描述的是 C4 验收期的状态,

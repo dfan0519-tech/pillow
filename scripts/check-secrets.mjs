@@ -85,7 +85,45 @@ const RULES = [
       "/c/Users/someone/.grok/bin/grok.exe",
       "/cygdrive/c/Users/someone/.grok",
     ],
+    // Scrub placeholders and the synthetic Alice fixture are not host leaks.
+    negative: [
+      "%USERPROFILE%\\.cargo",
+      "<user>",
+      String.raw`C:\Users\Alice\.cargo`,
+      "/c/Users/Alice/.grok",
+    ],
     why: "host user-profile path",
+  },
+  {
+    id: "workspace-drive-path",
+    scope: "block",
+    // Developer checkout roots in drive-letter, git-bash, and URL-encoded
+    // form. Samples are concatenated so this file does not contain the
+    // forbidden literal; the regex itself is the detector. Placeholders from
+    // the history scrub must not match.
+    re: /(?:[Ff]:[\\/]+new(?![A-Za-z0-9])|(?<![A-Za-z0-9])\/(?:cygdrive\/)?[Ff]\/new(?![A-Za-z0-9])|[Ff]%3[Aa]%5[Cc]new(?![A-Za-z0-9]))/u,
+    sample: [
+      "F:" + "\\new\\pillow",
+      "F:" + "/new/pillow",
+      "F:" + "\\\\new\\\\pillow",
+      "f:" + "\\new\\pillow-tryout",
+      "f:" + "/new/pillow-sandbox",
+      "F%3A%5C" + "new%5Cpillow",
+      "f%3a%5c" + "new%5cpillow",
+      "/" + "f/" + "new/pillow",
+      "/cygdrive/" + "f/" + "new/pillow",
+    ],
+    negative: [
+      "<repo>",
+      "<workspace>/VaultSystem/keeper",
+      "<workspace>/pillow",
+      "<DRIVE>:\\new\\pillow",
+      "%USERPROFILE%\\.grok",
+      "<user>",
+      String.raw`C:\Users\Alice\Projects\pillow`,
+      "target/new/pillow",
+    ],
+    why: "developer workspace drive path",
   },
   {
     id: "machine-drive-path",
@@ -114,7 +152,14 @@ const RULES = [
       if (system.some((s) => lower.startsWith(s))) return false;
       return existsSync(norm);
     },
-    sample: process.cwd(),
+    // On Windows the sample is this checkout and must be detected. Other
+    // hosts have no drive-letter cwd; prove the regex against a synthetic
+    // path and require verify() to reject it because it is not on this machine.
+    sample:
+      process.platform === "win32"
+        ? process.cwd()
+        : "Z:" + "\\not-a-real-machine\\pillow",
+    absentOk: process.platform !== "win32",
     why: "absolute path that exists on this machine (developer-specific)",
   },
 ];
@@ -143,9 +188,29 @@ function selfTest() {
     const samples = Array.isArray(rule.sample) ? rule.sample : [rule.sample];
     for (const sample of samples) {
       const m = sample.match(rule.re);
-      const detected = Boolean(m) && (!rule.verify || rule.verify(m[0]));
-      if (!detected) {
+      if (!m) {
         broken.push(`${rule.id}: failed to detect its own sample (${sample})`);
+        continue;
+      }
+      if (!rule.verify) continue;
+      const present = rule.verify(m[0]);
+      if (rule.absentOk) {
+        if (present) {
+          broken.push(
+            `${rule.id}: verify() accepted a path that is not on this host (${sample})`,
+          );
+        }
+      } else if (!present) {
+        broken.push(`${rule.id}: failed to detect its own sample (${sample})`);
+      }
+    }
+    for (const sample of rule.negative ?? []) {
+      const m = sample.match(rule.re);
+      const detected = Boolean(m) && (!rule.verify || rule.verify(m[0]));
+      if (detected) {
+        broken.push(
+          `${rule.id}: flagged a placeholder or allowed fixture (${sample})`,
+        );
       }
     }
   }

@@ -1,7 +1,7 @@
 # Pillow 总控交接手册(2026-08-11)
 
 分支 / HEAD(撰写时):`main` / `963dcbb`
-远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
+远程:`https://github.com/dfan0519-tech/pillow.git`
 
 > 取代 `docs/handoff/2026-08-10-*.md`。那份写于边界尚未成立时,
 > **§3「真实代理没有手」已被推翻**,不得作为真相源。

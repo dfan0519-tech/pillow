@@ -2,7 +2,7 @@
 
 工作目录:`<repo>`
 分支 / HEAD:`main` / `9b2abba`(**本地 = 远程**)
-远程:`https://github.com/dfan0519-tech/pillow.git`(**private**)
+远程:`https://github.com/dfan0519-tech/pillow.git`
 
 > 本文件取代 `docs/handoff/2026-08-08-pillow-controller-handoff.md`。
 > 旧文件描述 C4 验收期,已过时,**不得作为真相源**。

@@ -7,5 +7,5 @@ bridge, shared vault wiki, sibling legacy resource manager, or multi-account
 CLI slot farm exists. Build, test, and contribute using only what this
 repository documents.
 
-For maintainer-only multi-agent operations on a development machine, use the
-local (gitignored) runbook under `.superpowers/RUNBOOK.md` when present.
+Maintainer-only multi-agent operations stay outside this repository. Do not
+assume a local runbook, session bridge, or private orchestration notes exist.

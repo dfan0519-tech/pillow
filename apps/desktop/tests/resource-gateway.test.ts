@@ -204,7 +204,7 @@ describe("TauriResourceGateway contract", () => {
     const gateway = new TauriResourceGateway();
 
     vi.mocked(invoke).mockResolvedValueOnce([
-      { ...entry, path: "<repo>\\\\src\\\\main.rs" },
+      { ...entry, path: "Z:/not-a-real-machine/pillow/src/main.rs" },
     ]);
     await expect(gateway.listProjectResources({ projectId })).rejects.toMatchObject({
       code: "invalid_resource_response",
@@ -242,7 +242,7 @@ describe("TauriResourceGateway contract", () => {
   it("rejects payloads that embed a project root or native handle", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ...file,
-      projectRoot: "<repo>",
+      projectRoot: "Z:/not-a-real-machine/pillow",
       nativeHandle: 42,
     });
     const gateway = new TauriResourceGateway();

@@ -10,8 +10,7 @@ Pillow is self-contained for product work: build, test, and code changes must
 not assume an external session bridge, shared vault wiki, or sibling legacy
 resource manager.
 
-Optional maintainer-only orchestration (local session recording, multi-profile
-CLI isolation) is documented only on machines that keep a gitignored runbook
-under `.superpowers/RUNBOOK.md`. Do not invent vault QUERY/INGEST steps or
-absolute paths outside this repository unless a task file in-tree explicitly
-requires a named recorded fact.
+Maintainer-only orchestration (local session recording, multi-profile CLI
+isolation) is outside the product contract. Do not invent vault QUERY/INGEST
+steps or absolute paths outside this repository unless a task file in-tree
+explicitly requires a named recorded fact.
